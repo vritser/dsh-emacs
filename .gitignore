@@ -1,0 +1,4 @@
+*.elc
+*~
+*.el.bak
+IMPLEMENTATION.md
