@@ -363,11 +363,11 @@
 
 (defface dsh-emacs-thinking-body-face
 	`((((background light))
-		 :background ,dsh-emacs-color-thinking-bg :slant italic :extend t)
+		 :slant italic)
 		(((background dark))
-		 :background ,dsh-emacs-color-thinking-bg-dark :slant italic :extend t)
+		 :slant italic)
 		(t :inherit font-lock-comment-face :slant italic))
-	"Thinking block body. Not visible when collapsed."
+	"Thinking block body (italic, no background box)."
 	:group 'dsh-emacs-faces)
 
 ;;; ---------------------------------------------------------------------------

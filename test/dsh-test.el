@@ -1396,6 +1396,42 @@
     (kill-buffer chat)
     (kill-buffer pinned)))
 
+;; --- 测试 55: thinking 块正文不再有深色背景（回归：此前 body face 带
+;; `:background'，展开后图标行正下方出现一块深色；现要求透明/主题背景） ---
+(let ((bg (face-attribute 'dsh-emacs-thinking-body-face :background nil 'default)))
+  (when (or (null bg) (equal bg "unspecified"))
+    (dsh-test-pass "thinking-body-face-no-background")))
+
+;; --- 测试 56: thinking 块 body face 只作用于正文行（回归：body-start
+;; 用固定偏移 (+ block-start 2) 会把 label 行（图标 + Think）也盖进
+;; `dsh-emacs-thinking-body-face'，思考完成瞬间图标底下出现黑色矩形；
+;; 流式阶段无此 face 应用所以正常） ---
+(let ((buf (generate-new-buffer " *dsh-think-face*"))
+      (dsh-emacs-thinking-expand-by-default t))
+  (unwind-protect
+      (with-current-buffer buf
+        (insert "###HEAD\n")
+        (dsh-emacs-render--render-thinking-block
+         "t" "b1" "first body line\nsecond body line" 1 (point-max))
+        ;; label 行（含图标）不得带 body face
+        (goto-char (point-min))
+        (search-forward "Think" nil t)
+        (let ((faces (seq-uniq
+                      (mapcar (lambda (p) (get-text-property p 'face))
+                              (number-sequence (line-beginning-position)
+                                               (line-end-position))))))
+          (when (not (memq 'dsh-emacs-thinking-body-face faces))
+            (dsh-test-pass "thinking-block-label-no-body-face")))
+        ;; label 下一行才是正文：body face 必须出现在这里
+        (forward-line 1)
+        (let ((faces (seq-uniq
+                      (mapcar (lambda (p) (get-text-property p 'face))
+                              (number-sequence (line-beginning-position)
+                                               (line-end-position))))))
+          (when (memq 'dsh-emacs-thinking-body-face faces)
+            (dsh-test-pass "thinking-block-body-gets-face"))))
+    (kill-buffer buf)))
+
 ;; --- 总结 ---
 (princ "\n===== 测试总结 =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))

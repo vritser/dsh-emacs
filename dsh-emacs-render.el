@@ -971,14 +971,21 @@ used as a fallback when no deltas were received."
   (when-let* ((b (dsh-emacs-ui-find-block (format "%s-%s" namespace-id block-id))))
     (let* ((block-start (car b))
            (block-end (cdr b))
-           (body-start (+ block-start 2))
-           body-end)
+           body-start body-end)
+      ;; 只用行定位 body 区间：label 是第一行，body 紧随其后。绝不能
+      ;; 用固定偏移（如 (1+ block-start)）来猜 label 的长度——minimal
+      ;; 折叠块可能只有 label 一行，猜错会把 `dsh-emacs-thinking-body-face'
+      ;; 盖到图标/Think 行上（思考完成一瞬间图标底下出现的黑色矩形，
+      ;; 流式阶段没有这行 face 应用所以正常）。
       (save-excursion
+        (goto-char block-start)
+        (forward-line 1)              ; 越过 label 行 → body 起点
+        (setq body-start (point))
         (goto-char block-end)
-        (forward-line -1)
         (setq body-end (point)))
-      (let ((inhibit-read-only t))
-        (put-text-property body-start body-end 'face 'dsh-emacs-thinking-body-face)))))
+      (when (< body-start body-end)
+        (let ((inhibit-read-only t))
+          (put-text-property body-start body-end 'face 'dsh-emacs-thinking-body-face))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; 渲染器：工具调用（活动组的一部分）
