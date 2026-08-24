@@ -188,7 +188,34 @@
                (string= "1" (map-elt frag :block-id)))
       (dsh-test-pass "ui-make-fragment"))))
 
-;; --- 测试 8: 事件渲染器函数存在 ---
+;; --- 测试 8: minimal label 行分隔符 · ---
+(with-temp-buffer
+  (let ((dsh-emacs-ui-label-separator "·"))
+    (dsh-emacs-ui-update-fragment
+     (dsh-emacs-ui-make-fragment
+      :namespace-id "sep" :block-id "1"
+      :label-left "✶ Think" :label-right "preview"
+      :body "body line" :style 'minimal)
+     :create-new t :expanded t)
+    (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+      (when (and (string-match-p "✶ Think · preview" text)
+                 (string-match-p "│ body line" text))
+        (dsh-test-pass "minimal-label-separator-dot")))))
+
+(with-temp-buffer
+  (let ((dsh-emacs-ui-label-separator ""))
+    (dsh-emacs-ui-update-fragment
+     (dsh-emacs-ui-make-fragment
+      :namespace-id "sep2" :block-id "1"
+      :label-left "✶ Think" :label-right "preview"
+      :body "body line" :style 'minimal)
+     :create-new t :expanded t)
+    (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+      (when (and (string-match-p "✶ Think  preview" text)
+                 (not (string-match-p "·" text)))
+        (dsh-test-pass "minimal-label-separator-disabled")))))
+
+;; --- 测试 9: 事件渲染器函数存在 ---
 (when (fboundp 'dsh-emacs-render-event)
   (dsh-test-pass "render-event function exists"))
 
@@ -713,8 +740,8 @@
          (block (dsh-emacs-test--tool-block-text (format "%s-tool-c1" ns))))
     (when (and block
                (string-match-p (regexp-quote "💻 ") block)
-               ;; Gear icon at the start of the row
-               (string-match-p (regexp-quote "⚙ ") block))
+               ;; 运行中保留变体图标；动画 spinner 已移至 footer 进度条
+               (string-match-p "Bash" block))
       (dsh-test-pass "tool-running-keeps-variant-icon")))
   ;; 2) 成功结果：body 含 IN / OUT 两段，成功态保留 icon 并显示输出
   (dsh-emacs-render-tool-result
@@ -788,7 +815,54 @@
                    (string-match-p "Bash" recollapsed))
           (dsh-test-pass "tool-recollapse-single-line"))))))
 
-;; --- 测试 32: 相邻工具行紧凑堆叠（无多余空行） ---
+;; --- 测试 32: 工具名与图标解耦 —— 同图标不同名 ---
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-footer-setup)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "g1" "grep" "{\"pattern\":\"foo\"}"))
+  (let* ((ns (dsh-emacs-render--make-namespace))
+         (block (dsh-emacs-test--tool-block-text (format "%s-tool-g1" ns))))
+    (when (and block
+               (string-match-p "🔍 Grep" block)      ; 放大镜图标 + 真实工具名
+               (not (string-match-p "Search" block)) ; 不得再显示成 Search
+               (not (string-match-p "· Search" block)))
+      (dsh-test-pass "tool-grep-title-distinct-from-search"))))
+
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-footer-setup)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "w1" "web_search" "{\"query\":\"cats\"}"))
+  (let* ((ns (dsh-emacs-render--make-namespace))
+         (block (dsh-emacs-test--tool-block-text (format "%s-tool-w1" ns))))
+    (when (and block
+               (string-match-p "🔍 Web Search" block)
+               (not (string-match-p "🔍 Search · cats" block)))
+      (dsh-test-pass "tool-web-search-title-keeps-variant-icon"))))
+
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-footer-setup)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "u1" "my_tool" "{\"x\":\"1\"}"))
+  (let* ((ns (dsh-emacs-render--make-namespace))
+         (block (dsh-emacs-test--tool-block-text (format "%s-tool-u1" ns))))
+    (when (and block (string-match-p "✨ My Tool" block))
+      (dsh-test-pass "tool-unknown-humanized-title"))))
+
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-footer-setup)
+  (let ((dsh-emacs-tool-titles '(("my_tool" . "Curated")))) ; defcustom 覆写
+    (dsh-emacs-render-tool-call
+     (dsh-emacs-test--tool-call-event 1 "u2" "my_tool" "{\"x\":\"1\"}")))
+  (let* ((ns (dsh-emacs-render--make-namespace))
+         (block (dsh-emacs-test--tool-block-text (format "%s-tool-u2" ns))))
+    (when (and block (string-match-p "✨ Curated" block))
+      (dsh-test-pass "tool-title-defcustom-override"))))
+
+;; --- 测试 33: 相邻工具行紧凑堆叠（无多余空行） ---
 (defun dsh-emacs-test--t32-call (seq id name args)
   (list (cons "type" "tool/call") (cons "seq" seq)
         (cons "data" (list (cons "callId" id) (cons "name" name)
@@ -813,16 +887,16 @@
   (dsh-emacs-render-tool-call
    (dsh-emacs-test--t32-call 3 "y2" "read" "{\"path\":\"/tmp/x\"}"))
   (dsh-emacs-render-tool-result (dsh-emacs-test--t32-result 4 "y2" "b"))
-  (when-let* ((line-tool (save-excursion
+  (when-let* ((line-search (save-excursion
                              (goto-char (point-min))
-                             (when (search-forward "Tool" nil t)
+                             (when (search-forward "Search" nil t)
                                (line-number-at-pos (match-beginning 0)))))
               (line-read (save-excursion
                            (goto-char (point-min))
                            (when (search-forward "Read" nil t)
                              (line-number-at-pos (match-beginning 0))))))
     ;; 两个折叠工具应占据相邻两行（无中间空白 / 省略号占位）
-    (when (= line-read (1+ line-tool))
+    (when (= line-read (1+ line-search))
       (dsh-test-pass "tool-adjacent-stack-tight"))))
 
 ;; --- 测试 33: 光标锁定在可编辑输入区 ---
@@ -1119,8 +1193,9 @@
 
 (let ((dsh-emacs--ml-busy nil)
       (dsh-emacs--footer-usage nil))
-  (when (string= "" (dsh-emacs-footer--doom-segment))
-    (dsh-test-pass "doom-segment-empty-when-idle")))
+  ;; 空闲时 doom segment 显示 model 段但不含进度条动画
+  (when (not (string-match-p "█" (dsh-emacs-footer--doom-segment)))
+    (dsh-test-pass "doom-segment-idle-has-no-spinner")))
 
 ;; --- 测试 46: send-or-stop 忙碌时打断（session.cancel），空闲时发送 ---
 (let ((buf (generate-new-buffer " *dsh-interrupt-test*"))
@@ -1398,8 +1473,11 @@
 
 ;; --- 测试 55: thinking 块正文不再有深色背景（回归：此前 body face 带
 ;; `:background'，展开后图标行正下方出现一块深色；现要求透明/主题背景） ---
-(let ((bg (face-attribute 'dsh-emacs-thinking-body-face :background nil 'default)))
-  (when (or (null bg) (equal bg "unspecified"))
+(let ((bg (face-attribute 'dsh-emacs-thinking-body-face :background nil)))
+  ;; face-attribute 返回的是符号 unspecified / unspecified-bg（表示未显式
+  ;; 设置、沿用默认），而不是字符串；只要不是显式颜色（如旧版 "#1f1b16"）即符合
+  (when (or (null bg)
+            (memq bg '(unspecified unspecified-bg)))
     (dsh-test-pass "thinking-body-face-no-background")))
 
 ;; --- 测试 56: thinking 块 body face 只作用于正文行（回归：body-start

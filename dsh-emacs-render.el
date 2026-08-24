@@ -109,6 +109,7 @@ Off by default to reduce visual noise."
     ("pwsh"       . "bash")
     ("read"       . "read")
     ("web_fetch"  . "read")
+    ("search"     . "search")
     ("web_search" . "search")
     ("grep"       . "search")
     ("glob"       . "search")
@@ -164,15 +165,15 @@ the emoji in `dsh-emacs--variant-icons'.")
 template with a \"__C__\" fill placeholder.  Graphical Emacs renders it via
 `create-image'; terminal Emacs falls back to the \"✶\" glyph.")
 
-(defconst dsh-emacs--variant-titles
-  '(("bash"   . "Bash")
-    ("read"   . "Read")
-    ("search" . "Search")
-    ("write"  . "Write")
-    ("edit"   . "Edit")
-    ("code"   . "Code")
-    ("others" . "Tool"))
-  "Variant -> display title.")
+(defcustom dsh-emacs-tool-titles
+  '(("pwsh" . "PowerShell"))
+  "Alist of tool name -> display title overrides.
+Tools not listed here show a humanized name (\"grep\" -> \"Grep\",
+\"web_search\" -> \"Web Search\") while keeping their variant icon, so
+distinct tools never share a display name just because they share an
+icon.  Add your own entries to curate custom tool names."
+  :type '(alist :key-type string :value-type string)
+  :group 'dsh-emacs-render)
 
 (defconst dsh-emacs--summary-keys
   '(("bash"   . ("description" "command"))
@@ -284,9 +285,20 @@ the emoji fallback otherwise."
          (icon (dsh-emacs-render--tool-icon variant)))
     (cons variant icon)))
 
-(defun dsh-emacs-render--tool-title (variant)
-  "Display title for VARIANT."
-  (or (cdr (assoc variant dsh-emacs--variant-titles)) "Tool"))
+(defun dsh-emacs-render--humanize-name (name)
+  "Humanize TOOL-NAME for display: split on _/-, capitalize each word.
+Returns \"Tool\" for empty or missing names."
+  (if (or (null name) (string-empty-p name))
+      "Tool"
+    (mapconcat #'capitalize (split-string name "[_-]+" t) " ")))
+
+(defun dsh-emacs-render--tool-title (tool-name)
+  "Display title for TOOL-NAME, independent of its icon variant.
+Uses `dsh-emacs-tool-titles' overrides, else a humanized name, so
+grep / glob / web_search all keep the search magnifier icon but show
+distinct titles."
+  (or (cdr (assoc tool-name dsh-emacs-tool-titles))
+      (dsh-emacs-render--humanize-name tool-name)))
 
 (defun dsh-emacs-render--first-line (text)
   "First line of TEXT, trimmed."
@@ -1018,7 +1030,7 @@ used as a fallback when no deltas were received."
          (variant-info (dsh-emacs-render--tool-variant name))
          (variant (car variant-info))
          (icon (cdr variant-info))
-         (title (dsh-emacs-render--tool-title variant))
+         (title (dsh-emacs-render--tool-title name))
          (summary (dsh-emacs-render--tool-summary variant args))
          (body-text (dsh-emacs-render--tool-body-text variant args))
          (ns (dsh-emacs-render--make-namespace))

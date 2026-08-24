@@ -187,6 +187,8 @@ The animation lights up when a message is sent and goes out at `turn/end` (or wh
 (setq dsh-emacs-pin-input-to-bottom nil)           ; nil = same buffer as replies (default); t = standalone bottom window
 (setq dsh-emacs-input-window-height 4)             ; height of the standalone bottom input window
 (setq dsh-emacs-input-history-length 50)           ; prompts kept for M-p / M-n recall
+(setq dsh-emacs-ui-label-separator "·")            ; separator between Think/Tool title and its right-side summary ("" = plain gap)
+(setq dsh-emacs-tool-titles '(("pwsh" . "PowerShell"))) ; tool name -> display title overrides (icons stay per variant; unnamed tools get a humanized name, e.g. grep -> "Grep")
 (setq dsh-emacs-attach-media-types '("image/png" "image/jpeg" "image/webp" "image/gif")) ; accepted upload types
 (setq dsh-emacs-session-auto-refresh-interval nil) ; seconds between automatic session-list refreshes (nil = off)
 (setq dsh-emacs-footer-enabled t)                  ; whether the footer status bar is enabled

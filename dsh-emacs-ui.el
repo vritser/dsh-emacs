@@ -95,6 +95,15 @@
 (defconst dsh-emacs-ui--border-color-dark "666666"
   "Border color for dark theme.")
 
+(defcustom dsh-emacs-ui-label-separator "·"
+  "Separator between the left label and the right summary on flat rows.
+Minimal (flat) fragments — Thinking and Tool cards — render
+\"label-left · label-right\" when both sides are present.  A space is
+added on each side automatically; set to \"\" to fall back to the plain
+two-space gap."
+  :type 'string
+  :group 'dsh-emacs)
+
 ;;; Border-style character tables.
 (defconst dsh-emacs-ui--rounded-chars
   '((top-left . "┌")
@@ -270,10 +279,15 @@ with no fold indicator; bordered fragments keep a leading [+-] indicator."
          (leading-width (string-width leading-indicator))
          (left-width (string-width left-label))
          (right-width (string-width right-label))
+         ;; Minimal rows separate title and summary with the user-selected
+         ;; separator (e.g. " · "); bordered rows keep the two-space gap.
+         (gap-string (if (eq style 'minimal)
+                         (concat " " dsh-emacs-ui-label-separator " ")
+                       "  "))
          ;; Calculate available space for labels
-         (available (- box-width leading-width 2)) ; 2 for spaces around right label
-         ;; Reserve at least 2 spaces between left and right labels
-         (gap-width 2)
+         (available (- box-width leading-width (string-width gap-string)))
+         ;; Reserve the gap between left and right labels
+         (gap-width (string-width gap-string))
          (left-max (max 0 (- available right-width gap-width)))
          (truncated-left (if (> left-width left-max)
                              (truncate-string-to-width left-label left-max nil nil "…")
@@ -295,7 +309,7 @@ with no fold indicator; bordered fragments keep a leading [+-] indicator."
           (propertize truncated-left 'face 'dsh-emacs-ui-label-face
                       'keymap dsh-emacs-ui-fragment-map)
           (when (and truncated-right (> (length truncated-right) 0))
-            (concat "  "
+            (concat gap-string
                     (propertize truncated-right 'face 'dsh-emacs-ui-label-face
                                 'keymap dsh-emacs-ui-fragment-map))))
          box-width)
