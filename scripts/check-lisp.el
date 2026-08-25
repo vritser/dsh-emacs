@@ -1,0 +1,45 @@
+;;; check-lisp.el --- 结构校验：read 级配平检查
+;;; 用法: emacs -Q --batch -l scripts/check-lisp.el
+;;;       或指定文件: emacs -Q --batch -l scripts/check-lisp.el -- t.el
+;;; 退出码: 0 = 全部 read 通过; 1 = 存在失败
+;;; 原理: 逐个 read 顶层 form，任何括号不平都会抛 read-syntax/end-of-file。
+;;;       比 check-parens 更接近 load 语义，且不会被注释里的括号误导。
+
+(defvar dsh-check:files
+  '("dsh-emacs.el" "dsh-emacs-protocol.el" "dsh-emacs-session.el"
+    "dsh-emacs-markdown.el" "dsh-emacs-render.el" "dsh-emacs-events.el"
+    "dsh-emacs-ui.el" "dsh-emacs-faces.el" "dsh-emacs-tokens.el"
+    "dsh-emacs-footer.el" "test/dsh-test.el")
+  "默认检查的 elisp 文件（相对仓库根目录）。")
+
+(defun dsh-check:read-ok (file)
+  "若 FILE 能被完整 read 则返回 t；括号不平会抛错。
+`read' 在 eof 处抛 end-of-file 是正常协议，当作循环终点处理；
+其余错误（invalid-read-syntax 等）原样传播。"
+  (with-temp-buffer
+    (insert-file-contents file)
+    (goto-char (point-min))
+    (while (condition-case nil
+             (prog1 t (read (current-buffer)))
+           (end-of-file nil))
+      ;; 继续读下一个 form
+      )
+    t))
+
+(let ((files (cdr (member "--" command-line-args-left)))
+      (failed 0))
+  (when files
+    (setq dsh-check:files files))
+  (dolist (f dsh-check:files)
+    (princ (format "read %-26s " f))
+    (condition-case err
+        (progn (dsh-check:read-ok f)
+               (princ "OK\n"))
+      (error
+       (setq failed (1+ failed))
+       (princ (format "FAIL %S\n" err)))))
+  (princ (format "==> %d file(s) checked, %d passed, %d failed\n"
+                 (length dsh-check:files)
+                 (- (length dsh-check:files) failed)
+                 failed))
+  (kill-emacs (if (zerop failed) 0 1)))
