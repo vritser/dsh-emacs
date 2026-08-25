@@ -1235,18 +1235,31 @@
             (dsh-test-pass "send-or-stop-idle-empty-noop"))))
     (kill-buffer buf)))
 
-;; --- 测试 47: 模型目录展开 + selectModel 调用 ---
+;; --- 测试 47: 模型目录展开 + 排序 + selectModel 调用 ---
 (let* ((g1 '((id . "g1") (name . "DeepSeek")
              (models . [((id . "m1") (name . "Model One"))
                         ((id . "m2"))])))
        (g2 '((id . "g2") (name . "qwen-token-plan")
              (models . [((id . "m3") (name . "Qwen-M"))])))
        (cands (dsh-emacs--model-candidates `((groups . [,g1 ,g2])))))
-  ;; 每项带 (id provider 组名)，provider 取所属组的 id
-  (when (equal cands '(("m1" "g1" "DeepSeek" "Model One")
-                       ("m2" "g1" "DeepSeek" "m2")
-                       ("m3" "g2" "qwen-token-plan" "Qwen-M")))
+  ;; 每项带 (id provider 组名)，provider 取所属组的 id；
+  ;; 列表按 provider 名 + 模型 id 排序（组内 m1 < m2，组名忽略大小写）
+  (when (equal cands '(("m1" "g1" "DeepSeek" "Model One" nil)
+                       ("m2" "g1" "DeepSeek" "m2" nil)
+                       ("m3" "g2" "qwen-token-plan" "Qwen-M" nil)))
     (dsh-test-pass "model-candidates-flattened")))
+
+;; 排序：组乱序 + 组内乱序 → provider 名 + 模型 id 字典序（大小写不敏感）
+(let* ((g1 '((id . "g1") (name . "Zeta")
+             (models . [((id . "m1") (name . "beta"))
+                        ((id . "m2") (name . "Alpha"))])))
+       (g2 '((id . "g2") (name . "Alpha-Group")
+             (models . [((id . "m3") (name . "gamma"))])))
+       (cands (dsh-emacs--model-candidates `((groups . [,g1 ,g2])))))
+  (when (equal cands '(("m3" "g2" "Alpha-Group" "gamma" nil)
+                       ("m1" "g1" "Zeta" "beta" nil)
+                       ("m2" "g1" "Zeta" "Alpha" nil)))
+    (dsh-test-pass "model-candidates-sorted-provider-then-name")))
 
 (let ((buf (generate-new-buffer " *dsh-model-test*"))
       (calls nil))
@@ -1264,10 +1277,10 @@
                                               (models . [((id . "m1")
                                                           (name . "Model One"))]))]))))))
                   ((symbol-function 'completing-read)
-                   ;; 用户选择的键是 padded 展示字符串（真实 minibuffer 返回的）
+                   ;; 用户选择的键是模型行完整键（含埋入的 provider，形如
+                   ;; "m1 [g1|DeepSeek]"；display 属性下渲染时不可见）
                    (lambda (&rest _)
-                     (format "%-28s %-18s %s"
-                             "m1" "DeepSeek" "Model One"))))
+                     "m1 [g1|DeepSeek]")))
           (dsh-emacs-select-model)
           (let* ((call (car calls))
                  (params (cadr call)))
@@ -1277,6 +1290,499 @@
                        (string= "sess-m" (cdr (assq 'sessionId params))))
               (dsh-test-pass "select-model-sends-selectModel")))))
     (kill-buffer buf)))
+
+;; --- 测试 47b: select-model 按 C-g 应干净取消（quit 不得漏进 process filter） ---
+(let ((buf (generate-new-buffer " *dsh-model-quit-test*"))
+      (leaked nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (setq dsh-emacs--current-session "sess-q")
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (&rest _) (signal 'quit nil))))
+          (condition-case err
+              (dsh-emacs--select-model-prompt
+               "sess-q"
+               '((current . ((provider . "p1") (model . "m0")))
+                 (groups . [((id . "g1") (name . "DeepSeek")
+                             (models . [((id . "m1") (name . "Model One"))]))])))
+            (quit (setq leaked t)))))
+    (kill-buffer buf))
+  (when (not leaked)
+    (dsh-test-pass "select-model-c-g-aborts-cleanly")))
+
+;; --- 测试 47c: 空 RET/未知输入都不得触发 selectModel（实现上不再传 DEF） ---
+;; 空 RET（""）→ 保持当前模型：不发 selectModel，提示 "Kept ..."
+(let ((buf (generate-new-buffer " *dsh-model-empty-test*"))
+      (calls nil)
+      (msgs nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (setq dsh-emacs--current-session "sess-e")
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method params cb)
+                     (push (list method params) calls)
+                     (when (string= method "session.models")
+                       (funcall
+                        cb t
+                        '((current . ((provider . "g1") (model . "m1")))
+                          (groups . [((id . "g1") (name . "DeepSeek")
+                                      (models . [((id . "m1")
+                                                  (name . "Model One"))]))]))))))
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _) ""))
+                  ((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (push (apply #'format fmt args) msgs))))
+          (dsh-emacs-select-model)
+          (let ((methods (mapcar #'car calls)))
+            (when (and (member "session.models" methods)
+                       (not (member "session.selectModel" methods))
+                       (cl-some (lambda (m) (string-prefix-p "Kept" m))
+                                msgs))
+              (dsh-test-pass "select-model-empty-pick-keeps-current")))))
+    (kill-buffer buf)))
+
+;; 未知串 → 拒绝：不发 selectModel，提示 "Unknown model"
+(let ((buf (generate-new-buffer " *dsh-model-unknown-test*"))
+      (calls nil)
+      (msgs nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (setq dsh-emacs--current-session "sess-u")
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method params cb)
+                     (push (list method params) calls)
+                     (when (string= method "session.models")
+                       (funcall
+                        cb t
+                        '((current . ((provider . "g1") (model . "m1")))
+                          (groups . [((id . "g1") (name . "DeepSeek")
+                                      (models . [((id . "m1")
+                                                  (name . "Model One"))]))]))))))
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _) "bogus"))
+                  ((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (push (apply #'format fmt args) msgs))))
+          (dsh-emacs-select-model)
+          (let ((methods (mapcar #'car calls)))
+            (when (and (member "session.models" methods)
+                       (not (member "session.selectModel" methods))
+                       (cl-some (lambda (m) (string-prefix-p "Unknown" m))
+                                msgs))
+              (dsh-test-pass "select-model-unknown-pick-rejected")))))
+    (kill-buffer buf)))
+
+;; --- 测试 47d: provider 只展示一次，models 缩进跟随（分组展示） ---
+;; 行键 = "id [provider-id|Provider Name]"：键里内嵌 provider id 与显示
+;; 名，保证同 id 跨 provider（m2 在 Qwen 和 Anthropic 下）时两行内容唯一、
+;; assoc 精确命中；键开头就是 id（前缀过滤可用）；display 属性渲染时把
+;; [provider|Name] 藏起来，列表里只看到 "  id"（前缀输入仍命中）。
+(let* ((cands '(("m1" "g1" "DeepSeek" "Model One")
+                ("m2b" "g1" "DeepSeek" "Model Two")
+                ("m0" "g2" "Qwen" "m0")
+                ("m2" "g2" "Qwen" "Qwen-M")
+                ("m2" "g3" "Anthropic" "Same-M")))
+       (entries (dsh-emacs--model-entries cands))
+       (key (lambda (id provider name) (format "%s [%s|%s]" id provider name)))
+       (expect `(("DeepSeek" :header . "DeepSeek")
+                 (,(funcall key "m1" "g1" "DeepSeek") . ("m1" "g1" "DeepSeek" "Model One"))
+                 (,(funcall key "m2b" "g1" "DeepSeek") . ("m2b" "g1" "DeepSeek" "Model Two"))
+                 ("Qwen" :header . "Qwen")
+                 (,(funcall key "m0" "g2" "Qwen") . ("m0" "g2" "Qwen" "m0"))
+                 (,(funcall key "m2" "g2" "Qwen") . ("m2" "g2" "Qwen" "Qwen-M"))
+                 ("Anthropic" :header . "Anthropic")
+                 (,(funcall key "m2" "g3" "Anthropic") . ("m2" "g3" "Anthropic" "Same-M"))))
+       ;; 渲染：唯一 id 保持纯 "  id"；重复 id（同 id 跨 provider）显示
+       ;; provider 名，因为过滤时分组头会被滤掉，纯 id 行将无法区分
+       (shown (mapcar (lambda (e)
+                        (if (eq :header (car (cdr e)))
+                            (car e)
+                          (get-text-property 0 'display (car e))))
+                      entries))
+       (shown-expect (list "DeepSeek" "  m1" "  m2b" "Qwen" "  m0"
+                           "  m2 (Qwen)" "Anthropic" "  m2 (Anthropic)")))
+  (when (and (equal entries expect)
+             (equal shown shown-expect)
+             ;; 模型行键全部唯一 → completion 返回的键无歧义
+             (= (length entries)
+                (length (cl-remove-duplicates (mapcar #'car entries)))))
+    (dsh-test-pass "model-entries-groups-by-provider")))
+
+;; --- 测试 47e: 选中 provider 头行 → 提示而非切换（不发 selectModel） ---
+(let ((buf (generate-new-buffer " *dsh-model-header-test*"))
+      (calls nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (setq dsh-emacs--current-session "sess-h")
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method params cb)
+                     (push (list method params) calls)
+                     (when (string= method "session.models")
+                       (funcall cb
+                                t
+                                '((current . ((provider . "g1") (model . "m1")))
+                                  (groups . [((id . "g1") (name . "DeepSeek")
+                                              (models . [((id . "m1")
+                                                          (name . "Model One"))]))]))))))
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _) "DeepSeek")))
+          (dsh-emacs-select-model)
+          (let ((methods (mapcar #'car calls)))
+            (when (and (member "session.models" methods)
+                       (not (member "session.selectModel" methods)))
+              (dsh-test-pass "select-model-header-pick-rejected")))))
+    (kill-buffer buf)))
+
+;; --- 测试 47f: 同 id 多 provider → 键内嵌 provider，选中行即正确 provider ---
+;; 行键 = "m2 [g2|Qwen]"（display 属性下不可见，列表仍显示 "  m2"）。
+;; completing-read 返回的键就是用户选中那行，assoc 直接命中正确 payload：
+;; 选 Qwen 行 → provider g2、确认消息 "Dup-2 (Qwen)"；全程一次选择，无二次确认。
+(let ((buf (generate-new-buffer " *dsh-model-dup-test*"))
+      (calls nil)
+      (msgs nil)
+      (cr-count 0))
+  (unwind-protect
+      (with-current-buffer buf
+        (setq dsh-emacs--current-session "sess-d")
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method params cb)
+                     (push (list method params) calls)
+                     (cond
+                      ((string= method "session.models")
+                       (funcall
+                        cb t
+                        '((current . ((provider . "g1") (model . "m1")))
+                          (groups . [((id . "g1") (name . "DeepSeek")
+                                      (models . [((id . "m2")
+                                                  (name . "Dup-1"))]))
+                                     ((id . "g2") (name . "Qwen")
+                                      (models . [((id . "m2")
+                                                  (name . "Dup-2"))]))]))))
+                      ((string= method "session.selectModel")
+                       ;; 成功回调触发确认消息（"Model switched to ..."）
+                       (funcall cb t nil)))))
+                  ;; 用户选了 Qwen 那行：返回该行完整键（含隐藏的 provider）
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _)
+                     (setq cr-count (1+ cr-count))
+                     "m2 [g2|Qwen]"))
+                  ((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (push (apply #'format fmt args) msgs))))
+          (dsh-emacs-select-model)
+          (let* ((call (car calls))
+                 (params (cadr call)))
+            (when (and (string= "session.selectModel" (car call))
+                       (string= "m2" (cdr (assq 'model params)))
+                       (string= "g2" (cdr (assq 'provider params)))
+                       (= 1 cr-count)
+                       (cl-some (lambda (m)
+                                  (string-match-p (regexp-quote "Dup-2 (Qwen)") m))
+                                msgs))
+              (dsh-test-pass "select-model-dup-id-picks-own-provider")))))
+    (kill-buffer buf)))
+
+;; 选 DeepSeek 那行（键 "m2 [g1|DeepSeek]"）→ provider 是 g1，确认消息显示 Dup-1
+(let ((buf (generate-new-buffer " *dsh-model-dup2*"))
+      (calls nil)
+      (msgs nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (setq dsh-emacs--current-session "sess-d2")
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method params cb)
+                     (push (list method params) calls)
+                     (cond
+                      ((string= method "session.models")
+                       (funcall
+                        cb t
+                        '((current . ((provider . "g1") (model . "m1")))
+                          (groups . [((id . "g1") (name . "DeepSeek")
+                                      (models . [((id . "m2")
+                                                  (name . "Dup-1"))]))
+                                     ((id . "g2") (name . "Qwen")
+                                      (models . [((id . "m2")
+                                                  (name . "Dup-2"))]))]))))
+                      ((string= method "session.selectModel")
+                       (funcall cb t nil)))))
+                  ;; 用户选了 DeepSeek 那行
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _) "m2 [g1|DeepSeek]"))
+                  ((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (push (apply #'format fmt args) msgs))))
+          (dsh-emacs-select-model)
+          (let* ((call (car calls))
+                 (params (cadr call)))
+            (when (and (string= "session.selectModel" (car call))
+                       (string= "g1" (cdr (assq 'provider params)))
+                       (cl-some (lambda (m)
+                                  (string-match-p (regexp-quote "Dup-1 (DeepSeek)") m))
+                                msgs))
+              (dsh-test-pass "select-model-dup-id-other-row-its-provider")))))
+    (kill-buffer buf)))
+
+;; --- 测试 47g: vertico-group 路径 → 分组由 group-function 元数据保持 ---
+;; 候选是纯模型行（无 :header 候选），行键 "  id [provider]" 渲染纯 id；
+;; 元数据 group-function 把键映射回 provider 显示名 —— 过滤时框架据此
+;; 保持每个 provider 的分组头。assoc 仍精确命中选中行。
+(let* ((cands '(("m1" "g1" "DeepSeek" "Model One")
+                ("m2" "g2" "Qwen" "Qwen-M")
+                ("m2" "g3" "Anthropic" "Same")))
+       (pair (dsh-emacs--model-grouped-collection cands))
+       (rows (cdr pair))
+       (md (funcall (car pair) "" nil 'metadata))
+       (gf (alist-get 'group-function (cdr md))))
+  (when (and (eq 'dsh-model (alist-get 'category (cdr md)))
+             (= 3 (length rows))
+             (cl-every (lambda (e) (not (eq :header (car (cdr e))))) rows)
+             (string= "DeepSeek" (funcall gf "m1 [g1|DeepSeek]" nil))
+             (string= "Qwen" (funcall gf "m2 [g2|Qwen]" nil))
+             (string= "Anthropic" (funcall gf "m2 [g3|Anthropic]" nil))
+
+             ;; transform 返回可见串（id 前缀 + 迁移的匹配高亮），供 vertico 渲染
+             (string= "m2" (substring-no-properties
+                             (funcall gf "m2 [g2|Qwen]" t)))
+             (string= "  m2" (get-text-property 0 'display (car (nth 1 rows))))
+             (string= "  m2" (get-text-property 0 'display (car (nth 2 rows)))))
+    (dsh-test-pass "model-grouped-collection-keeps-group-metadata")))
+
+;; 47g2: 现代 vertico（原生支持 group-function 元数据，无
+;; vertico-group-mode）→ 走 grouped 路径，选中行即正确 provider
+(let ((buf (generate-new-buffer " *dsh-model-grouped*"))
+      (calls nil)
+      (msgs nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (setq dsh-emacs--current-session "sess-g")
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method params cb)
+                     (push (list method params) calls)
+                     (cond
+                      ((string= method "session.models")
+                       (funcall
+                        cb t
+                        '((current . ((provider . "g1") (model . "m1")))
+                          (groups . [((id . "g1") (name . "DeepSeek")
+                                      (models . [((id . "m2")
+                                                  (name . "Dup-1"))]))
+                                     ((id . "g2") (name . "Qwen")
+                                      (models . [((id . "m2")
+                                                  (name . "Dup-2"))]))]))))
+                      ((string= method "session.selectModel")
+                       (funcall cb t nil)))))
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _) "m2 [g2|Qwen]"))
+                  ((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (push (apply #'format fmt args) msgs))))
+          (let ((vertico-mode t) (vertico--groups nil))
+            (dsh-emacs-select-model))
+          (let* ((call (car calls))
+                 (params (cadr call)))
+            (when (and (string= "session.selectModel" (car call))
+                       (string= "g2" (cdr (assq 'provider params)))
+                       (cl-some (lambda (m)
+                                  (string-match-p (regexp-quote "Dup-2 (Qwen)") m))
+                                msgs))
+              (dsh-test-pass "model-grouped-pick-exact-provider")))))
+    (kill-buffer buf)))
+
+;; --- 测试 47h: 键以 id 开头 → 默认前缀补全风格下过滤仍命中 ---
+;; 键 = "m2 [g2|Qwen]"（无前导空格）：basic（前缀）风格输入 "m2" 命中；
+;; 键内嵌 provider 显示名，子串风格输 "qwen" 也能命中；display 属性
+;; 照旧把 [provider|Name] 藏起来、渲染 "  m2"。
+(let* ((cands '(("m2" "g2" "Qwen" "Qwen-M")
+                ("m2" "g3" "Anthropic" "Same")))
+       (rows (mapcar (lambda (c) (dsh-emacs--model-row-entry c nil)) cands))
+       (raw0 (substring-no-properties (car (nth 0 rows))))
+       (raw1 (substring-no-properties (car (nth 1 rows)))))
+  (when (and (string-prefix-p "m2" raw0)
+             (string-match-p (regexp-quote "Qwen") raw0)
+             (string= "  m2" (get-text-property 0 'display (car (nth 0 rows))))
+             (string-prefix-p "m2" raw1)
+             (string-match-p (regexp-quote "Anthropic") raw1)
+             ;; 键全部唯一 → assoc 命中无歧义
+             (= 2 (length (cl-remove-duplicates (mapcar #'car rows)))))
+    (dsh-test-pass "model-row-prefix-filterable")))
+
+;; --- 测试 47i: 选择器内局部样式化 vertico 组头（默认去掉长分隔线） ---
+(progn
+  ;; batch 环境没有 vertico，模拟其全局变量
+  (defvar vertico-group-format "GLOBAL-FORMAT")
+  (let ((buf (generate-new-buffer " *dsh-group-fmt*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (dsh-emacs--model-select-setup-hook t)
+          (when (and (equal (buffer-local-value 'vertico-group-format buf)
+                            dsh-emacs-model-group-format)
+                     ;; 全局默认不被污染
+                     (string= "GLOBAL-FORMAT"
+                              (default-value 'vertico-group-format))
+                     ;; 默认格式含 %s 占位符
+                     (string-match-p "%s" dsh-emacs-model-group-format))
+            (dsh-test-pass "model-select-local-group-format")))
+      (kill-buffer buf)))
+  ;; grouped 为 nil（无分组 UI）时不动 vertico-group-format
+  (let ((buf (generate-new-buffer " *dsh-group-fmt2*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (dsh-emacs--model-select-setup-hook nil)
+          (unless (assq 'vertico-group-format (buffer-local-variables buf))
+            (dsh-test-pass "model-select-nongrouped-leaves-format")))
+      (kill-buffer buf))))
+
+;; --- 测试 47j: transform 把匹配高亮迁到显示串的 id 区，行只高亮 id ---
+;; 键 = "m2 [g2|Qwen]"（display 隐藏 [provider] 段），输入 "m2" 时
+;; orderless/basic 给键首 [0,2) 打 completion-match-face。transform 返回
+;; "  m2"（无 display 属性，face 落在 [2,4) 即 id 区）—— 既不整行背景
+;; 也不丢失高亮；assoc 仍按原键命中。
+(let* ((pair (dsh-emacs--model-grouped-collection
+              '(("m2" "g2" "Qwen" "Qwen-M"))))
+       (md (funcall (car pair) "" nil 'metadata))
+       (gf (alist-get 'group-function (cdr md)))
+       (key (caar (cdr pair)))
+       ;; 模拟 orderless/basic 的匹配高亮：匹配区在键首（"m2"）
+       (hl (copy-sequence key))
+       (shown (progn (add-face-text-property 0 2 'completion-match-face t hl)
+                     (funcall gf hl t))))
+  (when (and (string= "m2" (substring-no-properties shown))
+             ;; 高亮迁到 id 区 [0,2)（无前导空格）
+             (get-text-property 0 'face shown)
+             (null (get-text-property 2 'face shown))
+             ;; 显示文本自身承担 display，不再依赖隐藏段
+             (null (get-text-property 0 'display shown))
+             ;; 原键（含属性）assoc 仍命中
+             (assoc hl (cdr pair)))
+    (dsh-test-pass "model-grouped-transform-keeps-id-highlight")))
+
+;; --- 测试 47k: category=dsh-model + 恒等 affixation ---
+;; nerd-icons-completion 会给候选行首插图标（nil 类别 → 右箭头），
+;; category 声明为自用符号 → 图标表查不到 → 空串，行首干净；
+;; --- 测试 47k: 元数据自带恒等 affixation → 第三方注解注入被挡掉 ---
+;; marginalia/cape 等通过 metadata advice 注入 affixation-function 会在
+;; 行尾加注解（常见 "->"）；我们在元数据里声明无 prefix/suffix 的恒等
+;; affixation，vertico--affixate 优先用它，行保持干净。
+(let* ((pair (dsh-emacs--model-grouped-collection
+              '(("m1" "g1" "DeepSeek" "Model One")
+                ("m2" "g2" "Qwen" "Qwen-M"))))
+       (md (funcall (car pair) "" nil 'metadata))
+       (aff (alist-get 'affixation-function (cdr md)))
+       ;; 模拟第三方注入：随便一个会加 suffix 的 affixation 在前
+       (rows (funcall aff '("m1 [g1|DeepSeek]" "m2 [g2|Qwen]"))))
+  (when (and aff
+             ;; 每行 prefix 与 suffix 都为空
+             (cl-every (lambda (r) (and (string= "" (nth 1 r))
+                                        (string= "" (nth 2 r))))
+                       rows)
+             (= 2 (length rows))
+             (string= "m1 [g1|DeepSeek]" (car (nth 0 rows))))
+    (dsh-test-pass "model-grouped-empty-affixation-blocks-annotations")))
+
+;; --- 测试 47l: effort 目录解析 + 默认值优先级 ---
+(let* ((reasoning '((efforts . [((id . "off") (name . "Off"))
+                                ((id . "high") (name . "High"))
+                                ((id . "max") (name . "Max"))])
+                    (defaultEffort . "high")))
+       (choices (dsh-emacs--model-effort-choices reasoning)))
+  (when (equal choices '(("Off" . "off")
+                         ("High" . "high")
+                         ("Max" . "max")))
+    (dsh-test-pass "model-effort-choices-parses-options")))
+
+(let* ((reasoning '((efforts . [((id . "off") (name . "Off"))
+                                ((id . "high") (name . "High"))
+                                ((id . "max") (name . "Max"))])
+                    (defaultEffort . "high")))
+       (prefer (dsh-emacs--model-effort-default-id reasoning "max"))
+       (default (dsh-emacs--model-effort-default-id reasoning nil))
+       (bogus (dsh-emacs--model-effort-default-id reasoning "low")))
+  (when (and (string= "max" prefer)      ;; 现行 effort 有效 → 保持
+             (string= "high" default)     ;; 否则 defaultEffort
+             (string= "high" bogus))      ;; 非选项的 current → 忽略
+    (dsh-test-pass "model-effort-default-priority")))
+
+;; 无 display name 的 effort 项 → 用 id 兜底显示
+(let* ((reasoning '((efforts . [((id . "t0"))])))
+       (choices (dsh-emacs--model-effort-choices reasoning)))
+  (when (equal choices '(("t0" . "t0")))
+    (dsh-test-pass "model-effort-choice-name-falls-back-to-id")))
+
+;; --- 测试 47m: selectModel 携带 reasoningEffort ---
+;; 辅助：模拟一轮模型选择（completing-read 第二次输入 PICK2），
+;; 返回 selectModel 请求里的 reasoningEffort（未发请求时为 :no-call）
+(defun dsh-emacs-test--model-effort-run (dir pick2)
+  (let ((buf (generate-new-buffer " *dsh-effort-*"))
+        (calls nil)
+        (cr-n 0))
+    (unwind-protect
+        (with-current-buffer buf
+          (setq dsh-emacs--current-session "sess-t")
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (method params cb)
+                       (push (list method params) calls)
+                       (funcall cb t
+                                (if (string= method "session.models")
+                                    dir
+                                  '((selected . ((provider . "p1")
+                                                 (model . "m1")))))))))
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (&rest _)
+                         (setq cr-n (1+ cr-n))
+                         (if (eq cr-n 1) "m1 [g1|DeepSeek]" pick2))))
+              (dsh-emacs-select-model)
+              (let* ((call (car calls))
+                     (params (cadr call)))
+                (if (and (string= "session.selectModel" (car call))
+                         (string= "m1" (cdr (assq 'model params))))
+                    (cdr (assq 'reasoningEffort params))
+                  :no-call)))))
+      (kill-buffer buf))))
+
+;; 目标模型带 reasoning：第二层手动选 Max（不同于默认 High）→ 传 max
+(let* ((dir '((current . ((provider . "p1") (model . "m0")))
+              (groups . [((id . "g1") (name . "DeepSeek")
+                          (models . [((id . "m1") (name . "One")
+                                      (reasoning . ((efforts . [((id . "off") (name . "Off"))
+                                                                ((id . "high") (name . "High"))
+                                                                ((id . "max") (name . "Max"))])
+                                                    (defaultEffort . "high"))))]))])))
+       (eff (dsh-emacs-test--model-effort-run dir "Max")))
+  (when (string= "max" eff)
+    (dsh-test-pass "select-model-sends-reasoning-effort")))
+
+;; 空输入（RET）→ completing-read 返回默认 → 传默认 effort（defaultEffort）
+(let* ((dir '((current . ((provider . "p1") (model . "m0")))
+              (groups . [((id . "g1") (name . "DeepSeek")
+                          (models . [((id . "m1") (name . "One")
+                                      (reasoning . ((efforts . [((id . "off") (name . "Off"))
+                                                                ((id . "high") (name . "High"))
+                                                                ((id . "max") (name . "Max"))])
+                                                    (defaultEffort . "high"))))]))])))
+       (eff (dsh-emacs-test--model-effort-run dir "")))
+  (when (string= "high" eff)
+    (dsh-test-pass "select-model-empty-effort-pick-default")))
+
+;; 重选当前模型（current.reasoningEffort=max、m1 选项含 max）→ 保持 max
+(let* ((dir '((current . ((provider . "p1") (model . "m1") (reasoningEffort . "max")))
+              (groups . [((id . "g1") (name . "DeepSeek")
+                          (models . [((id . "m1") (name . "One")
+                                      (reasoning . ((efforts . [((id . "off") (name . "Off"))
+                                                                ((id . "max") (name . "Max"))])
+                                                    (defaultEffort . "high"))))]))])))
+       (eff (dsh-emacs-test--model-effort-run dir "")))
+  (when (string= "max" eff)
+    (dsh-test-pass "select-model-repick-keeps-current-effort")))
+
+;; 目标模型没有 reasoning 选项 → 请求不带 reasoningEffort 键
+(let* ((dir '((current . ((provider . "p1") (model . "m0")))
+              (groups . [((id . "g1") (name . "DeepSeek")
+                          (models . [((id . "m1") (name . "One"))]))])))
+       (eff (dsh-emacs-test--model-effort-run dir "x")))
+  (when (null eff)
+    (dsh-test-pass "select-model-no-reasoning-omits-effort")))
+
 
 ;; --- 测试 48: 附件（图片 base64 内联进 session.prompt） ---
 (let ((png-file (make-temp-file "dsh-test-1px" nil ".png"))
@@ -1520,3 +2026,4 @@
     (dolist (r (nreverse dsh-test-results))
       (unless (cdr r)
         (princ (format "  - %s: %s\n" (car r) (cdr r)))))))
+

@@ -66,6 +66,19 @@
   :group 'applications
   :prefix "dsh-emacs-")
 
+(defcustom dsh-emacs-model-group-format
+  #(" %s " 0 4 (face vertico-group-title))
+  "Format string for provider group titles in the model selector.
+`%s' is replaced with the provider name.
+Inside the model selector's minibuffer this overrides vertico's global
+`vertico-group-format' (buffer-locally, other completions are untouched):
+vertico's stock format draws a long strike-through separator line across
+the whole group header (\"----...\"), which is noisy; the default here
+paints just the provider name.  Set to nil to hide group titles entirely
+inside the picker."
+  :type '(choice (const :tag "No group titles" nil) string)
+  :group 'dsh-emacs)
+
 (defcustom dsh-emacs-base-url "http://127.0.0.1:3080"
   "Address of the running dsh web service."
   :type 'string
@@ -355,7 +368,11 @@ Returns (ok-p . value) or nil."
                             (message "RPC async error: %S" status)
                             (when (buffer-live-p callback-buffer)
                               (with-current-buffer callback-buffer
-                                (funcall callback nil nil))))
+                                ;; 回调若在 filter 里交互（completing-read 等）
+                                ;; 并按 C-g，吞掉 quit 而非报 process filter 错误
+                                (condition-case nil
+                                    (funcall callback nil nil)
+                                  (quit nil)))))
                         (goto-char (point-min))
                         (re-search-forward "^$")
                         (delete-region (point) (point-min))
@@ -368,7 +385,9 @@ Returns (ok-p . value) or nil."
                             (kill-buffer)
                             (when (buffer-live-p callback-buffer)
                               (with-current-buffer callback-buffer
-                                (funcall callback ok value))))))))
+                                (condition-case nil
+                                    (funcall callback ok value)
+                                  (quit nil)))))))))
                   nil t)))
 
 ;;; ---------------------------------------------------------------------------
@@ -1324,31 +1343,246 @@ Only the media types in `dsh-emacs-attach-media-types' are sent."
            attachments))))))
 
 (defun dsh-emacs--model-candidates (value)
-  "Flatten a `session.models' VALUE into per-model entries.
+  "Flatten a `session.models' VALUE into per-model entries, sorted.
 
-Each entry is (ID PROVIDER PROVIDER-NAME NAME):
+The list is sorted by provider display name then model id
+(case-insensitive), so the model picker shows a stable, predictable
+order regardless of the host's own group/model ordering.
+
+Each entry is (ID PROVIDER PROVIDER-NAME NAME REASONING):
   ID            — the model id, sent as `session.selectModel' model.
   PROVIDER      — the owning group's id; the live host resolves
                   `current.provider' to exactly this value (the provider
                   `session.selectModel' expects for the model).
   PROVIDER-NAME — the group's display name (may equal PROVIDER).
-  NAME          — the model's display name."
+  NAME          — the model's display name (may equal ID).
+  REASONING     — the model's `reasoning' alist (efforts + defaultEffort)
+                  as returned by the host, or nil when the model offers
+                  no reasoning-effort options."
   (let ((groups (dsh-emacs--sequence-list (cdr (assq 'groups value)))))
-    (cl-loop for g in groups
-             for provider = (cdr (assq 'id g))
-             for provider-name = (or (cdr (assq 'name g)) provider)
-             append (cl-loop for m in (dsh-emacs--sequence-list
-                                       (cdr (assq 'models g)))
-                             for id = (cdr (assq 'id m))
-                             for name = (or (cdr (assq 'name m)) id)
-                             collect (list id provider provider-name name)))))
+    (sort (cl-loop for g in groups
+                   for provider = (cdr (assq 'id g))
+                   for provider-name = (or (cdr (assq 'name g)) provider)
+                   append (cl-loop for m in (dsh-emacs--sequence-list
+                                             (cdr (assq 'models g)))
+                                   for id = (cdr (assq 'id m))
+                                   for name = (or (cdr (assq 'name m)) id)
+                                   for reasoning = (cdr (assq 'reasoning m))
+                                   collect (list id provider provider-name
+                                                name reasoning)))
+          (lambda (a b)
+            (let ((pa (downcase (nth 2 a)))
+                  (pb (downcase (nth 2 b)))
+                  (ia (downcase (nth 0 a)))
+                  (ib (downcase (nth 0 b))))
+              (or (string-lessp pa pb)
+                  (and (string= pa pb) (string-lessp ia ib))))))))
+
+(defun dsh-emacs--model-effort-choices (reasoning)
+  "Effort options of a model's REASONING alist as ((NAME . ID) ...),
+keeping the host's directory order for display; entries without a display
+name fall back to their id.  Returns nil when REASONING has no efforts."
+  (mapcar (lambda (e)
+            (let ((id (cdr (assq 'id e)))
+                  (name (or (cdr (assq 'name e))
+                            (cdr (assq 'id e)))))
+              (cons name id)))
+          (dsh-emacs--sequence-list (cdr (assq 'efforts reasoning)))))
+
+(defun dsh-emacs--model-effort-default-id (reasoning &optional current-id)
+  "The effort id to pre-select for a model with REASONING options.
+CURRENT-ID wins when it is a valid option (the session already runs that
+model at that effort); otherwise the model's `defaultEffort' when it is a
+known option; otherwise the first effort in the directory."
+  (let* ((choices (dsh-emacs--model-effort-choices reasoning))
+         (ids (mapcar #'cdr choices))
+         (default (cdr (assq 'defaultEffort reasoning))))
+    (cond ((and current-id (member current-id ids)) current-id)
+          ((member default ids) default)
+          (ids (car ids))
+          (t nil))))
+
+(defun dsh-emacs--model-pick-effort (model choices default-id)
+  "Read a reasoning-effort choice for MODEL from CHOICES ((NAME . ID) ...).
+Returns the chosen effort id.  The choice whose id equals DEFAULT-ID is
+passed as completing-read's DEF: vertico pre-selects it and an empty RET
+takes it — re-picking the current model keeps its live effort, other
+models default to their host-supplied default.  Signals quit on C-g, so
+the caller can cancel the whole selection."
+  (let* ((default-name (car (rassoc default-id choices)))
+         (name (completing-read
+                (if default-name
+                    (format "Reasoning effort for %s (default %s): "
+                            model default-name)
+                  (format "Reasoning effort for %s: " model))
+                choices nil t nil nil default-name)))
+    (or (cdr (assoc name choices)) default-id)))
+
+(defun dsh-emacs--model-row-entry (c dup)
+  "One (KEY . C) completing-read entry for model tuple C.
+KEY = \"id [provider|Provider Name]\" — the id first, so prefix
+completion (default `completion-styles' match by prefix) hits when the
+user types a model id; provider id and display name are embedded for
+exact `assoc' and for searching by provider name — with a `display'
+property rendering \"  id\" (or, when DUP non-nil — the same id is
+offered by several providers — and no group headers are available,
+\"  id (Provider Name)\" so duplicate-id rows stay distinguishable
+after the group headers are dropped)."
+  (let* ((id (nth 0 c))
+         (provider (nth 1 c))
+         (provider-name (nth 2 c))
+         (shown (if dup
+                    (format "  %s (%s)" id provider-name)
+                  (format "  %s" id)))
+         (key (propertize (format "%s [%s|%s]" id provider provider-name)
+                          'display shown)))
+    (cons key c)))
+
+(defun dsh-emacs--model-key-parts (key)
+  "Parse row KEY built by `dsh-emacs--model-row-entry' as
+\"id [provider|Provider Name]\", returning (ID PROVIDER PROVIDER-NAME)
+or nil when KEY is not a model row."
+  (when (string-match "\\`\\([^ ]+\\) \\[\\([^]|]*\\)|\\([^]]*\\)\\]\\'" key)
+    (list (match-string 1 key)
+          (match-string 2 key)
+          (match-string 3 key))))
+
+(defun dsh-emacs--model-key-provider (key)
+  "Provider id embedded in row KEY, or nil."
+  (nth 1 (dsh-emacs--model-key-parts key)))
+
+(defun dsh-emacs--model-entries (candidates)
+  "Entries for completion UIs WITHOUT grouping support: provider shown
+once as a bare header row, its models following, indented, each
+showing the model id (the payload keeps the display NAME for
+messages/footer) with payload = the candidate tuple
+(ID PROVIDER PROVIDER-NAME NAME REASONING), where REASONING is the
+host's `reasoning' alist (efforts + defaultEffort) or nil.  Rows are
+(DISPLAY . PAYLOAD) conses, so a picked header is rejected by the
+caller instead of being treated as a model.
+
+The row KEY embeds the owning provider (\"id [provider|Provider
+Name]\", id first so prefix filtering still matches) and a `display'
+property renders the row: bare \"  id\" for unique ids, and
+\"  m2 (Qwen)\" when an id collides across providers — because this
+path's group headers are ordinary candidates and vanish from the
+displayed list the moment the user types a query."
+  (let ((entries '())
+        (last-provider nil)
+        (id-count (make-hash-table :test #'equal)))
+    (dolist (c candidates)
+      (let ((id (nth 0 c)))
+        (puthash id (1+ (gethash id id-count 0)) id-count)))
+    (dolist (c candidates (nreverse entries))
+      (let* ((provider-name (nth 2 c))
+             (dup (> (gethash (nth 0 c) id-count 0) 1)))
+        (unless (equal provider-name last-provider)
+          (push (cons provider-name (cons :header provider-name)) entries)
+          (setq last-provider provider-name))
+        (push (dsh-emacs--model-row-entry c dup) entries)))))
+
+(defun dsh-emacs--model-grouped-collection (candidates)
+  "Completion table with sticky group headers, returns (TABLE . ROWS).
+For completion UIs that honour the `group-function' completion
+metadata — modern vertico draws sticky group headers from it,
+recomputing them on every filter input, and the Emacs 27+ *Completions*
+buffer renders them too: rows are flat (no header-row candidates),
+each KEY \"id [provider|Provider Name]\" rendered as bare \"  id\"
+via the `display' property (id first so prefix completion still
+matches while typing; provider name sits in the key, so substring
+styles also find it), and the table metadata carries a
+`group-function' mapping every key back to its provider display name.
+The UI then paints one sticky group header per provider that stays
+visible while any of its rows still matches the query — grouping is
+NOT lost while searching."
+  (let* ((rows (mapcar (lambda (c) (dsh-emacs--model-row-entry c nil))
+                       candidates))
+         (group-fn
+          ;; 自包含：直接从键里解析 provider 显示名，不捕获任何变量。
+          ;; 标题必须是无属性串（match-string 会保留候选键上的 display 属性）。
+          ;; transform 分支把 id 区间的匹配高亮 face 迁到显示串对应位置：
+          ;; 键 = "m2 [g2|Qwen]"（display 隐藏段），输入 "m2" 时 orderless/
+          ;; basic 给键首 [0,2) 打 completion-match-face —— 整键摊给
+          ;; vertico--display-string 会变成整行背景，全部剥掉又丢失高亮；
+          ;; 正确做法是带 face 子串嵌入 "  " + id 的可见文本
+          (lambda (cand transform)
+            (if transform
+                (let* ((c (copy-sequence cand))
+                       (id (car (dsh-emacs--model-key-parts cand))))
+                  (if (and id (> (length id) 0))
+                      (let ((sub (substring c 0 (length id))))
+                        ;; 子串剥掉 display/invisible（隐藏段的属性），保留 face。
+                        (remove-text-properties
+                         0 (length sub) '(display nil invisible nil) sub)
+                        sub)
+                    c))
+              (let ((parts (dsh-emacs--model-key-parts cand)))
+                (and parts (substring-no-properties (nth 2 parts)))))))
+         (table (completion-table-with-metadata
+                 rows
+                 ;; Emacs 31 的 completion-table-with-metadata 要求元数据
+                 ;; 不带前缀 (metadata ...)，直接给 plist，它自己包一层。
+                 ;; (category . dsh-model)：nerd-icons-completion 会给
+                 ;; 每个候选行首插图标 —— 它的图标表里 nil 类别映射为
+                 ;; nf-cod-arrow_small_right（行首的 "->" 箭头），而
+                 ;; 不在表里的类别返回空串；显式声明一个自用类别即可
+                 ;; 让行首无图标（同时 marginalia 因类别不在其 annotator
+                 ;; 表中也不会注入后缀注解）。
+                 ;; 恒等 affixation-function 再兜底：第三方包想往行尾加
+                 ;; annotation/affixation 后缀也会被顶掉
+                 (list (cons 'category 'dsh-model)
+                       (cons 'group-function group-fn)
+                       (cons 'affixation-function
+                             (lambda (cands)
+                               (mapcar (lambda (c) (list c "" "")) cands)))))))
+    (cons table rows)))
+
+;; 模型选择器行首图标（可选集成，不新增依赖）：
+;; 选择器 metadata 声明 category=dsh-model；当 nerd-icons-completion 加载后，
+;; 给这个类别注册一枚默认芯片图标（nf-cod-chip）——行首就显示，无需
+;; 用户配置。想换图标时在自己的配置里先 add-to-list 同类别条目即可覆盖
+;; （assq 已存在则默认注册跳过）。未安装 nerd-icons-completion 时无任何影响。
+(with-eval-after-load 'nerd-icons-completion
+  (when (and (boundp 'nerd-icons-completion-category-icons)
+             (not (assq 'dsh-model nerd-icons-completion-category-icons)))
+    (add-to-list 'nerd-icons-completion-category-icons
+                 '(dsh-model . (nerd-icons-codicon "nf-cod-chip" nerd-icons-blue)))))
+
+(defun dsh-emacs--model-select-setup-hook (grouped)
+  "Buffer-local tweaks for the model picker's minibuffer.
+GROUPED says whether vertico's native group-function rendering is
+active (see the detection in `dsh-emacs--select-model-prompt').
+Sorting and preselect are tamed locally so the provider order and the
+cursor position stay put; when GROUPED, `vertico-group-format' is
+overridden buffer-locally by `dsh-emacs-model-group-format' (killing
+the stock long separator lines inside the picker only)."
+  (when (boundp 'vertico-sort-function)
+    (setq-local vertico-sort-function nil))
+  (when (boundp 'vertico-sort-override-function)
+    (setq-local vertico-sort-override-function nil))
+  (when (boundp 'vertico-preselect)
+    (setq-local vertico-preselect 'first))
+  (when (and grouped (boundp 'vertico-group-format))
+    (setq-local vertico-group-format dsh-emacs-model-group-format))
+  ;; 显式返回 nil：Emacs 31 的 minibuffer-with-setup-hook 会把 SETUP
+  ;; 表达式的求值结果 funcall 掉，绝不能让它流回别的值（比如上面的
+  ;; setq-local 值 —— 那会变成 "Invalid function: ..."）
+  nil)
 
 ;;;###autoload
 (defun dsh-emacs-select-model ()
   "Choose a model for the current session from the live model catalog.
-Lists the models the host can route to (`session.models'), shows each with
-a provider column, reads one with `completing-read' and switches via
-`session.selectModel'.  The footer model segment updates immediately."
+Lists the models the host can route to (`session.models'), shows each
+under its provider as its id, reads one with `completing-read'
+and switches via `session.selectModel'.  Each row's key carries its
+provider (hidden from display), and the provider display name is part
+of the key too, so provider names stay searchable while filtering.
+Modern vertico draws sticky provider group headers from the table's
+`group-function' metadata (an Emacs 27+ *Completions* buffer does the
+same), kept while any row of the group matches the query; without a
+group-aware UI, header rows plus a per-row provider suffix on
+colliding ids are shown.  The footer model segment updates
+immediately."
   (interactive)
   (let ((session-id (or dsh-emacs--current-session
                         (and (boundp 'dsh-emacs--buffer-session)
@@ -1364,38 +1598,120 @@ a provider column, reads one with `completing-read' and switches via
 
 (defun dsh-emacs--select-model-prompt (session-id value)
   "Read a model choice for SESSION-ID from a `session.models' VALUE.
-Each candidate shows model id, provider display name, and model name; the
-provider actually sent to `session.selectModel' is the owning group's id
-(the host resolves `current.provider' to exactly that)."
-  (let* ((candidates (dsh-emacs--model-candidates value))
-         (current (cdr (assq 'current value)))
-         (current-model (and current (cdr (assq 'model current))))
-         (entries (mapcar (lambda (c)
-                            (cons (format "%-28s %-18s %s"
-                                          (nth 0 c) (nth 2 c) (nth 3 c))
-                                  c))
-                          candidates))
-         (picked (completing-read
-                  (format "Select model%s: "
-                          (if current-model
-                              (format " (current %s)" current-model)
-                            ""))
-                  entries nil t)))
-    (when picked
-      (let* ((chosen (cdr (assoc picked entries)))
-             (model (nth 0 chosen))
-             (provider (nth 1 chosen)))
-        (dsh-emacs--rpc-async "session.selectModel"
-          `((sessionId . ,session-id)
-            (provider . ,provider)
-            (model . ,model))
-          (lambda (ok2 value2)
-            (if ok2
-                (progn
-                  (dsh-emacs-footer-set-model model)
-                  (message "Model switched to %s (%s)" (nth 3 chosen)
-                           (nth 2 chosen)))
-              (message "Failed to switch model: %S" value2))))))))
+Each candidate is a provider header or an indented model row showing
+the model id; the provider
+actually sent to `session.selectModel' is the owning group's id (the host
+resolves `current.provider' to exactly that).  Row keys carry the
+provider hidden behind a `display' property, so `assoc' always resolves
+to the row the user picked, even when the same id is offered by
+several providers.
+
+Two display paths: with `vertico-group-mode' active (Emacs 27+
+`*Completions*' buffers group too), candidates are flat rows and a
+`group-function' metadata keeps one sticky header per provider while
+the user filters — grouping survives searching.  In completion UIs
+without grouping support, provider headers are ordinary candidates
+(dropped by filtering) and colliding ids fall back to a visible
+provider suffix on their rows.
+
+When the chosen model declares reasoning-effort options (`reasoning'),
+a second reader asks for the effort: re-picking the current model
+pre-selects its live `reasoningEffort', other models pre-select their
+`defaultEffort', and the id is sent as `session.selectModel'
+`reasoningEffort'.  Models without reasoning options send no effort
+field at all.
+
+No completing-read default is passed on purpose: vertico moves the default
+row to the top of the candidate list, which would pull the current model
+out of its provider group.  Instead an empty RET keeps the current model
+(no RPC at all) and unknown input is rejected against the entry table.
+A vertico preselect nudge (vertico-nudge.el) is available but not wired;
+without it the highlight starts on the first row and the user navigates
+manually.
+
+Runs inside the async RPC callback (a process filter), so C-g during
+`completing-read' is caught here; otherwise the `quit' would leak out of
+the filter as \"error in process filter: Quit\"."
+  (condition-case nil
+      (let* ((candidates (dsh-emacs--model-candidates value))
+             (current (cdr (assq 'current value)))
+             (current-model (and current (cdr (assq 'model current))))
+             ;; 现代 vertico（≥2.0）原生支持 group-function 元数据：每次
+             ;; 输入都重算分组并重绘粘性组头（无需 vertico-group.el/group-mode）
+             ;; → 走元数据分组路径；否则用候选头行 + 重复行后缀兜底
+             ;; （头行会被过滤滤掉）。旧 vertico + vertico-group 也用同协议。
+             (grouped (and (bound-and-true-p vertico-mode)
+                           (or (boundp 'vertico--groups)
+                               (boundp 'vertico-group--groups))))
+             (grouped-pair (and grouped
+                                (dsh-emacs--model-grouped-collection
+                                 candidates)))
+             ;; provider 头行 + 缩进的模型行（头行 payload 是 (:header . NAME)）
+             (entries (if grouped (cdr grouped-pair)
+                        (dsh-emacs--model-entries candidates)))
+             (collection (if grouped (car grouped-pair) entries))
+             (picked (minibuffer-with-setup-hook
+                         ;; 模型选择器内局部关闭 vertico 的排序（防止候选被重排），
+                         ;; 兜底预选设为首行（vertico preselect 只支持 prompt/first）。
+                         ;; 必须是求值成函数对象的表达式：Emacs 31 的宏会
+                         ;; (funcall (eval SETUP))，直接传函数调用会把它
+                         ;; 的返回值当函数调用（见 dsh-emacs--model-select-setup-hook）
+                         (lambda () (dsh-emacs--model-select-setup-hook grouped))
+                         ;; 不传 DEF：vertico 会把默认项搬到列表最前，当前模型就会
+                         ;; 脱离自己的分组、永远占首行。空 RET 由下方 "" 分支处理
+                         ;; （保持当前模型），乱输入由 assoc 校验兜底。
+                         (completing-read
+                          (format "Select model%s: "
+                                  (if current-model
+                                      (format " (current %s)" current-model)
+                                    ""))
+                          collection nil nil nil nil nil)))
+             (empty (not (and picked (stringp picked)
+                              (not (string-empty-p picked))))))
+        (cond
+         (empty
+          (message (if current-model
+                       (format "Kept current model %s" current-model)
+                     "Kept the current model")))
+         ((not (assoc picked entries))
+          (message "Unknown model: %s" picked))
+         ;; 选中 provider 头行（不是模型）→ 提示后不切换
+         ((eq :header (car (cdr (assoc picked entries))))
+          (message "That is a provider header — pick a model below it"))
+         (t
+          (let* ((chosen (cdr (assoc picked entries)))
+                 (model (nth 0 chosen))
+                 (provider (nth 1 chosen))
+                 (reasoning (nth 4 chosen))
+                 ;; 第二层：目标模型声明了 reasoning 选项才问 effort。
+                 ;; 重选当前模型 → 保持其现行 reasoningEffort；其他模型
+                 ;; → 目录 defaultEffort（无则第一个）。RET/vertico 预选
+                 ;; 即默认，C-g 冒泡到外层统一“取消”。
+                 (effort-id (and reasoning
+                                 (dsh-emacs--model-pick-effort
+                                  model
+                                  (dsh-emacs--model-effort-choices reasoning)
+                                  (dsh-emacs--model-effort-default-id
+                                   reasoning
+                                   (and (equal model current-model)
+                                        (cdr (assq 'reasoningEffort
+                                                   current))))))))
+            (dsh-emacs--rpc-async "session.selectModel"
+              `((sessionId . ,session-id)
+                (provider . ,provider)
+                (model . ,model)
+                ,@(and effort-id `((reasoningEffort . ,effort-id))))
+              (lambda (ok2 value2)
+                (if ok2
+                    (progn
+                      (dsh-emacs-footer-set-model model)
+                      (message "Model switched to %s (%s)%s"
+                               (nth 3 chosen) (nth 2 chosen)
+                               (if effort-id
+                                   (format ", effort %s" effort-id)
+                                 "")))
+                  (message "Failed to switch model: %S" value2))))))))
+    (quit (message "Model selection cancelled"))))
 
 (defun dsh-emacs--replace-input (text)
   "Replace the input area of the current buffer with TEXT and park point."
