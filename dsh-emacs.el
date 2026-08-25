@@ -45,6 +45,9 @@
 (require 'url)
 (require 'cl-lib)
 
+;; 协议层：dsh 响应字段的 typed 访问（见 dsh-emacs-protocol.el）
+(require 'dsh-emacs-protocol)
+
 ;; 加载核心 UI 框架(必须先加载)
 (require 'dsh-emacs-ui)
 
@@ -415,7 +418,7 @@ helpers expect lists."
   "Return the cached session item for SESSION-ID, or nil."
   (catch 'found
     (dolist (item dsh-emacs--sessions)
-      (when (equal session-id (dsh-emacs--alist-state item "sessionId"))
+      (when (equal session-id (dsh-protocol-session-session-id item))
         (throw 'found item)))))
 
 (defun dsh-emacs--chat-title (session-id)
@@ -427,7 +430,7 @@ helpers expect lists."
   "Workspace path of SESSION-ID (the session's `cwd' from session.list),
 or nil when the session is not in the cache."
   (let ((item (dsh-emacs--chat-session-item session-id)))
-    (and item (dsh-emacs--alist-state item "cwd"))))
+    (and item (dsh-protocol-session-cwd item))))
 
 (defun dsh-emacs--sanitize-buffer-name (title)
   "Sanitize TITLE for use as a buffer name.
@@ -492,10 +495,14 @@ Updates the mode-line name (list title) and the workspace directory."
                               (progn
                                 ;; JSON arrays arrive as vectors; normalize
                                 ;; them before the session list renderer uses
-                                ;; `dolist'.
+                                ;; `dolist', and wrap each item in a
+                                ;; `dsh-protocol-session' struct so field
+                                ;; access is centralized (protoco.el).
                                 (setq dsh-emacs--sessions
-                                      (dsh-emacs--sequence-list
-                                       (cdr (assq 'items value))))
+                                      (mapcar
+                                       #'dsh-protocol-session--from-alist
+                                       (dsh-emacs--sequence-list
+                                        (cdr (assq 'items value)))))
                                 ;; 标题/工作区可能已漂移（自动摘要/重命名/
                                 ;; 会话移动），同步所有存活聊天缓冲的名称与
                                 ;; default-directory。
@@ -786,7 +793,7 @@ When the input line is not visible because the window was scrolled up to\nread h
 Choices show the display title (like the list); the returned value is
 always the session id."
   (let* ((entries (mapcar (lambda (s)
-                            (let ((id (or (alist-get 'sessionId s) "")))
+                            (let ((id (dsh-protocol-session-session-id s)))
                               (cons (format "%-30s  %s"
                                             (or (dsh-emacs--chat-title id) id)
                                             id)
@@ -818,8 +825,8 @@ buffer opens with the same workspace path."
   "Return the agentPreset cached for SESSION-ID, or nil when unknown."
   (catch 'found
     (dolist (item dsh-emacs--sessions)
-      (when (equal session-id (dsh-emacs--alist-state item "sessionId"))
-        (throw 'found (dsh-emacs--alist-state item "agentPreset"))))))
+      (when (equal session-id (dsh-protocol-session-session-id item))
+        (throw 'found (dsh-protocol-session-agent-preset item))))))
 
 (defun dsh-emacs--link-session-preset (session-id)
   "Fill the footer thinking preset for SESSION-ID into the mode line.
@@ -832,8 +839,10 @@ chat buffer (the RPC callback runs in the buffer that called this)."
       (dsh-emacs--rpc-async "session.list" nil
                             (lambda (ok value)
                               (when ok
-                                (let ((items (dsh-emacs--sequence-list
-                                              (cdr (assq 'items value)))))
+                                (let ((items (mapcar
+                                              #'dsh-protocol-session--from-alist
+                                              (dsh-emacs--sequence-list
+                                               (cdr (assq 'items value))))))
                                   ;; 新会话首次打开时缓存里没有该会话：顺带
                                   ;; 更新整个缓存，让缓冲名（`dsh-<标题>'）
                                   ;; 与工作区（default-directory）也一并取得。
@@ -842,11 +851,11 @@ chat buffer (the RPC callback runs in the buffer that called this)."
                                   (catch 'found
                                     (dolist (item items)
                                       (when (equal session-id
-                                                   (dsh-emacs--alist-state
-                                                    item "sessionId"))
+                                                   (dsh-protocol-session-session-id
+                                                    item))
                                         (dsh-emacs-footer-set-effort
-                                         (dsh-emacs--alist-state
-                                          item "agentPreset"))
+                                         (dsh-protocol-session-agent-preset
+                                          item))
                                         (throw 'found t)))))))))))
 
 (defun dsh-emacs--load-history (session-id)
@@ -960,12 +969,12 @@ default), far smaller than a full parse of 30k raw events."
   (dsh-emacs--rpc-async "workspace.list" nil
                         (lambda (ok value)
                           (when ok
-                            (setq dsh-emacs--workspaces
-                                  (dsh-emacs--sequence-list
-                                   (cdr (assq 'items value))))
-                            (setq dsh-emacs--archived-sessions
-                                  (dsh-emacs--normalize-archived
-                                   (cdr (assq 'archivedSessionIds value)))))
+                            (let ((wl (dsh-protocol-workspace-list--from-alist value)))
+                              (setq dsh-emacs--workspaces
+                                    (dsh-protocol-workspace-list-items wl))
+                              (setq dsh-emacs--archived-sessions
+                                    (dsh-emacs--normalize-archived
+                                     (dsh-protocol-workspace-list-archived-session-ids wl)))))
                           ;; Always re-render the session list so grouping
                           ;; reflects the latest workspace data (or falls back
                           ;; to the ungrouped view when the fetch failed).
@@ -1356,18 +1365,24 @@ Each entry is (ID PROVIDER PROVIDER-NAME NAME REASONING):
                   `session.selectModel' expects for the model).
   PROVIDER-NAME — the group's display name (may equal PROVIDER).
   NAME          — the model's display name (may equal ID).
-  REASONING     — the model's `reasoning' alist (efforts + defaultEffort)
-                  as returned by the host, or nil when the model offers
-                  no reasoning-effort options."
-  (let ((groups (dsh-emacs--sequence-list (cdr (assq 'groups value)))))
+  REASONING     — the model's reasoning metadata
+                  (a `dsh-protocol-reasoning' struct), or nil when the
+                  model offers no reasoning-effort options.
+
+VALUE is the raw `session.models' response alist — it is normalized to
+a `dsh-protocol-model-directory' struct first, so all field access lives
+in dsh-emacs-protocol.el."
+  (let* ((dir (dsh-protocol-model-directory--from-alist value))
+         (groups (dsh-protocol-model-directory-groups dir)))
     (sort (cl-loop for g in groups
-                   for provider = (cdr (assq 'id g))
-                   for provider-name = (or (cdr (assq 'name g)) provider)
-                   append (cl-loop for m in (dsh-emacs--sequence-list
-                                             (cdr (assq 'models g)))
-                                   for id = (cdr (assq 'id m))
-                                   for name = (or (cdr (assq 'name m)) id)
-                                   for reasoning = (cdr (assq 'reasoning m))
+                   for provider = (dsh-protocol-provider-group-id g)
+                   for provider-name = (or (dsh-protocol-provider-group-name g)
+                                           provider)
+                   append (cl-loop for m in (dsh-protocol-provider-group-models g)
+                                   for id = (dsh-protocol-model-catalog-entry-id m)
+                                   for name = (or (dsh-protocol-model-catalog-entry-name m)
+                                                  id)
+                                   for reasoning = (dsh-protocol-model-catalog-entry-reasoning m)
                                    collect (list id provider provider-name
                                                 name reasoning)))
           (lambda (a b)
@@ -1379,24 +1394,33 @@ Each entry is (ID PROVIDER PROVIDER-NAME NAME REASONING):
                   (and (string= pa pb) (string-lessp ia ib))))))))
 
 (defun dsh-emacs--model-effort-choices (reasoning)
-  "Effort options of a model's REASONING alist as ((NAME . ID) ...),
-keeping the host's directory order for display; entries without a display
-name fall back to their id.  Returns nil when REASONING has no efforts."
+  "Effort options of REASONING (a `dsh-protocol-reasoning' struct, or a
+wire alist) as ((NAME . ID) ...), keeping the host's directory order for
+display; entries without a display name fall back to their id.  Returns
+nil when REASONING has no efforts."
+  (setq reasoning (dsh-protocol--struct
+                   #'dsh-protocol-reasoning-p
+                   #'dsh-protocol-reasoning--from-alist
+                   reasoning))
   (mapcar (lambda (e)
-            (let ((id (cdr (assq 'id e)))
-                  (name (or (cdr (assq 'name e))
-                            (cdr (assq 'id e)))))
+            (let ((id (dsh-protocol-effort-id e))
+                  (name (or (dsh-protocol-effort-name e)
+                            (dsh-protocol-effort-id e))))
               (cons name id)))
-          (dsh-emacs--sequence-list (cdr (assq 'efforts reasoning)))))
+          (dsh-protocol-reasoning-efforts reasoning)))
 
 (defun dsh-emacs--model-effort-default-id (reasoning &optional current-id)
   "The effort id to pre-select for a model with REASONING options.
 CURRENT-ID wins when it is a valid option (the session already runs that
 model at that effort); otherwise the model's `defaultEffort' when it is a
 known option; otherwise the first effort in the directory."
+  (setq reasoning (dsh-protocol--struct
+                   #'dsh-protocol-reasoning-p
+                   #'dsh-protocol-reasoning--from-alist
+                   reasoning))
   (let* ((choices (dsh-emacs--model-effort-choices reasoning))
          (ids (mapcar #'cdr choices))
-         (default (cdr (assq 'defaultEffort reasoning))))
+         (default (dsh-protocol-reasoning-default-effort reasoning)))
     (cond ((and current-id (member current-id ids)) current-id)
           ((member default ids) default)
           (ids (car ids))
@@ -1633,9 +1657,11 @@ Runs inside the async RPC callback (a process filter), so C-g during
 `completing-read' is caught here; otherwise the `quit' would leak out of
 the filter as \"error in process filter: Quit\"."
   (condition-case nil
-      (let* ((candidates (dsh-emacs--model-candidates value))
-             (current (cdr (assq 'current value)))
-             (current-model (and current (cdr (assq 'model current))))
+      (let* ((dir (dsh-protocol-model-directory--from-alist value))
+             (current (dsh-protocol-model-directory-current dir))
+             (current-model (and current
+                                 (dsh-protocol-model-selection-model current)))
+             (candidates (dsh-emacs--model-candidates value))
              ;; 现代 vertico（≥2.0）原生支持 group-function 元数据：每次
              ;; 输入都重算分组并重绘粘性组头（无需 vertico-group.el/group-mode）
              ;; → 走元数据分组路径；否则用候选头行 + 重复行后缀兜底
@@ -1694,8 +1720,8 @@ the filter as \"error in process filter: Quit\"."
                                   (dsh-emacs--model-effort-default-id
                                    reasoning
                                    (and (equal model current-model)
-                                        (cdr (assq 'reasoningEffort
-                                                   current))))))))
+                                        (dsh-protocol-model-selection-reasoning-effort
+                                         current)))))))
             (dsh-emacs--rpc-async "session.selectModel"
               `((sessionId . ,session-id)
                 (provider . ,provider)

@@ -154,14 +154,14 @@ sessions are always excluded."
         (groups nil)
         (ungrouped nil))
     (dolist (ws workspaces)
-      (let ((ws-id (cdr (assq 'workspaceId ws))))
+      (let ((ws-id (dsh-protocol-workspace-workspace-id ws)))
         (puthash ws-id ws ws-by-id)
-        (dolist (sid (dsh-emacs--sequence-list (cdr (assq 'sessionIds ws))))
+        (dolist (sid (dsh-protocol-workspace-session-ids ws))
           (puthash sid ws-id ws-by-session))))
     ;; Assign each visible (non-archived) session to its workspace or the
     ;; ungrouped bucket.
     (dolist (session sessions)
-      (let* ((session-id (or (alist-get 'sessionId session) ""))
+      (let* ((session-id (or (dsh-protocol-session-session-id session) ""))
              (ws-id (gethash session-id ws-by-session)))
         ;; Skip archived sessions entirely.
         (unless (and archived (gethash session-id archived))
@@ -177,10 +177,10 @@ sessions are always excluded."
     ;; Emit groups in workspace order, then ungrouped.
     (let ((result nil))
       (dolist (ws workspaces)
-        (let* ((ws-id (cdr (assq 'workspaceId ws)))
-               (title (or (cdr (assq 'title ws))
+        (let* ((ws-id (dsh-protocol-workspace-workspace-id ws))
+               (title (or (dsh-protocol-workspace-title ws)
                           (dsh-emacs-session--workspace-basename
-                           (cdr (assq 'path ws)))))
+                           (dsh-protocol-workspace-path ws))))
                (members (dsh-emacs-session--sort-by-recency
                          (cdr (assoc ws-id groups)))))
           (when members
@@ -196,8 +196,8 @@ sessions are always excluded."
   "Sort SESSIONS by updatedAt descending (newest first)."
   (sort (copy-sequence sessions)
         (lambda (a b)
-          (let ((ta (or (alist-get 'updatedAt a) 0))
-                (tb (or (alist-get 'updatedAt b) 0)))
+          (let ((ta (or (dsh-protocol-session-updated-at a) 0))
+                (tb (or (dsh-protocol-session-updated-at b) 0)))
             (> (if (numberp ta) ta (string-to-number ta))
                (if (numberp tb) tb (string-to-number tb)))))))
 
@@ -245,10 +245,10 @@ answer clears the filter.  `g' refreshes while keeping the filter."
   (interactive)
   (let* ((workspaces dsh-emacs--workspaces)
          (entries (mapcar (lambda (ws)
-                            (cons (or (cdr (assq 'title ws))
+                            (cons (or (dsh-protocol-workspace-title ws)
                                       (dsh-emacs-session--workspace-basename
-                                       (cdr (assq 'path ws))))
-                                  (cdr (assq 'workspaceId ws))))
+                                       (dsh-protocol-workspace-path ws)))
+                                  (dsh-protocol-workspace-workspace-id ws)))
                           workspaces))
          (picked (completing-read "Filter by workspace (empty to clear): "
                                   entries nil t)))
@@ -290,14 +290,12 @@ answer clears the filter.  `g' refreshes while keeping the filter."
   "Return SESSION's auto-generated title (summary text), or nil.
 The API carries it at `projections.values.title' — the first-user-prompt
 summary that dsh web shows in the session list.  (Not under sessionStats.)"
-  (let* ((projections (alist-get 'projections session))
-         (proj-values (and projections (alist-get 'values projections))))
-    (and proj-values (cdr (assq 'title proj-values)))))
+  (dsh-protocol-session-title-value session))
 
 (defun dsh-emacs-session--display-title (session)
   "Display name for SESSION, matching dsh web: \"New Session\" for blank
 rows, otherwise the generated summary title, else a cwd-derived name."
-  (let ((blank (alist-get 'blank session))
+  (let ((blank (dsh-protocol-session-blank session))
         (inferred (dsh-emacs-session--title session)))
     (cond
      ((and blank (not (eq blank :json-false))) "New Session")
@@ -306,10 +304,10 @@ rows, otherwise the generated summary title, else a cwd-derived name."
 
 (defun dsh-emacs-session--render-session (session &optional indent)
   "Render a single SESSION row, optionally indented by INDENT spaces."
-  (let* ((session-id (or (alist-get 'sessionId session) ""))
-         (running (let ((value (alist-get 'running session)))
+  (let* ((session-id (or (dsh-protocol-session-session-id session) ""))
+         (running (let ((value (dsh-protocol-session-running session)))
                     (and value (not (eq value :json-false)))))
-         (updated-at (alist-get 'updatedAt session))
+         (updated-at (dsh-protocol-session-updated-at session))
          ;; Compute status from projections
          (status (dsh-emacs-session--compute-status session running))
 
@@ -345,7 +343,7 @@ rows, otherwise the generated summary title, else a cwd-derived name."
 
 (defun dsh-emacs-session--generate-name (session)
   "Generate a name for SESSION when it has no title."
-  (let ((cwd (or (alist-get 'cwd session) "")))
+  (let ((cwd (or (dsh-protocol-session-cwd session) "")))
     (if (not (string-empty-p cwd))
         (file-name-nondirectory (directory-file-name cwd))
       "Untitled")))
@@ -381,10 +379,8 @@ Accept both numeric and string timestamps in seconds or milliseconds."
 (defun dsh-emacs-session--compute-status (session running)
   "Compute session status: 'running, 'approval, 'pending, or 'idle.
 Uses projections data when available, falls back to running flag."
-  (let* ((projections (alist-get 'projections session))
-         (proj-values (and projections (alist-get 'values projections)))
-         (stats (and proj-values (alist-get 'sessionStats proj-values)))
-         (pending-interaction (and stats (cdr (assq 'pendingInteraction stats)))))
+  (let* ((pending-interaction (dsh-protocol-session-pending-interaction
+                                  session)))
     (cond
      ;; Pending interaction takes priority
      ((and pending-interaction
@@ -493,12 +489,12 @@ when it arrives."
          (session-id (dsh-emacs-session-id-at-point)))
     (if (not session)
         (user-error "No session at point")
-      (let* ((cwd (or (alist-get 'cwd session) ""))
-             (running (let ((value (alist-get 'running session)))
+      (let* ((cwd (or (dsh-protocol-session-cwd session) ""))
+             (running (let ((value (dsh-protocol-session-running session)))
                         (and value (not (eq value :json-false)))))
-             (updated-at (alist-get 'updatedAt session))
+             (updated-at (dsh-protocol-session-updated-at session))
              (title (dsh-emacs-session--title session))
-             (preset (or (alist-get 'agentPreset session) ""))
+             (preset (or (dsh-protocol-session-agent-preset session) ""))
              (status (dsh-emacs-session--compute-status session running))
              (time-str (dsh-emacs-session--compact-time updated-at))
              (cwd-short (dsh-emacs-session--shorten-cwd cwd))
@@ -515,20 +511,21 @@ when it arrives."
                            (if preset preset session-id))))
         (message "%s" info)
         ;; The session-list item carries no model field, so query the live
-        ;; catalog once per `i' press (never per list row — that would be
+                ;; catalog once per `i' press (never per list row — that would be
         ;; N+1 requests).
         (dsh-emacs--rpc-async "session.models"
                               `((sessionId . ,session-id))
                               (lambda (ok value)
                                 (when ok
                                   (let ((current (and (listp value)
-                                                      (cdr (assq 'current value)))))
+                                                      (dsh-protocol-model-directory-current
+                                                       (dsh-protocol-model-directory--from-alist
+                                                        value)))))
                                     (when current
                                       (message "%s | Model: %s (%s)"
                                                info
-                                               (cdr (assq 'model current))
-                                               (cdr (assq 'provider current))))))))))))
-
+                                               (dsh-protocol-model-selection-model current)
+                                               (dsh-protocol-model-selection-provider current)))))))))))
 (defun dsh-emacs-session--shorten-cwd (cwd)
   "Shorten CWD path for display."
   (let ((home (expand-file-name "~")))
@@ -548,7 +545,7 @@ when it arrives."
                    (lambda (session)
                      (let ((title (dsh-emacs-session--title session)))
                        (or (and title (string-match-p query title))
-                           (string-match-p query (or (alist-get 'sessionId session) "")))))
+                           (string-match-p query (or (dsh-protocol-session-session-id session) "")))))
                    dsh-emacs--sessions)))
     (if matches
         (progn

@@ -13,6 +13,11 @@
 
 (defvar dsh-test-results '())
 
+(defun dsh-emacs-test--session-items (items)
+  "Wrap raw session-item alists ITEMS as `dsh-protocol-session' structs
+so the code under test can read fields through the protocol accessors."
+  (mapcar #'dsh-protocol-session--from-alist items))
+
 (defun dsh-test-pass (name)
   (push (cons name t) dsh-test-results)
   (princ (format "PASS: %s\n" name)))
@@ -978,7 +983,8 @@
                          (list (cons 'values
                                      (list (cons 'title "Emacs 改造")))))))
        (old dsh-emacs--sessions))
-  (setq dsh-emacs--sessions (list item))
+  (setq dsh-emacs--sessions
+                (dsh-emacs-test--session-items (list item)))
   (when (string= "dsh-Emacs 改造" (dsh-emacs--chat-buffer-name "sess-title-1"))
     (dsh-test-pass "chat-buffer-name-with-title"))
   (setq dsh-emacs--sessions old))
@@ -1006,7 +1012,8 @@
                          (list (cons 'values
                                      (list (cons 'title "完成50%")))))))
        (old dsh-emacs--sessions))
-  (setq dsh-emacs--sessions (list item))
+  (setq dsh-emacs--sessions
+                (dsh-emacs-test--session-items (list item)))
   (when (string= "dsh-完成50％" (dsh-emacs--chat-buffer-name "sess-pct"))
     (dsh-test-pass "chat-buffer-name-escape-percent"))
   (setq dsh-emacs--sessions old))
@@ -1022,7 +1029,8 @@
        (b2 (get-buffer-create (generate-new-buffer-name "dsh-同题"))))
   (unwind-protect
       (progn
-        (setq dsh-emacs--sessions (list item))
+        (setq dsh-emacs--sessions
+                (dsh-emacs-test--session-items (list item)))
         (when (string= "dsh-同题<2>" (buffer-name b2))
           (dsh-test-pass "chat-buffer-name-unique-suffix")))
     (setq dsh-emacs--sessions old)
@@ -1040,7 +1048,8 @@
        (buf (get-buffer-create " *dsh-test-sync*")))
   (unwind-protect
       (progn
-        (setq dsh-emacs--sessions (list item))
+        (setq dsh-emacs--sessions
+                (dsh-emacs-test--session-items (list item)))
         (with-current-buffer buf
           (setq dsh-emacs--buffer-session "sess-rename")
           (rename-buffer "old-name"))
@@ -1064,7 +1073,8 @@
                          (list (cons 'values
                                      (list (cons 'title "某会话")))))))
        (old dsh-emacs--sessions))
-  (setq dsh-emacs--sessions (list item))
+  (setq dsh-emacs--sessions
+                (dsh-emacs-test--session-items (list item)))
   (when (string= "/Users/ed/playground/dsh-emacs"
                  (dsh-emacs--chat-cwd "sess-cwd"))
     (dsh-test-pass "chat-cwd-from-session-item"))
@@ -1079,7 +1089,8 @@
                          (list (cons 'values
                                      (list (cons 'title "与列表一致")))))))
        (old dsh-emacs--sessions))
-  (setq dsh-emacs--sessions (list item))
+  (setq dsh-emacs--sessions
+                (dsh-emacs-test--session-items (list item)))
   (when (string= "与列表一致" (dsh-emacs--chat-title "sess-match"))
     (dsh-test-pass "chat-title-matches-list"))
   (setq dsh-emacs--sessions old))
@@ -1114,13 +1125,14 @@
     (unwind-protect
         (progn
           (setq dsh-emacs--sessions
-                (list (list (cons 'sessionId "sess-open")
-                            (cons 'blank :json-false)
-                            (cons 'cwd "/tmp/ws")
-                            (cons 'agentPreset "standard")
-                            (cons 'projections
-                                  (list (cons 'values
-                                              (list (cons 'title "开场"))))))))
+                (dsh-emacs-test--session-items
+                 (list (list (cons 'sessionId "sess-open")
+                             (cons 'blank :json-false)
+                             (cons 'cwd "/tmp/ws")
+                             (cons 'agentPreset "standard")
+                             (cons 'projections
+                                   (list (cons 'values
+                                               (list (cons 'title "开场")))))))))
           (dsh-emacs-open-session "sess-open")
           (let ((buf dsh-emacs--current-buffer))
             (when (and (bufferp buf)
@@ -1867,7 +1879,7 @@
       (dsh-test-pass "fork-refreshes-list"))))
 
 ;; --- 测试 51: 会话列表工作区过滤 ---
-(let ((sessions (list (list (cons 'sessionId "s1") (cons 'updatedAt 100)
+(let* ((sessions (list (list (cons 'sessionId "s1") (cons 'updatedAt 100)
                             (cons 'projections
                                   (list (cons 'values (list (cons 'title "Alpha"))))))
                       (list (cons 'sessionId "s2") (cons 'updatedAt 200)
@@ -1877,13 +1889,15 @@
                             (cons 'projections
                                   (list (cons 'values (list (cons 'title "Gamma"))))))))
       (workspaces (list (list (cons 'workspaceId "w1") (cons 'title "WS A")
-                              (cons 'sessionIds ["s1" "s2"])))))
+                              (cons 'sessionIds ["s1" "s2"]))))
+      (sessions-s (dsh-emacs-test--session-items sessions))
+      (workspaces-s (mapcar #'dsh-protocol-workspace--from-alist workspaces)))
   ;; 过滤到 w1：只剩 WS A 的成员，Ungrouped 桶被抑制
   ;; 注意：`filtered' 的初始化器必须在 filter 绑定建立后再求值，
   ;; 所以这里用 let*（let 的初始化器在绑定建立前求值，会读到旧值）
   (let* ((dsh-emacs--archived-sessions nil)
          (dsh-emacs-session--filter-ws-id "w1")
-         (filtered (dsh-emacs-session--group-sessions sessions workspaces)))
+         (filtered (dsh-emacs-session--group-sessions sessions-s workspaces-s)))
     (when (and (= 1 (length filtered))
                (equal "WS A" (plist-get (car filtered) :label))
                (= 2 (length (plist-get (car filtered) :sessions))))
@@ -1891,7 +1905,7 @@
   ;; 无过滤：WS A + Ungrouped 两个桶都在
   (let* ((dsh-emacs--archived-sessions nil)
          (dsh-emacs-session--filter-ws-id nil)
-         (grouped (dsh-emacs-session--group-sessions sessions workspaces)))
+         (grouped (dsh-emacs-session--group-sessions sessions-s workspaces-s)))
     (when (and (= 2 (length grouped))
                (cl-some (lambda (g) (equal "WS A" (plist-get g :label))) grouped)
                (cl-some (lambda (g) (equal "Ungrouped" (plist-get g :label))) grouped))
@@ -1900,8 +1914,8 @@
   (let ((buf (generate-new-buffer " *dsh-filter-render*")))
     (unwind-protect
         (with-current-buffer buf
-          (let ((dsh-emacs--sessions sessions)
-                (dsh-emacs--workspaces workspaces)
+          (let ((dsh-emacs--sessions sessions-s)
+                (dsh-emacs--workspaces workspaces-s)
                 (dsh-emacs--archived-sessions nil)
                 (dsh-emacs-session--filter-ws-id "w1")
                 (dsh-emacs-session--filter-ws-title "WS A"))
@@ -2015,6 +2029,74 @@
           (when (memq 'dsh-emacs-thinking-body-face faces)
             (dsh-test-pass "thinking-block-body-gets-face"))))
     (kill-buffer buf)))
+
+;; --- 测试 57: 协议层 workspace-list / workspace-result / model-selection-result ---
+;; workspace.list 顶层响应：items 数组→列表、archivedSessionIds 数组→列表
+(let* ((value '((items . [((workspaceId . "w1") (title . "WS A")
+                           (path . "/tmp/a") (sessionIds . ["s1" "s2"])
+                           (createdAt . "2026-08-25T00:00:00Z")
+                           (updatedAt . "2026-08-25T01:00:00Z"))
+                          ((workspaceId . "w2") (title . "WS B")
+                           (path . "/tmp/b") (sessionIds . []))])
+                  (archivedSessionIds . ["s9"])))
+       (wl (dsh-protocol-workspace-list--from-alist value))
+       (items (dsh-protocol-workspace-list-items wl))
+       (w1 (car items)))
+  (when (and (= (length items) 2)
+             (equal (dsh-protocol-workspace-list-archived-session-ids wl)
+                    '("s9"))
+             ;; items 内嵌转换 + 数组归一为列表
+             (dsh-protocol-workspace-p w1)
+             (equal (dsh-protocol-workspace-session-ids w1) '("s1" "s2"))
+             ;; WorkspaceView 官方字段完整
+             (string= (dsh-protocol-workspace-title w1) "WS A")
+             (string= (dsh-protocol-workspace-created-at w1)
+                      "2026-08-25T00:00:00Z")
+             (string= (dsh-protocol-workspace-updated-at w1)
+                      "2026-08-25T01:00:00Z")
+             (string= (dsh-protocol-workspace-path w1) "/tmp/a")
+             (string= (dsh-protocol-workspace-workspace-id
+                       (car (dsh-protocol-workspace-list-items
+                             (dsh-protocol-workspace-list--from-alist
+                              '((items . [((workspaceId . "w2"))]))))))
+                      "w2"))
+    (dsh-test-pass "protocol-workspace-list-conversion")))
+
+;; workspace.create 响应：{workspace, created}
+(let* ((value '((workspace . ((workspaceId . "w3") (title . "New")
+                              (path . "/tmp/new") (sessionIds . [])
+                              (createdAt . "x") (updatedAt . "y")))
+                (created . t)))
+       (r (dsh-protocol-workspace-result--from-alist value)))
+  (when (and (dsh-protocol-workspace-p (dsh-protocol-workspace-result-workspace r))
+             (eq (dsh-protocol-workspace-result-created r) t)
+             (string= (dsh-protocol-workspace-title
+                       (dsh-protocol-workspace-result-workspace r))
+                      "New"))
+    (dsh-test-pass "protocol-workspace-create-result")))
+
+;; workspace.rename / insertSessionBefore 响应：只有 {workspace}，created 为 nil
+(let* ((r (dsh-protocol-workspace-result--from-alist
+           '((workspace . ((workspaceId . "w1") (title . "Renamed"))))))
+       (d (dsh-protocol-workspace-result-created r)))
+  (when (and (string= (dsh-protocol-workspace-title
+                       (dsh-protocol-workspace-result-workspace r))
+                      "Renamed")
+             (null d))
+    (dsh-test-pass "protocol-workspace-rename-result")))
+
+;; session.selectModel 响应：{selected}
+(let* ((r (dsh-protocol-model-selection-result--from-alist
+           '((selected . ((provider . "deepseek")
+                          (model . "deepseek-chat")
+                          (reasoningEffort . "high"))))))
+       (sel (dsh-protocol-model-selection-result-selected r)))
+  (when (and (dsh-protocol-model-selection-p sel)
+             (string= (dsh-protocol-model-selection-provider sel) "deepseek")
+             (string= (dsh-protocol-model-selection-model sel) "deepseek-chat")
+             (string= (dsh-protocol-model-selection-reasoning-effort sel)
+                      "high"))
+    (dsh-test-pass "protocol-model-selection-result")))
 
 ;; --- 总结 ---
 (princ "\n===== 测试总结 =====\n")

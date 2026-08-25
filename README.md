@@ -31,7 +31,7 @@ The design language draws on mainstream coding agents (agent-shell, pi, opencode
 - **Session list** (`*dsh-sessions*`): card-style browsing, search filtering, quick open/create/rename
 - **Chat buffer**: read-only transcript on top with a fixed input area at the bottom, supporting streaming output and Markdown rendering
 - **Interrupt**: while a turn is running, pressing `C-c C-c` again issues `session.cancel` — the agent stops mid-flight, the partial reply stays in the transcript
-- **Model switching**: `C-c C-m` lists the live model catalog (`session.models`) and switches the session's model (`session.selectModel`), updating the footer immediately. Rows show model ids; modern vertico draws sticky provider group headers from the table's `group-function` metadata (an Emacs 27+ `*Completions*` buffer does the same), so groups stay pinned while filtering — rows carry the provider name inside their (hidden) key, keeping provider names searchable too; without a group-aware UI, header rows plus a per-row provider suffix on colliding ids are shown. Inside the picker, the group header style is `dsh-emacs-model-group-format` (defaults to just the provider name, dropping vertico's long separator lines; applies buffer-locally, so other completions keep their own `vertico-group-format`). The picker's table metadata declares its own `category` (`dsh-model`): that keeps row prefixes clean by default, and once `nerd-icons-completion` is loaded the picker auto-registers a default chip icon (`nf-cod-chip`) for that category, so model rows show a chip icon at line start with zero configuration. To pick a different icon, register the same category in your own config (your entry wins, the auto default is skipped): `(add-to-list 'nerd-icons-completion-category-icons '(dsh-model . (nerd-icons-faicon "nf-fa-robot" nerd-icons-blue)))`. Models that declare reasoning-effort options (`session.models` groups' `reasoning`) get a second mini-prompt for the effort right after the model pick: re-picking the current model pre-selects its live effort, other models pre-select their `defaultEffort`, and the id is sent as `session.selectModel`'s `reasoningEffort`; models without `reasoning` send no effort field at all.
+- **Model switching**: `C-c C-m` opens the live model catalog and switches the session's model, updating the footer immediately — rows are grouped by provider with sticky headers while filtering, and models with reasoning-effort options get a second mini-prompt for the effort. Details in [Model Picker](#model-picker).
 - **Image attachments**: `C-c C-a` (or drag & drop onto the chat buffer) attaches images inline as base64 in the prompt, with media-type and caption
 - **Code-block copy**: `C-c C-k` (or `RET` on the `LANG ⧉` label) copies the fenced block under point to the kill ring
 - **Session fork**: `f` in the session list branches a session (`session.fork`) into a child that inherits the full history, then opens it
@@ -43,6 +43,17 @@ The design language draws on mainstream coding agents (agent-shell, pi, opencode
 - **Asynchronous polling**: session history is polled automatically after sending, and stops automatically when the WebSocket reconnects
 - **Zero dependencies**: uses only the built-in `url` / `json` libraries; Emacs 27+
 
+## Model Picker
+
+`C-c C-m` (`dsh-emacs-select-model`) reads `session.models` and calls `session.selectModel`. Rows show the model **id** only (the provider name lives inside the row key, so it stays searchable while filtering); duplicates of the same id across providers keep their provider visible in the suffix.
+
+- **Sticky provider groups**: the table carries a `group-function` in its completion metadata. Modern vertico (and Emacs 27+ `*Completions*` buffers) draw one sticky header per provider, recomputed on every filter input, so grouping is never lost while searching — no `vertico-group.el`/group-mode needed. In completion UIs without group support, provider headers are ordinary candidates and colliding ids fall back to a per-row provider suffix.
+- **Header style**: inside the picker, `vertico-group-format` is overridden buffer-locally by `dsh-emacs-model-group-format` (defaults to just the provider name — vertico's stock long separator lines are dropped; other completions keep their global format unchanged).
+- **Row icons**: the table metadata declares its own `category` (`dsh-model`), which keeps row prefixes clean against `nerd-icons-completion` by default. Once that package is loaded, the picker auto-registers a default chip icon (`nf-cod-chip`) for the category — zero configuration. To use a different icon, register the category yourself and your entry wins (the auto default is skipped):
+  `(add-to-list 'nerd-icons-completion-category-icons '(dsh-model . (nerd-icons-faicon "nf-fa-robot" nerd-icons-blue)))`
+- **Reasoning effort**: models that declare `reasoning` options (efforts + defaultEffort) get a second mini-prompt right after the model pick. Re-picking the current model pre-selects its live `reasoningEffort`; other models pre-select their `defaultEffort`. The chosen id is sent as `session.selectModel`'s `reasoningEffort`; models without `reasoning` send no effort field at all.
+- **Behaviour**: empty RET keeps the current model (no RPC), unknown input is rejected, `C-g` cancels cleanly inside the RPC filter; when vertico is active the picker locally disables extra sorting and pre-selects the first row.
+
 ## Architecture
 
 Modular design that is easy to maintain and extend:
@@ -50,14 +61,45 @@ Modular design that is easy to maintain and extend:
 ```
 dsh-emacs/
 ├── dsh-emacs.el              # Main entry point, RPC client, session management, mode definition
+├── dsh-emacs-protocol.el     # Typed views of dsh RPC payloads (cl-defstruct)
 ├── dsh-emacs-ui.el           # UI framework (rounded borders, collapsing, fragment management)
 ├── dsh-emacs-faces.el        # Unified face definitions and theme variables
 ├── dsh-emacs-tokens.el       # Token tracking and formatting
+├── dsh-emacs-markdown.el     # Markdown syntax highlighting
 ├── dsh-emacs-render.el       # Event renderer (user/assistant/tool/thinking)
+├── dsh-emacs-events.el       # Event stream: native WebSocket + fallback polling
 ├── dsh-emacs-footer.el       # Footer status bar
-├── dsh-emacs-session.el      # Session list card view
-└── dsh-emacs-markdown.el     # Markdown syntax highlighting
+└── dsh-emacs-session.el      # Session list card view
 ```
+
+### Protocol layer (`dsh-emacs-protocol.el`)
+
+dsh server responses arrive as decoded JSON alists (arrays as vectors). Their
+common shapes are normalized into `cl-defstruct` types here, and business
+code reads fields exclusively through generated accessors
+(e.g. `dsh-protocol-model-selection-reasoning-effort`,
+`dsh-protocol-session-cwd`): each wire field name appears only in the
+matching `--from-alist` constructor, so when the server protocol changes you
+sync exactly one file. Covered payloads:
+
+- `session.list` → `dsh-protocol-session` (sessionId, title, cwd,
+  agentPreset, updatedAt, blank, running, title-value, pending-interaction)
+- `workspace.list` → `dsh-protocol-workspace-list` (items,
+  archived-session-ids) → `dsh-protocol-workspace` (workspaceId, sessionIds,
+  title, path, createdAt, updatedAt)
+- `workspace.create` / `rename` / `insertSessionBefore` →
+  `dsh-protocol-workspace-result` (workspace, created)
+- `session.models` → `dsh-protocol-model-directory` → `provider-group` →
+  `model-catalog-entry` → `reasoning` → `effort`, plus
+  `dsh-protocol-model-selection` for `current`
+- `session.selectModel` → `dsh-protocol-model-selection-result` (selected)
+
+Conversion is one-way and lossless: `session.models` responses become a
+`dsh-protocol-model-directory` before the picker reads them; the cached
+session/workspace lists are stored as structs too. Helper
+`dsh-protocol--struct` accepts either a wire alist or an already-converted
+struct, so callers and fixtures can stay on either side of the boundary.
+Event-stream payloads stay raw for now (their shapes vary per event type).
 
 ## Installation
 
@@ -184,6 +226,7 @@ The animation lights up when a message is sent and goes out at `turn/end` (or wh
 (setq dsh-emacs-show-tool-calls t)                 ; show tool calls
 (setq dsh-emacs-default-cwd default-directory)     ; working directory for new sessions
 (setq dsh-emacs-default-model "claude-opus-4-5")   ; default model name
+(setq dsh-emacs-model-group-format #(" %s " 0 4 (face vertico-group-title))) ; provider group-header format inside the model picker (nil = hide group titles)
 (setq dsh-emacs-pin-input-to-bottom nil)           ; nil = same buffer as replies (default); t = standalone bottom window
 (setq dsh-emacs-input-window-height 4)             ; height of the standalone bottom input window
 (setq dsh-emacs-input-history-length 50)           ; prompts kept for M-p / M-n recall
@@ -358,11 +401,11 @@ The dsh service returns UTF-8 JSON. The `url` library inserts the response body 
 
 ## Testing
 
-The repository ships batch tests (they require a running dsh service):
+The repository ships batch tests:
 
 ```sh
-emacs -Q --batch -l test/dsh-test.el   # Unit tests: module loading, token formatting, face definitions, renderer
-emacs -Q --batch -l test/dsh-e2e.el    # E2E: full flow (create session, send message, poll, render)
+emacs -Q --batch -l test/dsh-test.el   # ~177 unit tests, no service needed: modules, protocol types, model picker, renderer, footer
+emacs -Q --batch -l test/dsh-e2e.el    # E2E against a running dsh service: create session, send message, poll, render
 ```
 
 ## Acknowledgments
