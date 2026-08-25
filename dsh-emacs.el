@@ -928,7 +928,7 @@ default), far smaller than a full parse of 30k raw events."
 
 (defun dsh-emacs-delete-session (session-id)
   "Delete session SESSION-ID."
-  (interactive)
+  (interactive (list (dsh-emacs--completing-session-id "Delete session: ")))
   (dsh-emacs--rpc-async "session.delete"
                         `((sessionId . ,session-id))
                         (lambda (ok value)
@@ -940,7 +940,9 @@ default), far smaller than a full parse of 30k raw events."
 
 (defun dsh-emacs-rename-session (session-id new-title)
   "Rename session."
-  (interactive)
+  (interactive (list (dsh-emacs--completing-session-id "Rename session: ")
+                     (read-string "New title: "
+                                  (or (dsh-emacs--chat-title session-id) ""))))
   (dsh-emacs--rpc-async "session.update"
                         `((sessionId . ,session-id)
                           (title . ,new-title))
