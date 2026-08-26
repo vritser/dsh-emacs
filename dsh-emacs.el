@@ -181,21 +181,6 @@ prefix argument asks for the preset instead of using this value."
   :type '(choice (const :tag "Host default" nil) string)
   :group 'dsh-emacs)
 
-(defcustom dsh-emacs-pin-input-to-bottom nil
-  "Whether to show the editable prompt in a fixed bottom window.
-
-When nil (default), the prompt and the replies live in the same buffer,
-agent-shell style: the `❯' input line stays at the bottom of the transcript
-and messages stream in above it.  When non-nil, a separate input window is
-pinned below the transcript window."
-  :type 'boolean
-  :group 'dsh-emacs)
-
-(defcustom dsh-emacs-input-window-height 4
-  "Height of the fixed input window, measured in text lines."
-  :type 'integer
-  :group 'dsh-emacs)
-
 (defcustom dsh-emacs-attach-media-types
   '("image/png" "image/jpeg" "image/webp" "image/gif")
   "Image media types accepted for session attachments.
@@ -277,15 +262,6 @@ window until it stops advancing or the round budget is spent.")
 (defvar-local dsh-emacs--poll-warned nil
   "Whether the fallback-polling warning was already shown for this buffer.")
 
-(defvar dsh-emacs--pinned-input-window nil
-  "Window displaying the fixed input buffer.")
-
-(defvar dsh-emacs--pinned-input-buffer nil
-  "Buffer displayed in `dsh-emacs--pinned-input-window'.")
-
-(defvar-local dsh-emacs--input-chat-buffer nil
-  "Chat buffer mirrored by a dedicated input buffer, if any.")
-
 (defvar-local dsh-emacs--buffer-session nil
   "Session ID owned by this chat buffer (buffer-local).
 
@@ -304,9 +280,6 @@ transcript or a `C-c C-c' belongs to.")
 ;; `dsh-emacs--chat-buffer-sync' (invoked from live `session/title' events)
 ;; can still match the current buffer against its session id.
 (put 'dsh-emacs--buffer-session 'permanent-local t)
-
-(defvar-local dsh-emacs--transcript-input-overlay nil
-  "Overlay hiding the transcript's internal input anchor when pinned.")
 
 (defvar dsh-emacs--input-history nil
   "Prompts submitted with `dsh-emacs-send-or-stop', newest first.
@@ -819,88 +792,28 @@ after the `❯ ' prompt so input sync and transcript rendering keep working."
                 (forward-char 2)      ; skip "❯ "
                 (point-marker)))))))
 
-(defun dsh-emacs--hide-transcript-input ()
-  "Hide the internal input anchor in the transcript buffer."
-  (let* ((m (and dsh-emacs--input-marker
-                 (markerp dsh-emacs--input-marker)
-                 dsh-emacs--input-marker))
-         (anchor-line
-          (cond
-           ((and m (eq (marker-buffer m) (current-buffer)))
-            (save-excursion
-              (goto-char (marker-position m))
-              (line-beginning-position)))
-           (t
-            (dsh-emacs--ensure-input-marker)
-            (if-let* ((new-marker dsh-emacs--input-marker)
-                      (m2 (and (eq (marker-buffer new-marker) (current-buffer))
-                               new-marker)))
-                (save-excursion
-                  (goto-char (marker-position m2))
-                  (line-beginning-position))
-              (when (fboundp 'dsh-emacs-render--input-anchor-pos)
-                (dsh-emacs-render--input-anchor-pos)))))))
-    (when anchor-line
-      (when (overlayp dsh-emacs--transcript-input-overlay)
-        (delete-overlay dsh-emacs--transcript-input-overlay))
-      (let ((overlay (make-overlay anchor-line (point-max) nil t t)))
-        (overlay-put overlay 'invisible t)
-        (overlay-put overlay 'priority 100)
-        (setq dsh-emacs--transcript-input-overlay overlay)))))
-
-(defun dsh-emacs--sync-pinned-input ()
-  "Mirror the dedicated input buffer into its transcript anchor."
-  (when (and dsh-emacs--input-chat-buffer
-             (buffer-live-p dsh-emacs--input-chat-buffer)
-             dsh-emacs--input-marker
-             (markerp dsh-emacs--input-marker)
-             (marker-buffer dsh-emacs--input-marker))
-    (let ((text (dsh-emacs--get-input))
-          (chat dsh-emacs--input-chat-buffer))
-      (with-current-buffer chat
-        (dsh-emacs--ensure-input-marker)
-        (when (and dsh-emacs--input-marker
-                   (markerp dsh-emacs--input-marker)
-                   (eq (marker-buffer dsh-emacs--input-marker) (current-buffer)))
-          (let ((inhibit-read-only t))
-            (delete-region dsh-emacs--input-marker (dsh-emacs--input-end))
-            (goto-char dsh-emacs--input-marker)
-            (insert text)
-            ;; Keep the anchor on its own line so the editable region is never
-            ;; the last line of the buffer: message insertion above the prompt
-            ;; must always stay above it, and `point-max' fallbacks can never
-            ;; land inside the input area.
-            (let ((footer-start (and dsh-emacs--footer-overlay
-                                     (overlay-start dsh-emacs--footer-overlay))))
-              (when (and footer-start
-                         (> footer-start (point-min))
-                         (not (eq (char-before footer-start) ?\n)))
-                (goto-char footer-start)
-                (insert "\n")))
-            (dsh-emacs--hide-transcript-input)))))))
-
 (defun dsh-emacs--lock-cursor-to-input ()
-  "In inline mode, prevent the cursor from moving below the input line.\n
-Moving up into the read-only transcript to read history is allowed; only when\nmoving down past the end of the input area is the cursor clamped back to the\nend of the input area (the writable region after `❯ ')."
-  (when (and (not dsh-emacs-pin-input-to-bottom)
-             (buffer-live-p dsh-emacs--current-buffer)
-             (eq (current-buffer) dsh-emacs--current-buffer))
-    (dsh-emacs--ensure-input-marker)
-    (when (and dsh-emacs--input-marker
-               (markerp dsh-emacs--input-marker)
-               (eq (marker-buffer dsh-emacs--input-marker) (current-buffer)))
-      (let* ((marker-pos (marker-position dsh-emacs--input-marker))
-             (input-end (max marker-pos (dsh-emacs--input-end))))
-        (when (> (point) input-end)
-          (goto-char input-end))))))
+  "Clamp the cursor to the end of the editable input area (post-command).
+Moving up into the read-only transcript to read history is allowed; only
+positions BELOW the input area are clamped back to its end.  The clamp is
+area-based (`dsh-emacs--input-end'), not line-based, so a multi-line input
+is unaffected — the cursor may roam anywhere inside the editable region.
+Runs in every dsh-emacs-mode buffer (buffer-local hook) independent of the
+global `dsh-emacs--current-buffer', so it also holds in an inactive chat
+buffer while another session is the last-opened one."
+  (dsh-emacs--ensure-input-marker)
+  (when (and dsh-emacs--input-marker
+             (markerp dsh-emacs--input-marker)
+             (eq (marker-buffer dsh-emacs--input-marker) (current-buffer)))
+    (let* ((marker-pos (marker-position dsh-emacs--input-marker))
+           (input-end (max marker-pos (dsh-emacs--input-end))))
+      (when (> (point) input-end)
+        (goto-char input-end)))))
 
 (defun dsh-emacs--route-typing-to-input ()
   "When about to type or edit while point is in the read-only region, first\nmove the cursor back to the input area after `❯ '.\n
 Used with `dsh-emacs--reveal-input-when-typing': typing directly in the\nread-only area would trigger `text-read-only'; this moves point into the\ninput area before the command runs, so typing no longer errors\nand the input area scrolls into view automatically."
-  (when (and (not dsh-emacs-pin-input-to-bottom)
-             (buffer-live-p dsh-emacs--current-buffer)
-             (eq (current-buffer) dsh-emacs--current-buffer)
-             (memq this-command
+  (when (and (memq this-command
                    '(self-insert-command
                      delete-backward-char
                      delete-forward-char
@@ -916,10 +829,7 @@ Used with `dsh-emacs--reveal-input-when-typing': typing directly in the\nread-on
 (defun dsh-emacs--reveal-input-when-typing ()
   "Immediately scroll the window to the input area when typing (self-insert /\nediting commands).\n
 When the input line is not visible because the window was scrolled up to\nread history, starting to type scrolls the input line\nback to the bottom of the window, so the `❯ ' line being typed is visible."
-  (when (and (not dsh-emacs-pin-input-to-bottom)
-             (buffer-live-p dsh-emacs--current-buffer)
-             (eq (current-buffer) dsh-emacs--current-buffer)
-             (window-live-p (get-buffer-window (current-buffer) t))
+  (when (and (window-live-p (get-buffer-window (current-buffer) t))
              (memq this-command
                    '(self-insert-command
                      delete-backward-char
@@ -937,87 +847,6 @@ When the input line is not visible because the window was scrolled up to\nread h
           (goto-char input-pos)
           (recenter -1))))))
 
-(defun dsh-emacs--unpin-input-window ()
-  "Remove the dedicated input window and its hidden transcript anchor."
-  (when (buffer-live-p dsh-emacs--pinned-input-buffer)
-    (with-current-buffer dsh-emacs--pinned-input-buffer
-      (remove-hook 'post-command-hook #'dsh-emacs--sync-pinned-input t)))
-  (when (window-live-p dsh-emacs--pinned-input-window)
-    (delete-window dsh-emacs--pinned-input-window))
-  (when (buffer-live-p dsh-emacs--pinned-input-buffer)
-    (kill-buffer dsh-emacs--pinned-input-buffer))
-  (when (buffer-live-p dsh-emacs--current-buffer)
-    (with-current-buffer dsh-emacs--current-buffer
-      (when (overlayp dsh-emacs--transcript-input-overlay)
-        (delete-overlay dsh-emacs--transcript-input-overlay)
-        (setq dsh-emacs--transcript-input-overlay nil))))
-  (setq dsh-emacs--pinned-input-window nil
-        dsh-emacs--pinned-input-buffer nil))
-
-(defun dsh-emacs--setup-pinned-input-window ()
-  "Create a fixed bottom input window for the current chat buffer."
-  (when (and dsh-emacs-pin-input-to-bottom
-             (buffer-live-p dsh-emacs--current-buffer))
-    (dsh-emacs--unpin-input-window)
-    (let ((chat dsh-emacs--current-buffer)
-          (chat-window (get-buffer-window dsh-emacs--current-buffer t)))
-      (when (and (window-live-p chat-window)
-                 (> (window-body-height chat-window)
-                    (+ (max 2 dsh-emacs-input-window-height) 3)))
-        (let ((input-buffer
-               (get-buffer-create
-                (format "*dsh-input: %s*"
-                        (or (buffer-local-value 'dsh-emacs--buffer-session
-                                                chat)
-                            dsh-emacs--current-session)))))
-          (with-current-buffer input-buffer
-            (fundamental-mode)
-            (use-local-map (symbol-value 'dsh-emacs-mode-map))
-            (setq-local truncate-lines nil
-                        word-wrap t
-                        dsh-emacs--input-chat-buffer chat)
-            ;; 复用聊天缓冲的工作区路径：从输入窗口启动 magit 等同样
-            ;; 定位到会话项目目录。
-            (setq-local default-directory
-                        (with-current-buffer chat default-directory))
-            (let ((inhibit-read-only t))
-              (erase-buffer)
-              (insert (propertize "❯ " 'face 'dsh-emacs-input-prompt-face))
-              (put-text-property (point-min) (point) 'read-only t)
-              (put-text-property (point-min) (point)
-                                 'front-sticky '(read-only))
-              (put-text-property (point-min) (point)
-                                 'rear-nonsticky '(read-only))
-              (setq dsh-emacs--input-marker (point-marker)))
-            (add-hook 'post-command-hook #'dsh-emacs--sync-pinned-input nil t)
-              ;; 输入窗同样不落盘：关闭/销毁时不提示保存
-              (add-hook 'kill-buffer-query-functions
-                        #'dsh-emacs--chat-buffer-clear-modified nil t)
-              (add-hook 'after-change-functions
-                        #'dsh-emacs--chat-buffer-keep-clean nil t))
-          (select-window chat-window)
-          (let ((input-window
-                 (split-window chat-window
-                               (- (max 2 dsh-emacs-input-window-height))
-                               'below)))
-            (set-window-buffer input-window input-buffer)
-            ;; `below' should create the input window at the bottom.  Some
-            ;; window managers / existing split layouts can nevertheless
-            ;; return the two windows in the opposite physical order; make
-            ;; the placement explicit so the prompt never appears above the
-            ;; transcript.
-            (let ((actual-input-window input-window))
-              (when (< (nth 1 (window-edges input-window))
-                       (nth 1 (window-edges chat-window)))
-                (set-window-buffer input-window chat)
-                (set-window-buffer chat-window input-buffer)
-                (setq actual-input-window chat-window))
-              (setq dsh-emacs--pinned-input-buffer input-buffer
-                    dsh-emacs--pinned-input-window actual-input-window)
-              (dsh-emacs--hide-transcript-input)
-              (select-window actual-input-window)
-              (goto-char (with-current-buffer input-buffer
-                           dsh-emacs--input-marker)))))))))
 
 ;;;###autoload
 (defun dsh-emacs-open-session (session-id)
@@ -1028,7 +857,6 @@ its own realtime stream (tearing the previous one down here used to
 leave it stream-less — polling-only and unable to ever switch back to
 realtime)."
   (interactive)
-  (dsh-emacs--unpin-input-window)
   (setq dsh-emacs--current-session session-id)
   (let* ((existing (gethash session-id dsh-emacs--chat-buffers))
          (buf (if (and existing (buffer-live-p existing))
@@ -1068,8 +896,7 @@ realtime)."
       (setq dsh-emacs--event-history-loading t)
       (dsh-emacs-events-connect dsh-emacs--current-buffer)
       (dsh-emacs--load-history session-id))
-    (pop-to-buffer dsh-emacs--current-buffer)
-    (dsh-emacs--setup-pinned-input-window)))
+    (pop-to-buffer dsh-emacs--current-buffer)))
 
 (defun dsh-emacs--completing-session-id (prompt)
   "Read a session id with completion against the cached session list.
@@ -1416,8 +1243,13 @@ and prompt \"save?\".  Clearing is cheap (a flag), not a content change."
   (setq buffer-read-only nil)
   (setq truncate-lines nil)
   (setq word-wrap t)
-  ;; The pinned layout hides the transcript's internal input anchor while
-  ;; exposing the same editable text in the dedicated bottom window.
+  ;; telega-style scroll discipline: with point in the input area, vertical
+  ;; scrolling keeps the `❯' line visible (recenters rather than jumping far
+  ;; away), page commands land on line boundaries, and scrolling past the
+  ;; top/bottom wraps to the other end instead of erroring.
+  (setq-local scroll-conservatively 101)
+  (setq-local next-screen-context-lines 0)
+  (setq-local scroll-error-top-bottom t)
   (setq-local buffer-invisibility-spec '(t))
   (setq-local line-spacing 0.15)
   (buffer-disable-undo)
@@ -1490,32 +1322,20 @@ All welcome text is marked read-only; only the region after ❯ is writable."
 (defun dsh-emacs--active-session-id ()
   "Return the session id the current command context belongs to.
 Resolves in this order:
-1. the chat buffer mirrored by a pinned input window (`dsh-emacs--input-chat-buffer');
-2. the buffer-local `dsh-emacs--buffer-session' of the current chat buffer;
-3. the global `dsh-emacs--current-session' as a fallback for list-buffer \ncommands and other contexts with no session ownership.
+1. the buffer-local `dsh-emacs--buffer-session' of the current chat buffer;
+2. the global `dsh-emacs--current-session' as a fallback for list-buffer \ncommands and other contexts with no session ownership.
 Interactive commands (send, interrupt, refresh, model picker) must resolve
 here rather than reading the global directly: with several session buffers
 open, the global points at the last-opened session while the user may be
 editing inside an earlier one."
-  (or (and dsh-emacs--input-chat-buffer
-           (buffer-live-p dsh-emacs--input-chat-buffer)
-           (buffer-local-value 'dsh-emacs--buffer-session
-                               dsh-emacs--input-chat-buffer))
-      (and (boundp 'dsh-emacs--buffer-session)
+  (or (and (boundp 'dsh-emacs--buffer-session)
            dsh-emacs--buffer-session)
       dsh-emacs--current-session))
 
 (defun dsh-emacs--busy-p ()
-  "Return non-nil when this chat buffer (or its pinned input) is generating.
-Consults the same buffer-local flag that drives the mode-line spinner; when
-called from the fixed bottom input window, falls back to the flag of the
-chat buffer it mirrors."
-  (or (and (boundp 'dsh-emacs--ml-busy) dsh-emacs--ml-busy)
-      (and (boundp 'dsh-emacs--input-chat-buffer)
-           dsh-emacs--input-chat-buffer
-           (buffer-live-p dsh-emacs--input-chat-buffer)
-           (buffer-local-value 'dsh-emacs--ml-busy
-                               dsh-emacs--input-chat-buffer))))
+  "Return non-nil when this chat buffer is generating.
+Consults the same buffer-local flag that drives the mode-line spinner."
+  (and (boundp 'dsh-emacs--ml-busy) dsh-emacs--ml-busy))
 
 (defun dsh-emacs--interrupt-turn ()
   "Interrupt the running turn via `session.cancel'.
@@ -1622,10 +1442,9 @@ IMAGES, when given, is a list of wire-ready attachment alists
 On acceptance the message is echoed into the transcript (when non-empty),
 the running spinner lights up, and the watchdog starts."
   (let* ((session-id (dsh-emacs--active-session-id))
-         (chat-buffer (or dsh-emacs--input-chat-buffer
-                          (and (boundp 'dsh-emacs--buffer-session)
-                               dsh-emacs--buffer-session
-                               (current-buffer))))
+         (chat-buffer (and (boundp 'dsh-emacs--buffer-session)
+                           dsh-emacs--buffer-session
+                           (current-buffer)))
          (input-buffer (current-buffer))
          (payload `((sessionId . ,session-id)
                     (mode . "queue")
@@ -1674,8 +1493,7 @@ the running spinner lights up, and the watchdog starts."
                                         (dsh-emacs--start-polling))))
                                   (when (buffer-live-p input-buffer)
                                     (with-current-buffer input-buffer
-                                      (dsh-emacs--clear-input)
-                                      (dsh-emacs--sync-pinned-input))))
+                                      (dsh-emacs--clear-input))))
                               (message "Failed to send: %S" value))))))
 
 ;;; ---------------------------------------------------------------------------
@@ -2316,7 +2134,7 @@ copy into another buffer (e.g. an image viewport)."
 (defun dsh-emacs-copy-transcript ()
   "Copy the current transcript to the clipboard."
   (interactive)
-  (let ((chat (or dsh-emacs--input-chat-buffer (current-buffer))))
+  (let ((chat (current-buffer)))
     (when (buffer-live-p chat)
       (with-current-buffer chat
         (let ((transcript (buffer-substring-no-properties
@@ -2327,7 +2145,7 @@ copy into another buffer (e.g. an image viewport)."
 (defun dsh-emacs-footer-toggle ()
   "Toggle footer display."
   (interactive)
-  (let ((chat (or dsh-emacs--input-chat-buffer (current-buffer))))
+  (let ((chat (current-buffer)))
     (when (buffer-live-p chat)
       (with-current-buffer chat
         (setq dsh-emacs-footer-enabled (not dsh-emacs-footer-enabled))

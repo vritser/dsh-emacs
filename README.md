@@ -163,9 +163,9 @@ A different address/port can be set via `dsh-emacs-base-url`:
 | `C-c C-m` | `dsh-emacs-select-model` | Choose a model for the session |
 | `M-p` / `M-n` | `dsh-emacs-input-history-back/forward` | Recall previously submitted prompts |
 
-Send rule: sends the text after the `❯ ` prompt in the input area. By default (`dsh-emacs-pin-input-to-bottom` is nil) the input field and the reply live **in the same buffer** (agent-shell style): the `❯` input line stays pinned at the bottom of the transcript, replies stream in above it, and the cursor always stays in the input area; scrolling away does not pull the view back. If set to t, a separate input window pinned to the bottom of the chat window is used instead.
+Send rule: sends the text after the `❯ ` prompt in the input area. The input field and the reply live **in the same buffer** (agent-shell style): the `❯` input line stays at the bottom of the transcript, replies stream in above it, and the cursor always stays in the input area — chat buffers set a telega-style scroll discipline (`scroll-conservatively`/`next-screen-context-lines`/`scroll-error-top-bottom`), so the prompt line stays visible while typing and page commands land on line boundaries; scrolling away to read history does not pull the view back.
 
-**Workspace path**: each session buffer's `default-directory` automatically points at that session's workspace (the `cwd` from `session.list`, consistent with the list/grouping), so `M-x magit-status`, `M-x dired` or `project-*` commands run directly in the corresponding project directory from the chat buffer; it stays in sync after session-list refreshes/renames, and the standalone bottom input window inherits the same path.
+**Workspace path**: each session buffer's `default-directory` automatically points at that session's workspace (the `cwd` from `session.list`, consistent with the list/grouping), so `M-x magit-status`, `M-x dired` or `project-*` commands run directly in the corresponding project directory from the chat buffer; it stays in sync after session-list refreshes/renames.
 
 **No save prompts**: session transcripts are never written to disk, and the chat buffer always stays in unmodified state — closing the buffer (`C-x k`, tab/window-manager close) never shows a "buffer modified, save?" prompt.
 
@@ -234,8 +234,6 @@ The animation lights up when a message is sent and goes out at `turn/end` (or wh
 (setq dsh-emacs-default-model "claude-opus-4-5")   ; default model name
 (setq dsh-emacs-default-preset "standard")         ; default agent preset for new sessions (nil = host default; "standard"/"minimal"/"code"/"cordis" or a user preset id)
 (setq dsh-emacs-model-group-format #(" %s " 0 4 (face vertico-group-title))) ; provider group-header format inside the model picker (nil = hide group titles)
-(setq dsh-emacs-pin-input-to-bottom nil)           ; nil = same buffer as replies (default); t = standalone bottom window
-(setq dsh-emacs-input-window-height 4)             ; height of the standalone bottom input window
 (setq dsh-emacs-input-history-length 50)           ; prompts kept for M-p / M-n recall
 (setq dsh-emacs-ui-label-separator "·")            ; separator between Think/Tool title and its right-side summary ("" = plain gap)
 (setq dsh-emacs-tool-titles '(("pwsh" . "PowerShell"))) ; tool name -> display title overrides (icons stay per variant; unnamed tools get a humanized name, e.g. grep -> "Grep")

@@ -481,9 +481,9 @@ re-pinned via `set-window-start' while the user keeps typing."
               (goto-char anchor)
               (forward-line (- (1- (max 1 (window-text-height window)))))
               (set-window-start window (max (point-min) (point)) t))
-            ;; Keep the pinned viewer's cursor at the input anchor (hidden by
-            ;; the transcript overlay in pinned mode); never move the buffer
-            ;; point of the selected inline-input window while typing.
+            ;; Keep the pinned viewer's cursor at the input anchor; never move
+            ;; the buffer point of the selected inline-input window while
+            ;; typing.
             (unless (eq window (selected-window))
               (set-window-point window anchor))))))))
 
@@ -494,9 +494,8 @@ back one line: after the first reply that would point inside the previous
 assistant body and reverse the order of subsequent replies.
 
 The live prompt marker is preferred; when it is missing or points into
-another buffer (for example after a window/tab tearing down the pinned
-input buffer), the anchor is located again by its hiding overlay or by the
-prompt face so messages can never be appended below the input area."
+another buffer, the anchor is located again by the prompt face so messages
+can never be appended below the input area."
   (or
    ;; 1. Live marker pointing into the current buffer.
    (let ((m (and (boundp 'dsh-emacs--input-marker)
@@ -506,12 +505,7 @@ prompt face so messages can never be appended below the input area."
        (save-excursion
          (goto-char (marker-position m))
          (line-beginning-position))))
-   ;; 2. Start of the overlay hiding the anchor (pinned layout).
-   (let ((ov (and (boundp 'dsh-emacs--transcript-input-overlay)
-                  dsh-emacs--transcript-input-overlay)))
-     (when (and (overlayp ov) (eq (overlay-buffer ov) (current-buffer)))
-       (overlay-start ov)))
-   ;; 3. Last prompt-face run: the anchor itself.
+   ;; 2. Last prompt-face run: the anchor itself.
    (when-let* ((anchor (dsh-emacs-render--input-anchor-pos)))
      (save-excursion
        (goto-char anchor)

@@ -622,23 +622,30 @@ so the code under test can read fields through the protocol accessors."
       (dsh-test-pass "follow-does-not-yank-scrolled-window"))))
 
 ;; --- 测试 27: 同 buffer 输入模式（agent-shell 风格） ---
-(let ((dsh-emacs-pin-input-to-bottom nil))
-  (with-temp-buffer
-    (dsh-emacs-mode)
-    (dsh-emacs-footer-setup)
-    (dsh-emacs-render-event
-     (json-read-from-string
-      "{\"type\":\"assistant/message\",\"seq\":1,\"data\":{\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"inline reply\"}]}}}"))
-    (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
-           (reply-pos (string-match "inline reply" text))
-           (prompt-pos (string-match "❯ " text))
-           (marker-pos (marker-position dsh-emacs--input-marker)))
-      (when (and reply-pos prompt-pos
-                 (< reply-pos prompt-pos)         ; reply above the prompt
-                 (null dsh-emacs--pinned-input-buffer)  ; no separate input window
-                 (goto-char marker-pos)
-                 (looking-back "❯ " (line-beginning-position)))
-        (dsh-test-pass "inline-mode-single-buffer")))))
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-footer-setup)
+  (dsh-emacs-render-event
+   (json-read-from-string
+    "{\"type\":\"assistant/message\",\"seq\":1,\"data\":{\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"inline reply\"}]}}}"))
+  (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
+         (reply-pos (string-match "inline reply" text))
+         (prompt-pos (string-match "❯ " text))
+         (marker-pos (marker-position dsh-emacs--input-marker)))
+    (when (and reply-pos prompt-pos
+               (< reply-pos prompt-pos)         ; reply above the prompt
+               (goto-char marker-pos)
+               (looking-back "❯ " (line-beginning-position)))
+      (dsh-test-pass "inline-mode-single-buffer"))))
+
+;; --- 测试 27e: telega 式滚动纪律（chatbuf 缓冲局部） ---
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (when (and (local-variable-p 'scroll-conservatively (current-buffer))
+             (= 101 scroll-conservatively)
+             (= 0 (or next-screen-context-lines -1))
+             scroll-error-top-bottom)
+    (dsh-test-pass "chat-buffer-scroll-discipline")))
 
 ;; --- 测试 28: WebSocket 握手后的帧仍被消费（实时修复） ---
 (with-temp-buffer
@@ -676,12 +683,12 @@ so the code under test can read fields through the protocol accessors."
       (advice-remove 'dsh-emacs-events--dispatch-json
                      (lambda (&rest _) (setq dispatch-count (1+ dispatch-count)))))))
 
-;; --- 测试 24: pinned 输入同步后 anchor 仍独占一行 ---
+;; --- 测试 24: 输入 anchor 独占一行（footer 之前） ---
 (with-temp-buffer
   (dsh-emacs-mode)
   (dsh-emacs-footer-setup)
-  ;; Simulate what dsh-emacs--sync-pinned-input guarantees: the anchor line
-  ;; always ends with a newline so point-max never sits inside the input.
+  ;; The anchor prompt line always ends with a newline and sits right before
+  ;; the footer, so point-max never falls inside the editable input.
   (let ((footer-start (overlay-start dsh-emacs--footer-overlay)))
     (when (and (eq (char-before footer-start) ?\n)
                ;; the anchor prompt is on its own line, before the footer
@@ -913,8 +920,7 @@ so the code under test can read fields through the protocol accessors."
       (goto-char (point-min))
       (insert "user  hello\n")
       (put-text-property (point-min) (1- (point)) 'read-only t)))
-  (let ((dsh-emacs--current-buffer (current-buffer))
-        (dsh-emacs-pin-input-to-bottom nil))
+  (let ((dsh-emacs--current-buffer (current-buffer)))
     (dsh-emacs--ensure-input-marker)
     (let ((mpos (marker-position dsh-emacs--input-marker)))
       ;; 上移进入只读转录区阅读 → 应被允许（停留在原处）
@@ -934,6 +940,42 @@ so the code under test can read fields through the protocol accessors."
       (dsh-emacs--route-typing-to-input)
       (when (= (point) (marker-position dsh-emacs--input-marker))
         (dsh-test-pass "typing-in-history-routes-to-input")))))
+
+;; --- 测试 33b: 光标钳制在输入区底部 —— 多行输入不受影响，且与全局
+;;     current-buffer（多会话时指向最后打开的会话）无关 ---
+(let* ((chat (get-buffer-create " *t33b-chat*"))
+       (other (generate-new-buffer " *t33b-other*")))
+  (unwind-protect
+      (progn
+        (with-current-buffer chat
+          (dsh-emacs-mode)
+          (dsh-emacs-footer-setup)
+          ;; 模拟多会话：全局 current-buffer 指向别的会话
+          (setq dsh-emacs--current-buffer other))
+        (with-current-buffer chat
+          (let ((inhibit-read-only t))
+            (goto-char dsh-emacs--input-marker)
+            (insert "line one\nline two\nline three"))
+          (let ((input-end (dsh-emacs--input-end)))
+            ;; 越界（M-> / 点击 footer 区）→ 钳回输入区末端
+            (goto-char (point-max))
+            (dsh-emacs--lock-cursor-to-input)
+            (when (= (point) input-end)
+              (dsh-test-pass "cursor-clamped-at-input-area-end"))
+            ;; 多行输入内部的光标位置不动（不受影响）
+            (goto-char dsh-emacs--input-marker)
+            (forward-line 1)
+            (let ((mid (point)))
+              (dsh-emacs--lock-cursor-to-input)
+              (when (= (point) mid)
+                (dsh-test-pass "cursor-stays-inside-multi-line-input")))
+            ;; 恰好停在输入区末端 → 不误伤
+            (goto-char input-end)
+            (dsh-emacs--lock-cursor-to-input)
+            (when (= (point) input-end)
+              (dsh-test-pass "cursor-at-input-end-not-moved")))))
+    (kill-buffer chat)
+    (kill-buffer other)))
 
 ;; --- 测试 34: 运行中工具无 spinner 动画（行首图标）+ 完成后行不消失 ---
 (with-temp-buffer
@@ -1276,7 +1318,7 @@ so the code under test can read fields through the protocol accessors."
                              (lambda () (setq polled t)))
                             ((symbol-function 'dsh-emacs-events--watchdog-start)
                              (lambda () nil)))
-                    (dsh-emacs--submit-prompt "hi2")))
+                    (dsh-emacs--submit-prompt "hi")))
                 (when (and (null connects) polled)
                   (dsh-test-pass "submit-in-handshake-keeps-single-stream")))
             (delete-process proc))))
@@ -2108,20 +2150,6 @@ so the code under test can read fields through the protocol accessors."
     (kill-buffer buf)
     (setq dsh-emacs--input-history old-hist
           dsh-emacs--input-history-pos old-pos)))
-
-;; --- 测试 54: pinned 输入窗在忙碌时也能识别打断状态 ---
-(let ((chat (generate-new-buffer " *dsh-pinned-chat*"))
-      (pinned (generate-new-buffer " *dsh-pinned-input*")))
-  (unwind-protect
-      (progn
-        (with-current-buffer chat
-          (setq-local dsh-emacs--ml-busy t))
-        (with-current-buffer pinned
-          (setq-local dsh-emacs--input-chat-buffer chat)
-          (when (dsh-emacs--busy-p)
-            (dsh-test-pass "busy-p-reflects-chat-from-pinned-input"))))
-    (kill-buffer chat)
-    (kill-buffer pinned)))
 
 ;; --- 测试 55: thinking 块正文不再有深色背景（回归：此前 body face 带
 ;; `:background'，展开后图标行正下方出现一块深色；现要求透明/主题背景） ---
@@ -3157,17 +3185,7 @@ so the code under test can read fields through the protocol accessors."
           (when (and sent
                      (equal (list "load-history" "sess-a") (car sent)))
             (dsh-test-pass "refresh-in-inactive-buffer-targets-own-session")))
-        ;; 场景 4：pinned 输入窗 → 归属窗镜像的 chat buffer（测试 54 的 busy-p 同源）
-        (with-current-buffer buf-a
-          (let ((pinned (generate-new-buffer " *t70-pinned*")))
-            (unwind-protect
-                (with-current-buffer pinned
-                  (setq-local dsh-emacs--input-chat-buffer buf-a)
-                  (when (string= "sess-a" (dsh-emacs--active-session-id))
-                    (dsh-test-pass
-                     "active-session-from-pinned-input-uses-mirrored-chat")))
-              (kill-buffer pinned))))
-        ;; 场景 5：无归属上下文（如 *dsh-sessions* 列表 buffer）→ 全局兜底
+        ;; 场景 4：无归属上下文（如 *dsh-sessions* 列表 buffer）→ 全局兜底
         (with-temp-buffer
           (when (string= "sess-b" (dsh-emacs--active-session-id))
             (dsh-test-pass "active-session-falls-back-to-global"))))
