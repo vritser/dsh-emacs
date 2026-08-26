@@ -6,10 +6,13 @@
 ;;; Commentary:
 ;;
 ;; dsh Web uses /api/events.mux as a long-lived WebSocket carrying
-;; server-request envelopes whose payload is session/event.  Emacs does not
-;; ship a WebSocket client, so this module implements the small RFC 6455
-;; client needed by that endpoint directly on top of `open-network-stream'.
-;; HTTP history remains the bootstrap and reconnect fallback.
+;; server-request envelopes whose payload is session/event or an
+;; answerable ask-user interaction (question/requested — answered via
+;; POST /api/respond, see `dsh-emacs--question-requested').  Emacs does
+;; not ship a WebSocket client, so this module implements the small
+;; RFC 6455 client needed by that endpoint directly on top of
+;; `open-network-stream'.  HTTP history remains the bootstrap and
+;; reconnect fallback.
 
 ;;; Code:
 
@@ -87,6 +90,7 @@
 (defvar dsh-emacs--archived-sessions)
 (declare-function dsh-emacs--chat-session-item "dsh-emacs" (session-id))
 (declare-function dsh-emacs--chat-buffer-sync "dsh-emacs" (session-id))
+(declare-function dsh-emacs--question-requested "dsh-emacs" (chat rpc-id session-id questions))
 (declare-function dsh-emacs-render--aget "dsh-emacs-render" (key alist))
 (declare-function dsh-emacs-render--json-bool "dsh-emacs-render" (value))
 (declare-function dsh-emacs-session--render "dsh-emacs-session" ())
@@ -260,7 +264,11 @@ overrides it via the `dsh-emacs-event-path' process property."
   "Handle one decoded WebSocket JSON envelope from PROCESS.
 Host-stream frames (list-scoped workspace/session/archive changes) are
 routed to `dsh-emacs-events--host-dispatch'; the mux stream (per-chat
-session/event envelopes) goes to the transcript path below.
+session/event envelopes) goes to the transcript path below, and
+answerable `question/requested' frames are presented and answered
+interactively (they are NOT gated on history loading — pending
+questions replay on mux open; answering is queued one frame at a time,
+since the minibuffer is a single global resource).
 While the initial history is loading, the mux replay of the ENTIRE global
 backlog is dropped UNPARSED: big sessions alone replay 500k+ raw events, and
 queueing + sorting + flushing them (historically the multi-second freeze on
@@ -273,37 +281,57 @@ through the normal path once loading completes."
                (process-get process 'dsh-emacs-host-stream))
           (dsh-emacs-events--host-dispatch process json)
         (let ((chat (dsh-emacs-events--chat process)))
-          (when (and (buffer-live-p chat)
-                     (not (with-current-buffer chat
-                            dsh-emacs--event-history-loading)))
+          (when (buffer-live-p chat)
             (let* ((message (json-read-from-string json))
                    (payload (dsh-emacs-render--aget "payload" message))
+                   (rpc-id (dsh-emacs-render--aget "rpcId" message))
                    (type (dsh-emacs-render--aget "type" payload))
                    (session-id (dsh-emacs-render--aget "sessionId" payload))
                    (event (dsh-emacs-render--aget "event" payload)))
-              (when (equal type "session/event")
-                ;; Server auto-renames a session after its first turns (summary
-                ;; title) and `session.rename' also lands here: both surface as
-                ;; a `session/title' event.  Titles are per-session metadata, not
-                ;; transcript content, so apply them for ANY session (the buffer
-                ;; name and the list row must track dsh web in real time) and
-                ;; only render transcript events for the session this chat buffer
-                ;; is attached to.
-                (when (and event
-                           (equal (dsh-emacs-render--aget "type" event)
-                                  "session/title"))
-                  (let ((title (dsh-emacs-render--aget "title"
-                                                       (dsh-emacs-render--aget "data" event))))
-                    (dsh-emacs-events--apply-title chat session-id title)
-                    ;; A refresh snapshot arriving after this title would roll
-                    ;; the row back to an old title: record it for replay too.
-                    (dsh-emacs-events--host-frame-record
-                     (list :apply-title session-id title))))
-                (when (and event
+              (cond
+               ;; answerable ask-user interaction (`ask' tool): show the
+               ;; question card and read the answers now.  Pending questions
+               ;; REPLAY on mux open — possibly while history is still loading
+               ;; — so this branch must not be gated on the loading flag.
+               ((equal type "question/requested")
+                (when (and rpc-id
                            (equal session-id
                                   (buffer-local-value
                                    'dsh-emacs--buffer-session chat)))
-                  (dsh-emacs-events--dispatch-event chat event)))))))
+                  (dsh-emacs--question-requested
+                   chat rpc-id session-id
+                   (dsh-emacs-render--aget "questions" payload))))
+               ;; Server auto-renames a session after its first turns (summary
+               ;; title) and `session.rename' also lands here: both surface as
+               ;; a `session/title' event.  Titles are per-session metadata, not
+               ;; transcript content, so apply them for ANY session (the buffer
+               ;; name and the list row must track dsh web in real time) and
+               ;; only render transcript events for the session this chat buffer
+               ;; is attached to.  The whole bulk is gated on history loading:
+               ;; the mux replay of the ENTIRE backlog is dropped UNPARSED
+               ;; during it (see the docstring), and the gap closes on the
+               ;; bounded re-fetch once the page renders.
+               ((equal type "session/event")
+                (when (not (with-current-buffer chat
+                             dsh-emacs--event-history-loading))
+                  (when (and event
+                             (equal (dsh-emacs-render--aget "type" event)
+                                    "session/title"))
+                    (let ((title (dsh-emacs-render--aget "title"
+                                                         (dsh-emacs-render--aget "data" event))))
+                      (dsh-emacs-events--apply-title chat session-id title)
+                      ;; A refresh snapshot arriving after this title would roll
+                      ;; the row back to an old title: record it for replay too.
+                      (dsh-emacs-events--host-frame-record
+                       (list :apply-title session-id title))))
+                  (when (and event
+                             (equal session-id
+                                    (buffer-local-value
+                                     'dsh-emacs--buffer-session chat)))
+                    (dsh-emacs-events--dispatch-event chat event))))
+               ;; 其余 mux 帧（approval/requested、session/subscribed 等）
+               ;; 当前不处理。
+               (t nil))))))
     (error (message "dsh event decode error: %S" err))))
 
 (defun dsh-emacs-events--consume-frames (process)

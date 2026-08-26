@@ -2338,6 +2338,294 @@ This is the main entry command of dsh-emacs."
                               (message "dsh service is running")
                             (message "dsh service unreachable: %S" value)))))
 
+;; ---------------------------------------------------------------------------
+;;  用户提问（question/requested）应答
+;; ---------------------------------------------------------------------------
+;; dsh 的 `ask' 工具（AskUserQuestion）通过 mux 流推送 answerable 的
+;; `question/requested' 帧：客户端必须展示问题与选项、读取用户选择并
+;; 以 client-response 回 POST /api/respond（回声 rpcId）。逐字对齐宿主
+;; 的校验规则：单选用一个 label 或 custom（二选一），多用 label 集合
+;; + 可选 custom，无选项问题只能给 custom，且 answers 必须覆盖整帧。
+;;
+;; 交互方式：逐题在 MINIBUFFER 中选择——选项作为 completion 候选（带
+;; 序号，输入数字即可跳选），单/多选，候选末尾附「Type answer…」以输入
+;; 自定义文本（空输入回到选项）；提示语带 Question N/M 序号，全部答完
+;; 一次性 respond。C-g 取消整个帧（问题留给 host 在打断回合时撤销）。
+;;
+;; minibuffer 是全局唯一资源：多个会话同时活跃时，回答一帧的途中其它
+;; mux 流仍会继续到达 question/requested。帧进入全局 FIFO 队列，同一
+;; 时刻只回答一帧（否则嵌套 completing-read 会把不同会话的提示叠进
+;; 同一个 minibuffer、相互覆盖）；提示语带所属会话的标识（聊天缓冲名，
+;; 如 [dsh-<标题>]），让用户知道问题来自哪个会话。
+
+(defvar dsh-emacs--question-queue nil
+  "Pending `question/requested' frames awaiting the single interactive
+answering slot; each entry is (CHAT RPC-ID SESSION-ID QUESTIONS).")
+
+(defvar dsh-emacs--question-active nil
+  "Non-nil while a question frame occupies the interactive answering slot.")
+
+(defun dsh-emacs--question-session-label (session-id)
+  "Label identifying SESSION-ID in question prompts.
+Prefers the live chat buffer's name (the title-based \"dsh-<title>\"
+form); falls back to `dsh-emacs--chat-buffer-name', then to the raw id.
+Long labels are truncated so the minibuffer prompt stays readable; a nil
+SESSION-ID (direct test calls) yields an empty label."
+  (let* ((buf (and session-id
+                   (boundp 'dsh-emacs--chat-buffers)
+                   (hash-table-p dsh-emacs--chat-buffers)
+                   (gethash session-id dsh-emacs--chat-buffers)))
+         (label (cond
+                 ((and buf (buffer-live-p buf)) (buffer-name buf))
+                 (session-id (dsh-emacs--chat-buffer-name session-id))
+                 (t ""))))
+    (if (> (length label) 40)
+        (concat (substring label 0 37) "…")
+      label)))
+
+(defun dsh-emacs--question-drain ()
+  "Answer queued question frames one at a time, in arrival order.
+Minibuffer answering is a single global slot
+(`dsh-emacs--question-active'): each frame is answered — or aborted —
+before the next one is presented, so prompts from different sessions
+never nest inside the same minibuffer.  Runs from whatever filter
+context delivered the current frame; queued frames are collected in
+their own chat buffer regardless of which stream they arrived on."
+  (while (and (null dsh-emacs--question-active)
+              dsh-emacs--question-queue)
+    (let* ((frame (pop dsh-emacs--question-queue))
+           (chat (nth 0 frame))
+           (rpc-id (nth 1 frame))
+           (session-id (nth 2 frame))
+           (questions (dsh-emacs--sequence-list (nth 3 frame))))
+      (setq dsh-emacs--question-active t)
+      (condition-case err
+          (let ((answers
+                 (when (buffer-live-p chat)
+                   (with-current-buffer chat
+                     (dsh-emacs--collect-question-answers
+                      questions session-id)))))
+            (if answers
+                (dsh-emacs--rpc-respond-async
+                 rpc-id
+                 `((sessionId . ,session-id)
+                   (answer . ((answers . ,answers))))
+                 (lambda (accepted reason)
+                   (if accepted
+                       (message "Answered %d question(s)" (length answers))
+                     (message "Question response not accepted (%s)"
+                              reason))))
+              (message "Question cancelled")))
+        (quit (message "Question cancelled"))
+        (error (message "dsh question error: %S" err)))
+      (setq dsh-emacs--question-active nil))))
+
+(defun dsh-emacs--respond-envelope-json (rpc-id payload)
+  "JSON body of the client-response answering server-request RPC-ID
+with PAYLOAD (the domain answer alist).  The receipt lives on
+POST /api/respond; rpcId echoes the requested frame."
+  (json-encode `((type . "client-response")
+                 (rpcId . ,rpc-id)
+                 (result . ((ok . t) (value . ,payload))))))
+
+(defun dsh-emacs--rpc-respond-async (rpc-id payload callback)
+  "Answer a server-request on POST /api/respond: client-response for
+RPC-ID with domain answer PAYLOAD.  CALLBACK receives (accepted-p . reason):
+accepted-p non-nil on an accepted receipt; otherwise REASON is
+`not-pending' or `bad-response' (a transport failure calls it with nil)."
+  (let* ((url (format "%s/api/respond" dsh-emacs-base-url))
+         (json-data (dsh-emacs--respond-envelope-json rpc-id payload))
+         (url-request-method "POST")
+         (url-request-extra-headers '(("Content-Type" . "application/json")))
+         (url-request-data (encode-coding-string json-data 'utf-8))
+         (callback-buffer (current-buffer)))
+    (url-retrieve
+     url
+     (lambda (status)
+       (let ((gc-cons-threshold (* 64 1024 1024)))
+         (if (plist-get status :error)
+             (progn
+               (message "RPC respond error: %S%s" status
+                        (dsh-emacs--http-error-hint (plist-get status :error)))
+               (when (buffer-live-p callback-buffer)
+                 (with-current-buffer callback-buffer
+                   (condition-case nil
+                       (funcall callback nil 'transport)
+                     (quit nil)))))
+           (goto-char (point-min))
+           (re-search-forward "^$")
+           (delete-region (point) (point-min))
+           (dsh-emacs--decode-response-body)
+           (goto-char (point-min))
+           (let* ((response (json-read))
+                  (accepted (cdr (assq 'accepted response)))
+                  (reason (cdr (assq 'reason response))))
+             (kill-buffer)
+             (when (buffer-live-p callback-buffer)
+               (with-current-buffer callback-buffer
+                 (condition-case nil
+                     (funcall callback
+                              (and accepted (not (eq accepted :json-false)))
+                              reason)
+                   (quit nil))))))))
+     nil t)))
+
+(defun dsh-emacs--question-option-labels (question)
+  "Option labels of QUESTION (a decoded alist), in roster order."
+  (delq nil
+        (mapcar (lambda (o) (dsh-emacs-render--aget "label" o))
+                (dsh-emacs--sequence-list
+                 (dsh-emacs-render--aget "options" question)))))
+
+(defun dsh-emacs--question-candidates (labels type-option)
+  "Completion candidates for one question: each LABEL prefixed with its
+1-based index (\"1. label\" — type the number to jump to it), then the
+raw TYPE-OPTION as the LAST entry.
+The returned candidate keeps the number; the answer must go through
+`dsh-emacs--question-picked-label' to recover the bare label."
+  (append (cl-loop for l in labels for n from 1
+                   collect (format "%d. %s" n l))
+          (list type-option)))
+
+(defun dsh-emacs--question-picked-label (picked)
+  "The bare option label of a PICKED candidate (strip the leading
+\"N. \" index); the `Type answer…' sentinel passes through unchanged."
+  (if (string-match "\\`[0-9]+\\. \\(.*\\)\\'" picked)
+      (match-string 1 picked)
+    picked))
+
+(defun dsh-emacs--question-setup-hook ()
+  "Tame completion sorting in the question chooser's minibuffer: the
+roster order stays put (numbered labels, `Type answer…' pinned last)
+and the first option is preselected.  Returns nil explicitly — the
+Emacs 31 `minibuffer-with-setup-hook' would funcall the setup value."
+  (when (boundp 'vertico-sort-function)
+    (setq-local vertico-sort-function nil))
+  (when (boundp 'vertico-sort-override-function)
+    (setq-local vertico-sort-override-function nil))
+  (when (boundp 'vertico-preselect)
+    (setq-local vertico-preselect 'first))
+  nil)
+
+(defun dsh-emacs--question-choice (question &optional index total session-id)
+  "Read ONE answer to QUESTION in the minibuffer and return it as an
+answer alist ((id . ID) (selected . LABELS) [custom . TEXT]).
+The options are the completion candidates, shown numbered (\"1. label\")
+with `Type answer…' pinned LAST (completion sorting is disabled); a
+single-select picks one option, multi-select uses
+`completing-read-multiple', and the trailing `Type answer…' candidate
+reads free text as the `custom' answer — an EMPTY free-text input goes
+BACK to the options instead (re-reads the whole choice).  Questions
+without options read free text directly, where an empty input returns
+nil (the caller aborts the frame — there is no option list to go back
+to).  INDEX/TOTAL (when given) prefix each prompt as \"Question INDEX/
+TOTAL\" so a multi-question frame stays oriented; SESSION-ID (when
+given) prefixes the owning session's label (\[dsh-<title>\]), so with
+several sessions open the user can tell which conversation is asking.
+`selected' is always present and JSON-encodes as an array (empty for
+custom-only answers — the host schema requires the field).  Labels are
+compared with `equal' (fresh strings are never `eq'); C-g aborts the
+whole frame."
+  (let* ((id (dsh-emacs-render--aget "id" question))
+         (text (or (dsh-emacs-render--aget "question" question)
+                   "Question"))
+         (where (concat
+                 (if (and session-id (not (string-empty-p session-id)))
+                     (format "[%s] "
+                             (dsh-emacs--question-session-label
+                              session-id))
+                   "")
+                 (if index (format "Question %d/%d — " index total) "")))
+         (multi (eq t (dsh-emacs-render--aget "multiSelect" question)))
+         (labels (dsh-emacs--question-option-labels question))
+         (type-option "Type answer…")
+         (free-prompt (format "%s%s (free text, empty input = back to options): "
+                              where text)))
+    (cond
+     ((null labels)
+      (let ((custom (read-string (format "%s%s: " where text))))
+        (and (not (string-empty-p custom))
+             `((id . ,id) (selected . []) (custom . ,custom)))))
+     (multi
+      (catch 'back
+        (while t
+          (let* ((picked
+                  (minibuffer-with-setup-hook
+                      (lambda () (dsh-emacs--question-setup-hook))
+                    (completing-read-multiple
+                     (format "%s%s (comma-separated choices): " where text)
+                     (dsh-emacs--question-candidates labels type-option)
+                     nil t)))
+                 (custom-p (cl-member type-option picked :test #'equal))
+                 (custom (and custom-p (read-string free-prompt)))
+                 (selected (mapcar #'dsh-emacs--question-picked-label
+                                   (cl-remove type-option picked :test #'equal))))
+            (if (and custom-p (string-empty-p custom))
+                (message "Empty answer — back to the options")   ; 循环返回选项
+              (throw 'back
+                (append `((id . ,id) (selected . ,(or selected [])))
+                        (and custom (not (string-empty-p custom))
+                             `((custom . ,custom))))))))))
+     (t
+      (catch 'back
+        (while t
+          (let ((picked
+                 (minibuffer-with-setup-hook
+                     (lambda () (dsh-emacs--question-setup-hook))
+                   (completing-read
+                    (format "%s%s: " where text)
+                    (dsh-emacs--question-candidates labels type-option)
+                    nil t nil nil nil))))
+            (if (equal picked type-option)
+                (let ((custom (read-string free-prompt)))
+                  (if (string-empty-p custom)
+                      (message "Empty answer — back to the options")
+                    (throw 'back
+                           `((id . ,id) (selected . [])
+                             (custom . ,custom)))))
+              (throw 'back
+                     `((id . ,id)
+                       (selected . (,(dsh-emacs--question-picked-label
+                                      picked)))))))))))))
+
+(defun dsh-emacs--collect-question-answers (questions &optional session-id)
+  "Answer QUESTIONS one at a time from the minibuffer: each question's
+options are the completion candidates (`dsh-emacs--question-choice',
+with its INDEX/TOTAL in the prompt), in frame order.  SESSION-ID (when
+given) labels every prompt with the owning session.  Returns the answer
+alists in frame order, or nil when the user aborted (C-g or an empty
+custom-only answer) — the caller then skips the respond."
+  (let ((total (length questions))
+        (answers nil)
+        (n 0))
+    (catch 'abort
+      (dolist (q questions)
+        (setq n (1+ n))
+        (let ((answer (dsh-emacs--question-choice q n total session-id)))
+          (if (null answer) (throw 'abort nil)
+            (push answer answers))))
+      (reverse answers))))
+
+(defun dsh-emacs--question-requested (chat rpc-id session-id questions)
+  "Queue a `question/requested' frame for SESSION-ID in CHAT and answer it.
+The minibuffer is one global resource: with several chat buffers open, a
+mux filter can deliver the next question while the previous frame is
+still being answered interactively.  Nested `completing-read' calls
+would stack different sessions' prompts inside the same minibuffer, so
+frames are queued (FIFO) and drained one at a time by
+`dsh-emacs--question-drain'; each prompt carries the owning session's
+label (see `dsh-emacs--question-session-label').  All questions of the
+frame are then read one after another (options as completion candidates
+plus a \"Type answer…\" free-text choice) and answered with a single
+client-response echoing RPC-ID on POST /api/respond.  C-g aborts the
+frame without responding (the host keeps the question pending until the
+turn is interrupted); the quit is caught here, so it cannot leak out of
+the process filter as \"error in process filter: Quit\"."
+  (setq dsh-emacs--question-queue
+        (nconc dsh-emacs--question-queue
+               (list (list chat rpc-id session-id questions))))
+  (dsh-emacs--question-drain))
+
 (provide 'dsh-emacs)
 
 ;;; dsh-emacs.el ends here

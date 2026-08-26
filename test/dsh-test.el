@@ -3514,6 +3514,398 @@ so the code under test can read fields through the protocol accessors."
     (when (buffer-live-p buf) (kill-buffer buf))))
 
 
+;; --- 测试 81: 用户提问（question/requested）minibuffer 选择与应答 ---
+;; dsh 的 `ask' 工具经 mux 流推 question/requested（server-request，稳定
+;; rpcId）：每帧逐题在 minibuffer 选择 — 选项为 completion 候选（单选
+;; 一个 / 多选多个），末尾附「Type answer…」输入自定义文本；全部答完
+;; 一次性 client-response 回 POST /api/respond。selected 恒为数组
+;; （custom-only 时为 []），标签比较用 equal。minibuffer 是全局唯一资源：
+;; 多个会话并发提问时帧进 FIFO 队列串行应答，提示语带所属会话标识。
+
+;; 1) respond 信封：client-response + 回声 rpcId + result.value
+(when (string= (concat "{\"type\":\"client-response\","
+                       "\"rpcId\":\"rpc-1\","
+                       "\"result\":{\"ok\":true,\"value\":"
+                       "{\"sessionId\":\"s1\","
+                       "\"answer\":{\"answers\":"
+                       "[{\"id\":\"q1\",\"selected\":[\"Yes\"]}]}}}}")
+               (dsh-emacs--respond-envelope-json
+                "rpc-1"
+                '((sessionId . "s1")
+                  (answer . ((answers .
+                              (((id . "q1") (selected "Yes")))))))))
+  (dsh-test-pass "respond-envelope-json-client-response"))
+
+;; 2) 候选构建：选项带序号（输入数字跳选），Type answer… 恒垫底
+(when (equal '("1. Yes" "2. No" "Type answer…")
+             (dsh-emacs--question-candidates
+              '("Yes" "No") "Type answer…"))
+  (dsh-test-pass "question-candidates-numbered-type-answer-last"))
+
+(when (and (equal "Yes" (dsh-emacs--question-picked-label "1. Yes"))
+           (equal "Type answer…"
+                  (dsh-emacs--question-picked-label "Type answer…")))
+  (dsh-test-pass "question-picked-label-strips-number"))
+
+;; 会话标识：优先用活跃聊天缓冲的名字；无缓冲回退到 dsh: <id> 并截断；
+;; 无 session-id 时为空（直接调用测试不加前缀）
+(let ((buf (get-buffer-create " *dsh-test-label-buf*")))
+  (unwind-protect
+      (progn
+        (when (equal " *dsh-test-label-buf*"
+                     (let ((dsh-emacs--chat-buffers
+                            (make-hash-table :test 'equal)))
+                       (puthash "sess-l" buf dsh-emacs--chat-buffers)
+                       (dsh-emacs--question-session-label "sess-l")))
+          (dsh-test-pass "question-session-label-uses-chat-buffer-name"))
+        (when (equal (concat "dsh: " (make-string 32 ?x) "…")
+                     (let ((dsh-emacs--chat-buffers
+                            (make-hash-table :test 'equal))
+                           (dsh-emacs--sessions nil))
+                       (dsh-emacs--question-session-label
+                        (make-string 50 ?x))))
+          (dsh-test-pass "question-session-label-truncates-long"))
+        (when (equal ""
+                     (let ((dsh-emacs--chat-buffers
+                            (make-hash-table :test 'equal)))
+                       (dsh-emacs--question-session-label nil)))
+          (dsh-test-pass "question-session-label-nil-id-empty")))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; 3) minibuffer 选择 → answer 映射
+(when (equal '((id . "q1") (selected "Yes"))
+             (cl-letf (((symbol-function 'completing-read)
+                        (lambda (&rest _) "1. Yes")))
+               (dsh-emacs--question-choice
+                '((id . "q1") (question . "Proceed?")
+                  (options . (((label . "Yes")) ((label . "No"))))))))
+  (dsh-test-pass "question-choice-single-label"))
+
+(when (equal '((id . "q1") (selected . []) (custom . "my note"))
+             (cl-letf (((symbol-function 'completing-read)
+                        (lambda (&rest _) "Type answer…"))
+                       ((symbol-function 'read-string)
+                        (lambda (&rest _) "my note")))
+               (dsh-emacs--question-choice
+                '((id . "q1") (question . "Proceed?")
+                  (options . (((label . "Yes")) ((label . "No"))))))))
+  (dsh-test-pass "question-choice-single-type-answer"))
+
+(when (equal '((id . "q2") (selected "A" "B"))
+             (cl-letf (((symbol-function 'completing-read-multiple)
+                        (lambda (&rest _) '("1. A" "2. B")))
+                       ((symbol-function 'read-string)
+                        (lambda (&rest _) "x")))
+               (dsh-emacs--question-choice
+                '((id . "q2") (question . "Pick?") (multiSelect . t)
+                  (options . (((label . "A")) ((label . "B"))
+                              ((label . "C"))))))))
+  (dsh-test-pass "question-choice-multi-labels"))
+
+(when (equal '((id . "q2") (selected "A") (custom . "extra"))
+             (cl-letf (((symbol-function 'completing-read-multiple)
+                        (lambda (&rest _) '("1. A" "Type answer…")))
+                       ((symbol-function 'read-string)
+                        (lambda (&rest _) "extra")))
+               (dsh-emacs--question-choice
+                '((id . "q2") (question . "Pick?") (multiSelect . t)
+                  (options . (((label . "A")) ((label . "B"))))))))
+  (dsh-test-pass "question-choice-multi-with-type-answer"))
+
+(when (equal '((id . "q3") (selected . []) (custom . "free text"))
+             (cl-letf (((symbol-function 'read-string)
+                        (lambda (&rest _) "free text")))
+               (dsh-emacs--question-choice
+                '((id . "q3") (question . "Say?")))))
+  (dsh-test-pass "question-choice-no-options-custom"))
+
+;; 无选项 + 空输入 → nil（无选项可回退，整体取消）
+(when (null (cl-letf (((symbol-function 'read-string)
+                       (lambda (&rest _) "")))
+              (dsh-emacs--question-choice
+               '((id . "q3") (question . "Say?")))))
+  (dsh-test-pass "question-choice-no-options-empty-aborts"))
+
+;; Type answer… 空输入 → 回到选项（再轮选择）
+(let ((reads '("Type answer…" "1. Yes")))
+  (when (equal '((id . "q1") (selected "Yes"))
+               (cl-letf (((symbol-function 'completing-read)
+                          (lambda (&rest _)
+                            (if reads (pop reads) "1. Yes")))
+                         ((symbol-function 'read-string)
+                          (lambda (&rest _) "")))
+                 (dsh-emacs--question-choice
+                  '((id . "q1") (question . "Proceed?")
+                    (options . (((label . "Yes")) ((label . "No"))))))))
+    (dsh-test-pass "question-choice-type-answer-empty-backs-to-options")))
+
+;; 多选同规则：Type answer… 空输入 → 回到多选
+(let ((reads '(("Type answer…") ("1. A"))))
+  (when (equal '((id . "q2") (selected "A"))
+               (cl-letf (((symbol-function 'completing-read-multiple)
+                          (lambda (&rest _)
+                            (if reads (pop reads) '("1. A"))))
+                         ((symbol-function 'read-string)
+                          (lambda (&rest _) "")))
+                 (dsh-emacs--question-choice
+                  '((id . "q2") (question . "Pick?") (multiSelect . t)
+                    (options . (((label . "A")) ((label . "B"))))))))
+    (dsh-test-pass "question-choice-multi-type-answer-empty-backs")))
+
+;; 3b) 帧分发：question/requested → minibuffer 应答（不渲染任何卡片）
+;; （单题；mux 重放时 history 加载中也应答）
+(let* ((chat (get-buffer-create " *dsh-test-question*"))
+       (responds nil))
+  (unwind-protect
+      (progn
+        (with-current-buffer chat
+          (setq-local dsh-emacs--buffer-session "sess-q"))
+        (cl-letf (((symbol-function 'dsh-emacs-events--chat)
+                   (lambda (_p) chat))
+                  ((symbol-function 'dsh-emacs--rpc-respond-async)
+                   (lambda (rpc-id payload cb)
+                     (push (list rpc-id payload) responds)
+                     (funcall cb t nil)))
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _) "Yes")))
+          (dsh-emacs-events--dispatch-json
+           'process
+           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-q\","
+                   "\"method\":\"question/requested\","
+                   "\"payload\":{\"type\":\"question/requested\","
+                   "\"sessionId\":\"sess-q\","
+                   "\"questions\":[{\"id\":\"q1\","
+                   "\"question\":\"Proceed?\","
+                   "\"options\":[{\"label\":\"Yes\"},"
+                   "{\"label\":\"No\"}]}]}}"))
+          (let ((r (car responds)))
+            (when (and (equal "rpc-q" (car r))
+                       (equal '((sessionId . "sess-q")
+                                (answer . ((answers .
+                                            (((id . "q1")
+                                              (selected "Yes")))))))
+                             (cadr r)))
+              (dsh-test-pass "question-frame-responds-echoing-rpc-id")))
+          ;; 不再插入选项卡：应答后缓冲内容没有任何问题卡片
+          (let ((text (with-current-buffer chat (buffer-string))))
+            (when (not (string-match-p "❓ Question" text))
+              (dsh-test-pass "question-frame-inserts-no-card")))))
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
+;; 4) 多问题帧：顺序渲染 + 逐题 minibuffer 选择，答完只 respond 一次
+(let* ((chat (get-buffer-create " *dsh-test-question-multi*"))
+       (responds nil)
+       (queue '("Yes" "X")))
+  (unwind-protect
+      (progn
+        (with-current-buffer chat
+          (setq-local dsh-emacs--buffer-session "sess-m"))
+        (cl-letf (((symbol-function 'dsh-emacs-events--chat)
+                   (lambda (_p) chat))
+                  ((symbol-function 'dsh-emacs--rpc-respond-async)
+                   (lambda (rpc-id payload cb)
+                     (push (list rpc-id payload) responds)
+                     (funcall cb t nil)))
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _)
+                     (if queue (pop queue) "Yes")))
+                  ((symbol-function 'completing-read-multiple)
+                   (lambda (&rest _) '("X"))))
+          (dsh-emacs-events--dispatch-json
+           'process
+           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-m\","
+                   "\"method\":\"question/requested\","
+                   "\"payload\":{\"type\":\"question/requested\","
+                   "\"sessionId\":\"sess-m\","
+                   "\"questions\":[{\"id\":\"q1\","
+                   "\"question\":\"One?\","
+                   "\"options\":[{\"label\":\"Yes\"},"
+                   "{\"label\":\"No\"}]},"
+                   "{\"id\":\"q2\",\"question\":\"Two?\","
+                   "\"multiSelect\":true,"
+                   "\"options\":[{\"label\":\"X\"},"
+                   "{\"label\":\"Y\"}]}]}}"))
+          (let ((r (car responds)))
+            (when (and (equal "rpc-m" (car r))
+                       (equal '((sessionId . "sess-m")
+                                (answer . ((answers .
+                                            (((id . "q1")
+                                              (selected "Yes"))
+                                             ((id . "q2")
+                                              (selected "X")))))))
+                             (cadr r)))
+              (dsh-test-pass "question-multi-answers-sequential-in-order")))
+          ;; 仍然不插入任何卡片（纯 minibuffer 回答）
+          (let ((text (with-current-buffer chat (buffer-string))))
+            (when (not (string-match-p "❓ Question" text))
+              (dsh-test-pass "question-multi-inserts-no-card")))))
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
+;; 5) 帧分发：C-g 取消 → 不应答（问题留给 host）
+(let* ((chat (get-buffer-create " *dsh-test-question-cg*"))
+       (responds nil))
+  (unwind-protect
+      (progn
+        (with-current-buffer chat
+          (setq-local dsh-emacs--buffer-session "sess-qc"))
+        (cl-letf (((symbol-function 'dsh-emacs-events--chat)
+                   (lambda (_p) chat))
+                  ((symbol-function 'dsh-emacs--rpc-respond-async)
+                   (lambda (&rest _) (push t responds)))
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _) (signal 'quit nil))))
+          (dsh-emacs-events--dispatch-json
+           'process
+           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-qc\","
+                   "\"method\":\"question/requested\","
+                   "\"payload\":{\"type\":\"question/requested\","
+                   "\"sessionId\":\"sess-qc\","
+                   "\"questions\":[{\"id\":\"q1\","
+                   "\"question\":\"Proceed?\","
+                   "\"options\":[{\"label\":\"Yes\"}]}]}}"))
+          (when (null responds)
+            (dsh-test-pass "question-frame-c-g-aborts-without-respond"))))
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
+;; 6) 帧分发：history 加载中也要应答（mux 重放的 pending 问题在打开时到达）
+(let* ((chat (get-buffer-create " *dsh-test-question-load*"))
+       (responds nil))
+  (unwind-protect
+      (progn
+        (with-current-buffer chat
+          (setq-local dsh-emacs--buffer-session "sess-ql")
+          (setq-local dsh-emacs--event-history-loading t))
+        (cl-letf (((symbol-function 'dsh-emacs-events--chat)
+                   (lambda (_p) chat))
+                  ((symbol-function 'dsh-emacs--rpc-respond-async)
+                   (lambda (rpc-id payload cb)
+                     (push rpc-id responds)
+                     (funcall cb t nil)))
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _) "Yes")))
+          (dsh-emacs-events--dispatch-json
+           'process
+           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-ql\","
+                   "\"method\":\"question/requested\","
+                   "\"payload\":{\"type\":\"question/requested\","
+                   "\"sessionId\":\"sess-ql\","
+                   "\"questions\":[{\"id\":\"q1\","
+                   "\"question\":\"Proceed?\","
+                   "\"options\":[{\"label\":\"Yes\"}]}]}}"))
+          (when (equal '("rpc-ql") responds)
+            (dsh-test-pass "question-frame-during-history-load-answered"))))
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
+;; 7) 非本会话问题、question/resolved、approval/requested → 忽略
+(let* ((chat (get-buffer-create " *dsh-test-question-other*"))
+       (responds nil))
+  (unwind-protect
+      (progn
+        (with-current-buffer chat
+          (setq-local dsh-emacs--buffer-session "mine"))
+        (cl-letf (((symbol-function 'dsh-emacs-events--chat)
+                   (lambda (_p) chat))
+                  ((symbol-function 'dsh-emacs--rpc-respond-async)
+                   (lambda (&rest _) (push t responds)))
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _) "Yes")))
+          ;; 另一会话的问题帧 → 忽略
+          (dsh-emacs-events--dispatch-json
+           'process
+           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-o\","
+                   "\"method\":\"question/requested\","
+                   "\"payload\":{\"type\":\"question/requested\","
+                   "\"sessionId\":\"other-session\","
+                   "\"questions\":[{\"id\":\"q1\","
+                   "\"question\":\"Proceed?\","
+                   "\"options\":[{\"label\":\"Yes\"}]}]}}"))
+          ;; question/resolved（纯推送）→ 忽略
+          (dsh-emacs-events--dispatch-json
+           'process
+           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-r\","
+                   "\"method\":\"question/resolved\","
+                   "\"payload\":{\"type\":\"question/resolved\","
+                   "\"sessionId\":\"mine\","
+                   "\"questionRpcId\":\"rpc-q\",\"outcome\":\"answered\"}}"))
+          ;; approval/requested → 忽略
+          (dsh-emacs-events--dispatch-json
+           'process
+           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-a\","
+                   "\"method\":\"approval/requested\","
+                   "\"payload\":{\"type\":\"approval/requested\","
+                   "\"sessionId\":\"mine\",\"approvalId\":\"a1\","
+                   "\"toolName\":\"bash\"}}"))
+          (when (null responds)
+            (dsh-test-pass "question-other-session-and-pushes-ignored"))))
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
+;; 8) 多会话并发提问：minibuffer 是全局唯一资源，回答一帧的途中到达的
+;;    其它会话帧必须排队（FIFO）串行应答，提示语还要带所属会话标识
+(let* ((chat-a (get-buffer-create " *dsh-test-question-a*"))
+       (chat-b (get-buffer-create " *dsh-test-question-b*"))
+       (responds nil)
+       (prompts nil)
+       (b-pushed nil))
+  (unwind-protect
+      (let ((dsh-emacs--sessions nil)
+            (dsh-emacs--chat-buffers (make-hash-table :test 'equal)))
+        (setq dsh-emacs--question-queue nil
+              dsh-emacs--question-active nil)
+        (with-current-buffer chat-a
+          (setq-local dsh-emacs--buffer-session "sess-a"))
+        (with-current-buffer chat-b
+          (setq-local dsh-emacs--buffer-session "sess-b"))
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-respond-async)
+                   (lambda (rpc-id payload cb)
+                     (push (list rpc-id payload) responds)
+                     (funcall cb t nil)))
+                  ((symbol-function 'completing-read)
+                   (lambda (prompt &rest _)
+                     (push prompt prompts)
+                     ;; A 的 minibuffer 等待期间，B 会话的问题帧到达：
+                     ;; 必须排队，而不是在同一 minibuffer 里嵌套提示
+                     (unless b-pushed
+                       (setq b-pushed t)
+                       (dsh-emacs--question-requested
+                        chat-b "rpc-b" "sess-b"
+                        '(("id" . "qb") ("question" . "B asks?")
+                          ("options" . ((("label" . "Only")))))))
+                     "Yes")))
+          ;; 先来 A 帧（空闲 → 直接进入回答槽）；A 回答途中 B 帧排队
+          (dsh-emacs--question-requested
+           chat-a "rpc-a" "sess-a"
+           '(("id" . "qa") ("question" . "A asks?")
+             ("options" . ((("label" . "Yes"))))))
+          ;; A 答完后 B 排进同一回答槽继续答；respond 与到达顺序一致
+          (let ((r2 (nth 1 (pop responds)))
+                (r1 (nth 1 (pop responds))))
+            (when (equal '((sessionId . "sess-a")
+                           (answer . ((answers .
+                                       (((id . "qa")
+                                         (selected "Yes")))))))
+                         r1)
+              (dsh-test-pass "question-queue-serial-first"))
+            (when (equal '((sessionId . "sess-b")
+                           (answer . ((answers .
+                                       (((id . "qb")
+                                         (selected "Yes")))))))
+                         r2)
+              (dsh-test-pass "question-queue-serial-second")))
+          ;; 每个提示语都标出所属会话
+          (when (and (cl-some (lambda (p)
+                                (string-match-p "\\[dsh: sess-a\\]" p))
+                              prompts)
+                     (cl-some (lambda (p)
+                                (string-match-p "\\[dsh: sess-b\\]" p))
+                              prompts))
+            (dsh-test-pass "question-prompt-carries-session-label"))
+          ;; 回答结束后回答槽与队列都清空（不泄漏到后续测试）
+          (when (and (null dsh-emacs--question-active)
+                     (null dsh-emacs--question-queue))
+            (dsh-test-pass "question-queue-drained-clean"))))
+    (when (buffer-live-p chat-a) (kill-buffer chat-a))
+    (when (buffer-live-p chat-b) (kill-buffer chat-b))))
+
 (princ "\n===== 测试总结 =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))
       (fail (cl-count-if (lambda (r) (not (cdr r))) dsh-test-results)))
