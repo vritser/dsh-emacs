@@ -3045,6 +3045,167 @@ so the code under test can read fields through the protocol accessors."
     (kill-buffer buf-a)
     (kill-buffer buf-b)))
 
+;; --- 测试 71: 纯函数覆盖补强（markdown 表格 / render-trim / tokens / http 提示） ---
+;; 覆盖报告 (scripts/check-coverage.el) 暴露的纯逻辑盲区：markdown 表格分配、
+;; 显示宽度、最长词、render--trim 边界、format-cost 分支、usage-p、http-error-hint。
+(let ((pass-n 0))
+  ;; markdown 表格：宽度分配（有富余则原样）
+  (when (equal '(5 5) (dsh-emacs-markdown--table-allocate-widths '(5 5) '(2 2) 18))
+    (dsh-test-pass "table-allocate-keeps-when-no-shrink"))
+  ;; 需要压缩时按可缩减比例分配，且不低于 min-widths
+  (when (equal '(3 3 3) (dsh-emacs-markdown--table-allocate-widths '(10 10 10) '(3 3 3) 20))
+    (dsh-test-pass "table-allocate-shrinks-to-fit"))
+  ;; 可缩减量为 0 时直接返回 min-widths
+  (when (equal '(10 3) (dsh-emacs-markdown--table-allocate-widths '(10 3) '(10 3) 10))
+    (dsh-test-pass "table-allocate-min-bound"))
+  ;; 总宽度 = 每列 + 3（两侧 padding + 分隔 pipe），外加前导 pipe
+  (when (= 15 (dsh-emacs-markdown--table-total-width '(4 4)))
+    (dsh-test-pass "table-total-width-counts-borders"))
+  ;; 最长词（无窗口走 string-width 路径）
+  (when (= 9 (dsh-emacs-markdown--table-longest-word :str "alpha beta-long gamma"))
+    (dsh-test-pass "table-longest-word-ascii"))
+  ;; 空字符串最长词 = 0
+  (when (= 0 (dsh-emacs-markdown--table-longest-word :str ""))
+    (dsh-test-pass "table-longest-word-empty"))
+  ;; 显示宽度：ASCII 走 string-width；中文按字符计数
+  (when (and (= 7 (dsh-emacs-markdown--table-display-width :str "abc def"))
+             (= 8 (dsh-emacs-markdown--table-display-width :str "中文测试")))
+    (dsh-test-pass "table-display-width-char-count"))
+  ;; render--trim：折叠空白 + 截断加省略号
+  (when (equal "hello …" (dsh-emacs-render--trim "  hello   world  " 6))
+    (dsh-test-pass "render-trim-folds-and-ellipsizes"))
+  ;; render--trim：多行/制表符折叠
+  (when (equal "…" (dsh-emacs-render--trim "a\nb\tc" 0))
+    (dsh-test-pass "render-trim-folds-newlines"))
+  ;; format-cost 各分支
+  (when (and (equal "$0.000" (dsh-emacs-format-cost nil))
+             (equal "<$0.001" (dsh-emacs-format-cost 0.0005))
+             (equal "$0.000" (dsh-emacs-format-cost "x"))
+             (equal "$1.234" (dsh-emacs-format-cost 1.234)))
+    (dsh-test-pass "format-cost-branches"))
+  ;; usage-p：合法 plist 判定（返回 truthy），非 plist 为 nil
+  (when (and (dsh-emacs-usage-p '(:input 1 :output 2))
+             (null (dsh-emacs-usage-p '(a b))))
+    (dsh-test-pass "usage-p-detects-plist"))
+  ;; http-error-hint：4xx/5xx 提示 RPC 不存在，其它 code 短格式，非错误为空
+  (when (and (string-match-p "HTTP 404" (dsh-emacs--http-error-hint '(error http 404)))
+             (string-match-p "HTTP 500" (dsh-emacs--http-error-hint '(error http 500)))
+             (equal " (HTTP 302)" (dsh-emacs--http-error-hint '(error http 302)))
+             (equal "" (dsh-emacs--http-error-hint nil)))
+    (dsh-test-pass "http-error-hint-branches"))
+  pass-n)
+
+;; --- 测试 72: markdown 解析层纯函数补强（覆盖报告 A 类盲区） ---
+;; 目标: deconstruct / highlight-code / table-min-widths / shorten-cwd /
+;; insert-read-only / resolve-image-url / parse-local-link（需临时文件）。
+(let ((tmpdir (make-temp-file "dsh-cov" t)))
+  (unwind-protect
+      (progn
+        ;; markdown--deconstruct: face 连续段拆分
+        (when (equal '(("my" (dsh-emacs-markdown-italic))
+                       (" " nil)
+                       ("text" (dsh-emacs-markdown-bold)))
+                     (dsh-emacs-markdown--deconstruct
+                      (dsh-emacs-markdown-convert "_my_ **text**")))
+          (dsh-test-pass "markdown-deconstruct-splits-face-runs"))
+        ;; highlight-code: 真实模式（elisp）font-lock 加 face，未知语言原样
+        (let ((hl (dsh-emacs-markdown--highlight-code "(defun f () 1)" "elisp")))
+          (when (and (string= hl "(defun f () 1)")
+                     (get-text-property 1 'face hl))
+            (dsh-test-pass "markdown-highlight-elisp-applies-face")))
+        (when (equal "abc" (dsh-emacs-markdown--highlight-code "abc" "nolangxyz"))
+          (dsh-test-pass "markdown-highlight-unknown-lang-pass-through"))
+        ;; table-min-widths: 每列最长词
+        (when (equal '(6 3)
+                     (dsh-emacs-markdown--table-min-widths
+                      :processed-rows '(("hdr" "a b" "ccc")
+                                        ("row" "longer" "dd"))))
+          (dsh-test-pass "markdown-table-min-widths-longest-word"))
+        ;; shorten-cwd: home 前缀 → ~，深路径 → ../尾两段
+        (when (equal "~/src/foo"
+                     (dsh-emacs-session--shorten-cwd
+                      (format "%s/src/foo" (expand-file-name "~"))))
+          (dsh-test-pass "shorten-cwd-home-prefix"))
+        (when (equal "../d/e" (dsh-emacs-session--shorten-cwd "/a/b/c/d/e"))
+          (dsh-test-pass "shorten-cwd-deep-path"))
+        ;; insert-read-only: 文本带 read-only + face 属性
+        (with-temp-buffer
+          (dsh-emacs-render--insert-read-only "hi" 'dsh-emacs-test-face)
+          (when (and (equal t (get-text-property 1 'read-only))
+                     (eq 'dsh-emacs-test-face (get-text-property 1 'face)))
+            (dsh-test-pass "render-insert-read-only-props")))
+        ;; resolve-image-url: 本地文件各形态，不存在返回 nil
+        (let ((f (expand-file-name "img.png" tmpdir)))
+          (with-temp-file f)
+          (when (equal f (dsh-emacs-markdown--resolve-image-url
+                          (concat "file://" f)))
+            (dsh-test-pass "resolve-image-url-file-uri"))
+          (when (equal f (dsh-emacs-markdown--resolve-image-url f))
+            (dsh-test-pass "resolve-image-url-absolute"))
+          (when (null (dsh-emacs-markdown--resolve-image-url
+                       (concat tmpdir "/missing.png")))
+            (dsh-test-pass "resolve-image-url-missing-nil")))
+        ;; parse-local-link: file:// URI、file: 前缀、相对路径 + 行号，非本地 nil
+        (let ((f (expand-file-name "foo.el" tmpdir)))
+          (with-temp-file f)
+          (let ((parsed (dsh-emacs-markdown--parse-local-link
+                         (concat f "#L10"))))
+            (when (and (equal (expand-file-name f) (car parsed))
+                       (equal 10 (cdr parsed)))
+              (dsh-test-pass "parse-local-link-hash-line")))
+          (let ((parsed (dsh-emacs-markdown--parse-local-link
+                         (concat "file://" f ":5"))))
+            (when (and (equal (expand-file-name f) (car parsed))
+                       (equal 5 (cdr parsed)))
+              (dsh-test-pass "parse-local-link-file-colon")))
+          (when (null (dsh-emacs-markdown--parse-local-link
+                       "https://example.com/path"))
+            (dsh-test-pass "parse-local-link-remote-nil"))))
+    (delete-directory tmpdir t)))
+
+;; --- 测试 73: footer 系列纯逻辑补强（shorten-cwd / branch 缓存） ---
+;; footer--shorten-cwd 的 ~ 前缀、非 home 路径原样；cached-branch 的新鲜度
+;; 逻辑（缓存期内仍旧值、过期后重查）。detect-branch 走真实 git，
+;; 此处 mock 它以锁定其余分支。
+(let ((old-cache dsh-emacs--footer-branch-cache))
+  (unwind-protect
+      (progn
+        ;; shorten-cwd: home 前缀截为 ~ 前缀（截掉 home-dir 剩相对段）
+        (when (equal (format "~%s" "proj")
+                     (dsh-emacs-footer--shorten-cwd
+                      (format "%s/proj" (getenv "HOME"))))
+          (dsh-test-pass "footer-shorten-cwd-home-prefix"))
+        (when (equal "/opt/app" (dsh-emacs-footer--shorten-cwd "/opt/app"))
+          (dsh-test-pass "footer-shorten-cwd-non-home"))
+        ;; cached-branch: 缓存新鲜时保持旧值（即使 mock 已换）
+        (setq dsh-emacs--footer-branch-cache nil)
+        (cl-letf (((symbol-function 'dsh-emacs-footer--detect-branch)
+                   (lambda () "feature/x"))
+                  (dsh-emacs-footer-branch-refresh-interval 60))
+          (let ((b1 (dsh-emacs-footer--cached-branch)))
+            (cl-letf (((symbol-function 'dsh-emacs-footer--detect-branch)
+                       (lambda () "other")))
+              (let ((b2 (dsh-emacs-footer--cached-branch)))
+                (when (and (equal "feature/x" b1)
+                           (equal "feature/x" b2))
+                  (dsh-test-pass "footer-cached-branch-fresh-keeps-value"))
+                ;; 缓存过期 → 重查新值
+                (setf (cdr dsh-emacs--footer-branch-cache)
+                      (- (float-time) 999))
+                (when (equal "other" (dsh-emacs-footer--cached-branch))
+                  (dsh-test-pass "footer-cached-branch-stale-refetches"))))))
+        ;; segment-branch: 有分支渲染括号包裹
+        (let ((dsh-emacs--footer-branch "main"))
+          (let ((seg (dsh-emacs-footer--segment-branch)))
+            (when (string-match-p "main" seg)
+              (dsh-test-pass "footer-segment-branch-renders"))))
+        ;; segment-cwd: propertize face
+        (let ((seg (dsh-emacs-footer--segment-cwd)))
+          (when (get-text-property 0 'face seg)
+            (dsh-test-pass "footer-segment-cwd-face"))))
+    (setq dsh-emacs--footer-branch-cache old-cache)))
+
+
 (princ "\n===== 测试总结 =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))
       (fail (cl-count-if (lambda (r) (not (cdr r))) dsh-test-results)))

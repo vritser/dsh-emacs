@@ -1,51 +1,93 @@
-# AGENTS.md — dsh-emacs 开发规则
+# AGENTS.md — dsh-emacs development rules
 
-## 验证（改完必跑，不得省略）
+## Verification (run after every change — never skip)
 
-- 全量单测：`emacs -Q --batch -l test/dsh-test.el`
-  （当前基准：177 项通过、0 失败）
-- 加载洁癖：`emacs -Q --batch -L . -l dsh-emacs.el` 应无输出退出码 0
-- 函数级复现优先用最小 batch：`emacs -Q --batch -L . --eval '(...)'`
-
-## Elisp 修改纪律
-
-- 理想一次只改一个逻辑块；改完**立即**用上面的命令验证，再改下一处
-- **结构性替换**（增减调用嵌套层数，如 `(cdr (assq 'k v))` → `(accessor v)`）
-  必须核对新旧片段括号净差：新旧各自 net balance 应相等
-  （`(`=+1、`)`=-1，忽略注释与字符串；可用 python 或下方 check 脚本）
-- 连续括号（`))))))))`）禁止肉数；以 **read 级平衡**为准
-  （batch 能无错读完整文件即配平）
-- read 平衡检查（一键，含 11 个文件）：
+- One-shot paren balance check (all 11 files):
   ```sh
   emacs -Q --batch -l scripts/check-lisp.el
-  # 指定单文件：emacs -Q --batch -l scripts/check-lisp.el -- foo.el
-  # 退出码 0 = 全部通过；1 = 存在失败（invalid-read-syntax ")" N 等）
+  # single file: emacs -Q --batch -l scripts/check-lisp.el -- foo.el
+  # exit 0 = all pass; exit 1 = failure (invalid-read-syntax "]" N etc.)
   ```
-- 编译期常见问题（未定义函数/variable、宏滥用）用：
-  `emacs -Q --batch -L . -f batch-byte-compile <file>`（只看 `Error`，`Warning` 可忽略）
+  Full unit tests: `emacs -Q --batch -l test/dsh-test.el`
+- Clean load: `emacs -Q --batch -L . -l dsh-emacs.el` should print nothing and exit 0
+- For function-level repros prefer a minimal batch: `emacs -Q --batch -L . --eval '(...)'`
 
-## 协议层约束
+## Elisp editing discipline
 
-- wire 字段名（`sessionId`、`archivedSessionIds` 等）**只允许**出现在
-  `dsh-emacs-protocol.el` 的 `--from-alist` 中，业务代码一律走 `dsh-protocol-*`
-  访问器
-- 业务函数若需兼容旧测试 fixture，用 `dsh-protocol--struct` 兼容门接受
-  wire alist 或已转换 struct 双形态；wire 数组为 vector，转入 struct 后归一为 list
+- Ideally change one logic block at a time; verify with the commands above
+  immediately after each change, before moving on
+- **Structural rewrites** (changing call nesting depth, e.g.
+  `(cdr (assq 'k v))` → `(accessor v)`) must keep the paren net balance
+  equal between old and new snippets (`(` = +1, `)` = -1, ignoring
+  comments and strings; use check script below)
+- Never count long `)` runs by eye; rely on **read-level balance**
+  (a clean batch read of the full file means it is balanced)
+- One-shot paren balance check (all 11 files):
+  ```sh
+  emacs -Q --batch -l scripts/check-lisp.el
+  # single file: emacs -Q --batch -l scripts/check-lisp.el -- foo.el
+  # exit 0 = all pass; exit 1 = failure (invalid-read-syntax ")" N etc.)
+  ```
+- Compile-time issues (undefined functions/variables, macro misuse):
+  `emacs -Q --batch -L . -f batch-byte-compile <file>`
+  (only look at `Error`; `Warning` can be ignored)
+- Optional coverage report (testcover line/branch coverage, ~1s):
+  `emacs -Q --batch -l scripts/check-coverage.el`
+  prints per-definition coverage and defs below 80%; `dsh-emacs-protocol.el`
+  is excluded (testcover's edebug copy breaks cl-defstruct values)
+
+## Protocol-layer constraint
+
+- Wire field names (`sessionId`, `archivedSessionIds`, …) must appear
+  **only** in the `--from-alist` constructors inside
+  `dsh-emacs-protocol.el`; business code reads through `dsh-protocol-*`
+  accessors exclusively
+- Business functions that must accept legacy test fixtures use the
+  `dsh-protocol--struct` compat gate to take either a wire alist or an
+  already-converted struct; wire arrays are vectors and are normalized to
+  lists inside the structs
 
 ## Commit
 
-- Conventional Commits + 英文单行；双主题用 `;` 分隔
-- 标准类型（Angular 惯例，均可使用）：
-  - `feat:` 新功能 / `fix:` 修复
-  - `docs:` 文档（README/AGENTS/IMPLEMENTATION）
-  - `style:` 格式、`refactor:` 重构（不加功能不修 bug）、`perf:` 性能
-  - `test:` 测试、`build:` 构建、`ci:` CI、`chore:` 杂项、`revert:` 回滚
-- 参考历史：`feat: model picker sticky provider groups; reasoning-effort selection`
+- **Auto-commit is disabled**: only commit when the user explicitly says
+  so; keep changes in the working tree until then. `git add` (staging)
+  without committing is fine when needed.
+- Conventional Commits, English single-line summary; multiple topics
+  separated by `;`
+- Standard types (Angular convention, all usable):
+  - `feat:` new feature / `fix:` bug fix
+  - `docs:` documentation (README/AGENTS/IMPLEMENTATION)
+  - `style:` formatting, `refactor:` (no behavior change), `perf:` perf
+  - `test:` tests, `build:` build, `ci:` CI, `chore:` misc, `revert:` rollback
+- Historical reference: `feat: model picker sticky provider groups; reasoning-effort selection`
 
-## 已知历史坑（勿重复）
+## Known pitfalls (do not repeat)
 
-- `check-parens` 对 test/dsh-test.el 745 行的注释 `;; 2)` 有误报，别拿它当唯一判据
-- 改 select-model-prompt 等大函数时，闭括号层级 = 调用层数；少/多 1 个会让
-  `(quit …)` handler 溢出或整段函数被吞（void-function / void-variable 症状）
-- 测括号用「新旧片段净差」而非肉眼数连串 `)`；balance 相等 ≠ 配平，
-  最终以 read 级检查为准
+- `check-parens` false-positives on the comment line `;; 2)` around line
+  745 of test/dsh-test.el; do not use it as the sole judge
+- When editing big functions like select-model-prompt, the closing paren
+  count equals the call nesting depth; one paren off can leak the
+  `(quit …)` handler into the body or swallow whole functions
+  (symptoms: void-function / void-variable)
+- For parens use the old/new snippet net-balance check, not eye-counting
+  long `)` runs; equal balance is necessary but not sufficient — the
+  read-level check is final
+- When `check-lisp.el` reports FAIL, its `scan-error` message already
+  carries the offending character offset; map it to a line in Emacs
+  instead of re-counting parens by hand or rolling your own counter:
+  ```sh
+  emacs -Q --batch --eval '(
+    with-temp-buffer
+    (insert-file-contents "dsh-emacs.el")
+    (goto-char 36353)              ; ^ offset from the scan-error
+    (princ (format "line %d: %s\n"
+                   (line-number-at-pos)
+                   (buffer-substring (line-beginning-position)
+                                     (line-end-position)))))'
+  ```
+- dsh server RPC names must match the real registry: there is no
+  `session.delete` or `session.update` in dsh 0.1.1-rc.1
+  (`session.rename` and `workspace.archiveSession` are the real ones);
+  HTTP 404 usually means the method does not exist on this server version
+- dsh web visible-session rule (mirror it):
+  `origin !== "subagent" && !archived && (!blank || current)`
