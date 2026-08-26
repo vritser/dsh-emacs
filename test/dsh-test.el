@@ -3206,6 +3206,314 @@ so the code under test can read fields through the protocol accessors."
     (setq dsh-emacs--footer-branch-cache old-cache)))
 
 
+;; --- 测试 74: agentPreset.list 协议结构（新建会话的 thinking preset 候选） ---
+;; wire alist（presets 数组为 vector）→ struct：presets 归一为 list、字段
+;; 全部经访问器读取；broken/缺失字段不破坏转换。
+(let* ((v (dsh-protocol-agent-preset-list--from-alist
+           '((presets . [((id . "standard") (trust . "system")
+                          (isDefault . t) (name . "Standard mode"))
+                         ((id . "broken-agent") (broken . "load failed"))])
+             (authorable . t)
+             (hasDocument . t))))
+       (presets (dsh-protocol-agent-preset-list-presets v))
+       (p0 (car presets))
+       (p1 (cadr presets)))
+  (when (and (dsh-protocol-agent-preset-p p0)
+             (equal "standard" (dsh-protocol-agent-preset-id p0))
+             (equal "system" (dsh-protocol-agent-preset-trust p0))
+             (eq t (dsh-protocol-agent-preset-is-default p0))
+             (equal "Standard mode" (dsh-protocol-agent-preset-name p0))
+             (null (dsh-protocol-agent-preset-broken p0))
+             (equal 2 (length presets))
+             (equal "broken-agent" (dsh-protocol-agent-preset-id p1))
+             (equal "load failed" (dsh-protocol-agent-preset-broken p1))
+             (eq t (dsh-protocol-agent-preset-list-authorable v))
+             (eq t (dsh-protocol-agent-preset-list-has-document v)))
+    (dsh-test-pass "agent-preset-list-protocol-struct")))
+
+;; --- 测试 75: 新建会话 preset 候选表（web 显示名 + 缓存 roster + 内置兜底） ---
+;; 显示名与 web 一致：system 内置 preset 经 web 的内建 key map 取名
+;; （"Standard mode" 等，即使发布了自己的 name 也以 web 名为准）；user
+;; preset 用发布的 name（无则 id）；broken 条目剔除。无缓存 → 四个内置
+;; 的 web 名。
+(let ((old-cache dsh-emacs--agent-presets))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs--agent-presets nil)
+        (when (equal '(("Standard mode" . "standard")
+                       ("Minimal mode" . "minimal")
+                       ("PTC mode" . "code")
+                       ("Creator mode" . "cordis"))
+                     (dsh-emacs--preset-choices))
+          (dsh-test-pass "preset-choices-fallback-builtins"))
+        (setq dsh-emacs--agent-presets
+              (dsh-protocol-agent-preset-list--from-alist
+               '((presets . [((id . "standard") (trust . "system"))
+                             ((id . "minimal") (trust . "system")
+                              (name . "Legacy name"))
+                             ((id . "my-agent") (trust . "user")
+                              (name . "My Agent"))
+                             ((id . "broken-agent") (broken . "x"))]))))
+        (when (equal '(("Standard mode" . "standard")
+                       ("Minimal mode" . "minimal")
+                       ("My Agent" . "my-agent"))
+                     (dsh-emacs--preset-choices))
+          (dsh-test-pass "preset-choices-web-names-and-roster"))
+        ;; display-name 边界：system 未知 id → name ?? id；user 无 name → id
+        (when (and (equal "Future Mode"
+                          (dsh-emacs--preset-display-name
+                           (dsh-protocol-agent-preset--from-alist
+                            '((id . "future") (trust . "system")
+                              (name . "Future Mode")))))
+                   (equal "my-raw"
+                          (dsh-emacs--preset-display-name
+                           (dsh-protocol-agent-preset--from-alist
+                            '((id . "my-raw") (trust . "user"))))))
+          (dsh-test-pass "preset-display-name-falls-back-name-or-id")))
+    (setq dsh-emacs--agent-presets old-cache)))
+
+;; --- 测试 76: preset 预选 id（配置 > roster isDefault > 无） ---
+(let ((old-cache dsh-emacs--agent-presets))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs--agent-presets
+              (dsh-protocol-agent-preset-list--from-alist
+               '((presets . [((id . "standard") (isDefault . t))
+                             ((id . "minimal"))]))))
+        (when (equal "standard" (dsh-emacs--preset-default-id nil))
+          (dsh-test-pass "preset-default-id-roster-is-default"))
+        (when (equal "minimal" (dsh-emacs--preset-default-id "minimal"))
+          (dsh-test-pass "preset-default-id-configured-wins"))
+        (when (equal "standard" (dsh-emacs--preset-default-id "ghost"))
+          (dsh-test-pass "preset-default-id-invalid-config-falls-back")))
+    (setq dsh-emacs--agent-presets old-cache)))
+
+;; --- 测试 77: read-preset 交互读取（候选 + 预选 + host default + C-g） ---
+;; 按显示名选 → 其 id；空 RET 接受预选（模拟 completing-read 返回 DEF）；
+;; 无预选时空 RET → nil（host default，不发送 agentPreset）；C-g 冒泡
+;; 取消整个创建（quit 不被 read-preset 吞掉）。每次读取都会触发一次
+;; agentPreset.list 刷新（rpc-async 被 mock 捕获）。
+(let ((old-cache dsh-emacs--agent-presets)
+      (calls nil))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs--agent-presets
+              (dsh-protocol-agent-preset-list--from-alist
+               '((presets . [((id . "standard") (isDefault . t)
+                              (name . "Standard mode"))
+                             ((id . "minimal") (name . "Minimal mode"))]))))
+        ;; 按显示名选 → 其 id；同时向后端发了一次 roster 刷新
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (&rest _) "Standard mode"))
+                  ((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method _params _cb)
+                     (push method calls))))
+          (when (and (equal "standard" (dsh-emacs--read-preset nil))
+                     (member "agentPreset.list" calls))
+            (dsh-test-pass "read-preset-pick-by-display-name")))
+        ;; 空 RET → 接受预选默认（roster isDefault = standard）
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_prompt _table &optional _pred _req _init _hist
+                                   def _inherit)
+                     (or def "")))
+                  ((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (&rest _) nil)))
+          (when (equal "standard" (dsh-emacs--read-preset nil))
+            (dsh-test-pass "read-preset-empty-ret-accepts-default")))
+        ;; 无 isDefault 且无配置 → 空 RET 返回 nil（host default）
+        (setq dsh-emacs--agent-presets
+              (dsh-protocol-agent-preset-list--from-alist
+               '((presets . [((id . "standard")
+                              (name . "Standard mode"))]))))
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_prompt _table &optional _pred _req _init _hist
+                                   def _inherit)
+                     (or def "")))
+                  ((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (&rest _) nil)))
+          (when (null (dsh-emacs--read-preset nil))
+            (dsh-test-pass "read-preset-no-default-keeps-host-default")))
+        ;; C-g → quit 冒泡到 interactive（不被 read-preset 吞掉）
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (&rest _) (signal 'quit nil)))
+                  ((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (&rest _) nil)))
+          (condition-case err
+              (dsh-emacs--read-preset nil)
+            (quit (dsh-test-pass "read-preset-c-g-aborts-cleanly")))))
+    (setq dsh-emacs--agent-presets old-cache)))
+
+;; --- 测试 78: 新建会话携带 agentPreset ---
+;; 直接调用带 preset → session.create 参数含 agentPreset（cwd / workspaceId
+;; 两种上下文都要）；响应里的 agentPreset 进入占位缓存行（列表详情/页脚
+;; 立即可见）；不带 preset → 不发 agentPreset。
+(let* ((old-sessions dsh-emacs--sessions))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs--sessions nil)
+        ;; 带 preset（cwd 上下文）
+        (let ((calls nil))
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (method params cb)
+                       (push (list method params) calls)
+                       (funcall cb t '((sessionId . "s-preset")
+                                       (agentPreset . "standard")))))
+                    ((symbol-function 'dsh-emacs-open-session)
+                     (lambda (_sid) nil)))
+            (dsh-emacs-new-session nil nil "standard")
+            (let* ((call (car calls))
+                   (params (cadr call)))
+              (when (and (string= "session.create" (car call))
+                         (null (assq 'workspaceId params))
+                         (assq 'cwd params)
+                         (string= "standard"
+                                  (cdr (assq 'agentPreset params))))
+                (dsh-test-pass "new-session-with-preset-sends-agent-preset")))
+            ;; 占位缓存行带了 preset（响应回填）
+            (let ((item (dsh-emacs--chat-session-item "s-preset")))
+              (when (and item
+                         (string= "standard"
+                                  (dsh-protocol-session-agent-preset item)))
+                (dsh-test-pass "new-session-preset-cached-in-placeholder")))))
+        ;; 带 preset（workspace 上下文）：workspaceId 与 agentPreset 并存
+        (let ((calls nil))
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (method params cb)
+                       (push (list method params) calls)
+                       (funcall cb t '((sessionId . "s-ws-preset")))))
+                    ((symbol-function 'dsh-emacs-open-session)
+                     (lambda (_sid) nil)))
+            (dsh-emacs-new-session nil "w1" "code")
+            (let* ((call (car calls))
+                   (params (cadr call)))
+              (when (and (string= "session.create" (car call))
+                         (string= "w1" (cdr (assq 'workspaceId params)))
+                         (null (assq 'cwd params))
+                         (string= "code" (cdr (assq 'agentPreset params))))
+                (dsh-test-pass "new-session-workspace-with-preset")))))
+        ;; 无 preset → 不发送 agentPreset
+        (let ((calls nil))
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (method params cb)
+                       (push (list method params) calls)
+                       (funcall cb t '((sessionId . "s-plain2")))))
+                    ((symbol-function 'dsh-emacs-open-session)
+                     (lambda (_sid) nil)))
+            (dsh-emacs-new-session nil nil nil)
+            (let* ((call (car calls))
+                   (params (cadr call)))
+              (when (and (string= "session.create" (car call))
+                         (null (assq 'agentPreset params)))
+                (dsh-test-pass "new-session-without-preset-omits-agent-preset"))))))
+    (setq dsh-emacs--sessions old-sessions)))
+
+;; --- 测试 79: 交互带前缀参数 → 先选 preset 再创建 ---
+;; C-u 下 call-interactively：interactive spec 读 preset（completing-read
+;; mock 返回显示名），session.create 携带其 id，且触发过 agentPreset.list。
+(let* ((old-sessions dsh-emacs--sessions)
+       (buf (generate-new-buffer " *dsh-prefix-create*"))
+       (calls nil)
+       (old-cache dsh-emacs--agent-presets))
+  (unwind-protect
+      (with-current-buffer buf
+        (setq dsh-emacs--sessions nil)
+        (setq dsh-emacs--agent-presets
+              (dsh-protocol-agent-preset-list--from-alist
+               '((presets . [((id . "minimal")
+                              (name . "Minimal mode"))]))))
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method params cb)
+                     (push (list method params) calls)
+                     (when (string= method "session.create")
+                       (funcall cb t '((sessionId . "s-pfx"))))))
+                  ((symbol-function 'dsh-emacs-open-session)
+                   (lambda (_sid) nil))
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _) "Minimal mode"))
+                  (current-prefix-arg '(4)))
+          (call-interactively #'dsh-emacs-new-session))
+        (let ((create (cl-find-if
+                       (lambda (c) (string= "session.create" (car c)))
+                       calls)))
+          (when (and create
+                     (string= "minimal"
+                              (cdr (assq 'agentPreset (cadr create))))
+                     (member "agentPreset.list" (mapcar #'car calls)))
+            (dsh-test-pass "new-session-prefix-asks-preset"))))
+    (setq dsh-emacs--sessions old-sessions)
+    (setq dsh-emacs--agent-presets old-cache)
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; --- 测试 80: 列表键位 c = 默认 preset 立即建，C = 先选 preset ---
+;; c → dsh-emacs-new-session（不弹选择，会话带 dsh-emacs-default-preset，
+;; nil 即 host default，不发 agentPreset 也不拉 roster）；
+;; C → dsh-emacs-new-session-choose-preset（先选 preset 再建，workspace
+;; 上下文沿用，且触发 agentPreset.list 刷新）。
+(when (eq (lookup-key dsh-emacs-session-mode-map "c")
+          #'dsh-emacs-new-session)
+  (dsh-test-pass "session-map-c-binds-plain-create"))
+(when (eq (lookup-key dsh-emacs-session-mode-map "C")
+          #'dsh-emacs-new-session-choose-preset)
+  (dsh-test-pass "session-map-C-binds-preset-choose"))
+
+;; c 路径：无前缀交互 → 只发 session.create，不带 agentPreset
+(let* ((calls nil)
+       (buf (generate-new-buffer " *dsh-c-default-create*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (insert "row text\n")
+        (goto-char (point-min))
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method params cb)
+                     (push (list method params) calls)
+                     (funcall cb t '((sessionId . "s-c-default")))))
+                  ((symbol-function 'dsh-emacs-open-session)
+                   (lambda (_sid) nil)))
+          (call-interactively #'dsh-emacs-new-session))
+        (let* ((call (car calls))
+               (params (cadr call)))
+          (when (and (string= "session.create" (car call))
+                     (null (assq 'agentPreset params))
+                     (not (member "agentPreset.list" (mapcar #'car calls))))
+            (dsh-test-pass "session-c-creates-without-preset-prompt"))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; C 路径：先选 preset（completing-read mock 返回显示名），workspace 上下文
+;; 创建 → session.create 带 workspaceId + agentPreset，且触发过 roster。
+(let* ((calls nil)
+       (buf (generate-new-buffer " *dsh-C-preset-create*"))
+       (old-cache dsh-emacs--agent-presets))
+  (unwind-protect
+      (with-current-buffer buf
+        (insert "  workspace row")
+        (put-text-property (point-min) (point-max)
+                           'dsh-emacs-workspace-id "w-C")
+        (goto-char (point-min))
+        (setq dsh-emacs--agent-presets
+              (dsh-protocol-agent-preset-list--from-alist
+               '((presets . [((id . "code") (name . "PTC mode"))]))))
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method params cb)
+                     (push (list method params) calls)
+                     (when (string= method "session.create")
+                       (funcall cb t '((sessionId . "s-C"))))))
+                  ((symbol-function 'dsh-emacs-open-session)
+                   (lambda (_sid) nil))
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _) "PTC mode")))
+          (call-interactively #'dsh-emacs-new-session-choose-preset))
+        (let ((create (cl-find-if
+                       (lambda (c) (string= "session.create" (car c)))
+                       calls)))
+          (when (and create
+                     (string= "w-C" (cdr (assq 'workspaceId (cadr create))))
+                     (string= "code" (cdr (assq 'agentPreset (cadr create))))
+                     (member "agentPreset.list" (mapcar #'car calls)))
+            (dsh-test-pass "session-C-creates-with-chosen-preset"))))
+    (setq dsh-emacs--agent-presets old-cache)
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+
 (princ "\n===== 测试总结 =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))
       (fail (cl-count-if (lambda (r) (not (cdr r))) dsh-test-results)))

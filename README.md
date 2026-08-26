@@ -93,6 +93,9 @@ sync exactly one file. Covered payloads:
   `model-catalog-entry` → `reasoning` → `effort`, plus
   `dsh-protocol-model-selection` for `current`
 - `session.selectModel` → `dsh-protocol-model-selection-result` (selected)
+- `agentPreset.list` → `dsh-protocol-agent-preset-list` (presets,
+  authorable, has-document) → `dsh-protocol-agent-preset` (id, trust,
+  is-default, name, description, broken)
 
 Conversion is one-way and lossless: `session.models` responses become a
 `dsh-protocol-model-directory` before the picker reads them; the cached
@@ -137,7 +140,7 @@ A different address/port can be set via `dsh-emacs-base-url`:
 | Command | Description |
 |---|---|
 | `M-x dsh-emacs` | Open the session list |
-| `M-x dsh-emacs-new-session` | Create a new session. On a workspace header / its empty New Session row the session is created inside that workspace; elsewhere as an ungrouped session |
+| `M-x dsh-emacs-new-session` | Create a new session. On a workspace header / its empty New Session row the session is created inside that workspace; elsewhere as an ungrouped session. With a prefix argument (`C-u`), first choose the agent preset (thinking preset) from the live `agentPreset.list` roster |
 | `M-x dsh-emacs-open-session` | Open an existing session by ID |
 | `M-x dsh-emacs-fork-session` | Fork a session into a child that inherits its history |
 | `M-x dsh-emacs-select-model` | Switch the current session's model (live catalog) |
@@ -170,7 +173,8 @@ Send rule: sends the text after the `❯ ` prompt in the input area. By default 
 | Key | Description |
 |---|---|
 | `RET` | Open the session at point |
-| `c` | Create a new session |
+| `c` | Create a new session (default preset) |
+| `C` | Create a new session after choosing its agent preset |
 | `r` | Rename the session |
 | `D` | Archive the session (remove it from its workspace view) |
 | `f` | Fork the session into a child that inherits its history |
@@ -227,6 +231,7 @@ The animation lights up when a message is sent and goes out at `turn/end` (or wh
 (setq dsh-emacs-show-tool-calls t)                 ; show tool calls
 (setq dsh-emacs-default-cwd default-directory)     ; working directory for new sessions
 (setq dsh-emacs-default-model "claude-opus-4-5")   ; default model name
+(setq dsh-emacs-default-preset "standard")         ; default agent preset for new sessions (nil = host default; "standard"/"minimal"/"code"/"cordis" or a user preset id)
 (setq dsh-emacs-model-group-format #(" %s " 0 4 (face vertico-group-title))) ; provider group-header format inside the model picker (nil = hide group titles)
 (setq dsh-emacs-pin-input-to-bottom nil)           ; nil = same buffer as replies (default); t = standalone bottom window
 (setq dsh-emacs-input-window-height 4)             ; height of the standalone bottom input window

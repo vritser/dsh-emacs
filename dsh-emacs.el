@@ -169,6 +169,18 @@ open."
   :type 'string
   :group 'dsh-emacs)
 
+(defcustom dsh-emacs-default-preset nil
+  "Default agent preset (agentPreset id) for new sessions.
+
+nil lets the host pick its own default preset (no `agentPreset' field is
+sent to `session.create').  Known values are the built-in preset ids
+\"standard\" (Standard mode), \"minimal\" (Minimal mode), \"code\" (PTC
+mode) and \"cordis\" (Creator mode), or the id of a user preset listed
+by `agentPreset.list'.  Interactively, `dsh-emacs-new-session' with a
+prefix argument asks for the preset instead of using this value."
+  :type '(choice (const :tag "Host default" nil) string)
+  :group 'dsh-emacs)
+
 (defcustom dsh-emacs-pin-input-to-bottom nil
   "Whether to show the editable prompt in a fixed bottom window.
 
@@ -215,6 +227,12 @@ renaming by session ID.")
 
 (defvar dsh-emacs--workspaces nil
   "Cache of the workspace list.")
+
+(defvar dsh-emacs--agent-presets nil
+  "Cached `agentPreset.list' response (a `dsh-protocol-agent-preset-list'
+struct), used by the new-session preset picker.  Refreshed lazily by
+`dsh-emacs--agent-presets-refresh'; nil before the first successful
+fetch falls back to the built-in preset ids.")
 
 (defvar dsh-emacs--archived-sessions nil
   "Set of archived session IDs (hash table).")
@@ -564,31 +582,42 @@ Updates the mode-line name (list title) and the workspace directory."
                             (dsh-emacs-events--host-refresh-drain)))))
 
 ;;;###autoload
-(defun dsh-emacs-new-session (&optional cwd workspace-id)
+(defun dsh-emacs-new-session (&optional cwd workspace-id preset)
   "Create a new session.
 CWD is the working directory; with WORKSPACE-ID the session is created
 inside that workspace (`session.create' takes workspaceId rather than
-cwd).  Interactively, when point sits on a workspace header or its empty
+cwd).  PRESET is the agentPreset id the session starts on; nil lets the
+host pick its default preset.
+
+Interactively, when point sits on a workspace header or its empty
 New Session row (in the session list), the session is created in that
-workspace; otherwise in CWD."
+workspace; otherwise in CWD.  With a prefix argument, first choose the
+agent preset from the live `agentPreset.list' roster (falling back to
+the built-in presets before the first roster arrives); without one
+the session uses `dsh-emacs-default-preset'."
   (interactive
    (let ((ws (dsh-emacs-workspace-id-at-point)))
-     (list nil ws)))
+     (list nil ws
+           (if current-prefix-arg
+               (dsh-emacs--read-preset dsh-emacs-default-preset)
+             dsh-emacs-default-preset))))
   (dsh-emacs--rpc-async "session.create"
-                        (if workspace-id
-                            `((workspaceId . ,workspace-id)
-                              (model . ,dsh-emacs-default-model))
-                          `((cwd . ,(dsh-emacs--absolute-cwd cwd))
-                            (model . ,dsh-emacs-default-model)))
+                        (append (if workspace-id
+                                    `((workspaceId . ,workspace-id))
+                                  `((cwd . ,(dsh-emacs--absolute-cwd cwd))))
+                                `((model . ,dsh-emacs-default-model))
+                                (and preset `((agentPreset . ,preset))))
                         (lambda (ok value)
                           (if ok
                               (let ((session-id (cdr (assq 'sessionId value))))
                                 ;; 把新会话补进缓存：sessions 列表 + workspace
                                 ;; session-ids（分组归属）——否则它落到 ungrouped
                                 ;; 且 `session/title' 事件找不到缓存 item，自动
-                                ;; 重命名无法实时生效。
+                                ;; 重命名无法实时生效。创建响应携带 agentPreset
+                                ;; 时一并入缓存，列表详情/页脚预设立即可见。
                                 (dsh-emacs--cache-new-session
-                                 session-id workspace-id)
+                                 session-id workspace-id
+                                 (cdr (assq 'agentPreset value)))
                                 (dsh-emacs-open-session session-id)
                                 ;; 新建的 workspace 会话尚未进入 session.list
                                 ;; 缓存（事件流不携带该信息），`--chat-buffer-sync'
@@ -612,8 +641,25 @@ workspace; otherwise in CWD."
                                                          (expand-file-name dir))))))))))
                             (message "Failed to create session: %S" value)))))
 
-(defun dsh-emacs--cache-new-session (session-id &optional workspace-id)
-  "Cache the freshly created SESSION-ID so grouping and title updates work\n before the next `session.list' refresh: insert a placeholder row (blank,\n \"New Session\") into `dsh-emacs--sessions' and, with WORKSPACE-ID, append\n SESSION-ID to that workspace's `session-ids' (the group renderer assigns\n sessions to workspaces from those ids).  Repaints the session list.
+;;;###autoload
+(defun dsh-emacs-new-session-choose-preset ()
+  "Create a new session after choosing its agent preset.
+Like `dsh-emacs-new-session' (the workspace at point decides the
+creation context), but always reads the preset first — bound to `C' in
+the session list, next to `c' which creates immediately with
+`dsh-emacs-default-preset'.  C-g during the preset prompt cancels the
+creation."
+  (interactive)
+  (dsh-emacs-new-session nil (dsh-emacs-workspace-id-at-point)
+                         (dsh-emacs--read-preset dsh-emacs-default-preset)))
+
+(defun dsh-emacs--cache-new-session (session-id &optional workspace-id preset)
+  "Cache the freshly created SESSION-ID so grouping and title updates work
+before the next `session.list' refresh: insert a placeholder row (blank,
+\"New Session\", PRESET when given) into `dsh-emacs--sessions' and, with
+WORKSPACE-ID, append SESSION-ID to that workspace's `session-ids' (the
+group renderer assigns sessions to workspaces from those ids).  Repaints
+the session list.
 
 The workspace attachment is deliberately INDEPENDENT of the session-row
 insert: the host stream (`host/session-added') may deliver the new session
@@ -630,9 +676,10 @@ arrives."
       (let ((cwd (if ws (dsh-protocol-workspace-path ws)
                    (dsh-emacs--absolute-cwd nil))))
         (push (dsh-protocol-session--from-alist
-               (list (cons 'sessionId session-id)
-                     (cons 'blank t)
-                     (cons 'cwd cwd)))
+               (append (list (cons 'sessionId session-id)
+                             (cons 'blank t)
+                             (cons 'cwd cwd))
+                       (and preset (list (cons 'agentPreset preset)))))
               dsh-emacs--sessions)))
     ;; Attach even when the session row already arrived via the host stream:
     ;; membership comes solely from the workspace `session-ids', so the row
@@ -650,6 +697,110 @@ arrives."
       (with-current-buffer (get-buffer dsh-emacs-sessions-buffer)
         (dsh-emacs-session--render))))
   session-id)
+
+;; ---------------------------------------------------------------------------
+;;  新建会话的 agent preset（agentPreset）选择
+;; ---------------------------------------------------------------------------
+
+(defun dsh-emacs--agent-presets-refresh ()
+  "Refresh `dsh-emacs--agent-presets' from `agentPreset.list'.
+Async: the response lands in the cache when it arrives; a failed RPC
+leaves the previous cache (when any) untouched.  Returns nothing."
+  (dsh-emacs--rpc-async "agentPreset.list" nil
+                        (lambda (ok value)
+                          (when ok
+                            (setq dsh-emacs--agent-presets
+                                  (dsh-protocol-agent-preset-list--from-alist
+                                   value))))))
+
+(defconst dsh-emacs--preset-display-name-mapping
+  '(("standard" . "Standard mode")
+    ("minimal" . "Minimal mode")
+    ("code" . "PTC mode")
+    ("cordis" . "Creator mode"))
+  "Mapping (PRESET-ID . DISPLAY-NAME) of each shipped system preset.
+
+The dsh web resolves these presets' option labels through exactly this
+built-in key map (`presetDisplayText' in the web's agent-preset UI) —
+`agentPreset.list' carries no `name' for them.  The picker mirrors the
+mapping so the Emacs choices read the same as the web's.")
+
+(defun dsh-emacs--preset-display-name (preset)
+  "Web-consistent display name of roster row PRESET.
+Mirrors the web's `presetDisplayText': a system preset among the shipped
+built-ins shows its web name (\"Standard mode\" …); anything else shows
+its published `name', falling back to the id.  PRESET is a
+`dsh-protocol-agent-preset' struct or wire alist."
+  (let* ((p (dsh-protocol--struct #'dsh-protocol-agent-preset-p
+                                  #'dsh-protocol-agent-preset--from-alist
+                                  preset))
+         (id (dsh-protocol-agent-preset-id p)))
+    (or (and (equal "system" (dsh-protocol-agent-preset-trust p))
+             (cdr (assoc id dsh-emacs--preset-display-name-mapping)))
+        (dsh-protocol-agent-preset-name p)
+        id)))
+
+(defun dsh-emacs--preset-choices ()
+  "((DISPLAY . ID) ...) preset choices for the new-session picker.
+From the cached `agentPreset.list' roster (broken entries excluded),
+each DISPLAY matches what the dsh web shows for that preset — the web
+name for the shipped system presets (\"Standard mode\" …), the
+published `name' (or the id) for everything else.  Before the first
+roster arrives, the four built-in presets are offered with their web
+names."
+  (let ((presets (and dsh-emacs--agent-presets
+                      (dsh-protocol-agent-preset-list-presets
+                       dsh-emacs--agent-presets))))
+    (if presets
+        (delq nil
+              (mapcar
+               (lambda (p)
+                 (unless (dsh-protocol-agent-preset-broken p)
+                   (cons (dsh-emacs--preset-display-name p)
+                         (dsh-protocol-agent-preset-id p))))
+               presets))
+      (mapcar (lambda (pair) (cons (cdr pair) (car pair)))
+              dsh-emacs--preset-display-name-mapping))))
+
+(defun dsh-emacs--preset-default-id (&optional default)
+  "Preset id the new-session picker pre-selects, or nil.
+DEFAULT (the configured `dsh-emacs-default-preset') wins when it is a
+valid choice; otherwise the roster's `isDefault' preset; otherwise nil
+(no pre-selection)."
+  (let ((choices (dsh-emacs--preset-choices)))
+    (or (and default (rassoc default choices) default)
+        (let ((presets (and dsh-emacs--agent-presets
+                            (dsh-protocol-agent-preset-list-presets
+                             dsh-emacs--agent-presets))))
+          (cl-some (lambda (p)
+                     (and (dsh-protocol-agent-preset-is-default p)
+                          (dsh-protocol-agent-preset-id p)))
+                   presets)))))
+
+(defun dsh-emacs--read-preset (&optional default)
+  "Read an agent preset id for a new session; nil keeps the host default.
+Choices come from the cached `agentPreset.list' roster (the built-in
+presets with their web names before the first fetch); a background
+refresh is kicked off so the next pick sees fresh entries.  Pre-selects
+DEFAULT (the configured `dsh-emacs-default-preset') when it is a valid
+choice, else the host's `isDefault' preset — an empty RET accepts the
+pre-selection; without any pre-selection picking is required (unknown
+input is rejected).  C-g cancels the whole session creation."
+  (dsh-emacs--agent-presets-refresh)
+  (let* ((default-id (dsh-emacs--preset-default-id default))
+         (choices (dsh-emacs--preset-choices))
+         (default-name (and default-id
+                            (car (rassoc default-id choices))))
+         (picked (completing-read
+                  (format "Agent preset for the new session%s: "
+                          (if default-name
+                              (format " (default %s)" default-name)
+                            ""))
+                  choices nil t nil nil default-name)))
+    (cond ((and picked (not (string-empty-p picked)))
+           (or (cdr (assoc picked choices)) default-id))
+          (default-name default-id)
+          (t nil))))
 
 (defun dsh-emacs--ensure-input-marker ()
   "Repair the chat input marker when it was lost, without touching content.

@@ -30,6 +30,10 @@
 ;;                                    defaultEffort)
 ;;                                    └─ dsh-protocol-effort (id name
 ;;                                         description)
+;;   agentPreset.list → dsh-protocol-agent-preset-list (presets
+;;                       authorable has-document)
+;;                        └─ dsh-protocol-agent-preset (id trust
+;;                             is-default name description broken)
 ;;
 ;; 转换入口都接受 wire alist；注意 wire 中的数组（vector）在 struct 里
 ;; 一律归一为 list。业务代码写入缓存 struct 后，读取统一用 `dsh-protocol-*'
@@ -257,6 +261,43 @@ GROUPS by provider and unknown FAILURES."
   routable
   groups
   failures)
+
+;; ---------------------------------------------------------------------------
+;; agentPreset.list
+;; ---------------------------------------------------------------------------
+
+(cl-defstruct (dsh-protocol-agent-preset
+               (:constructor dsh-protocol-agent-preset--from-alist
+                             (alist
+                              &aux
+                              (id (cdr (assq 'id alist)))
+                              (trust (cdr (assq 'trust alist)))
+                              (is-default (cdr (assq 'isDefault alist)))
+                              (name (cdr (assq 'name alist)))
+                              (description (cdr (assq 'description alist)))
+                              (broken (cdr (assq 'broken alist))))))
+  "One `agentPreset.list' entry."
+  id
+  trust
+  is-default
+  name
+  description
+  broken)
+
+(cl-defstruct (dsh-protocol-agent-preset-list
+               (:constructor dsh-protocol-agent-preset-list--from-alist
+                             (alist
+                              &aux
+                              (presets (mapcar #'dsh-protocol-agent-preset--from-alist
+                                               (dsh-protocol--list
+                                                (cdr (assq 'presets alist)))))
+                              (authorable (cdr (assq 'authorable alist)))
+                              (has-document (cdr (assq 'hasDocument alist))))))
+  "The `agentPreset.list' response value: the PRESETS roster plus the
+AUTHORABLE / HAS-DOCUMENT flags the management UI needs."
+  presets
+  authorable
+  has-document)
 
 ;; 将 wire alist 归一为 struct 的便捷入口：已是 struct 则原样返回。
 ;; 这样业务函数可以同时接受“协议响应”和“转换后的 struct”两种形态，

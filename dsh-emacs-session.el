@@ -49,7 +49,8 @@
 ;; compilation does not mistake the intentional load order for missing
 ;; functions.
 (declare-function dsh-emacs-list-sessions "dsh-emacs" ())
-(declare-function dsh-emacs-new-session "dsh-emacs" (&optional cwd workspace-id))
+(declare-function dsh-emacs-new-session "dsh-emacs" (&optional cwd workspace-id preset))
+(declare-function dsh-emacs-new-session-choose-preset "dsh-emacs" ())
 (declare-function dsh-emacs-open-session "dsh-emacs" (session-id))
 (declare-function dsh-emacs-rename-session "dsh-emacs" (session-id new-title))
 (declare-function dsh-emacs-archive-session "dsh-emacs" (session-id))
@@ -86,6 +87,7 @@ Interactively resolve command targets through `dsh-emacs--active-session-id'
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET") #'dsh-emacs-open-session-at-point)
     (define-key map "c" #'dsh-emacs-new-session)
+    (define-key map "C" #'dsh-emacs-new-session-choose-preset)
     (define-key map "r" #'dsh-emacs-rename-session-at-point)
     (define-key map "D" #'dsh-emacs-archive-session-at-point)
     (define-key map "f" #'dsh-emacs-fork-session-at-point)
