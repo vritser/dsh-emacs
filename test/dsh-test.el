@@ -126,10 +126,11 @@ so the code under test can read fields through the protocol accessors."
              (= 60 (dsh-emacs-usage-output dsh-emacs--footer-usage))
              (= 3500 (dsh-emacs-usage-cache-read dsh-emacs--footer-usage)))
     (dsh-test-pass "footer-note-event accumulates assistant/message usage"))
-  (setq txt (dsh-emacs-footer-format))
-  (when (and (string-match "↑300" txt) (string-match "↓60" txt)
-             (string-match "CH92%" txt))
-    (dsh-test-pass "footer-format renders accumulated tokens")))
+  (let ((dsh-emacs-footer-format-spec '(:separator " " :segments (tokens))))
+    (setq txt (dsh-emacs-footer-format))
+    (when (and (string-match "↑300" txt) (string-match "↓60" txt)
+               (string-match "CH92%" txt))
+      (dsh-test-pass "footer-format renders accumulated tokens"))))
 
 ;; --- 测试 5d: request/context 喂 model 与 context window ---
 (let ((rc '(("type" . "request/context")
@@ -143,14 +144,20 @@ so the code under test can read fields through the protocol accessors."
              (= 1000000 dsh-emacs--footer-context-window))
     (dsh-test-pass "note-request feeds model and context window")))
 
-;; --- 测试 5e: model-effort 组合与 modeinline 括号 ---
-(let ((txt (progn
+;; --- 测试 5e: model/effort/preset 三独立分段 + modeinline 括号 ---
+(let ((dsh-emacs-footer-format-spec '(:separator " " :segments (model effort preset)))
+      (txt (progn
              (setq dsh-emacs--footer-model "m1"
-                   dsh-emacs--footer-effort "standard")
+                   dsh-emacs--footer-effort "max"
+                   dsh-emacs--footer-preset "standard")
              (dsh-emacs-footer-format))))
-  (when (string-match "m1-standard" txt)
-    (dsh-test-pass "model-effort combined in model segment")))
-(let* ((txt (progn
+  (when (and (string-match "m1" txt)
+             (string-match "max" txt)
+             (string-match "standard" txt)
+             (not (string-match "m1-standard" txt)))
+    (dsh-test-pass "model effort preset render as separate segments")))
+(let* ((dsh-emacs-footer-format-spec '(:separator " " :segments (model tokens ctx)))
+       (txt (progn
               (dsh-emacs-footer-set-effort nil)
               (dsh-emacs-footer--modeinline))))
   (when (and (string-prefix-p "(" txt) (string-match-p ") *$" txt)
@@ -1442,11 +1449,14 @@ so the code under test can read fields through the protocol accessors."
 ;; doom-modeline 分支的段漏掉了它，导致动画从未显示） ---
 (let ((dsh-emacs--footer-usage (dsh-emacs-make-usage 100 50))
       (dsh-emacs--footer-model "deepseek-v4-flash-0731")
-      (dsh-emacs--footer-effort "standard")
+      (dsh-emacs--footer-effort "max")
+      (dsh-emacs--footer-preset "standard")
       (dsh-emacs--ml-busy t)
       (dsh-emacs--ml-busy-index 4))
   (let ((txt (dsh-emacs-footer--doom-segment)))
-    (when (and (string-match-p "deepseek-v4-flash-0731-standard" txt)
+    (when (and (string-match-p "deepseek-v4-flash-0731" txt)
+               (string-match-p "max" txt)
+               (string-match-p "standard" txt)
                (string-match-p "████" txt)
                ;; 动画在统计之前（紧贴 DSH 模式名之后）
                (< (string-match "████" txt)

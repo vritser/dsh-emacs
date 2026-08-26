@@ -9,7 +9,7 @@ An Emacs frontend for [dsh](https://github.com/deepseek-ai/deepseek-harness) (De
 - **Session list** (`*dsh-sessions*`): card-style browsing, search/filter, create / open / rename / archive sessions
 - **Chat buffer**: read-only transcript with a fixed input area, streaming output and Markdown rendering
 - **Collapsible tool calls & thinking blocks** (folded by default)
-- **Mode-line footer**: live token usage, cost, context-window percentage (color-coded), model + thinking preset, all customizable via `M-x customize-group RET dsh-emacs-footer`
+- **Mode-line footer**: model · reasoning effort · agent preset · context-window percentage (color-coded), all customizable via `M-x customize-group RET dsh-emacs-footer`
 - **Mode-line buffer name** matches the session list title (`dsh-<title>`), and `default-directory` points at the session workspace so `magit-status`/`project-*` start in the right repo
 - **Zero runtime dependencies**: core `url` / `json` / `cl-lib` only; Emacs 27.1+
 - **Resilient event stream**: native RFC 6455 WebSocket client with fallback polling, watchdog and anchored incremental history rendering
@@ -196,6 +196,8 @@ The footer is displayed at the bottom of the chat buffer and contains the follow
 - **cwd**: current working directory (home path abbreviated with `~`)
 - **branch**: git branch name (auto-detected)
 - **model**: current model name
+- **effort**: reasoning effort (the `reasoningEffort` chosen via the model picker, e.g. `max`)
+- **preset**: agent preset of the session (`agentPreset`, e.g. `standard` / `code`)
 - **tokens**: token usage (`↑input ↓output Rcache-read Wcache-write CHcache-hit%`)
 - **ctx**: context-window usage percentage (color-coded)
 - **cost**: cumulative cost (USD)
@@ -209,7 +211,7 @@ The branch segment has a 10-second TTL cache (`dsh-emacs-footer-branch-refresh-i
 dsh-emacs does **not replace** your mode line; instead it makes two small additions to your existing (default or custom) `mode-line-format`: while **dsh is running** (after sending a prompt, before `turn/end` is received), a spinner animation is shown beside the DSH mode name (end-of-line area); the footer segment is appended at the far right. The modified flag, line/column position, primary/secondary modes, misc-info, and all other existing content are preserved:
 
 ```
- U:***  %b   L40  DSH [██  ]  [ ~/proj • (main) • deepseek-v4 • ↑1.2k ↓800 ]
+ U:***  %b   L40  DSH [██  ]  [ deepseek-v4-flash • max • code • CH95% ]
 ```
 
 - Spinner animation: filled progress bar (`[█   ]` fills to `[████]` then drains to `[   █]`, the `progress-bar-filled` style from Malabarba's spinner.el, with the track drawn as square brackets), `dsh-emacs-mode-line-busy-face` (amber), about 12.5fps, displayed at the end of the line next to the DSH mode name

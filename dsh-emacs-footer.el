@@ -10,7 +10,7 @@
 ;;; Commentary:
 
 ;; Footer 显示在 dsh 对话缓冲的底部（mode-line 之下、输入区之上）。
-;; 参考 pi-mono 的 footer 设计：cwd • git branch • model • tokens • ctx% • cost。
+;; 参考 pi-mono 的 footer 设计：model • effort • preset • ctx% • tokens • cost。
 ;;
 ;; 公开 API：
 ;;
@@ -22,6 +22,8 @@
 ;;   (dsh-emacs-footer-note-event event)    ;;  从 assistant/message 事件累计 usage
 ;;   (dsh-emacs-footer-set-context-window n);; 设置 context window 大小
 ;;   (dsh-emacs-footer-set-model "claude-opus-4-5") ;; 设置模型名
+;;   (dsh-emacs-footer-set-effort "max")   ;; 设置推理 effort
+;;   (dsh-emacs-footer-set-preset "code")  ;; 设置 agent preset
 ;;
 ;; 用户可通过 `dsh-emacs-footer-format-spec' 自定义显示哪些段（默认全部）。
 
@@ -54,12 +56,13 @@
 
 (defcustom dsh-emacs-footer-format-spec
   '(:separator " "
-    :segments (model tokens))
+    :segments (model effort preset ctx))
   "Plist describing the footer segments to render and the separator.
 The compact status line sits right next to the DSH mode name in the mode
-line, e.g.  DSH(model·effort ↑12k ↓3k CH95%).  Each segment is one of:
-  model   — model id (plus thinking preset when known: model·standard)
-  effort  — thinking preset only (agentPreset: standard/minimal/code/cordis)
+line, e.g.  DSH(deepseek-v4-flash·max·code CH95%).  Each segment is one of:
+  model   — model id (e.g. deepseek-v4-flash)
+  effort  — reasoning effort (effortId, e.g. off/max)
+  preset  — agent preset (agentPreset: standard/minimal/code/cordis)
   cwd     — short cwd (~/foo)
   branch  — git current branch (or empty if unavailable)
   tokens  — token usage (↑input ↓output CH% cache-hit)
@@ -74,7 +77,8 @@ mode line; the `:separator' is a separate string field."
           (const :format "Segments shown in the mode line: " :segments)
           (set :greedy t
                (const :tag "model — model id" model)
-               (const :tag "effort — thinking preset" effort)
+               (const :tag "effort — reasoning effort" effort)
+               (const :tag "preset — agent preset" preset)
                (const :tag "cwd — working directory" cwd)
                (const :tag "branch — git branch" branch)
                (const :tag "tokens — token usage ↑↓CH%" tokens)
@@ -119,7 +123,10 @@ Nil (no repo) is cached too so non-git dirs never spawn git per redraw.")
   "Model name displayed in the footer.")
 
 (defvar-local dsh-emacs--footer-effort nil
-  "Thinking preset (agentPreset) displayed next to the model.")
+  "Reasoning effort (effortId, e.g. \"off\"/\"max\") shown in the footer.")
+
+(defvar-local dsh-emacs--footer-preset nil
+  "Agent preset (agentPreset id, e.g. \"standard\"/\"code\") shown in the footer.")
 
 (defvar-local dsh-emacs--footer-context-window nil
   "Context window size in tokens for percentage calc.")
@@ -196,20 +203,26 @@ seconds; a nil (non-repo) result is cached the same way."
               (propertize ")" 'face 'dsh-emacs-footer-face)))))
 
 (defun dsh-emacs-footer--segment-model ()
-  "Render the model segment, suffixed with the thinking preset when known.
+  "Render the model segment.
 Falls back to `dsh-emacs-default-model' when the per-buffer model was never
 set (e.g. a session that predates request events)."
   (let ((model (or dsh-emacs--footer-model
                    (and (boundp 'dsh-emacs-default-model)
                         dsh-emacs-default-model))))
     (when (and model (not (string-empty-p model)))
-      (let ((effort (and dsh-emacs--footer-effort
-                         (not (string-empty-p dsh-emacs--footer-effort))
-                         dsh-emacs--footer-effort)))
-        (propertize (if effort
-                        (concat model "-" effort)
-                      model)
-                    'face 'dsh-emacs-footer-face)))))
+      (propertize model 'face 'dsh-emacs-footer-face))))
+
+(defun dsh-emacs-footer--segment-effort ()
+  "Render the reasoning-effort segment (effortId, e.g. \"max\")."
+  (when (and dsh-emacs--footer-effort
+             (not (string-empty-p dsh-emacs--footer-effort)))
+    (propertize dsh-emacs--footer-effort 'face 'dsh-emacs-footer-face)))
+
+(defun dsh-emacs-footer--segment-preset ()
+  "Render the agent-preset segment (agentPreset, e.g. \"code\")."
+  (when (and dsh-emacs--footer-preset
+             (not (string-empty-p dsh-emacs--footer-preset)))
+    (propertize dsh-emacs--footer-preset 'face 'dsh-emacs-footer-face)))
 
 (defun dsh-emacs-footer--segment-tokens ()
   "Render the token usage segment."
@@ -262,6 +275,8 @@ set (e.g. a session that predates request events)."
     ('cwd (dsh-emacs-footer--segment-cwd))
     ('branch (dsh-emacs-footer--segment-branch))
     ('model (dsh-emacs-footer--segment-model))
+    ('effort (dsh-emacs-footer--segment-effort))
+    ('preset (dsh-emacs-footer--segment-preset))
     ('tokens (dsh-emacs-footer--segment-tokens))
     ('ctx (dsh-emacs-footer--segment-ctx))
     ('cost (dsh-emacs-footer--segment-cost))
@@ -355,8 +370,13 @@ the mode-line smoke segment always reflects the live model."
   (dsh-emacs-footer-update))
 
 (defun dsh-emacs-footer-set-effort (effort)
-  "Set the displayed thinking preset to EFFORT (a string, or nil)."
+  "Set the displayed reasoning effort to EFFORT (an effortId string, or nil)."
   (setq dsh-emacs--footer-effort effort)
+  (dsh-emacs-footer-update))
+
+(defun dsh-emacs-footer-set-preset (preset)
+  "Set the displayed agent preset to PRESET (an agentPreset id string, or nil)."
+  (setq dsh-emacs--footer-preset preset)
   (dsh-emacs-footer-update))
 
 (defun dsh-emacs-footer-set-cwd (cwd)

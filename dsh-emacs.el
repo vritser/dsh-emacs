@@ -939,13 +939,13 @@ buffer opens with the same workspace path."
         (throw 'found (dsh-protocol-session-agent-preset item))))))
 
 (defun dsh-emacs--link-session-preset (session-id)
-  "Fill the footer thinking preset for SESSION-ID into the mode line.
+  "Fill the footer agent preset for SESSION-ID into the mode line.
 Uses the cached session list when possible; otherwise refreshes
 `session.list' once and picks the preset from the response.  SAFE outside a
 chat buffer (the RPC callback runs in the buffer that called this)."
   (let ((preset (dsh-emacs--session-preset session-id)))
     (if preset
-        (dsh-emacs-footer-set-effort preset)
+        (dsh-emacs-footer-set-preset preset)
       (dsh-emacs--rpc-async "session.list" nil
                             (lambda (ok value)
                               (when ok
@@ -963,7 +963,7 @@ chat buffer (the RPC callback runs in the buffer that called this)."
                                       (when (equal session-id
                                                    (dsh-protocol-session-session-id
                                                     item))
-                                        (dsh-emacs-footer-set-effort
+                                        (dsh-emacs-footer-set-preset
                                          (dsh-protocol-session-agent-preset
                                           item))
                                         (throw 'found t)))))))))))
@@ -1932,6 +1932,7 @@ the filter as \"error in process filter: Quit\"."
                 (if ok2
                     (progn
                       (dsh-emacs-footer-set-model model)
+                      (dsh-emacs-footer-set-effort effort-id)
                       (message "Model switched to %s (%s)%s"
                                (nth 3 chosen) (nth 2 chosen)
                                (if effort-id
