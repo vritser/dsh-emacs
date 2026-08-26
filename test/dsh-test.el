@@ -645,6 +645,7 @@ so the code under test can read fields through the protocol accessors."
   (dsh-emacs-mode)
   (dsh-emacs-footer-setup)
   (setq dsh-emacs--current-session "s1")   ; match the test frame's sessionId
+  (setq-local dsh-emacs--buffer-session "s1") ; 归属断言：真实 open-session 会设置
   (let ((fake-proc (start-process "dsh-test-proc" (current-buffer) "/usr/bin/true"))
         (dispatch-count 0))
     (accept-process-output fake-proc 1)
@@ -2801,7 +2802,249 @@ so the code under test can read fields through the protocol accessors."
     (setq dsh-emacs--workspaces old-workspaces)
     (setq dsh-emacs--sessions old-sessions)))
 
-;; --- 总结 ---
+;; --- 测试 68: 刷新快照不回滚在途 host/mux 帧（refreshFrames 镜像） ---
+;; dsh web 在 `refresh' 期间记录到达的帧并在快照之上重放；emacs 的
+;; list-sessions/list-workspaces 响应是请求时刻快照，若响应在途期间帧已推进
+;; 缓存（另一个客户端改名/归档/改状态），直接整体 setq 会回滚。begin/drain
+;; 配对保证：最后一次刷新结束时按到达顺序重放所有记录帧。
+(let* ((old-sessions dsh-emacs--sessions)
+       (old-workspaces dsh-emacs--workspaces)
+       (old-archived dsh-emacs--archived-sessions)
+       (old-refresh-depth dsh-emacs--host-refresh-depth)
+       (old-frames dsh-emacs--host-refresh-frames))
+  (unwind-protect
+      (progn
+        ;; 基线：两个 workspace + 一个 session
+        (setq dsh-emacs--sessions
+              (dsh-emacs-test--session-items
+               (list (list (cons 'sessionId "s-a")
+                           (cons 'blank :json-false)))))
+        (setq dsh-emacs--workspaces
+              (list (dsh-protocol-workspace--from-alist
+                     (list (cons 'workspaceId "w1") (cons 'title "One")
+                           (cons 'path "/one") (cons 'sessionIds ["s-a"])))
+                    (dsh-protocol-workspace--from-alist
+                     (list (cons 'workspaceId "w2") (cons 'title "Two")
+                           (cons 'path "/two") (cons 'sessionIds [])))))
+
+        ;; 场景 1：刷新在途时 workspace-changed/removed 帧到达，迟到快照不含
+        ;; 它们 → drain 后新 workspace 仍在、被删的不复现。
+        (setq dsh-emacs--host-refresh-depth 0
+              dsh-emacs--host-refresh-frames nil)
+        (dsh-emacs-events--host-refresh-begin)   ; list-workspaces 发出
+        ;; 帧先到：新增 w3 + 删除 w2
+        (dsh-emacs-events--host-frame-record
+         (list :upsert-workspace
+               (dsh-protocol-workspace--from-alist
+                (list (cons 'workspaceId "w3") (cons 'title "Three")
+                      (cons 'path "/three") (cons 'sessionIds [])))))
+        (dsh-emacs-events--host-frame-record
+         (list :remove-workspace "w2"))
+        ;; 迟到快照：仍只有 w1、w2（请求时刻）——模拟 list-workspaces 回调的
+        ;; 整体 setq。
+        (setq dsh-emacs--workspaces
+              (list (dsh-protocol-workspace--from-alist
+                     (list (cons 'workspaceId "w1") (cons 'title "One")
+                           (cons 'path "/one") (cons 'sessionIds ["s-a"])))
+                    (dsh-protocol-workspace--from-alist
+                     (list (cons 'workspaceId "w2") (cons 'title "Two")
+                           (cons 'path "/two") (cons 'sessionIds [])))))
+        (dsh-emacs-events--host-refresh-drain)
+        (let ((ids (mapcar #'dsh-protocol-workspace-workspace-id
+                           dsh-emacs--workspaces)))
+          (when (and (equal '("w1" "w3") ids)
+                     (null (member "w2" ids)))
+            (dsh-test-pass "refresh-replays-workspace-frames")))
+
+        ;; 场景 2：在途 session-status + title 帧，迟到快照把它们回滚 → drain 恢复
+        (setq dsh-emacs--host-refresh-depth 0
+              dsh-emacs--host-refresh-frames nil)
+        (dsh-emacs-events--host-refresh-begin)
+        (dsh-emacs-events--host-frame-record (list :session-status "s-a" t))
+        (dsh-emacs-events--host-frame-record
+         (list :apply-title "s-a" "新标题"))
+        ;; 迟到快照（旧 running + 旧标题）
+        (setq dsh-emacs--sessions
+              (dsh-emacs-test--session-items
+               (list (list (cons 'sessionId "s-a")
+                           (cons 'blank :json-false)
+                           (cons 'running :json-false)))))
+        (dsh-emacs-events--host-refresh-drain)
+        (let ((item (dsh-emacs--chat-session-item "s-a")))
+          (when (and item
+                     (equal t (dsh-protocol-session-running item))
+                     (equal "新标题" (dsh-protocol-session-title-value item)))
+            (dsh-test-pass "refresh-replays-session-status-title")))
+
+        ;; 场景 3：嵌套刷新（list-sessions 内调 list-workspaces）——depth 归零前
+        ;; 不重放，最后一次 drain 才重放全部帧。
+        (setq dsh-emacs--host-refresh-depth 0
+              dsh-emacs--host-refresh-frames nil)
+        (dsh-emacs-events--host-refresh-begin)   ; list-sessions
+        (dsh-emacs-events--host-frame-record
+         (list :upsert-workspace
+               (dsh-protocol-workspace--from-alist
+                (list (cons 'workspaceId "w9") (cons 'title "Nine")
+                      (cons 'path "/nine") (cons 'sessionIds [])))))
+        (dsh-emacs-events--host-refresh-begin)   ; 内层 list-workspaces
+        (dsh-emacs-events--host-refresh-drain)   ; 内层完成：depth 1，不重放
+        (let ((ids-before (mapcar #'dsh-protocol-workspace-workspace-id
+                                  dsh-emacs--workspaces)))
+          (when (= dsh-emacs--host-refresh-depth 1)
+            (dsh-test-pass "nested-refresh-holds-frames")))
+        (dsh-emacs-events--host-refresh-drain)   ; 外层完成：重放
+        (let ((ids (mapcar #'dsh-protocol-workspace-workspace-id
+                           dsh-emacs--workspaces)))
+          (when (member "w9" ids)
+            (dsh-test-pass "nested-refresh-replays-at-outer-end")))
+
+        ;; 场景 4：刷新失败（RPC 错误）也 drain，不留悬挂 depth
+        (setq dsh-emacs--host-refresh-depth 0)
+        (dsh-emacs-events--host-refresh-begin)
+        (dsh-emacs-events--host-refresh-drain)
+        (when (= dsh-emacs--host-refresh-depth 0)
+          (dsh-test-pass "refresh-drain-always-restores-depth")))
+    (setq dsh-emacs--sessions old-sessions)
+    (setq dsh-emacs--workspaces old-workspaces)
+    (setq dsh-emacs--archived-sessions old-archived)
+    (setq dsh-emacs--host-refresh-depth old-refresh-depth)
+    (setq dsh-emacs--host-refresh-frames old-frames)))
+
+;; --- 测试 69: 多会话并行时转录事件按缓冲归属路由（守卫不得用全局 current-session） ---
+;; 同时打开会话 A、B 后，全局 dsh-emacs--current-session 指向最后打开的 B；
+;; A 缓冲的 mux 流收到 A 的 transcript 事件时，归属判定必须看 buffer-local
+;; dsh-emacs--buffer-session（open-session 时 setq-local），否则 A 的实时转录
+;; 会被全局 current-session（“B”）吞掉。反向：B 的事件也只到 B。
+(let* ((chat-a (let ((b (generate-new-buffer " *t69-a*")))
+                 (with-current-buffer b
+                   (setq-local dsh-emacs--buffer-session "sess-a"))
+                 b))
+       (chat-b (let ((b (generate-new-buffer " *t69-b*")))
+                 (with-current-buffer b
+                   (setq-local dsh-emacs--buffer-session "sess-b"))
+                 b))
+       (rendered-a nil)
+       (rendered-b nil)
+       (proc-a (make-pipe-process :name "t69-proc-a" :buffer nil))
+       (proc-b (make-pipe-process :name "t69-proc-b" :buffer nil))
+       (old-session dsh-emacs--current-session))
+  (unwind-protect
+      (progn
+        (process-put proc-a 'dsh-emacs-chat-buffer chat-a)
+        (process-put proc-b 'dsh-emacs-chat-buffer chat-b)
+        (setq dsh-emacs--current-session "sess-b") ; 后开的会话
+        (cl-letf (((symbol-function 'dsh-emacs-render-event)
+                   (lambda (&rest _)
+                     (if (eq (current-buffer) chat-a)
+                         (setq rendered-a t)
+                       (setq rendered-b t))))
+                  ((symbol-function 'dsh-emacs-render--consume-pending-user-message)
+                   (lambda (&rest _) nil)))
+          ;; A 的流事件 → 应渲染到 A（不被全局 “sess-b” 吞掉）
+          (dsh-emacs-events--dispatch-json
+           proc-a
+           (json-encode
+            '((payload . ((type . "session/event")
+                          (sessionId . "sess-a")
+                          (event . ((type . "assistant/message")
+                                    (sessionId . "sess-a"))))))))
+          (when (and rendered-a (null rendered-b))
+            (dsh-test-pass "parallel-sessions-mux-event-routes-to-owner"))
+          ;; B 的流事件 → 仍只到 B，且不因全局 current-session 变化受影响
+          (dsh-emacs-events--dispatch-json
+           proc-b
+           (json-encode
+            '((payload . ((type . "session/event")
+                          (sessionId . "sess-b")
+                          (event . ((type . "assistant/message")
+                                    (sessionId . "sess-b"))))))))
+          (when (and rendered-a rendered-b)
+            (dsh-test-pass "parallel-sessions-both-streams-render"))))
+    (setq dsh-emacs--current-session old-session)
+    (kill-buffer chat-a)
+    (kill-buffer chat-b)
+    (delete-process proc-a)
+    (delete-process proc-b)))
+
+;; --- 测试 70: 交互命令的目标归属跟随命令上下文（非全局 current-session） ---
+;; 打开会话 A 后再打开 B 后，全局 dsh-emacs--current-session="sess-b"、
+;; current-buffer=buf-b；此时用户 switch-to-buffer 切回 A 的 chat buffer
+;; 按下 C-c C-c（发送/打断）或 C-c C-r（刷新），目标必须是 A——归属从
+;; buffer-local dsh-emacs--buffer-session 解析，而不是最后打开的全局值。
+(let* ((buf-a (generate-new-buffer " *t70-a*"))
+       (buf-b (generate-new-buffer " *t70-b*"))
+       (sent nil)
+       (old-session dsh-emacs--current-session)
+       (old-buffer dsh-emacs--current-buffer))
+  (unwind-protect
+      (progn
+        (with-current-buffer buf-a
+          (dsh-emacs-mode)
+          (setq-local dsh-emacs--buffer-session "sess-a"))
+        (with-current-buffer buf-b
+          (dsh-emacs-mode)
+          (setq-local dsh-emacs--buffer-session "sess-b"))
+        ;; 最后打开的是 B（全局指向 B）
+        (setq dsh-emacs--current-session "sess-b")
+        (setq dsh-emacs--current-buffer buf-b)
+        ;; 场景 1：此刻切换到 A 里发消息 → payload 必须带 sess-a
+        (with-current-buffer buf-a
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (method params cb)
+                       (push (list method (cdr (assq 'sessionId params))) sent)
+                       (funcall cb t '((accepted . t)))))
+                    ((symbol-function 'dsh-emacs--get-input)
+                     (lambda () "from A"))
+                    ((symbol-function 'dsh-emacs--ml-busy-set)
+                     (lambda (&rest _) nil)))
+            (dsh-emacs--submit-prompt "from A"))
+          (when (and sent
+                     (equal (list "session.prompt" "sess-a") (car sent)))
+            (dsh-test-pass "send-in-inactive-buffer-targets-its-own-session")))
+        ;; 场景 2：打断 → session.cancel 同样带 sess-a
+        (with-current-buffer buf-a
+          (setq sent nil)
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (method params cb)
+                       (push (list method (cdr (assq 'sessionId params))) sent)
+                       (funcall cb t nil)))
+                    ((symbol-function 'dsh-emacs--ml-busy-set)
+                     (lambda (&rest _) nil)))
+            (dsh-emacs--interrupt-turn))
+          (when (and sent
+                     (equal (list "session.cancel" "sess-a") (car sent)))
+            (dsh-test-pass "interrupt-in-inactive-buffer-targets-own-session")))
+        ;; 场景 3：刷新 → load-history 用 sess-a
+        (with-current-buffer buf-a
+          (setq sent nil)
+          (cl-letf (((symbol-function 'dsh-emacs--load-history)
+                     (lambda (session-id)
+                       (push (list "load-history" session-id) sent)))
+                    ((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (&rest _) nil)))
+            (dsh-emacs-refresh))
+          (when (and sent
+                     (equal (list "load-history" "sess-a") (car sent)))
+            (dsh-test-pass "refresh-in-inactive-buffer-targets-own-session")))
+        ;; 场景 4：pinned 输入窗 → 归属窗镜像的 chat buffer（测试 54 的 busy-p 同源）
+        (with-current-buffer buf-a
+          (let ((pinned (generate-new-buffer " *t70-pinned*")))
+            (unwind-protect
+                (with-current-buffer pinned
+                  (setq-local dsh-emacs--input-chat-buffer buf-a)
+                  (when (string= "sess-a" (dsh-emacs--active-session-id))
+                    (dsh-test-pass
+                     "active-session-from-pinned-input-uses-mirrored-chat")))
+              (kill-buffer pinned))))
+        ;; 场景 5：无归属上下文（如 *dsh-sessions* 列表 buffer）→ 全局兜底
+        (with-temp-buffer
+          (when (string= "sess-b" (dsh-emacs--active-session-id))
+            (dsh-test-pass "active-session-falls-back-to-global"))))
+    (setq dsh-emacs--current-session old-session)
+    (setq dsh-emacs--current-buffer old-buffer)
+    (kill-buffer buf-a)
+    (kill-buffer buf-b)))
+
 (princ "\n===== 测试总结 =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))
       (fail (cl-count-if (lambda (r) (not (cdr r))) dsh-test-results)))

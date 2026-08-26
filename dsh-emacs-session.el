@@ -71,7 +71,9 @@
 (defvar dsh-emacs--archived-sessions nil
   "Archived session ids (owned by dsh-emacs.el).")
 (defvar dsh-emacs--current-session nil
-  "Current session id (owned by dsh-emacs.el).")
+  "Globally active session (the last opened one); owned by dsh-emacs.el.
+Interactively resolve command targets through `dsh-emacs--active-session-id'
+(see the authoritative defvar in dsh-emacs.el).")
 
 ;;; ---------------------------------------------------------------------------
 ;;; 缓冲和模式

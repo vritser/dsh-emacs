@@ -46,6 +46,18 @@
 (defvar-local dsh-emacs--host-reconnect-timer nil
   "Timer scheduling a host-stream reconnect after a drop.")
 
+;; Refresh in-flight protection (mirrors dsh web's `refreshFrames'): a
+;; `session.list'/`workspace.list' response is a snapshot at request time.
+;; When the response is in flight, host/mux frames may already have advanced
+;; the caches to a newer state (another client reordered/renamed/archived… );
+;; blindly replacing the caches with the snapshot would roll them back.  The
+;; frames arriving during the refresh are recorded here and replayed over the
+;; snapshot when the last in-flight refresh completes.
+(defvar dsh-emacs--host-refresh-depth 0
+  "Nested refresh span count; frames are only recorded while > 0.")
+(defvar dsh-emacs--host-refresh-frames nil
+  "Frames (in arrival order) received while a refresh was in flight.")
+
 ;; `:nowait' network process filters installed as native-compiled subrs are
 ;; never invoked (repeatedly) on some Emacs builds: the socket is read once
 ;; at most, then Emacs stops dispatching to the subr while HTTP/url-retrieve
@@ -217,6 +229,7 @@ overrides it via the `dsh-emacs-event-path' process property."
         (setf (dsh-protocol-session-blank item) nil)))
     ;; Repaint the session list if it is currently displayed.
     (when (and (listp dsh-emacs--sessions)
+               dsh-emacs-sessions-buffer
                (get-buffer dsh-emacs-sessions-buffer))
       (with-current-buffer (get-buffer dsh-emacs-sessions-buffer)
         (dsh-emacs-session--render)))
@@ -279,14 +292,17 @@ through the normal path once loading completes."
                 (when (and event
                            (equal (dsh-emacs-render--aget "type" event)
                                   "session/title"))
-                  (dsh-emacs-events--apply-title
-                   chat session-id
-                   (dsh-emacs-render--aget "title"
-                                           (dsh-emacs-render--aget "data" event))))
+                  (let ((title (dsh-emacs-render--aget "title"
+                                                       (dsh-emacs-render--aget "data" event))))
+                    (dsh-emacs-events--apply-title chat session-id title)
+                    ;; A refresh snapshot arriving after this title would roll
+                    ;; the row back to an old title: record it for replay too.
+                    (dsh-emacs-events--host-frame-record
+                     (list :apply-title session-id title))))
                 (when (and event
                            (equal session-id
-                                  (with-current-buffer chat
-                                    dsh-emacs--current-session)))
+                                  (buffer-local-value
+                                   'dsh-emacs--buffer-session chat)))
                   (dsh-emacs-events--dispatch-event chat event)))))))
     (error (message "dsh event decode error: %S" err))))
 
@@ -393,7 +409,7 @@ through the normal path once loading completes."
   (when (memq (process-status process) '(closed failed exit signal))
     (dsh-emacs-events--lost process)))
 
-(defun dsh-emacs-events--watchdog-tick ()
+(defun dsh-emacs-events--watchdog-tick (buffer)
   "Confirm the event stream is actually delivering while a turn runs.
 The dsh mux can leave a socket open-but-unread (bytes pile up in the kernel
 queue while Emacs never invokes the process filter), making the stream look
@@ -401,9 +417,13 @@ alive although nothing renders.  A cheap `session.history' fetch both renders
 whatever the stream missed (anchor-diffed, so re-delivery is harmless) and
 reveals the stall: if the anchor advanced although the stream had been silent
 for > 3s, kill the socket so the sentinel reconnects and HTTP polling takes
-over.  Self-stops outside an active turn."
-  (when (buffer-live-p dsh-emacs--current-buffer)
-    (with-current-buffer dsh-emacs--current-buffer
+over.  Self-stops outside an active turn.  BUFFER is the chat buffer this
+watchdog was armed for: the timer is buffer-local but timers fire with no
+buffer context, so the owning buffer is passed explicitly (with several
+session buffers open, the global `dsh-emacs--current-buffer' would point at
+the last-opened one and the watchdog would probe the wrong stream)."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
       (if (and (bound-and-true-p dsh-emacs--ml-busy)
                dsh-emacs--event-ready
                (process-live-p dsh-emacs--event-process)
@@ -419,7 +439,9 @@ over.  Self-stops outside an active turn."
                     (buffer (current-buffer)))
                 (dsh-emacs--rpc-async
                  "session.history"
-                 `((sessionId . ,dsh-emacs--current-session)
+                 `((sessionId . ,(or (and (boundp 'dsh-emacs--buffer-session)
+                                           dsh-emacs--buffer-session)
+                                      dsh-emacs--current-session))
                    (maxMessages . 50))
                  (lambda (ok value)
                    (when (buffer-live-p buffer)
@@ -443,8 +465,12 @@ over.  Self-stops outside an active turn."
   (setq dsh-emacs--ws-last-event-time (float-time))
   (unless (timerp dsh-emacs--ws-watchdog-timer)
     (setq-local dsh-emacs--ws-watchdog-timer
-                (run-with-timer 2 dsh-emacs-poll-interval
-                                #'dsh-emacs-events--watchdog-tick))))
+                (let ((buffer (current-buffer)))
+                  (run-with-timer 2 dsh-emacs-poll-interval
+                                  (lambda ()
+                                    (when (buffer-live-p buffer)
+                                      (dsh-emacs-events--watchdog-tick
+                                       buffer))))))))
 
 (defun dsh-emacs-events--watchdog-stop ()
   "Cancel the stream-health watchdog timer."
@@ -495,7 +521,9 @@ wedged with no recovery scheduled — the exact limbo observed on this build."
              (port (or (url-port url)
                        (if (equal (url-type url) "https") 443 80)))
              (buffer (get-buffer-create
-                      (format " *dsh-events:%s*" dsh-emacs--current-session)))
+                      (format " *dsh-events:%s*"
+                              (or dsh-emacs--buffer-session
+                                  dsh-emacs--current-session))))
              (process (let ((url-proxy-services nil))
                         (open-network-stream
                          (buffer-name buffer) buffer host port
@@ -556,9 +584,57 @@ wedged with no recovery scheduled — the exact limbo observed on this build."
 (defun dsh-emacs-events--host-repaint ()
   "Repaint the session list buffer, if it is live."
   (when (and (listp dsh-emacs--sessions)
+             dsh-emacs-sessions-buffer
              (get-buffer dsh-emacs-sessions-buffer))
     (with-current-buffer (get-buffer dsh-emacs-sessions-buffer)
       (dsh-emacs-session--render))))
+
+(defun dsh-emacs-events--host-frame-record (frame)
+  "Record FRAME while a list refresh is in flight (best-effort).
+FRAME is a handler-description list, e.g. (:upsert-workspace WS) or
+(:session-status ID RUNNING).  Replayed by
+`dsh-emacs-events--host-refresh-drain' once the refresh completes, so a
+late-arriving snapshot response never rolls the caches back below the
+state the stream already delivered."
+  (when (> dsh-emacs--host-refresh-depth 0)
+    (push frame dsh-emacs--host-refresh-frames)))
+
+(defun dsh-emacs-events--host-refresh-begin ()
+  "Mark a list-refresh span: snapshot responses arriving inside it are
+drained through recorded frames before being installed."
+  (setq dsh-emacs--host-refresh-depth (1+ dsh-emacs--host-refresh-depth))
+  (when (= dsh-emacs--host-refresh-depth 1)
+    (setq dsh-emacs--host-refresh-frames nil)))
+
+(defun dsh-emacs-events--host-refresh-drain ()
+  "End a refresh span; when the last one ends, replay recorded frames."
+  (when (> dsh-emacs--host-refresh-depth 0)
+    (setq dsh-emacs--host-refresh-depth
+          (1- dsh-emacs--host-refresh-depth)))
+  (when (= dsh-emacs--host-refresh-depth 0)
+    (let ((frames (nreverse dsh-emacs--host-refresh-frames)))
+      (setq dsh-emacs--host-refresh-frames nil)
+      (dolist (frame frames)
+        (pcase (car frame)
+          (:upsert-workspace
+           (dsh-emacs-events--host-upsert-workspace (cadr frame)))
+          (:remove-workspace
+           (dsh-emacs-events--host-remove-workspace (cadr frame)))
+          (:reorder-workspaces
+           (dsh-emacs-events--host-reorder-workspaces (cadr frame)))
+          (:set-archived
+           (dsh-emacs-events--host-set-archived (cadr frame)))
+          (:session-added
+           (dsh-emacs-events--host-session-added
+            (cadr frame) (car (cddr frame)) (cadr (cddr frame))))
+          (:session-removed
+           (dsh-emacs-events--host-session-removed (cadr frame)))
+          (:session-status
+           (dsh-emacs-events--host-session-status
+            (cadr frame) (car (cddr frame))))
+          (:apply-title
+           (dsh-emacs-events--apply-title
+            nil (cadr frame) (car (cddr frame)))))))))
 
 (defun dsh-emacs-events--host-upsert-workspace (workspace)
   "Insert or replace WORKSPACE (a protocol struct) in the cache.
@@ -650,7 +726,10 @@ until titles arrive via mux.  Idempotent: a session already cached (from a
   "Handle one decoded host-stream JSON envelope from PROCESS.
 Updates the shared caches (`dsh-emacs--workspaces', `dsh-emacs--sessions',
 `dsh-emacs--archived-sessions') in place from the wire payload and repaints
-the session list, mirroring dsh web's live workspace browser."
+the session list, mirroring dsh web's live workspace browser.  While a
+list refresh is in flight the frame is ALSO recorded (like dsh web's
+`refreshFrames'); the refresh response snapshot is replayed through the
+recorded frames so a stale snapshot never rolls the caches back."
   (condition-case err
       (let* ((message (json-read-from-string json))
              (payload (dsh-emacs-render--aget "payload" message))
@@ -659,31 +738,45 @@ the session list, mirroring dsh web's live workspace browser."
          ((equal type "host/workspace-changed")
           (let ((ws (dsh-emacs-render--aget "workspace" payload)))
             (when ws
-              (dsh-emacs-events--host-upsert-workspace
-               (dsh-protocol-workspace--from-alist ws)))))
+              (let ((struct (dsh-protocol-workspace--from-alist ws)))
+                (dsh-emacs-events--host-upsert-workspace struct)
+                (dsh-emacs-events--host-frame-record
+                 (list :upsert-workspace struct))))))
          ((equal type "host/workspace-removed")
-          (dsh-emacs-events--host-remove-workspace
-           (dsh-emacs-render--aget "workspaceId" payload)))
+          (let ((id (dsh-emacs-render--aget "workspaceId" payload)))
+            (dsh-emacs-events--host-remove-workspace id)
+            (dsh-emacs-events--host-frame-record
+             (list :remove-workspace id))))
          ((equal type "host/workspace-order-changed")
-          (dsh-emacs-events--host-reorder-workspaces
-           (dsh-emacs--sequence-list
-            (dsh-emacs-render--aget "workspaceIds" payload))))
+          (let ((ids (dsh-emacs--sequence-list
+                      (dsh-emacs-render--aget "workspaceIds" payload))))
+            (dsh-emacs-events--host-reorder-workspaces ids)
+            (dsh-emacs-events--host-frame-record
+             (list :reorder-workspaces ids))))
          ((equal type "host/archived-sessions-changed")
-          (dsh-emacs-events--host-set-archived
-           (dsh-emacs--sequence-list
-            (dsh-emacs-render--aget "archivedSessionIds" payload))))
+          (let ((ids (dsh-emacs--sequence-list
+                      (dsh-emacs-render--aget "archivedSessionIds" payload))))
+            (dsh-emacs-events--host-set-archived ids)
+            (dsh-emacs-events--host-frame-record
+             (list :set-archived ids))))
          ((equal type "host/session-added")
-          (dsh-emacs-events--host-session-added
-           (dsh-emacs-render--aget "sessionId" payload)
-           (dsh-emacs-render--aget "blank" payload)
-           (dsh-emacs-render--aget "cwd" payload)))
+          (let ((sid (dsh-emacs-render--aget "sessionId" payload))
+                (blank (dsh-emacs-render--aget "blank" payload))
+                (cwd (dsh-emacs-render--aget "cwd" payload)))
+            (dsh-emacs-events--host-session-added sid blank cwd)
+            (dsh-emacs-events--host-frame-record
+             (list :session-added sid blank cwd))))
          ((equal type "host/session-removed")
-          (dsh-emacs-events--host-session-removed
-           (dsh-emacs-render--aget "sessionId" payload)))
+          (let ((sid (dsh-emacs-render--aget "sessionId" payload)))
+            (dsh-emacs-events--host-session-removed sid)
+            (dsh-emacs-events--host-frame-record
+             (list :session-removed sid))))
          ((equal type "host/session-status")
-          (dsh-emacs-events--host-session-status
-           (dsh-emacs-render--aget "sessionId" payload)
-           (dsh-emacs-render--aget "running" payload)))
+          (let ((sid (dsh-emacs-render--aget "sessionId" payload))
+                (running (dsh-emacs-render--aget "running" payload)))
+            (dsh-emacs-events--host-session-status sid running)
+            (dsh-emacs-events--host-frame-record
+             (list :session-status sid running))))
          (t nil)))
     (error (message "dsh host event decode error: %S" err))))
 

@@ -220,7 +220,15 @@ renaming by session ID.")
   "Set of archived session IDs (hash table).")
 
 (defvar dsh-emacs--current-session nil
-  "Current session ID.")
+  "Globally active session (the last opened one).
+
+`dsh-emacs-open-session' sets it; it is the fallback owner for contexts
+with no chat buffer (the session list, list-buffer commands, naming
+yourself before a session opens).  With several session buffers open it
+still points at the LAST-opened session, so interactive commands must
+NOT resolve their target from this variable alone — they read
+`dsh-emacs--buffer-session' (the owning chat buffer) first, via
+`dsh-emacs--active-session-id'.")
 
 (defvar dsh-emacs--current-buffer nil
   "Current chat buffer.")
@@ -261,7 +269,17 @@ window until it stops advancing or the round budget is spent.")
   "Chat buffer mirrored by a dedicated input buffer, if any.")
 
 (defvar-local dsh-emacs--buffer-session nil
-  "Session ID corresponding to this buffer (buffer-local).")
+  "Session ID owned by this chat buffer (buffer-local).
+
+Set by `dsh-emacs-open-session' on every chat buffer; this is the
+AUTHORITATIVE owner for event routing and interactive commands while
+inside that buffer: mux transcript events are attributed to a chat
+buffer via `buffer-local-value of this variable, and
+`dsh-emacs--active-session-id' resolves the command target from it
+before falling back to the global `dsh-emacs--current-session'.
+Several session buffers can be open at once; each keeps its own
+binding, so switching buffers never confuses which session a
+transcript or a `C-c C-c' belongs to.")
 ;; `dsh-emacs-mode' is a derived mode, whose generated initializer runs
 ;; `kill-all-local-variables' (Clearing buffer-local variables on mode
 ;; switch).  Mark this binding permanent so it survives the mode call and
@@ -516,28 +534,34 @@ Updates the mode-line name (list title) and the workspace directory."
 (defun dsh-emacs-list-sessions ()
   "Fetch the session list and refresh workspaces."
   (interactive)
+  (dsh-emacs-events--host-refresh-begin)
   (dsh-emacs--rpc-async "session.list" nil
                         (lambda (ok value)
-                          (if ok
-                              (progn
-                                ;; JSON arrays arrive as vectors; normalize
-                                ;; them before the session list renderer uses
-                                ;; `dolist', and wrap each item in a
-                                ;; `dsh-protocol-session' struct so field
-                                ;; access is centralized (protoco.el).
-                                (setq dsh-emacs--sessions
-                                      (mapcar
-                                       #'dsh-protocol-session--from-alist
-                                       (dsh-emacs--sequence-list
-                                        (cdr (assq 'items value)))))
-                                ;; 标题/工作区可能已漂移（自动摘要/重命名/
-                                ;; 会话移动），同步所有存活聊天缓冲的名称与
-                                ;; default-directory。
-                                (dsh-emacs--chat-buffers-sync-all)
-                                ;; Refresh workspaces in parallel so the
-                                ;; session list can group by workspace.
-                                (dsh-emacs-list-workspaces))
-                            (message "Failed to fetch session list: %S" value)))))
+                          (unwind-protect
+                              (if ok
+                                  (progn
+                                    ;; JSON arrays arrive as vectors; normalize
+                                    ;; them before the session list renderer uses
+                                    ;; `dolist', and wrap each item in a
+                                    ;; `dsh-protocol-session' struct so field
+                                    ;; access is centralized (protoco.el).
+                                    (setq dsh-emacs--sessions
+                                          (mapcar
+                                           #'dsh-protocol-session--from-alist
+                                           (dsh-emacs--sequence-list
+                                            (cdr (assq 'items value)))))
+                                    ;; 标题/工作区可能已漂移（自动摘要/重命名/
+                                    ;; 会话移动），同步所有存活聊天缓冲的名称与
+                                    ;; default-directory。
+                                    (dsh-emacs--chat-buffers-sync-all)
+                                    ;; Refresh workspaces in parallel so the
+                                    ;; session list can group by workspace.
+                                    (dsh-emacs-list-workspaces))
+                                (message "Failed to fetch session list: %S" value))
+                            ;; Snapshot installed: replay any frame that arrived
+                            ;; while the refresh was in flight, so the list never
+                            ;; rolls back below the stream's latest state.
+                            (dsh-emacs-events--host-refresh-drain)))))
 
 ;;;###autoload
 (defun dsh-emacs-new-session (&optional cwd workspace-id)
@@ -791,7 +815,10 @@ When the input line is not visible because the window was scrolled up to\nread h
                     (+ (max 2 dsh-emacs-input-window-height) 3)))
         (let ((input-buffer
                (get-buffer-create
-                (format "*dsh-input: %s*" dsh-emacs--current-session))))
+                (format "*dsh-input: %s*"
+                        (or (buffer-local-value 'dsh-emacs--buffer-session
+                                                chat)
+                            dsh-emacs--current-session)))))
           (with-current-buffer input-buffer
             (fundamental-mode)
             (use-local-map (symbol-value 'dsh-emacs-mode-map))
@@ -1079,21 +1106,26 @@ the session list on success."
 (defun dsh-emacs-list-workspaces ()
   "Fetch the workspace list."
   (interactive)
+  (dsh-emacs-events--host-refresh-begin)
   (dsh-emacs--rpc-async "workspace.list" nil
                         (lambda (ok value)
-                          (when ok
-                            (let ((wl (dsh-protocol-workspace-list--from-alist value)))
-                              (setq dsh-emacs--workspaces
-                                    (dsh-protocol-workspace-list-items wl))
-                              (setq dsh-emacs--archived-sessions
-                                    (dsh-emacs--normalize-archived
-                                     (dsh-protocol-workspace-list-archived-session-ids wl)))))
-                          ;; Always re-render the session list so grouping
-                          ;; reflects the latest workspace data (or falls back
-                          ;; to the ungrouped view when the fetch failed).
-                          (when (get-buffer dsh-emacs-sessions-buffer)
-                            (with-current-buffer dsh-emacs-sessions-buffer
-                              (dsh-emacs-session--render))))))
+                          (unwind-protect
+                              (progn
+                                (when ok
+                                  (let ((wl (dsh-protocol-workspace-list--from-alist value)))
+                                    (setq dsh-emacs--workspaces
+                                          (dsh-protocol-workspace-list-items wl))
+                                    (setq dsh-emacs--archived-sessions
+                                          (dsh-emacs--normalize-archived
+                                           (dsh-protocol-workspace-list-archived-session-ids wl)))))
+                                ;; Always re-render the session list so grouping
+                                ;; reflects the latest workspace data (or falls back
+                                ;; to the ungrouped view when the fetch failed).
+                                (when (and dsh-emacs-sessions-buffer
+                                           (get-buffer dsh-emacs-sessions-buffer))
+                                  (with-current-buffer dsh-emacs-sessions-buffer
+                                    (dsh-emacs-session--render))))
+                            (dsh-emacs-events--host-refresh-drain)))))
 
 ;;;###autoload
 (defun dsh-emacs-create-workspace (path)
@@ -1300,6 +1332,24 @@ All welcome text is marked read-only; only the region after ❯ is writable."
     (dsh-emacs--setup-input-area))
   (goto-char dsh-emacs--input-marker))
 
+(defun dsh-emacs--active-session-id ()
+  "Return the session id the current command context belongs to.
+Resolves in this order:
+1. the chat buffer mirrored by a pinned input window (`dsh-emacs--input-chat-buffer');
+2. the buffer-local `dsh-emacs--buffer-session' of the current chat buffer;
+3. the global `dsh-emacs--current-session' as a fallback for list-buffer \ncommands and other contexts with no session ownership.
+Interactive commands (send, interrupt, refresh, model picker) must resolve
+here rather than reading the global directly: with several session buffers
+open, the global points at the last-opened session while the user may be
+editing inside an earlier one."
+  (or (and dsh-emacs--input-chat-buffer
+           (buffer-live-p dsh-emacs--input-chat-buffer)
+           (buffer-local-value 'dsh-emacs--buffer-session
+                               dsh-emacs--input-chat-buffer))
+      (and (boundp 'dsh-emacs--buffer-session)
+           dsh-emacs--buffer-session)
+      dsh-emacs--current-session))
+
 (defun dsh-emacs--busy-p ()
   "Return non-nil when this chat buffer (or its pinned input) is generating.
 Consults the same buffer-local flag that drives the mode-line spinner; when
@@ -1317,7 +1367,7 @@ chat buffer it mirrors."
 
 The server stops the agent mid-flight; the partial reply stays in the
 transcript and `turn/end' arrives normally, which clears the spinner."
-  (let ((session-id dsh-emacs--current-session))
+  (let ((session-id (dsh-emacs--active-session-id)))
     (when (null session-id)
       (user-error "No session is open"))
     (dsh-emacs--rpc-async "session.cancel"
@@ -1416,12 +1466,16 @@ IMAGES, when given, is a list of wire-ready attachment alists
 `images' payload of `session.prompt' so the model sees them immediately.
 On acceptance the message is echoed into the transcript (when non-empty),
 the running spinner lights up, and the watchdog starts."
-  (let ((input-buffer (current-buffer))
-        (chat-buffer dsh-emacs--current-buffer)
-        (payload `((sessionId . ,dsh-emacs--current-session)
-                   (mode . "queue")
-                   (content . [((type . "text") (text . ,message))])
-                   (clientTimeZone . ,(dsh-emacs--client-time-zone)))))
+  (let* ((session-id (dsh-emacs--active-session-id))
+         (chat-buffer (or dsh-emacs--input-chat-buffer
+                          (and (boundp 'dsh-emacs--buffer-session)
+                               dsh-emacs--buffer-session
+                               (current-buffer))))
+         (input-buffer (current-buffer))
+         (payload `((sessionId . ,session-id)
+                    (mode . "queue")
+                    (content . [((type . "text") (text . ,message))])
+                    (clientTimeZone . ,(dsh-emacs--client-time-zone)))))
     (when images
       (setq payload (append payload (list (cons 'images images)))))
     (dsh-emacs--rpc-async "session.prompt" payload
@@ -1772,9 +1826,7 @@ group-aware UI, header rows plus a per-row provider suffix on
 colliding ids are shown.  The footer model segment updates
 immediately."
   (interactive)
-  (let ((session-id (or dsh-emacs--current-session
-                        (and (boundp 'dsh-emacs--buffer-session)
-                             dsh-emacs--buffer-session))))
+  (let ((session-id (dsh-emacs--active-session-id)))
     (unless session-id (user-error "Open or select a session first"))
     (dsh-emacs--rpc-async "session.models"
                           `((sessionId . ,session-id))
@@ -1996,7 +2048,7 @@ seeing a historical `turn/end'."
   (unless dsh-emacs--poll-inflight
     (setq dsh-emacs--poll-inflight t)
     (dsh-emacs--rpc-async "session.history"
-                          `((sessionId . ,dsh-emacs--current-session)
+                          `((sessionId . ,(dsh-emacs--active-session-id))
                             (maxMessages . 50))
                           (lambda (ok value)
                             (setq dsh-emacs--poll-inflight nil)
@@ -2037,8 +2089,9 @@ seeing a historical `turn/end'."
 (defun dsh-emacs-refresh ()
   "Refresh the current session."
   (interactive)
-  (when dsh-emacs--current-session
-    (dsh-emacs--load-history dsh-emacs--current-session)))
+  (let ((session-id (dsh-emacs--active-session-id)))
+    (when session-id
+      (dsh-emacs--load-history session-id))))
 
 (defun dsh-emacs-list-sessions-display ()
   "Display the session list buffer."
