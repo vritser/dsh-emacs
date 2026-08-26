@@ -2098,6 +2098,709 @@ so the code under test can read fields through the protocol accessors."
                       "high"))
     (dsh-test-pass "protocol-model-selection-result")))
 
+;; --- 测试 58: 归档会话（workspace.archiveSession）---
+;; server 无 session.delete，唯一移除途径是归档；响应为完整归档集。
+(let ((listed nil)
+      (calls nil)
+      (dsh-emacs--archived-sessions nil)
+      (archived (dsh-emacs--normalize-archived '("s1" "s2"))))
+  (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+             (lambda (method params cb)
+               (push (list method params) calls)
+               (when (string= method "workspace.archiveSession")
+                 (funcall cb t '((archivedSessionIds . ["s1" "s2"]))))))
+            ((symbol-function 'dsh-emacs-list-sessions)
+             (lambda () (setq listed t))))
+    (dsh-emacs-archive-session "s3")
+    (let* ((call (car calls))
+           (method (car call))
+           (params (cadr call)))
+      (when (and (string= "workspace.archiveSession" method)
+                 (string= "s3" (cdr (assq 'sessionId params))))
+        (dsh-test-pass "archive-passes-session-id")))
+    (when (and (gethash "s1" dsh-emacs--archived-sessions)
+               (gethash "s2" dsh-emacs--archived-sessions)
+               (not (gethash "s3" dsh-emacs--archived-sessions)))
+      (dsh-test-pass "archive-updates-archived-set"))
+    (when listed
+      (dsh-test-pass "archive-refreshes-list"))))
+
+;; --- 测试 59: rename session at point ---
+;; 列表内 r 键应像 archive（D 键）一样作用于光标处会话，
+;; 从 text property 取 id + 新标题，不带 completing-read。
+(let ((buf (generate-new-buffer " *dsh-rename-at-point*"))
+      (calls nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (insert "Rename me\n")
+        (put-text-property (point-min) (point-max) 'dsh-emacs-session-id "sid-1")
+        (goto-char (point-min))
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method params cb)
+                     (push (list method params) calls)
+                     (funcall cb t '((title . "新标题")))))
+                  ((symbol-function 'read-string)
+                   (lambda (&rest _args) "新标题"))
+                  ;; rename 成功回调会 refresh 列表；mock 掉以免二次进 calls
+                  ((symbol-function 'dsh-emacs-list-sessions)
+                   (lambda () nil)))
+          (dsh-emacs-rename-session-at-point)
+          (let* ((call (car calls))
+                 (params (cadr call)))
+            (when (and (string= "session.rename" (car call))
+                       (string= "sid-1" (cdr (assq 'sessionId params)))
+                       (string= "新标题" (cdr (assq 'title params))))
+              (dsh-test-pass "rename-at-point-uses-point-session")))))
+    (kill-buffer buf)))
+
+;; --- 测试 60: subagent 会话不进分组 ---
+;; server 用 origin: "subagent" 标记子代理会话，它们不应出现在
+;; 会话列表（含 Ungrouped 桶）。
+(let* ((dsh-emacs--archived-sessions nil)
+       (sessions (dsh-emacs-test--session-items
+                   (list (list (cons 'sessionId "s1")
+                               (cons 'origin "subagent")
+                               (cons 'updatedAt 100))
+                         (list (cons 'sessionId "s2")
+                               (cons 'updatedAt 200)))))
+       (workspaces nil))
+  ;; 无 workspace：subagent 应被剔除，只有 s2 进 Ungrouped
+  (let ((grouped (dsh-emacs-session--group-sessions sessions workspaces)))
+    (let* ((ungrouped (cl-find-if (lambda (g) (equal "Ungrouped" (plist-get g :label))) grouped))
+           (members (and ungrouped (plist-get ungrouped :sessions)))
+           (ids (mapcar #'dsh-protocol-session-session-id members)))
+      (when (and (= (length grouped) 1)
+                 (equal ids '("s2")))
+        (dsh-test-pass "subagent-session-hidden-from-list")))))
+
+;; --- 测试 61: blank 会话仅保留当前会话 ---
+;; dsh web 的 sessionVisible 规则：非 subagent、非 archived、
+;; 且 (非 blank 或 是 current)。三个 Untitled（blank）应隐藏，
+;; 但当前打开的 blank 保留。
+(let* ((dsh-emacs--archived-sessions nil)
+       (dsh-emacs--current-session "s-blank-open")
+       (sessions (dsh-emacs-test--session-items
+                  (list (list (cons 'sessionId "s-a")
+                              (cons 'blank :json-true)
+                              (cons 'updatedAt 300))
+                        (list (cons 'sessionId "s-blank-open")
+                              (cons 'blank :json-true)
+                              (cons 'updatedAt 200))
+                        (list (cons 'sessionId "s-b")
+                              (cons 'blank :json-false)
+                              (cons 'updatedAt 100))))))
+  (let* ((grouped (dsh-emacs-session--group-sessions sessions nil))
+         (ungrouped (cl-find-if (lambda (g) (equal "Ungrouped"
+                                                   (plist-get g :label)))
+                                grouped))
+         (members (and ungrouped (plist-get ungrouped :sessions)))
+         (ids (sort (mapcar #'dsh-protocol-session-session-id members)
+                    #'string<)))
+    ;; s-a（blank 非当前）被隐藏；s-blank-open（blank 但当前）与
+    ;; s-b（非 blank）保留
+    (when (and (equal ids '("s-b" "s-blank-open"))
+               (not (member "s-a" ids)))
+      (dsh-test-pass "blank-hidden-except-current"))))
+
+;; --- 测试 62: 空 workspace 保持显示，可从中创建会话 ---
+;; 成员的 blank 过滤后 workspace 可为空；空组必须仍出现在列表
+;; （渲染 New Session 行），且 `c'（dsh-emacs-new-session）在其上
+;; 应传 workspaceId 而非 cwd。
+(let* ((dsh-emacs--archived-sessions nil)
+       (dsh-emacs--current-session nil)
+       (empty-ws (mapcar #'dsh-protocol-workspace--from-alist
+                         (list (list (cons 'workspaceId "w-empty")
+                                     (cons 'title "Empty WS")
+                                     (cons 'path "/tmp/dsh-empty-ws")
+                                     (cons 'sessionIds [])))))
+       (sessions nil))
+  ;; 1) 分组：空 workspace 仍在结果里
+  (let* ((grouped (dsh-emacs-session--group-sessions sessions empty-ws))
+         (ws-group (cl-find-if (lambda (g)
+                                 (equal "w-empty"
+                                        (plist-get g :workspace-id)))
+                               grouped)))
+    (when (and ws-group
+               (equal "Empty WS" (plist-get ws-group :label))
+               (null (plist-get ws-group :sessions)))
+      (dsh-test-pass "empty-workspace-stays-visible")))
+  ;; 2) 渲染：空组显示 New Session 行，且该行带 workspace-id property
+  (let ((buf (generate-new-buffer " *dsh-empty-ws-render*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (let ((dsh-emacs--sessions sessions)
+                (dsh-emacs--workspaces empty-ws)
+                (dsh-emacs--archived-sessions nil)
+                (dsh-emacs-session--filter-ws-id nil)
+                (dsh-emacs-session--filter-ws-title nil))
+            (dsh-emacs-session--render)
+            (let ((txt (buffer-substring-no-properties
+                        (point-min) (point-max))))
+              ;; 定位空 workspace 的 New Session 行，检查它带 workspace-id
+              (goto-char (point-min))
+              (let ((found nil))
+                (while (and (not found)
+                            (search-forward "New Session" nil t))
+                  (when (dsh-emacs-workspace-id-at-point)
+                    (setq found t))
+                  (when (get-text-property (1- (point))
+                                           'dsh-emacs-workspace-id)
+                    (setq found t)))
+                (when (and found (string-match-p "Empty WS" txt))
+                  (dsh-test-pass "empty-workspace-renders-new-session"))))))
+      (kill-buffer buf)))
+  ;; 3) new-session 在 workspace 行上应传 workspaceId，且新会话的
+  ;;    default-directory 立即对齐 workspace path（magit 等按此定位项目）。
+  (let ((calls nil)
+        (buf (generate-new-buffer " *dsh-empty-ws-create*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "  New Session\n")
+          (put-text-property (point-min) (point-max)
+                             'dsh-emacs-workspace-id "w-empty")
+          (goto-char (point-min))
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (method params cb)
+                       (push (list method params) calls)
+                       (funcall cb t '((sessionId . "s-new")))))
+                    ((symbol-function 'dsh-emacs-open-session)
+                     (lambda (_sid) nil))
+                    ((symbol-value 'dsh-emacs--current-buffer) buf)
+                    (dsh-emacs--workspaces empty-ws))
+            (call-interactively #'dsh-emacs-new-session)
+            (let* ((call (car calls))
+                   (params (cadr call)))
+              (when (and (string= "session.create" (car call))
+                         (string= "w-empty"
+                                  (cdr (assq 'workspaceId params)))
+                         (null (assq 'cwd params)))
+                (dsh-test-pass "new-session-in-workspace-uses-workspace-id"))
+              ;; 新会话 buffer 的 default-directory 应为 workspace 的 path
+              (when (or (null (cdr (assq 'workspaceId params)))
+                        (string-suffix-p "/tmp/dsh-empty-ws"
+                                         (directory-file-name
+                                          default-directory)))
+                (dsh-test-pass "new-workspace-session-sets-default-directory")))))
+      (kill-buffer buf))))
+
+  ;; 4) 非 workspace 上下文：不带 workspaceId（ungrouped），只带 cwd
+  (let ((calls nil)
+        (buf (generate-new-buffer " *dsh-plain-create*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "plain text\n")
+          (goto-char (point-min))
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (method params cb)
+                       (push (list method params) calls)
+                       (funcall cb t '((sessionId . "s-plain")))))
+                    ((symbol-function 'dsh-emacs-open-session)
+                     (lambda (_sid) nil)))
+            (call-interactively #'dsh-emacs-new-session)
+            (let* ((call (car calls))
+                   (params (cadr call)))
+              (when (and (string= "session.create" (car call))
+                         (null (assq 'workspaceId params))
+                         (assq 'cwd params))
+                (dsh-test-pass "new-session-outside-workspace-ungrouped")))))
+      (kill-buffer buf)))
+
+;; --- 测试 63: session/title 事件实时更新标题（server 自动重命名） ---
+;; server 在前 1-2 轮对话后自动重命名（摘要标题），通过 mux 流广播
+;; `session/title' 事件；emacs 侧应实时：更新缓存 title-value、重命名
+;; 已打开的 chat buffer、重绘 session 列表——不等 session.list 刷新。
+(let* ((old-sessions dsh-emacs--sessions)
+       (old-buffers dsh-emacs--chat-buffers)
+       (item (list (cons 'sessionId "sess-title")
+                   (cons 'blank :json-false)
+                   (cons 'title "旧标题")
+                   (cons 'projections
+                         (list (cons 'values
+                                     (list (cons 'title "旧标题")))))))
+       (chat-buf (get-buffer-create " *dsh-test-title-chat*"))
+       (list-buf (get-buffer-create "*dsh-sessions*"))
+       (old-sessions-buffer dsh-emacs-sessions-buffer)
+       (json (concat "{\"payload\":{\"type\":\"session/event\","
+                     "\"sessionId\":\"sess-title\","
+                     "\"event\":{\"type\":\"session/title\","
+                     "\"data\":{\"title\":\"自动摘要标题\"}}}}")))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs--sessions
+              (dsh-emacs-test--session-items (list item)))
+        (setq dsh-emacs--chat-buffers
+              (let ((h (make-hash-table :test 'equal)))
+                (puthash "sess-title" chat-buf h) h))
+        ;; chat buffer 绑定会话；避免触发 history-loading 丢弃分支。
+        (with-current-buffer chat-buf
+          (setq-local dsh-emacs--buffer-session "sess-title")
+          (setq-local dsh-emacs--current-session "sess-title")
+          (setq-local dsh-emacs--event-history-loading nil)
+          (rename-buffer " *dsh-test-title-chat*" t)
+          (dsh-emacs-mode))
+        ;; 列表 buffer 置为 session 列表并渲染一次（固定旧状态）。
+        (with-current-buffer list-buf
+          (let ((dsh-emacs--sessions dsh-emacs--sessions)
+                (dsh-emacs--workspaces nil)
+                (dsh-emacs--archived-sessions nil)
+                (dsh-emacs-session--filter-ws-id nil)
+                (dsh-emacs-session--filter-ws-title nil))
+            (dsh-emacs-session--render))
+          (setq dsh-emacs-sessions-buffer (buffer-name)))
+        ;; 调 dispatch-json：mock `--chat' 返回 chat-buf。
+        (cl-letf (((symbol-function 'dsh-emacs-events--chat)
+                   (lambda (_p) chat-buf)))
+          (dsh-emacs-events--dispatch-json 'process json))
+        ;; 1) 缓存 title-value 已更新
+        (let ((cached (cl-find-if
+                       (lambda (s)
+                         (equal "sess-title"
+                                (dsh-protocol-session-session-id s)))
+                       dsh-emacs--sessions)))
+          (when (and cached
+                     (equal "自动摘要标题"
+                            (dsh-protocol-session-title-value cached)))
+            (dsh-test-pass "title-event-updates-cache")))
+        ;; 2) 列表 buffer 行已重绘为新标题
+        (when (string-match-p "自动摘要标题"
+                              (with-current-buffer list-buf
+                                (buffer-string)))
+          (dsh-test-pass "title-event-repaints-list"))
+        ;; 3) 已打开的 chat buffer 已重命名
+        (when (string-match-p "自动摘要标题" (buffer-name chat-buf))
+          (dsh-test-pass "title-event-renames-chat-buffer")))
+    (setq dsh-emacs--sessions old-sessions)
+    (setq dsh-emacs--chat-buffers old-buffers)
+    (setq dsh-emacs-sessions-buffer old-sessions-buffer)
+    (when (buffer-live-p chat-buf) (kill-buffer chat-buf))
+    (when (buffer-live-p list-buf) (kill-buffer list-buf))))
+
+;; --- 测试 64: 新建 workspace session 归入该 workspace，标题事件清 blank ---
+;; 回归：session.create 回调曾只 open 会话，新会话未进缓存/workspace
+;; session-ids → 分组落 ungrouped，且 session/title 事件找不到缓存 item、
+;; blank 不清 → 自动重命名不生效。
+(let* ((old-sessions dsh-emacs--sessions)
+       (old-workspaces dsh-emacs--workspaces)
+       (old-buffers dsh-emacs--chat-buffers)
+       (ws (dsh-protocol-workspace--from-alist
+            (list (cons 'workspaceId "w-empty")
+                  (cons 'title "Empty WS")
+                  (cons 'path "/tmp/dsh-empty-ws")
+                  (cons 'sessionIds []))))
+       (chat-buf (get-buffer-create " *dsh-test-ws-create*")))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs--workspaces (list ws))
+        (setq dsh-emacs--sessions
+              (dsh-emacs-test--session-items
+               (list (list (cons 'sessionId "s-old")
+                           (cons 'blank :json-false)))))
+        (setq dsh-emacs--chat-buffers
+              (let ((h (make-hash-table :test 'equal)))
+                (puthash "s-new" chat-buf h) h))
+        (with-current-buffer chat-buf
+          (setq-local dsh-emacs--buffer-session "s-new")
+          (setq-local dsh-emacs--current-session nil))
+        ;; mock rpc-async：创建成功立即回调
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_method params cb)
+                     (funcall cb t '((sessionId . "s-new")))))
+                  ((symbol-function 'dsh-emacs-open-session)
+                   (lambda (_sid) nil))
+                  ((symbol-value 'dsh-emacs--current-buffer) chat-buf))
+          ;; 直接以 workspace-id 参数调用（等价于在 workspace 行上按 c）
+          (dsh-emacs--cache-new-session "s-new" "w-empty"))
+        ;; 1) 缓存里有新会话
+        (when (dsh-emacs--chat-session-item "s-new")
+          (dsh-test-pass "new-session-cached-after-create"))
+        ;; 2) workspace session-ids 已吸收新会话
+        (let ((w (car dsh-emacs--workspaces)))
+          (when (member "s-new" (dsh-protocol-workspace-session-ids w))
+            (dsh-test-pass "new-session-attached-to-workspace")))
+        ;; 3) 分组：s-new 落在 Empty WS 组而非 Ungrouped（创建后会话处于
+        ;;    打开态，current-session 即它，blank 过滤不会隐藏它）
+        (let* ((dsh-emacs--current-session "s-new")
+               (grouped (dsh-emacs-session--group-sessions
+                         dsh-emacs--sessions dsh-emacs--workspaces))
+               (ws-group (cl-find-if
+                          (lambda (g) (equal "w-empty"
+                                             (plist-get g :workspace-id)))
+                          grouped))
+               (ungrouped (cl-find-if
+                           (lambda (g) (equal "Ungrouped"
+                                              (plist-get g :label)))
+                           grouped)))
+          (when (and ws-group
+                     (member "s-new"
+                             (mapcar #'dsh-protocol-session-session-id
+                                     (plist-get ws-group :sessions)))
+                     (not (member "s-new"
+                                  (mapcar #'dsh-protocol-session-session-id
+                                          (and ungrouped
+                                               (plist-get ungrouped :sessions))))))
+            (dsh-test-pass "new-session-grouped-in-workspace-not-ungrouped")))
+        ;; 4) 标题事件到达：清 blank + 更新 title-value → 显示标题不再是
+        ;;    "New Session"
+        (dsh-emacs-events--apply-title chat-buf "s-new" "自动摘要名称")
+        (let* ((item (dsh-emacs--chat-session-item "s-new"))
+               (blank (dsh-protocol-session-blank item))
+               (shown (dsh-emacs-session--display-title item)))
+          (when (and item
+                     (not (and blank (not (eq blank :json-false))))
+                     (equal "自动摘要名称" shown))
+            (dsh-test-pass "title-event-clears-blank-and-updates-title"))))
+    (setq dsh-emacs--sessions old-sessions)
+    (setq dsh-emacs--workspaces old-workspaces)
+    (setq dsh-emacs--chat-buffers old-buffers)
+    (when (buffer-live-p chat-buf) (kill-buffer chat-buf))))
+
+;; --- 测试 64b: host 流先到（session-added 入缓存）后 RPC 回调 ---
+;; 回归：cache-new-session 曾用同一个 not-cached 守卫包住“入缓存 + workspace
+;; attach”。host 流的 session-added 先于 session.create 回调到达时，session
+;; 已在缓存 → 整个 when 跳过 → workspace 没 attach，新会话落到 Ungrouped。
+;; 现在 attach 独立于入缓存执行（幂等），竞态窗口不再丢归属。
+(let* ((old-sessions dsh-emacs--sessions)
+       (old-workspaces dsh-emacs--workspaces)
+       (old-sessions-buffer dsh-emacs-sessions-buffer)
+       (ws (dsh-protocol-workspace--from-alist
+            (list (cons 'workspaceId "w-race")
+                  (cons 'title "Race WS")
+                  (cons 'path "/tmp/race-ws")
+                  (cons 'sessionIds []))))
+       (list-buf (get-buffer-create " *dsh-race-list*")))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs--sessions nil)
+        (setq dsh-emacs--workspaces (list ws))
+        (setq dsh-emacs-sessions-buffer (buffer-name list-buf))
+        ;; 1) host 事件先到：session-added 把 s-new 入 sessions 缓存（无归属）
+        (dsh-emacs-events--host-dispatch
+         'host-proc
+         (concat "{\"payload\":{\"type\":\"host/session-added\","
+                 "\"sessionId\":\"s-new\",\"blank\":true,"
+                 "\"cwd\":\"/tmp/race-ws\"}}"))
+        ;; 2) RPC 回调随后到达：cache-new-session 必须仍然 attach 到 workspace
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_method params cb)
+                     (funcall cb t '((sessionId . "s-new")))))
+                  ((symbol-function 'dsh-emacs-open-session)
+                   (lambda (_sid) nil)))
+          (dsh-emacs--cache-new-session "s-new" "w-race"))
+        ;; 断言：缓存只有一行（host 事件已入，不重复）
+        (when (= 1 (length dsh-emacs--sessions))
+          (dsh-test-pass "host-first-cache-no-duplicate"))
+        ;; 断言：workspace 已 attach（竞态修复点）
+        (let ((w (car dsh-emacs--workspaces)))
+          (when (and w
+                     (member "s-new"
+                             (dsh-protocol-workspace-session-ids w)))
+            (dsh-test-pass "host-first-still-attaches-to-workspace")))
+        ;; 断言：分组落在 Race WS 而非 Ungrouped
+        (let* ((dsh-emacs--current-session "s-new")
+               (grouped (dsh-emacs-session--group-sessions
+                         dsh-emacs--sessions dsh-emacs--workspaces))
+               (ws-group (cl-find-if
+                          (lambda (g) (equal "w-race"
+                                             (plist-get g :workspace-id)))
+                          grouped))
+               (ungrouped (cl-find-if
+                           (lambda (g) (equal "Ungrouped"
+                                              (plist-get g :label)))
+                           grouped)))
+          (when (and ws-group
+                     (member "s-new"
+                             (mapcar #'dsh-protocol-session-session-id
+                                     (plist-get ws-group :sessions))))
+            (dsh-test-pass "host-first-grouped-in-workspace"))))
+    (setq dsh-emacs--sessions old-sessions)
+    (setq dsh-emacs--workspaces old-workspaces)
+    (setq dsh-emacs-sessions-buffer old-sessions-buffer)
+    (when (buffer-live-p list-buf) (kill-buffer list-buf))))
+
+;; --- 测试 65: workspace 组内任意 session 行上按 c 创建归属该 workspace ---
+;; 回归：workspace-id property 只加在组头/空组 New Session 行；组内实际
+;; session 行上没有 → 在这些行按 c 会走 cwd 分支创建成 ungrouped。
+(let* ((old-sessions dsh-emacs--sessions)
+       (old-workspaces dsh-emacs--workspaces)
+       (ws (dsh-protocol-workspace--from-alist
+            (list (cons 'workspaceId "w-mid")
+                  (cons 'title "Mid WS")
+                  (cons 'path "/tmp/dsh-mid-ws")
+                  (cons 'sessionIds ["s-inside"]))))
+       (s-inside (dsh-protocol-session--from-alist
+                  (list (cons 'sessionId "s-inside")
+                        (cons 'blank :json-false)
+                        (cons 'projections
+                              (list (cons 'values
+                                          (list (cons 'title "已有会话"))))))))
+       (buf (generate-new-buffer " *dsh-ws-row-create*")))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs--sessions (list s-inside))
+        (setq dsh-emacs--workspaces (list ws))
+        (with-current-buffer buf
+          ;; 渲染分组：Mid WS 组的 session 行应带 workspace-id property
+          (let ((dsh-emacs--sessions dsh-emacs--sessions)
+                (dsh-emacs--workspaces dsh-emacs--workspaces)
+                (dsh-emacs--archived-sessions nil)
+                (dsh-emacs--current-session nil)
+                (dsh-emacs-session--filter-ws-id nil)
+                (dsh-emacs-session--filter-ws-title nil))
+            (dsh-emacs-session--render)
+            ;; 找到 session 行（含标题文本）并检查其 workspace-id
+            (goto-char (point-min))
+            (let ((row-ok nil))
+              (while (and (not row-ok)
+                          (search-forward "已有会话" nil t))
+                (setq row-ok
+                      (equal "w-mid"
+                             (dsh-emacs-workspace-id-at-point))))
+              (when row-ok
+                (dsh-test-pass "session-row-carries-workspace-context"))))
+          ;; 在该 session 行上按 c：创建应传 workspaceId 而非 cwd
+          (let ((calls nil))
+            (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                       (lambda (method params cb)
+                         (push (list method params) calls)
+                         (funcall cb t '((sessionId . "s-created")))))
+                      ((symbol-function 'dsh-emacs-open-session)
+                       (lambda (_sid) nil))
+                      ((symbol-value 'dsh-emacs--current-buffer) buf))
+              (goto-char (point-min))
+              (search-forward "已有会话" nil t)
+              (call-interactively #'dsh-emacs-new-session))
+            (let* ((call (car calls))
+                   (params (cadr call)))
+              (when (and (string= "session.create" (car call))
+                         (string= "w-mid"
+                                  (cdr (assq 'workspaceId params)))
+                         (null (assq 'cwd params)))
+                (dsh-test-pass "new-session-on-workspace-session-row-uses-workspace-id"))))))
+    (setq dsh-emacs--sessions old-sessions)
+    (setq dsh-emacs--workspaces old-workspaces)
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; --- 测试 66: host 事件流（/api/events.host）实时更新缓存 ---
+;; workspace/session/归档变化经 host 流广播（镜像 dsh web 的 WorkspaceBrowser
+;; 实时订阅）。帧 envelope：{payload: {type, ...}}（与 mux 相同）。
+(let* ((old-sessions dsh-emacs--sessions)
+       (old-workspaces dsh-emacs--workspaces)
+       (old-archived dsh-emacs--archived-sessions)
+       (old-sessions-buffer dsh-emacs-sessions-buffer)
+       (list-buf (get-buffer-create " *dsh-host-test-list*")))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs--sessions nil)
+        (setq dsh-emacs--workspaces nil)
+        (setq dsh-emacs--archived-sessions nil)
+        (with-current-buffer list-buf
+          (erase-buffer)
+          (insert "placeholder"))
+        (setq dsh-emacs-sessions-buffer (buffer-name list-buf))
+
+        ;; 1) host/workspace-changed：新增 workspace 并入缓存（含 sessionIds）
+        (dsh-emacs-events--host-dispatch
+         'host-proc
+         (concat "{\"payload\":{\"type\":\"host/workspace-changed\","
+                 "\"workspace\":{\"workspaceId\":\"w-live\","
+                 "\"path\":\"/tmp/live\",\"title\":\"Live WS\","
+                 "\"sessionIds\":[],\"createdAt\":\"2026-01-01\","
+                 "\"updatedAt\":\"2026-01-01\"}}}"))
+        (let ((ws (car dsh-emacs--workspaces)))
+          (when (and ws
+                     (equal "w-live" (dsh-protocol-workspace-workspace-id ws))
+                     (equal "Live WS" (dsh-protocol-workspace-title ws)))
+            (dsh-test-pass "host-workspace-changed-upserts")))
+        ;; workspace-changed 还触发列表重绘（placeholder 已被真正内容覆盖）
+        (when (not (string-match-p "placeholder"
+                                   (with-current-buffer list-buf
+                                     (buffer-string))))
+          (dsh-test-pass "host-workspace-changed-repaints"))
+
+        ;; 2) host/workspace-changed：替换已有 workspace（成员变化）
+        (dsh-emacs-events--host-dispatch
+         'host-proc
+         (concat "{\"payload\":{\"type\":\"host/workspace-changed\","
+                 "\"workspace\":{\"workspaceId\":\"w-live\","
+                 "\"path\":\"/tmp/live\",\"title\":\"Live WS\","
+                 "\"sessionIds\":[\"s-1\"],\"createdAt\":\"2026-01-01\","
+                 "\"updatedAt\":\"2026-01-02\"}}}"))
+        (let ((ws (car dsh-emacs--workspaces)))
+          (when (and ws
+                     (equal "w-live" (dsh-protocol-workspace-workspace-id ws))
+                     (equal '("s-1")
+                            (dsh-protocol-workspace-session-ids ws)))
+            (dsh-test-pass "host-workspace-changed-replaces-members")))
+
+        ;; 3) host/workspace-removed：删除缓存项
+        (dsh-emacs-events--host-dispatch
+         'host-proc
+         (concat "{\"payload\":{\"type\":\"host/workspace-removed\","
+                 "\"workspaceId\":\"w-live\"}}"))
+        (when (null dsh-emacs--workspaces)
+          (dsh-test-pass "host-workspace-removed-drops"))
+
+        ;; 4) host/archived-sessions-changed：替换归档集合
+        (setq dsh-emacs--sessions
+              (dsh-emacs-test--session-items
+               (list (list (cons 'sessionId "s-archive")
+                           (cons 'blank :json-false)))))
+        (dsh-emacs-events--host-dispatch
+         'host-proc
+         (concat "{\"payload\":{\"type\":\"host/archived-sessions-changed\","
+                 "\"archivedSessionIds\":[\"s-archive\"]}}"))
+        (let ((archived dsh-emacs--archived-sessions))
+          (when (and (hash-table-p archived)
+                     (gethash "s-archive" archived))
+            (dsh-test-pass "host-archived-sessions-changed")))
+
+        ;; 5) host/session-added：新会话进缓存（blank 占位）
+        (setq dsh-emacs--sessions nil)
+        (dsh-emacs-events--host-dispatch
+         'host-proc
+         (concat "{\"payload\":{\"type\":\"host/session-added\","
+                 "\"sessionId\":\"s-new\",\"blank\":true,"
+                 "\"cwd\":\"/tmp/new\"}}"))
+        (let ((item (dsh-emacs--chat-session-item "s-new")))
+          (when (and item (equal t (dsh-protocol-session-blank item)))
+            (dsh-test-pass "host-session-added-caches")))
+        ;; session-added 幂等：再次广播不产生重复行
+        (dsh-emacs-events--host-dispatch
+         'host-proc
+         (concat "{\"payload\":{\"type\":\"host/session-added\","
+                 "\"sessionId\":\"s-new\",\"blank\":true}}"))
+        (when (= 1 (length dsh-emacs--sessions))
+          (dsh-test-pass "host-session-added-idempotent"))
+
+        ;; 6) host/session-status：更新 running 标志并重绘
+        (dsh-emacs-events--host-dispatch
+         'host-proc
+         (concat "{\"payload\":{\"type\":\"host/session-status\","
+                 "\"sessionId\":\"s-new\",\"running\":true}}"))
+        (let ((item (dsh-emacs--chat-session-item "s-new")))
+          (when (and item (equal t (dsh-protocol-session-running item)))
+            (dsh-test-pass "host-session-status-updates")))
+
+        ;; 7) host/session-removed：删除缓存行
+        (dsh-emacs-events--host-dispatch
+         'host-proc
+         (concat "{\"payload\":{\"type\":\"host/session-removed\","
+                 "\"sessionId\":\"s-new\"}}"))
+        (when (null dsh-emacs--sessions)
+          (dsh-test-pass "host-session-removed-drops"))
+
+        ;; 8) host/workspace-order-changed：按 server 顺序重排
+        (setq dsh-emacs--workspaces
+              (list (dsh-protocol-workspace--from-alist
+                     (list (cons 'workspaceId "w-a") (cons 'title "A")
+                           (cons 'path "/a") (cons 'sessionIds [])))
+                    (dsh-protocol-workspace--from-alist
+                     (list (cons 'workspaceId "w-b") (cons 'title "B")
+                           (cons 'path "/b") (cons 'sessionIds [])))))
+        (dsh-emacs-events--host-dispatch
+         'host-proc
+         (concat "{\"payload\":{\"type\":\"host/workspace-order-changed\","
+                 "\"workspaceIds\":[\"w-b\",\"w-a\"]}}"))
+        (let ((order (mapcar #'dsh-protocol-workspace-workspace-id
+                             dsh-emacs--workspaces)))
+          (when (equal '("w-b" "w-a") order)
+            (dsh-test-pass "host-workspace-order-changed")))
+
+        ;; 9) 未知 host 帧类型（如 host/remote-event）安全忽略
+        (dsh-emacs-events--host-dispatch
+         'host-proc
+         (concat "{\"payload\":{\"type\":\"host/remote-event\","
+                 "\"event\":\"some.event\",\"args\":[]}}"))
+        (when (= 2 (length dsh-emacs--workspaces))
+          (dsh-test-pass "host-unknown-frame-ignored"))
+
+        ;; 10) 完整 dispatch-json 门控：host-stream property 才走 host 分发
+        (setq dsh-emacs--sessions nil)
+        (let ((host-props (list (cons 'dsh-emacs-host-stream t))))
+          (cl-letf (((symbol-function 'processp)
+                     (lambda (_p) t))
+                    ((symbol-function 'process-get)
+                     (lambda (_p prop)
+                       (cdr (assq prop host-props))))
+                    ;; 防真连接：host-lost 的重连逻辑会试 open-network-stream
+                    ((symbol-function 'dsh-emacs-events--host-lost)
+                     (lambda (_p) nil)))
+            (dsh-emacs-events--dispatch-json
+             'host-proc
+             (concat "{\"payload\":{\"type\":\"host/session-added\","
+                     "\"sessionId\":\"s-gated\",\"blank\":true}}")))
+          (when (dsh-emacs--chat-session-item "s-gated")
+            (dsh-test-pass "host-dispatch-gated-by-property")))
+    (setq dsh-emacs--sessions old-sessions)
+    (setq dsh-emacs--workspaces old-workspaces)
+    (setq dsh-emacs--archived-sessions old-archived)
+    (setq dsh-emacs-sessions-buffer old-sessions-buffer)
+    (when (buffer-live-p list-buf) (kill-buffer list-buf)))))
+
+;; --- 测试 67: workspace 排序 move-workspace (insertBefore) ---
+;; web 端拖拽 workspace 排序调用 workspace.insertBefore（always RPC）；
+;; emacs 用 M 键命令完成同款排序。beforeWorkspaceId 缺省 = 移到末尾。
+(let* ((old-workspaces dsh-emacs--workspaces)
+       (old-sessions dsh-emacs--sessions)
+       (ws-a (dsh-protocol-workspace--from-alist
+              (list (cons 'workspaceId "w-a") (cons 'title "A WS")
+                    (cons 'path "/tmp/a") (cons 'sessionIds []))))
+       (ws-b (dsh-protocol-workspace--from-alist
+              (list (cons 'workspaceId "w-b") (cons 'title "B WS")
+                    (cons 'path "/tmp/b") (cons 'sessionIds []))))
+       (ws-c (dsh-protocol-workspace--from-alist
+              (list (cons 'workspaceId "w-c") (cons 'title "C WS")
+                    (cons 'path "/tmp/c") (cons 'sessionIds [])))))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs--workspaces (list ws-a ws-b ws-c))
+        (setq dsh-emacs--sessions nil)
+
+        ;; 1) 把 w-c 移到 w-a 前面：insertBefore 带 beforeWorkspaceId
+        (let ((calls nil))
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (method params cb)
+                       (push (list method params) calls)
+                       (funcall cb t '((workspaceIds
+                                        . ["w-c" "w-a" "w-b"])))))
+                    ((symbol-function 'dsh-emacs-list-workspaces)
+                     (lambda () nil)))
+            (dsh-emacs-move-workspace "w-c" "w-a"))
+          (let* ((call (car calls))
+                 (params (cadr call)))
+            (when (and (string= "workspace.insertBefore" (car call))
+                       (string= "w-c" (cdr (assq 'workspaceId params)))
+                       (string= "w-a" (cdr (assq 'beforeWorkspaceId params))))
+              (dsh-test-pass "move-workspace-sends-before-workspace-id")))
+          ;; 回调按响应 workspaceIds 重排缓存（w-c 置顶）
+          (let ((order (mapcar #'dsh-protocol-workspace-workspace-id
+                               dsh-emacs--workspaces)))
+            (when (equal '("w-c" "w-a" "w-b") order)
+              (dsh-test-pass "move-workspace-reorders-cache"))))
+
+        ;; 2) 移到末尾：无 beforeWorkspaceId
+        (let ((calls nil))
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (method params cb)
+                       (push (list method params) calls)
+                       (funcall cb t '((workspaceIds
+                                        . ["w-b" "w-c" "w-a"])))))
+                    ((symbol-function 'dsh-emacs-list-workspaces)
+                     (lambda () nil)))
+            (dsh-emacs-move-workspace "w-a" nil))
+          (let* ((call (car calls))
+                 (params (cadr call)))
+            (when (and (string= "workspace.insertBefore" (car call))
+                       (string= "w-a" (cdr (assq 'workspaceId params)))
+                       (null (assq 'beforeWorkspaceId params)))
+              (dsh-test-pass "move-workspace-to-end-omits-before")))
+          (let ((order (mapcar #'dsh-protocol-workspace-workspace-id
+                               dsh-emacs--workspaces)))
+            (when (equal '("w-b" "w-c" "w-a") order)
+              (dsh-test-pass "move-workspace-to-end-reorders-cache")))))
+    (setq dsh-emacs--workspaces old-workspaces)
+    (setq dsh-emacs--sessions old-sessions)))
+
 ;; --- 总结 ---
 (princ "\n===== 测试总结 =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))

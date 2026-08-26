@@ -262,6 +262,12 @@ window until it stops advancing or the round budget is spent.")
 
 (defvar-local dsh-emacs--buffer-session nil
   "Session ID corresponding to this buffer (buffer-local).")
+;; `dsh-emacs-mode' is a derived mode, whose generated initializer runs
+;; `kill-all-local-variables' (Clearing buffer-local variables on mode
+;; switch).  Mark this binding permanent so it survives the mode call and
+;; `dsh-emacs--chat-buffer-sync' (invoked from live `session/title' events)
+;; can still match the current buffer against its session id.
+(put 'dsh-emacs--buffer-session 'permanent-local t)
 
 (defvar-local dsh-emacs--transcript-input-overlay nil
   "Overlay hiding the transcript's internal input anchor when pinned.")
@@ -347,6 +353,18 @@ Returns (ok-p . value) or nil."
        (message "RPC error: %s" (error-message-string err))
        (cons nil nil)))))
 
+(defun dsh-emacs--http-error-hint (err)
+  "Human-readable hint for an HTTP error ERR, or \"\".
+ERR like `(error http 404)' comes from `url-retrieve' status.  404/405
+mean the method is not exposed by this dsh server version (e.g.
+`session.delete' is absent from the 0.1.1-rc.1 RPC table)."
+  (if (and (listp err) (numberp (nth 2 err)))
+      (let ((code (nth 2 err)))
+        (if (>= code 400)
+            (format " (HTTP %S: current dsh server may not expose this RPC)" code)
+          (format " (HTTP %S)" code)))
+    ""))
+
 (defun dsh-emacs--rpc-async (method params callback)
   "Asynchronous RPC request.  CALLBACK receives (ok-p value-or-error)."
   (let* ((url (format "%s/api/%s" dsh-emacs-base-url method))
@@ -367,8 +385,9 @@ Returns (ok-p . value) or nil."
                     (let ((gc-cons-threshold (* 64 1024 1024))
                           (gc-cons-percentage 0.6))
                       (if (plist-get status :error)
-                          (progn
-                            (message "RPC async error: %S" status)
+                          (let ((err (plist-get status :error)))
+                            (message "RPC async error: %S%s" status
+                                     (dsh-emacs--http-error-hint err))
                             (when (buffer-live-p callback-buffer)
                               (with-current-buffer callback-buffer
                                 ;; 回调若在 filter 里交互（completing-read 等）
@@ -427,10 +446,18 @@ helpers expect lists."
     (and item (dsh-emacs-session--display-title item))))
 
 (defun dsh-emacs--chat-cwd (session-id)
-  "Workspace path of SESSION-ID (the session's `cwd' from session.list),
-or nil when the session is not in the cache."
-  (let ((item (dsh-emacs--chat-session-item session-id)))
-    (and item (dsh-protocol-session-cwd item))))
+  "Directory of SESSION-ID: the session's `cwd' from session.list.
+Falls back to the path of the workspace that accounts for the session
+(a freshly created workspace session may not be in the session cache yet
+but is already in `dsh-emacs--workspaces').  Returns nil when the session
+is not known at all."
+  (or (let ((item (dsh-emacs--chat-session-item session-id)))
+        (and item (dsh-protocol-session-cwd item)))
+      (catch 'found
+        (dolist (ws dsh-emacs--workspaces)
+          (when (member session-id
+                        (dsh-protocol-workspace-session-ids ws))
+            (throw 'found (dsh-protocol-workspace-path ws)))))))
 
 (defun dsh-emacs--sanitize-buffer-name (title)
   "Sanitize TITLE for use as a buffer name.
@@ -513,18 +540,92 @@ Updates the mode-line name (list title) and the workspace directory."
                             (message "Failed to fetch session list: %S" value)))))
 
 ;;;###autoload
-(defun dsh-emacs-new-session (&optional cwd)
-  "Create a new session.  CWD is the working directory."
-  (interactive)
-  (let ((cwd (dsh-emacs--absolute-cwd cwd)))
-    (dsh-emacs--rpc-async "session.create"
-                          `((cwd . ,cwd)
-                            (model . ,dsh-emacs-default-model))
-                          (lambda (ok value)
-                            (if ok
-                                (let ((session-id (cdr (assq 'sessionId value))))
-                                  (dsh-emacs-open-session session-id))
-                              (message "Failed to create session: %S" value))))))
+(defun dsh-emacs-new-session (&optional cwd workspace-id)
+  "Create a new session.
+CWD is the working directory; with WORKSPACE-ID the session is created
+inside that workspace (`session.create' takes workspaceId rather than
+cwd).  Interactively, when point sits on a workspace header or its empty
+New Session row (in the session list), the session is created in that
+workspace; otherwise in CWD."
+  (interactive
+   (let ((ws (dsh-emacs-workspace-id-at-point)))
+     (list nil ws)))
+  (dsh-emacs--rpc-async "session.create"
+                        (if workspace-id
+                            `((workspaceId . ,workspace-id)
+                              (model . ,dsh-emacs-default-model))
+                          `((cwd . ,(dsh-emacs--absolute-cwd cwd))
+                            (model . ,dsh-emacs-default-model)))
+                        (lambda (ok value)
+                          (if ok
+                              (let ((session-id (cdr (assq 'sessionId value))))
+                                ;; 把新会话补进缓存：sessions 列表 + workspace
+                                ;; session-ids（分组归属）——否则它落到 ungrouped
+                                ;; 且 `session/title' 事件找不到缓存 item，自动
+                                ;; 重命名无法实时生效。
+                                (dsh-emacs--cache-new-session
+                                 session-id workspace-id)
+                                (dsh-emacs-open-session session-id)
+                                ;; 新建的 workspace 会话尚未进入 session.list
+                                ;; 缓存（事件流不携带该信息），`--chat-buffer-sync'
+                                ;; 因此取不到 cwd；立即用 workspace 的 path 对齐
+                                ;; default-directory，magit-status 等按此定位项目。
+                                ;; 重新打开时缓存已刷新，走 `--chat-cwd' 分支。
+                                (when workspace-id
+                                  (let ((ws (cl-find-if
+                                             (lambda (w)
+                                               (equal workspace-id
+                                                      (dsh-protocol-workspace-workspace-id w)))
+                                             dsh-emacs--workspaces)))
+                                    (when ws
+                                      (let ((dir (dsh-protocol-workspace-path ws)))
+                                        (when (and dir (not (string-empty-p dir))
+                                                   (buffer-live-p
+                                                    dsh-emacs--current-buffer))
+                                          (with-current-buffer dsh-emacs--current-buffer
+                                            (setq-local default-directory
+                                                        (file-name-as-directory
+                                                         (expand-file-name dir))))))))))
+                            (message "Failed to create session: %S" value)))))
+
+(defun dsh-emacs--cache-new-session (session-id &optional workspace-id)
+  "Cache the freshly created SESSION-ID so grouping and title updates work\n before the next `session.list' refresh: insert a placeholder row (blank,\n \"New Session\") into `dsh-emacs--sessions' and, with WORKSPACE-ID, append\n SESSION-ID to that workspace's `session-ids' (the group renderer assigns\n sessions to workspaces from those ids).  Repaints the session list.
+
+The workspace attachment is deliberately INDEPENDENT of the session-row
+insert: the host stream (`host/session-added') may deliver the new session
+before the `session.create' RPC callback runs, so guarding both actions
+behind the same not-yet-cached check would skip the attach and leave the
+session in the Ungrouped bucket until a later `workspace-changed' frame
+arrives."
+  (let ((ws (and workspace-id
+                 (cl-find-if (lambda (w)
+                               (equal workspace-id
+                                      (dsh-protocol-workspace-workspace-id w)))
+                             dsh-emacs--workspaces))))
+    (unless (dsh-emacs--chat-session-item session-id)
+      (let ((cwd (if ws (dsh-protocol-workspace-path ws)
+                   (dsh-emacs--absolute-cwd nil))))
+        (push (dsh-protocol-session--from-alist
+               (list (cons 'sessionId session-id)
+                     (cons 'blank t)
+                     (cons 'cwd cwd)))
+              dsh-emacs--sessions)))
+    ;; Attach even when the session row already arrived via the host stream:
+    ;; membership comes solely from the workspace `session-ids', so the row
+    ;; must be accounted there or it renders in Ungrouped.  Idempotent by
+    ;; membership.
+    (when (and ws
+               (not (member session-id
+                            (dsh-protocol-workspace-session-ids ws))))
+      (setf (dsh-protocol-workspace-session-ids ws)
+            (cons session-id
+                  (dsh-protocol-workspace-session-ids ws))))
+    (when (and (listp dsh-emacs--sessions)
+               dsh-emacs-sessions-buffer
+               (get-buffer dsh-emacs-sessions-buffer))
+      (with-current-buffer (get-buffer dsh-emacs-sessions-buffer)
+        (dsh-emacs-session--render))))
+  session-id)
 
 (defun dsh-emacs--ensure-input-marker ()
   "Repair the chat input marker when it was lost, without touching content.
@@ -926,24 +1027,34 @@ default), far smaller than a full parse of 30k raw events."
                                     (setq dsh-emacs--event-history-loading
                                           nil)))))))))
 
-(defun dsh-emacs-delete-session (session-id)
-  "Delete session SESSION-ID."
-  (interactive (list (dsh-emacs--completing-session-id "Delete session: ")))
-  (dsh-emacs--rpc-async "session.delete"
+(defun dsh-emacs-archive-session (session-id)
+  "Archive SESSION-ID: remove it from its workspace view.
+`workspace.archiveSession' (the only session-removal RPC this dsh version
+exposes; there is no `session.delete').  Refreshes the archived set and
+the session list on success."
+  (interactive (list (dsh-emacs--completing-session-id "Archive session: ")))
+  (dsh-emacs--rpc-async "workspace.archiveSession"
                         `((sessionId . ,session-id))
                         (lambda (ok value)
                           (if ok
                               (progn
+                                (setq dsh-emacs--archived-sessions
+                                      (dsh-emacs--normalize-archived
+                                       (dsh-protocol-archived-set-archived-session-ids
+                                        (dsh-protocol-archived-set--from-alist value))))
                                 (dsh-emacs-list-sessions)
-                                (message "Session deleted"))
-                            (message "Failed to delete: %S" value)))))
+                                (message "Session archived"))
+                            (message "Failed to archive: %S" value)))))
 
 (defun dsh-emacs-rename-session (session-id new-title)
   "Rename session."
-  (interactive (list (dsh-emacs--completing-session-id "Rename session: ")
-                     (read-string "New title: "
-                                  (or (dsh-emacs--chat-title session-id) ""))))
-  (dsh-emacs--rpc-async "session.update"
+  (interactive
+   (let* ((sid (dsh-emacs--completing-session-id "Rename session: "))
+          (item (dsh-emacs--chat-session-item sid)))
+     (list sid
+           (read-string "New title: "
+                        (or (and item (dsh-emacs-session--title item)) "")))))
+  (dsh-emacs--rpc-async "session.rename"
                         `((sessionId . ,session-id)
                           (title . ,new-title))
                         (lambda (ok value)
@@ -1000,7 +1111,9 @@ default), far smaller than a full parse of 30k raw events."
 ;;;###autoload
 (defun dsh-emacs-rename-workspace (workspace-id new-title)
   "Rename workspace."
-  (interactive)
+  (interactive
+   (list (read-string "Workspace id: ")
+         (read-string "New workspace title: ")))
   (dsh-emacs--rpc-async "workspace.rename"
                         `((workspaceId . ,workspace-id)
                           (title . ,new-title))
@@ -1014,7 +1127,11 @@ default), far smaller than a full parse of 30k raw events."
 ;;;###autoload
 (defun dsh-emacs-delete-workspace (workspace-id)
   "Delete workspace.  The directory and session logs are not deleted."
-  (interactive)
+  (interactive
+   (let ((id (read-string "Delete workspace id: ")))
+     (if (yes-or-no-p (format "Delete workspace %s? " id))
+         (list id)
+       (keyboard-quit))))
   (dsh-emacs--rpc-async "workspace.delete"
                         `((workspaceId . ,workspace-id))
                         (lambda (ok value)
@@ -1023,6 +1140,51 @@ default), far smaller than a full parse of 30k raw events."
                                 (dsh-emacs-list-workspaces)
                                 (message "Workspace deleted"))
                             (message "Failed to delete: %S" value)))))
+
+;;;###autoload
+(defun dsh-emacs-move-workspace (workspace-id before-workspace-id)
+  "Move WORKSPACE-ID before BEFORE-WORKSPACE-ID in the workspace order.
+With nil BEFORE-WORKSPACE-ID the workspace moves to the end.
+Mirrors dsh web's drag ordering (`workspace.insertBefore'): the response
+carries the authoritative workspaceIds, which reorder the local cache so
+the session list regroups immediately (the host stream also repaints)."
+  (interactive
+   (list (read-string "Move workspace id: ")
+         (let ((s (read-string "Insert before workspace id (blank for end): " nil nil t)))
+           (and (not (string-empty-p s)) s))))
+  (dsh-emacs--rpc-async "workspace.insertBefore"
+                        (if before-workspace-id
+                            `((workspaceId . ,workspace-id)
+                              (beforeWorkspaceId . ,before-workspace-id))
+                          `((workspaceId . ,workspace-id)))
+                        (lambda (ok value)
+                          (if ok
+                              (progn
+                                (let* ((ids (dsh-emacs--sequence-list
+                                             (cdr (assq 'workspaceIds value))))
+                                       (ids-by-local
+                                        (delq nil
+                                              (mapcar
+                                               (lambda (ws)
+                                                 (let ((id (dsh-protocol-workspace-workspace-id ws)))
+                                                   (and id (cons id ws))))
+                                               dsh-emacs--workspaces))))
+                                  (when ids
+                                    (setq dsh-emacs--workspaces
+                                          (append
+                                           (delq nil (mapcar (lambda (id)
+                                                               (cdr (assoc id ids-by-local)))
+                                                             ids))
+                                           (delq nil (mapcar
+                                                      (lambda (pair)
+                                                        (unless (member (car pair) ids)
+                                                          (cdr pair)))
+                                                      ids-by-local))))
+                                    ;; Refresh workspaces in parallel so
+                                    ;; membership/order stays authoritative.
+                                    (dsh-emacs-list-workspaces)))
+                                (message "Workspace reordered"))
+                            (message "Failed to reorder: %S" value)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;;  对话模式

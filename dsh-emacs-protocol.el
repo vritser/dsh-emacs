@@ -60,6 +60,15 @@
                               (updated-at (cdr (assq 'updatedAt alist)))
                               (blank (cdr (assq 'blank alist)))
                               (running (cdr (assq 'running alist)))
+                              ;; 子会话标记：subagent 同时带 origin="subagent"
+                              ;; 和 parentSessionId；fork 子会话只有
+                              ;; parentSessionId（无 origin）
+                              (parent-session-id
+                               (cdr (assq 'parentSessionId alist)))
+                              ;; subagent 会话标记（server schema:
+                              ;; origin: literal("subagent")）；不为 nil 时应在
+                              ;; 会话列表中隐藏
+                              (origin (cdr (assq 'origin alist)))
                               ;; projections.values.title —— dsh web 的
                               ;; 自动摘要标题（与列表行的显示标题一致）
                               (title-value
@@ -81,6 +90,8 @@
   updated-at
   blank
   running
+  origin
+  parent-session-id
   title-value
   pending-interaction)
 
@@ -130,6 +141,16 @@ flag), `workspace.rename' and `workspace.insertSessionBefore' (WORKSPACE
 only; CREATED is nil there)."
   workspace
   created)
+
+(cl-defstruct (dsh-protocol-archived-set
+               (:constructor dsh-protocol-archived-set--from-alist
+                             (alist
+                              &aux
+                              (archived-session-ids
+                               (dsh-protocol--list
+                                (cdr (assq 'archivedSessionIds alist)))))))
+  "The `workspace.archiveSession' response value: the full updated archive set."
+  archived-session-ids)
 
 ;; ---------------------------------------------------------------------------
 ;; session.models

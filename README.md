@@ -6,7 +6,7 @@ An Emacs frontend for [dsh](https://github.com/deepseek-ai/deepseek-harness) (De
 
 `dsh-emacs` is an Emacs client for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh). It talks to a running dsh web service (`http://127.0.0.1:3080`) over plain HTTP/WebSocket and renders sessions, streaming replies, tool calls and thinking blocks with an Emacs-native UI:
 
-- **Session list** (`*dsh-sessions*`): card-style browsing, search/filter, create / open / rename / delete sessions
+- **Session list** (`*dsh-sessions*`): card-style browsing, search/filter, create / open / rename / archive sessions
 - **Chat buffer**: read-only transcript with a fixed input area, streaming output and Markdown rendering
 - **Collapsible tool calls & thinking blocks** (folded by default)
 - **Mode-line footer**: live token usage, cost, context-window percentage (color-coded), model + thinking preset, all customizable via `M-x customize-group RET dsh-emacs-footer`
@@ -137,7 +137,7 @@ A different address/port can be set via `dsh-emacs-base-url`:
 | Command | Description |
 |---|---|
 | `M-x dsh-emacs` | Open the session list |
-| `M-x dsh-emacs-new-session` | Create a new session (optionally with a working directory) |
+| `M-x dsh-emacs-new-session` | Create a new session. On a workspace header / its empty New Session row the session is created inside that workspace; elsewhere as an ungrouped session |
 | `M-x dsh-emacs-open-session` | Open an existing session by ID |
 | `M-x dsh-emacs-fork-session` | Fork a session into a child that inherits its history |
 | `M-x dsh-emacs-select-model` | Switch the current session's model (live catalog) |
@@ -172,7 +172,7 @@ Send rule: sends the text after the `❯ ` prompt in the input area. By default 
 | `RET` | Open the session at point |
 | `c` | Create a new session |
 | `r` | Rename the session |
-| `D` | Delete the session |
+| `D` | Archive the session (remove it from its workspace view) |
 | `f` | Fork the session into a child that inherits its history |
 | `w` | Filter the list to one workspace (empty answer clears) |
 | `g` | Refresh the list |
@@ -180,8 +180,9 @@ Send rule: sends the text after the `❯ ` prompt in the input area. By default 
 | `i` | Show session details (title, cwd, branch, preset, live model) |
 | `q` | Quit the list |
 
-> Note: `D` (delete) requires a dsh server that exposes the session-deletion
-> RPC; older service versions return a route error, and the key is a no-op then.
+> Note: `D` (archive) removes the session from its workspace via
+> `workspace.archiveSession`; the session data itself is kept server-side.
+> There is no `session.delete` RPC in current dsh server versions.
 
 ## Footer Status Bar
 
@@ -375,8 +376,8 @@ Example: customize the tool card colors
 | `session.fork` | Branch a session into a child inheriting its history |
 | `session.models` | List the routable model catalog for a session |
 | `session.selectModel` | Switch the session's model |
-| `session.update` | Rename a session |
-| `session.delete` | Delete a session (not exposed by every dsh version) |
+| `session.rename` | Rename a session |
+| `workspace.archiveSession` | Archive a session (remove from its workspace view) |
 
 ### Event Rendering Flow
 

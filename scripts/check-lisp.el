@@ -13,17 +13,16 @@
   "默认检查的 elisp 文件（相对仓库根目录）。")
 
 (defun dsh-check:read-ok (file)
-  "若 FILE 能被完整 read 则返回 t；括号不平会抛错。
-`read' 在 eof 处抛 end-of-file 是正常协议，当作循环终点处理；
-其余错误（invalid-read-syntax 等）原样传播。"
+  "若 FILE 全部顶层 form 配平则返回 t；否则抛 scan-error。
+用 `forward-sexp' 逐 form 前进：缺闭合括号（EOF 处）与多余
+括号都会抛 scan-error，不会被误吞成正常结束（比裸 `read' 可靠）。"
   (with-temp-buffer
     (insert-file-contents file)
+    (emacs-lisp-mode)
     (goto-char (point-min))
-    (while (condition-case nil
-             (prog1 t (read (current-buffer)))
-           (end-of-file nil))
-      ;; 继续读下一个 form
-      )
+    (while (not (eobp))
+      (forward-sexp 1)
+      (skip-chars-forward " \t\r\n"))
     t))
 
 (let ((files (cdr (member "--" command-line-args-left)))
