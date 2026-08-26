@@ -530,12 +530,15 @@ can never be appended below the input area."
         (when position (goto-char position))
         (insert line "\n")))))
 
-(defun dsh-emacs-render--insert-chat-message (text face insert-point event-id)
+(defun dsh-emacs-render--insert-chat-message (text face insert-point event-id &optional user-message)
   "Insert TEXT as a read-only, background-colored chat message.
 FACE is applied to the message body.  EVENT-ID is stored for navigation.
 The prompt remains after the message and each message ends with a newline,
 so subsequent messages are appended in history order.  Blank lines left by
-the previous content are consumed so everything stacks flush."
+the previous content are consumed so everything stacks flush — except
+around a user message (USER-MESSAGE non-nil), which keeps one blank line
+above AND is marked so the NEXT insertion keeps one blank line below it
+(see `dsh-emacs-ui--blank-above-preserve')."
   (when (and (stringp text) (not (string-empty-p text)))
     ;; Rendering happens from an asynchronous callback.  Never leave point at
     ;; the transcript insertion position; the user's cursor belongs after ❯.
@@ -548,9 +551,10 @@ the previous content are consumed so everything stacks flush."
           (if-let* ((anchor (dsh-emacs-render--input-anchor-pos)))
               (progn (goto-char anchor) (beginning-of-line))
             (goto-char (point-max))))
-        ;; Flush against previous content: drop any blank line above so the
-        ;; transcript shows no stray gaps (tools/streams stack the same way).
-        (dsh-emacs-ui--consume-blanks-above)
+        ;; Flush against previous content, but keep one blank line above when
+        ;; this is a user message, or when the previous entry was one.
+        (dsh-emacs-ui--consume-blanks-above
+         (if (or user-message (dsh-emacs-ui--blank-above-preserve)) 1 0))
         (let ((start (point))
               (text-end (progn (insert text) (point))))
           (unless (string-suffix-p "\n" text)
@@ -564,6 +568,11 @@ the previous content are consumed so everything stacks flush."
             ;; Add the background only to the message TEXT, never to the
             ;; trailing blank separator line, so blank lines stay transparent.
             (add-face-text-property start text-end face t)
+            (when user-message
+              ;; Marker consulted by `dsh-emacs-ui--blank-above-preserve':
+              ;; whatever is inserted next keeps one blank line below the
+              ;; user message.
+              (put-text-property start text-end 'dsh-emacs-user-message t))
             (when event-id
               (put-text-property start end 'dsh-emacs-event-block event-id))))))))
 
@@ -911,7 +920,9 @@ used as a fallback when no deltas were received."
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-render-user-message (event)
-  "Render a `user/message' event with a user-specific background color."
+  "Render a `user/message' event with a user-specific background color.
+The block gets one blank line before and after (see
+`dsh-emacs-render--insert-chat-message' and `dsh-emacs-ui--blank-above-preserve')."
   (let* ((seq (dsh-emacs-render--event-seq event))
          (data (dsh-emacs-render--event-data event))
          (kind (dsh-emacs-render--aget "kind" (dsh-emacs-render--aget "source" data)))
@@ -923,7 +934,8 @@ used as a fallback when no deltas were received."
        (concat (propertize "❯ " 'face 'dsh-emacs-input-prompt-face)
                text)
        'dsh-emacs-user-block-face insert-point
-       (format "%s-%s" (dsh-emacs-render--make-namespace) block-id)))
+       (format "%s-%s" (dsh-emacs-render--make-namespace) block-id)
+       t))
     seq))
 
 ;;; ---------------------------------------------------------------------------

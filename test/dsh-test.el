@@ -647,6 +647,56 @@ so the code under test can read fields through the protocol accessors."
              scroll-error-top-bottom)
     (dsh-test-pass "chat-buffer-scroll-discipline")))
 
+;; --- 测试 27g: 用户消息前后各留一个空行；助手消息之间仍紧贴 ---
+(let ((buf (generate-new-buffer " *t27g-layout*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-footer-setup)
+        (dsh-emacs-render-event
+         (json-read-from-string
+          "{\"type\":\"assistant/message\",\"seq\":1,\"data\":{\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"a1\"}]}}}"))
+        (dsh-emacs-render-event
+         (json-read-from-string
+          "{\"type\":\"assistant/message\",\"seq\":2,\"data\":{\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"a2\"}]}}}"))
+        (dsh-emacs-render-event
+         (json-read-from-string
+          "{\"type\":\"user/message\",\"seq\":3,\"data\":{\"content\":[{\"type\":\"text\",\"text\":\"u1\"}]}}"))
+        (dsh-emacs-render-event
+         (json-read-from-string
+          "{\"type\":\"assistant/message\",\"seq\":4,\"data\":{\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"a3\"}]}}}"))
+        (let* ((user-line
+                (save-excursion
+                  (goto-char (point-min))
+                  (when (search-forward "❯ u1" nil t)
+                    (line-number-at-pos (line-beginning-position)))))
+               (above-blank
+                (and user-line
+                     (save-excursion
+                       (goto-char (point-min))
+                       (forward-line (- user-line 2))
+                       (looking-at-p "[ \t]*$"))))
+               (below-blank
+                (and user-line
+                     (save-excursion
+                       (goto-char (point-min))
+                       (forward-line user-line)
+                       (looking-at-p "[ \t]*$"))))
+               (a1-line (save-excursion
+                          (goto-char (point-min))
+                          (when (search-forward "a1" nil t)
+                            (line-number-at-pos (line-beginning-position)))))
+               (a2-line (save-excursion
+                          (goto-char (point-min))
+                          (when (search-forward "a2" nil t)
+                            (line-number-at-pos (line-beginning-position))))))
+          (when (and above-blank below-blank)
+            (dsh-test-pass "user-message-spaced-above-and-below"))
+          ;; 相邻助手消息仍然紧贴（无空行）
+          (when (and a1-line a2-line (= a2-line (1+ a1-line)))
+            (dsh-test-pass "assistant-messages-remain-flush"))))
+    (kill-buffer buf)))
+
 ;; --- 测试 28: WebSocket 握手后的帧仍被消费（实时修复） ---
 (with-temp-buffer
   (dsh-emacs-mode)
@@ -1002,6 +1052,32 @@ so the code under test can read fields through the protocol accessors."
                    (string-match-p "OUT" txt)
                    (string-match-p (regexp-quote "💻 ") txt))
           (dsh-test-pass "tool-row-not-lost-after-result"))))))
+
+;; --- 测试 34b: 用户消息之后紧跟工具行：保留一个空行 ---
+(let ((buf (generate-new-buffer " *t34b-layout*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-footer-setup)
+        (setq-local dsh-emacs-tool-expand-by-default t)
+        (dsh-emacs-render-event
+         (json-read-from-string
+          "{\"type\":\"user/message\",\"seq\":1,\"data\":{\"content\":[{\"type\":\"text\",\"text\":\"u2\"}]}}"))
+        (dsh-emacs-render-tool-call
+         (dsh-emacs-test--tool-call-event 2 "t1" "bash" "{\"command\":\"ls\"}"))
+        (let* ((user-line
+                (save-excursion
+                  (goto-char (point-min))
+                  (when (search-forward "❯ u2" nil t)
+                    (line-number-at-pos (line-beginning-position)))))
+               (tool-line
+                (save-excursion
+                  (goto-char (point-min))
+                  (when (search-forward "💻 " nil t)
+                    (line-number-at-pos (line-beginning-position))))))
+          (when (and user-line tool-line (= tool-line (+ user-line 2)))
+            (dsh-test-pass "tool-after-user-keeps-one-blank"))))
+    (kill-buffer buf)))
 
 ;; --- 测试 35: 历史真实 tool/result 使用 message.source.callId ---
 (with-temp-buffer

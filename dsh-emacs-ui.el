@@ -385,15 +385,18 @@ STYLE selects border characters."
 ;;; 片段插入与更新
 ;;; ---------------------------------------------------------------------------
 
-(defun dsh-emacs-ui--consume-blanks-above ()
-  "Delete every consecutive blank line immediately above point.
+(defun dsh-emacs-ui--consume-blanks-above (&optional preserve)
+  "Delete every consecutive blank line immediately above point, keeping
+the last PRESERVE of them (default 0 = flush stacking).
 Point must be at the beginning of a line.  Lines belonging to an existing UI
 fragment (carrying `dsh-emacs-ui-state') are never consumed, so stacked fragments
 stay intact.  Afterward point is at the beginning of the line that followed
-the last consumed blank, i.e. flush against the content above."
+the last consumed blank, i.e. flush against the content above (or PRESERVE
+blank lines below it).  PRESERVE keeps the blanks closest to the content
+above; used to give user-message cards air before/after."
   (when (not (bobp))
     (let ((kill-end (point))
-          kill-start)
+          (blanks nil))
       (save-excursion
         (while (and (not (bobp))
                     (progn (forward-line -1) t)
@@ -402,9 +405,29 @@ the last consumed blank, i.e. flush against the content above."
                     (save-excursion
                       (beginning-of-line)
                       (looking-at-p "[ \t]*$")))
-          (setq kill-start (point))))
-      (when kill-start
-        (delete-region kill-start kill-end)))))
+          (setq blanks (cons (point) blanks))))
+      ;; `blanks' lists the blank-line starts from top to bottom; keep the
+      ;; first PRESERVE of them and delete whatever follows.
+      (let ((keep (min (or preserve 0) (length blanks))))
+        (when (> (length blanks) keep)
+          (delete-region (nth keep blanks) kill-end))))))
+
+(defun dsh-emacs-ui--blank-above-preserve ()
+  "Blank line to keep when consuming above: 1 when the previous
+non-blank line is a user-message block (they are rendered with one blank
+line before and after), else nil.  Call with point at the insertion line;
+a nil result doubles as the zero preserve count."
+  (save-excursion
+    (forward-line -1)
+    (while (and (not (bobp))
+                (save-excursion
+                  (beginning-of-line)
+                  (looking-at-p "[ \t]*$")))
+      (forward-line -1))
+    (when (and (not (bobp))
+               (get-text-property (line-beginning-position)
+                                  'dsh-emacs-user-message))
+      1)))
 
 (defun dsh-emacs-ui--insert-fragment (model qualified-id &optional expanded)
   "Insert a fragment from MODEL with QUALIFIED-ID text properties.
@@ -713,8 +736,10 @@ before that position (useful for buffers with a fixed input area)."
                        (beginning-of-line)
                        ;; Flush against the content above: consume any blank
                        ;; lines left by the preceding message/stream so a tool
-                       ;; row never shows a gap above it.
-                       (dsh-emacs-ui--consume-blanks-above)
+                       ;; row never shows a gap above it — unless the previous
+                       ;; entry is a user message, which keeps one blank line.
+                       (dsh-emacs-ui--consume-blanks-above
+                        (dsh-emacs-ui--blank-above-preserve))
                        (dsh-emacs-ui--insert-fragment final-model qualified-id expanded))
                    (goto-char (point-max))
                    (unless (or (bobp)
