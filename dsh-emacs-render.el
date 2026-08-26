@@ -33,6 +33,7 @@
 (declare-function dsh-emacs--ml-busy-set "dsh-emacs-footer" (flag))
 (declare-function dsh-emacs-footer-note-event "dsh-emacs-footer" (event))
 (declare-function dsh-emacs-footer-note-request "dsh-emacs-footer" (event))
+(declare-function dsh-emacs-footer-note-header "dsh-emacs-footer" (event))
 
 ;;; ---------------------------------------------------------------------------
 ;;; 定制
@@ -1260,6 +1261,9 @@ toggle — which strips faces — keeps them readable)."
       ("request/context" (setq seq (dsh-emacs-render--event-seq event))
                          (when (fboundp 'dsh-emacs-footer-note-request)
                            (dsh-emacs-footer-note-request event)))
+      ("request/header" (setq seq (dsh-emacs-render--event-seq event))
+                        (when (fboundp 'dsh-emacs-footer-note-header)
+                          (dsh-emacs-footer-note-header event)))
       ("tool/call" (setq seq (dsh-emacs-render-tool-call event)))
       ("tool/result" (setq seq (dsh-emacs-render-tool-result event)))
       ("turn/start" (setq seq (dsh-emacs-render-turn-start event)))

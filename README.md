@@ -210,14 +210,16 @@ The footer is displayed at the bottom of the chat buffer and contains the follow
 
 - **cwd**: current working directory (home path abbreviated with `~`)
 - **branch**: git branch name (auto-detected)
-- **model**: current model name
-- **effort**: reasoning effort (the `reasoningEffort` chosen via the model picker, e.g. `max`)
+- **model**: current model name (fed live from `request/header` / `request/context`)
+- **effort**: reasoning effort — the `reasoningEffort` chosen via the model picker, or the one the host announces in `request/header` (e.g. `high`)
 - **preset**: agent preset of the session (`agentPreset`, e.g. `standard` / `code`)
 - **tokens**: token usage (`↑input ↓output Rcache-read Wcache-write CHcache-hit%`)
 - **ctx**: context-window usage percentage (color-coded)
 - **cost**: cumulative cost (USD)
 
 The footer can be toggled with `C-c C-f`, or controlled via the `dsh-emacs-footer-enabled` customization option.
+
+**Why ctx% needs `dsh-emacs-footer-context-window-alist`**: the dsh server never exposes a model's context window through its client APIs — `session.models` catalog entries carry only id/name/reasoning, and the windowed `session.history` response drops `request/context` events outside the fetched window (they are appended once near the first request and almost never land inside it). dsh-emacs therefore resolves the window from `dsh-emacs-footer-context-window-alist` (model id → tokens, pre-seeded for the deepseek models) once the model is known, then falls back to `dsh-emacs-footer-context-window`; a window from a live `request/context` event wins over both. Unknown window = ctx segment hidden; add an entry for a model that shows nothing:
 
 The branch segment has a 10-second TTL cache (`dsh-emacs-footer-branch-refresh-interval`): the running spinner animation triggers a mode-line recomputation about every 80ms, and without caching each tick would fork a `git rev-parse` subprocess (~30ms+), which would freeze Emacs; the nil result for non-git directories is cached too, so it never respawns.
 

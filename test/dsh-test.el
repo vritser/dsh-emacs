@@ -164,6 +164,59 @@ so the code under test can read fields through the protocol accessors."
              (string-match "CH92%%" txt))
     (dsh-test-pass "modeinline wraps stats in parens and escapes percent")))
 
+;; --- 测试 5f: request/header 喂 model 与 reasoningEffort（rc.1 事件形状） ---
+(let ((hdr '(("type" . "request/header")
+             ("seq" . 11)
+             ("data" . (("header" . (("config" . (("provider" . "opencode-go")
+                                                  ("model" . "deepseek-v4-flash")
+                                                  ("reasoningEffort" . "high"))))))))))
+  (setq dsh-emacs--footer-model nil
+        dsh-emacs--footer-effort nil)
+  (dsh-emacs-footer-note-header hdr)
+  (when (and (equal "deepseek-v4-flash" dsh-emacs--footer-model)
+             (equal "high" dsh-emacs--footer-effort))
+    (dsh-test-pass "note-header feeds model and reasoning effort"))
+  (setq dsh-emacs--footer-model nil
+        dsh-emacs--footer-effort nil))
+
+;; --- 测试 5g: render 调度转发 request/header 到 footer feed ---
+(let ((fired 0))
+  (cl-letf (((symbol-function 'dsh-emacs-footer-note-header)
+             (lambda (_event) (setq fired (1+ fired)))))
+    (dsh-emacs-render-event '(("type" . "request/header") ("seq" . 5)))
+    (dsh-emacs-render-event '(("type" . "request/context") ("seq" . 6))))
+  (when (= 1 fired)
+    (dsh-test-pass "render-dispatches-request-header-to-footer")))
+
+;; --- 测试 5h: ctx 窗口解析优先级：buffer-local > 模型映射表 > 默认值 ---
+(let ((dsh-emacs-footer-context-window-alist
+       '(("deepseek-v4-flash" . 1000000)
+         ("other-model" . 65536)))
+      (dsh-emacs-footer-context-window nil))
+  ;; 仅模型已知 → 走映射表
+  (setq dsh-emacs--footer-model "deepseek-v4-flash"
+        dsh-emacs--footer-context-window nil)
+  (when (= 1000000 (dsh-emacs-footer--ctx-window))
+    (dsh-test-pass "ctx-window-resolves-from-model-alist"))
+  ;; buffer-local（来自实时 request/context）> 映射表
+  (setq dsh-emacs--footer-context-window 200000)
+  (when (= 200000 (dsh-emacs-footer--ctx-window))
+    (dsh-test-pass "ctx-window-buffer-local-wins"))
+  ;; 模型不在表内 → 默认值兜底
+  (setq dsh-emacs--footer-model "ghost-model"
+        dsh-emacs--footer-context-window nil
+        dsh-emacs-footer-context-window 131072)
+  (when (= 131072 (dsh-emacs-footer--ctx-window))
+    (dsh-test-pass "ctx-window-falls-back-to-default"))
+  ;; 全部未知 → nil（ctx 段隐藏）
+  (setq dsh-emacs--footer-model nil
+        dsh-emacs-footer-context-window nil)
+  (when (null (dsh-emacs-footer--ctx-window))
+    (dsh-test-pass "ctx-window-unknown-hides-segment"))
+  (setq dsh-emacs--footer-model nil
+        dsh-emacs--footer-context-window nil
+        dsh-emacs-footer-context-window nil))
+
 ;; --- 测试 6: 面孔定义 ---
 (when (facep 'dsh-emacs-user-face)
   (dsh-test-pass "user-face exists"))

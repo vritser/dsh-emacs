@@ -100,9 +100,29 @@ last result — including a \"not a git repo\" nil — is reused."
 Nil leaves the ctx segment hidden (unknown window); set it to your model's
 context size (e.g. 131072 for a 128k-token window) to enable the
 percentage.  The buffer-local `dsh-emacs--footer-context-window' takes
-precedence when set."
+precedence when set, then `dsh-emacs-footer-context-window-alist' by the
+current model, then this value."
   :type '(choice (const :tag "unknown (hide ctx%)" nil)
                  (integer :tag "tokens"))
+  :group 'dsh-emacs-footer)
+
+(defcustom dsh-emacs-footer-context-window-alist
+  '(("deepseek-v4-flash" . 1000000)
+    ("deepseek-v4-pro" . 1000000))
+  "Per-model context window sizes (tokens) for the footer ctx% segment.
+
+The dsh server never exposes a model's context window through its client
+APIs: the `session.models' catalog entries carry only id/name/reasoning,
+and the windowed `session.history' response drops `request/context' events
+outside the fetched window (they are appended once, at the first request,
+which is almost never inside it).  dsh-emacs therefore resolves the window
+from this table once the session's model is known — a live
+`request/header' (or `request/context') event or a model switch.  Keys are
+model ids; add entries for the models you use to enable the ctx% segment
+out of the box.  Precedence: a buffer-local window from a live
+`request/context' event, then this table, then
+`dsh-emacs-footer-context-window'."
+  :type '(alist :key-type string :value-type integer)
   :group 'dsh-emacs-footer)
 
 ;;; ---------------------------------------------------------------------------
@@ -247,10 +267,23 @@ set (e.g. a session that predates request events)."
         (mapconcat #'identity (nreverse parts)
                    (propertize " " 'face 'dsh-emacs-footer-separator-face))))))
 
+(defun dsh-emacs-footer--ctx-window ()
+  "Resolve the context-window size (tokens) for the ctx segment, or nil.
+Precedence: the buffer-local window fed by a live `request/context' event,
+then `dsh-emacs-footer-context-window-alist' keyed by the current model,
+then the plain `dsh-emacs-footer-context-window' default.  Nil (unknown)
+hides the ctx segment."
+  (or dsh-emacs--footer-context-window
+      (let ((model (and dsh-emacs--footer-model
+                        (not (string-empty-p dsh-emacs--footer-model))
+                        dsh-emacs--footer-model)))
+        (and model
+             (cdr (assoc model dsh-emacs-footer-context-window-alist))))
+      dsh-emacs-footer-context-window))
+
 (defun dsh-emacs-footer--segment-ctx ()
   "Render the context-window usage percentage segment."
-  (let ((window (or dsh-emacs--footer-context-window
-                    dsh-emacs-footer-context-window)))
+  (let ((window (dsh-emacs-footer--ctx-window)))
     (when (and dsh-emacs--footer-usage window)
       (let* ((u dsh-emacs--footer-usage)
              (pct (dsh-emacs-format-ctx-percent
@@ -357,6 +390,26 @@ the mode-line smoke segment always reflects the live model."
           (setq dsh-emacs--footer-model model))
         (when (and (numberp window) (> window 0))
           (setq dsh-emacs--footer-context-window window)))
+      (dsh-emacs-footer-update))))
+
+(defun dsh-emacs-footer-note-header (event)
+  "Pick the model id and reasoning effort off a `request/header' EVENT.
+dsh 0.1.1-rc.1 emits `request/header' (data.header.config) instead of (or
+before) the rc.2 `request/context', and — unlike `request/context' — the
+event survives the windowed `session.history' response, so this is what
+actually reaches the footer when a session is opened.  Consuming it makes
+the model and effort segments live on open (the rc.2 `request/context' is
+still handled by `dsh-emacs-footer-note-request' for the context window)."
+  (let* ((data (dsh-emacs--alist-state event "data"))
+         (header (and data (dsh-emacs--alist-state data "header")))
+         (config (and header (dsh-emacs--alist-state header "config"))))
+    (when config
+      (let ((model (dsh-emacs--alist-state config "model"))
+            (effort (dsh-emacs--alist-state config "reasoningEffort")))
+        (when (and model (not (string-empty-p model)))
+          (setq dsh-emacs--footer-model model))
+        (when (and effort (not (string-empty-p effort)))
+          (setq dsh-emacs--footer-effort effort)))
       (dsh-emacs-footer-update))))
 
 (defun dsh-emacs-footer-set-context-window (n)
