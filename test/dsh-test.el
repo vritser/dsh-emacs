@@ -4141,6 +4141,162 @@ so the code under test can read fields through the protocol accessors."
     (when (buffer-live-p chat-a) (kill-buffer chat-a))
     (when (buffer-live-p chat-b) (kill-buffer chat-b))))
 
+(when (featurep 'dsh-emacs-server)
+  (dsh-test-pass "dsh-emacs-server loaded"))
+
+;; --- 测试 79: server bootstrap：base-url → (host . port) 解析 ---
+(let ((dsh-emacs-base-url "http://127.0.0.1:3080"))
+  (let ((hp (dsh-emacs--server-host-port)))
+    (when (and (equal "127.0.0.1" (car hp)) (= 3080 (cdr hp)))
+      (dsh-test-pass "server-host-port-parses-default-url"))))
+(let ((dsh-emacs-base-url "http://localhost:9999"))
+  (let ((hp (dsh-emacs--server-host-port)))
+    (when (and (equal "localhost" (car hp)) (= 9999 (cdr hp)))
+      (dsh-test-pass "server-host-port-parses-custom-host-port"))))
+(let ((dsh-emacs-base-url "http://127.0.0.1"))
+  (when (= 80 (cdr (dsh-emacs--server-host-port)))
+    (dsh-test-pass "server-host-port-defaults-to-80")))
+
+;; --- 测试 80: alive 探测带短缓存（TTL 内不重复探测） ---
+(let ((probes 0))
+  (setq dsh-emacs--server-alive-check nil)
+  (cl-letf (((symbol-function 'dsh-emacs--server-probe)
+             (lambda () (setq probes (1+ probes)) t)))
+    (dsh-emacs--server-alive-p)
+    (dsh-emacs--server-alive-p)
+    (when (= 1 probes)
+      (dsh-test-pass "server-alive-cached-within-ttl"))
+    (dsh-emacs--server-invalidate-alive)
+    (dsh-emacs--server-alive-p)
+    (when (= 2 probes)
+      (dsh-test-pass "server-alive-invalidate-reprobes")))
+  (setq dsh-emacs--server-alive-check nil))
+
+;; --- 测试 81: ensure 在 batch（noninteractive）下恒为 no-op ---
+(let ((started 0)
+      (noninteractive t))
+  (cl-letf (((symbol-function 'dsh-emacs--server-alive-p) (lambda () nil))
+            ((symbol-function 'dsh-emacs-server-start)
+             (lambda () (setq started (1+ started)))))
+    (dsh-emacs-server-ensure))
+  (when (= 0 started)
+    (dsh-test-pass "server-ensure-noop-in-batch")))
+
+;; --- 测试 82: ensure 交互路径：server 已就绪 → 不启动 ---
+(let ((started 0)
+      (noninteractive nil))
+  (cl-letf (((symbol-function 'dsh-emacs--server-alive-p) (lambda () t))
+            ((symbol-function 'dsh-emacs-server-start)
+             (lambda () (setq started (1+ started)))))
+    (dsh-emacs-server-ensure))
+  (when (= 0 started)
+    (dsh-test-pass "server-ensure-alive-skips-start")))
+
+;; --- 测试 83: ensure 交互路径：down + auto-start → 启动被调用 ---
+(let ((started 0)
+      (noninteractive nil))
+  (cl-letf (((symbol-function 'dsh-emacs--server-alive-p) (lambda () nil))
+            ((symbol-function 'dsh-emacs-server-start)
+             (lambda () (setq started (1+ started)))))
+    (dsh-emacs-server-ensure))
+  (when (= 1 started)
+    (dsh-test-pass "server-ensure-down-starts-server")))
+
+;; --- 测试 84: ensure 交互路径：auto-start nil → user-error 带指引 ---
+(let ((dsh-emacs-server-auto-start nil)
+      (noninteractive nil))
+  (cl-letf (((symbol-function 'dsh-emacs--server-alive-p) (lambda () nil)))
+    (condition-case err
+        (dsh-emacs-server-ensure)
+      (user-error
+       (when (string-match-p "not reachable" (error-message-string err))
+         (dsh-test-pass "server-ensure-auto-start-nil-errors"))))))
+
+;; --- 测试 85: 安装流程：接受 → 运行安装并返回 dsh 路径 ---
+(cl-letf (((symbol-function 'dsh-emacs--server-bin) (lambda () nil))
+          ((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+          ((symbol-function 'dsh-emacs--server-run-install)
+           (lambda () "/usr/bin/dsh")))
+  (when (equal "/usr/bin/dsh" (dsh-emacs--server-ensure-installed))
+    (dsh-test-pass "server-install-accepted-runs-install")))
+
+;; --- 测试 86: 安装流程：拒绝 → user-error 手动指引 ---
+(cl-letf (((symbol-function 'dsh-emacs--server-bin) (lambda () nil))
+          ((symbol-function 'y-or-n-p) (lambda (_prompt) nil)))
+  (condition-case err
+      (dsh-emacs--server-ensure-installed)
+    (user-error
+     (when (string-match-p "manually" (error-message-string err))
+       (dsh-test-pass "server-install-declined-errors")))))
+
+;; --- 测试 87: server-start：已就绪 → 不拉起进程 ---
+(let ((commands nil))
+  (cl-letf (((symbol-function 'dsh-emacs--server-alive-p) (lambda () t))
+            ((symbol-function 'make-process)
+             (lambda (&rest args) (push args commands) 'fake-proc)))
+    (dsh-emacs-server-start))
+  (when (null commands)
+    (dsh-test-pass "server-start-alive-does-not-spawn")))
+
+;; --- 测试 88: server-start：down → 以 base-url 的 host/port 拉起 dsh web ---
+(let ((commands nil)
+      (waits 0)
+      (dsh-emacs-base-url "http://127.0.0.1:3080"))
+  (setq dsh-emacs--server-process nil)
+  (cl-letf (((symbol-function 'dsh-emacs--server-alive-p) (lambda () nil))
+            ((symbol-function 'dsh-emacs--server-bin) (lambda () "/usr/bin/dsh"))
+            ((symbol-function 'make-process)
+             (lambda (&rest args) (push args commands) 'fake-proc))
+            ((symbol-function 'set-process-query-on-exit-flag)
+             (lambda (&rest _) nil))
+            ((symbol-function 'dsh-emacs--server-wait-ready)
+             (lambda () (setq waits (1+ waits)) t)))
+    (dsh-emacs-server-start))
+  (when (and (= 1 waits)
+             (equal '("/usr/bin/dsh" "web" "--host" "127.0.0.1"
+                      "--port" "3080" "--no-open")
+                    (plist-get (car commands) :command)))
+    (dsh-test-pass "server-start-spawns-dsh-web-with-base-url-args"))
+  (setq dsh-emacs--server-process nil))
+
+;; --- 测试 89: wait-ready：server 已就绪 → 立即返回 t ---
+(cl-letf (((symbol-function 'dsh-emacs--server-alive-p) (lambda () t)))
+  (when (eq t (dsh-emacs--server-wait-ready))
+    (dsh-test-pass "server-wait-ready-alive-returns-t")))
+
+;; --- 测试 90: Emacs 退出时清理托管进程 ---
+(when (memq 'dsh-emacs-server--teardown kill-emacs-hook)
+  (dsh-test-pass "server-teardown-registered-on-kill-emacs-hook"))
+
+;; --- 测试 91: 命令体护栏——真实命令在 server 不可达时给出指引错误 ---
+(let ((dsh-emacs-server-auto-start nil)
+      (noninteractive nil))
+  (cl-letf (((symbol-function 'dsh-emacs--server-alive-p) (lambda () nil)))
+    (condition-case err
+        (dsh-emacs-list-sessions)
+      (user-error
+       (when (string-match-p "not reachable" (error-message-string err))
+         (dsh-test-pass "list-sessions-guard-fails-with-guidance"))))))
+
+;; --- 测试 92: open-web 打开 dsh web（base-url，settings 是弹窗无子路由） ---
+(let ((dsh-emacs-base-url "http://127.0.0.1:3080")
+      (opened nil))
+  (cl-letf (((symbol-function 'browse-url)
+             (lambda (url) (setq opened url))))
+    (dsh-emacs-open-web))
+  (when (equal "http://127.0.0.1:3080" opened)
+    (dsh-test-pass "open-web-opens-web-ui-root")))
+
+;; --- 测试 93: open-web 同样被 server 护栏保护 ---
+(let ((dsh-emacs-server-auto-start nil)
+      (noninteractive nil))
+  (cl-letf (((symbol-function 'dsh-emacs--server-alive-p) (lambda () nil)))
+    (condition-case err
+        (dsh-emacs-open-web)
+      (user-error
+       (when (string-match-p "not reachable" (error-message-string err))
+         (dsh-test-pass "open-web-guard-fails-with-guidance"))))))
+
 (princ "\n===== 测试总结 =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))
       (fail (cl-count-if (lambda (r) (not (cdr r))) dsh-test-results)))

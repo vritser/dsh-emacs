@@ -58,6 +58,7 @@
 (require 'dsh-emacs-render)
 (require 'dsh-emacs-events)
 (require 'dsh-emacs-footer)
+(require 'dsh-emacs-server)
 (require 'dsh-emacs-session)
 
 ;;; ---------------------------------------------------------------------------
@@ -525,6 +526,7 @@ Updates the mode-line name (list title) and the workspace directory."
 (defun dsh-emacs-list-sessions ()
   "Fetch the session list and refresh workspaces."
   (interactive)
+  (dsh-emacs-server-ensure)
   (dsh-emacs-events--host-refresh-begin)
   (dsh-emacs--rpc-async "session.list" nil
                         (lambda (ok value)
@@ -574,6 +576,7 @@ the session uses `dsh-emacs-default-preset'."
            (if current-prefix-arg
                (dsh-emacs--read-preset dsh-emacs-default-preset)
              dsh-emacs-default-preset))))
+  (dsh-emacs-server-ensure)
   (dsh-emacs--rpc-async "session.create"
                         (append (if workspace-id
                                     `((workspaceId . ,workspace-id))
@@ -623,6 +626,7 @@ the session list, next to `c' which creates immediately with
 `dsh-emacs-default-preset'.  C-g during the preset prompt cancels the
 creation."
   (interactive)
+  (dsh-emacs-server-ensure)
   (dsh-emacs-new-session nil (dsh-emacs-workspace-id-at-point)
                          (dsh-emacs--read-preset dsh-emacs-default-preset)))
 
@@ -857,6 +861,7 @@ its own realtime stream (tearing the previous one down here used to
 leave it stream-less — polling-only and unable to ever switch back to
 realtime)."
   (interactive)
+  (dsh-emacs-server-ensure)
   (setq dsh-emacs--current-session session-id)
   (let* ((existing (gethash session-id dsh-emacs--chat-buffers))
          (buf (if (and existing (buffer-live-p existing))
@@ -919,6 +924,7 @@ The child starts from the session's latest state (`session.fork' without
 an explicit seq); after the RPC confirms, the list refreshes and the child
 buffer opens with the same workspace path."
   (interactive (list (dsh-emacs--completing-session-id "Fork session: ")))
+  (dsh-emacs-server-ensure)
   (dsh-emacs--rpc-async "session.fork"
                         `((sessionId . ,session-id))
                         (lambda (ok value)
@@ -1042,6 +1048,7 @@ default), far smaller than a full parse of 30k raw events."
 exposes; there is no `session.delete').  Refreshes the archived set and
 the session list on success."
   (interactive (list (dsh-emacs--completing-session-id "Archive session: ")))
+  (dsh-emacs-server-ensure)
   (dsh-emacs--rpc-async "workspace.archiveSession"
                         `((sessionId . ,session-id))
                         (lambda (ok value)
@@ -1063,6 +1070,7 @@ the session list on success."
      (list sid
            (read-string "New title: "
                         (or (and item (dsh-emacs-session--title item)) "")))))
+  (dsh-emacs-server-ensure)
   (dsh-emacs--rpc-async "session.rename"
                         `((sessionId . ,session-id)
                           (title . ,new-title))
@@ -1088,6 +1096,7 @@ the session list on success."
 (defun dsh-emacs-list-workspaces ()
   "Fetch the workspace list."
   (interactive)
+  (dsh-emacs-server-ensure)
   (dsh-emacs-events--host-refresh-begin)
   (dsh-emacs--rpc-async "workspace.list" nil
                         (lambda (ok value)
@@ -1113,6 +1122,7 @@ the session list on success."
 (defun dsh-emacs-create-workspace (path)
   "Create a workspace.  PATH is the path of an existing directory."
   (interactive "DWorkspace directory: ")
+  (dsh-emacs-server-ensure)
   (dsh-emacs--rpc-async "workspace.create"
                         `((path . ,(expand-file-name path)))
                         (lambda (ok value)
@@ -1128,6 +1138,7 @@ the session list on success."
   (interactive
    (list (read-string "Workspace id: ")
          (read-string "New workspace title: ")))
+  (dsh-emacs-server-ensure)
   (dsh-emacs--rpc-async "workspace.rename"
                         `((workspaceId . ,workspace-id)
                           (title . ,new-title))
@@ -1146,6 +1157,7 @@ the session list on success."
      (if (yes-or-no-p (format "Delete workspace %s? " id))
          (list id)
        (keyboard-quit))))
+  (dsh-emacs-server-ensure)
   (dsh-emacs--rpc-async "workspace.delete"
                         `((workspaceId . ,workspace-id))
                         (lambda (ok value)
@@ -1166,6 +1178,7 @@ the session list regroups immediately (the host stream also repaints)."
    (list (read-string "Move workspace id: ")
          (let ((s (read-string "Insert before workspace id (blank for end): " nil nil t)))
            (and (not (string-empty-p s)) s))))
+  (dsh-emacs-server-ensure)
   (dsh-emacs--rpc-async "workspace.insertBefore"
                         (if before-workspace-id
                             `((workspaceId . ,workspace-id)
@@ -1362,6 +1375,7 @@ While a turn is executing (the mode-line spinner is lit) another
 the agent stops, the partial reply is kept in the transcript.  When idle,
 the text after the `❯ ' prompt is submitted."
   (interactive)
+  (dsh-emacs-server-ensure)
   (if (dsh-emacs--busy-p)
       (dsh-emacs--interrupt-turn)
     (let ((input (dsh-emacs--get-input)))
@@ -1526,6 +1540,7 @@ Only the media types in `dsh-emacs-attach-media-types' are sent."
   (interactive
    (list (read-file-name "Image to attach: " default-directory)
          (read-string "Caption (optional): ")))
+  (dsh-emacs-server-ensure)
   (let ((attachment (dsh-emacs--file-attachment file)))
     (unless attachment
       (user-error "Unsupported or unreadable image: %s" file))
@@ -1537,6 +1552,7 @@ Only the media types in `dsh-emacs-attach-media-types' are sent."
 (defun dsh-emacs--dnd-attach (event)
   "Handle a `drag-n-drop' EVENT in a chat buffer by attaching the files."
   (interactive "e")
+  (dsh-emacs-server-ensure)
   (let* ((files (and (listp event) (nth 1 event)))
          (paths (and files
                      (delq nil (mapcar (lambda (f) (dnd-get-local-file-name f t))
@@ -1811,6 +1827,7 @@ group-aware UI, header rows plus a per-row provider suffix on
 colliding ids are shown.  The footer model segment updates
 immediately."
   (interactive)
+  (dsh-emacs-server-ensure)
   (let ((session-id (dsh-emacs--active-session-id)))
     (unless session-id (user-error "Open or select a session first"))
     (dsh-emacs--rpc-async "session.models"
@@ -2075,6 +2092,7 @@ seeing a historical `turn/end'."
 (defun dsh-emacs-refresh ()
   "Refresh the current session."
   (interactive)
+  (dsh-emacs-server-ensure)
   (let ((session-id (dsh-emacs--active-session-id)))
     (when session-id
       (dsh-emacs--load-history session-id))))

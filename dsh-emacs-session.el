@@ -55,6 +55,7 @@
 (declare-function dsh-emacs-rename-session "dsh-emacs" (session-id new-title))
 (declare-function dsh-emacs-archive-session "dsh-emacs" (session-id))
 (declare-function dsh-emacs-fork-session "dsh-emacs" (session-id))
+(declare-function dsh-emacs-server-ensure "dsh-emacs-server" ())
 (declare-function dsh-emacs-create-workspace "dsh-emacs" (path))
 (declare-function dsh-emacs-rename-workspace "dsh-emacs" (workspace-id new-title))
 (declare-function dsh-emacs-delete-workspace "dsh-emacs" (workspace-id))
@@ -325,6 +326,7 @@ answer clears the filter.  `g' refreshes while keeping the filter."
 (defun dsh-emacs-fork-session-at-point ()
   "Fork the session under point into a new child session."
   (interactive)
+  (dsh-emacs-server-ensure)
   (let ((session-id (dsh-emacs-session-id-at-point)))
     (unless session-id (user-error "No session at point"))
     (dsh-emacs-fork-session session-id)))
@@ -481,6 +483,7 @@ Uses projections data when available, falls back to running flag."
 (defun dsh-emacs-open-session-at-point ()
   "Open session at point."
   (interactive)
+  (dsh-emacs-server-ensure)
   (let ((session-id (dsh-emacs-session-id-at-point)))
     (if session-id
         (progn
@@ -491,6 +494,7 @@ Uses projections data when available, falls back to running flag."
 (defun dsh-emacs-rename-session-at-point ()
   "Rename session at point."
   (interactive)
+  (dsh-emacs-server-ensure)
   (let* ((session-id (dsh-emacs-session-id-at-point))
          (session (dsh-emacs-session-at-point))
          (current-title (and session (dsh-emacs-session--title session)))
@@ -501,6 +505,7 @@ Uses projections data when available, falls back to running flag."
 (defun dsh-emacs-archive-session-at-point ()
   "Archive session at point (remove it from its workspace view)."
   (interactive)
+  (dsh-emacs-server-ensure)
   (let ((session-id (dsh-emacs-session-id-at-point)))
     (if session-id
         (when (yes-or-no-p (format "Archive session %s? " session-id))
@@ -518,6 +523,7 @@ Uses projections data when available, falls back to running flag."
 (defun dsh-emacs-delete-workspace-at-point ()
   "Remove workspace registration at point (directory and logs are kept)."
   (interactive)
+  (dsh-emacs-server-ensure)
   (let ((workspace-id (dsh-emacs-workspace-id-at-point)))
     (if workspace-id
         (when (yes-or-no-p "Remove this workspace? (Sessions become ungrouped) ")
@@ -527,6 +533,7 @@ Uses projections data when available, falls back to running flag."
 (defun dsh-emacs-rename-workspace-at-point ()
   "Rename workspace at point."
   (interactive)
+  (dsh-emacs-server-ensure)
   (let* ((workspace-id (dsh-emacs-workspace-id-at-point))
          (current-title (dsh-emacs-workspace-title-at-point))
          (new-title (read-string "New workspace title: " (or current-title ""))))
@@ -539,6 +546,7 @@ Prompts for the workspace to insert BEFORE (or append to the end), then
 calls `workspace.insertBefore' — dsh web's drag-to-reorder persisted via
 RPC rather than by mouse."
   (interactive)
+  (dsh-emacs-server-ensure)
   (let ((workspace-id (dsh-emacs-workspace-id-at-point))
         (workspace-title (dsh-emacs-workspace-title-at-point)))
     (if (null workspace-id)
@@ -570,6 +578,7 @@ The base line (status, title, cwd, time, preset) shows immediately; the
 live model for the session is fetched once (`session.models') and appended
 when it arrives."
   (interactive)
+  (dsh-emacs-server-ensure)
   (let* ((session (dsh-emacs-session-at-point))
          (session-id (dsh-emacs-session-id-at-point)))
     (if (not session)

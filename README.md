@@ -12,6 +12,7 @@ An Emacs frontend for [dsh](https://github.com/deepseek-ai/deepseek-harness) (De
 - **Mode-line footer**: model · reasoning effort · agent preset · context-window percentage (color-coded), all customizable via `M-x customize-group RET dsh-emacs-footer`
 - **Mode-line buffer name** matches the session list title (`dsh-<title>`), and `default-directory` points at the session workspace so `magit-status`/`project-*` start in the right repo
 - **Zero runtime dependencies**: core `url` / `json` / `cl-lib` only; Emacs 27.1+
+- **Out-of-the-box server bootstrap**: the `dsh` CLI is auto-detected (asking to install it with `npm install -g @deepseek-ai/dsh` when missing) and the server is started on demand before any server-touching command — no manual `dsh web` needed
 - **Resilient event stream**: native RFC 6455 WebSocket client with fallback polling, watchdog and anchored incremental history rendering
 
 ## Design Highlights
@@ -42,6 +43,7 @@ The design language draws on mainstream coding agents (agent-shell, pi, opencode
 - **Footer status bar**: live token usage, cost, and context percentage (color-coded: <50% green, 50-80% yellow, >80% red)
 - **Smart collapsing**: tool calls and thinking blocks are folded by default and expand on demand
 - **Asynchronous polling**: session history is polled automatically after sending, and stops automatically when the WebSocket reconnects
+- **Server bootstrap on demand**: before any server-touching command, the server address is probed — down, the `dsh` CLI is located (asking to install it when missing) and `dsh web --no-open` is started in the background and awaited, so the first `M-x dsh-emacs` just works
 - **Zero dependencies**: uses only the built-in `url` / `json` libraries; Emacs 27+
 
 ## Model Picker
@@ -70,6 +72,7 @@ dsh-emacs/
 ├── dsh-emacs-render.el       # Event renderer (user/assistant/tool/thinking)
 ├── dsh-emacs-events.el       # Event stream: native WebSocket + fallback polling
 ├── dsh-emacs-footer.el       # Footer status bar
+├── dsh-emacs-server.el       # Server bootstrap: probe / auto-start / install
 └── dsh-emacs-session.el      # Session list card view
 ```
 
@@ -124,7 +127,11 @@ Or in `use-package`:
 
 ## Prerequisites
 
-A running dsh web service is required (default address `http://127.0.0.1:3080`):
+The dsh CLI is auto-managed out of the box; a manually run server also works:
+
+- **Auto-detection & install**: when the `dsh` executable is missing, the first server-touching command asks whether to install it (`npm install -g @deepseek-ai/dsh`, customizable via `dsh-emacs-server-install-command`); declining gives manual instructions.
+- **Server auto-start** (`dsh-emacs-server-auto-start`, default `t`): the probe checks `dsh-emacs-base-url`; if nothing answers, `dsh web --host H --port P --no-open` is spawned in the background (host/port come from the base URL) and dsh-emacs waits up to `dsh-emacs-server-wait-seconds` for it to become ready. The spawned process is tracked and stopped on Emacs exit (or via `M-x dsh-emacs-server-stop`); set the option to `nil` to manage the server yourself.
+- **Manual server**: a server you start yourself is just used — dsh-emacs never kills it:
 
 ```sh
 dsh --profile web
@@ -135,6 +142,10 @@ A different address/port can be set via `dsh-emacs-base-url`:
 ```elisp
 (setq dsh-emacs-base-url "http://127.0.0.1:8080")
 ```
+
+### Provider configuration
+
+Provider/model configuration is **owned by dsh**, not by dsh-emacs — this package is a thin client that reads the catalog via `session.models` and has no provider-editing surface. Configure providers in the dsh web UI (`M-x dsh-emacs-open-web` opens it; Settings is a modal inside the app), or directly in the dsh home files (`~/.dsh/settings.yaml`, `~/.dsh/.credentials.yaml` for API keys, `~/.dsh/profiles/<name>/cordis.yml` for profile layers). Changes appear in dsh-emacs after a refresh (`g` in the session list, `C-c C-r` in a chat buffer); the model picker (`C-c C-m`) shows exactly the providers the host announces.
 
 ## Quick Start
 
@@ -148,6 +159,10 @@ A different address/port can be set via `dsh-emacs-base-url`:
 | `M-x dsh-emacs-attach-file` | Attach an image to the current session and send it |
 | `M-x dsh-emacs-copy-code-block` | Copy the code block under point |
 | `M-x dsh-emacs-health` | Check whether the dsh service is reachable |
+| `M-x dsh-emacs-server-start` | Start the dsh server as a managed background process (asks to install the dsh CLI when missing) |
+| `M-x dsh-emacs-server-stop` | Stop the managed dsh server process (never touches servers you started) |
+| `M-x dsh-emacs-server-restart` | Restart the managed dsh server process |
+| `M-x dsh-emacs-open-web` | Open the dsh web UI in the browser (provider/model config lives in dsh; Settings is a modal there) |
 
 ## Chat Buffer Key Bindings
 
