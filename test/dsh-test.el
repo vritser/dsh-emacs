@@ -1152,6 +1152,137 @@ so the code under test can read fields through the protocol accessors."
           (kill-buffer b)))
       (remhash "sess-open" dsh-emacs--chat-buffers))))
 
+;; --- 测试 43b: 打开新会话不再断开其它会话的流（多会话实时） ---
+;; 回归：open-session 曾无条件断开上一个 current-buffer 的 mux——从 A 打开
+;; B 时把 A 的流拆了且无人重连，A 之后只能轮询，还会冒出误导性的
+;; "event stream connecting / switches back to realtime" 提示（永远回不去）。
+(let* ((buf-a (generate-new-buffer " *t43b-a*"))
+       (disconnects nil)
+       (connects nil)
+       (old-sessions dsh-emacs--sessions)
+       (old-current-buffer dsh-emacs--current-buffer)
+       (old-current-session dsh-emacs--current-session))
+  (unwind-protect
+      (progn
+        (with-current-buffer buf-a
+          (setq-local dsh-emacs--buffer-session "sess-ka"))
+        (setq dsh-emacs--current-buffer buf-a
+              dsh-emacs--current-session "sess-ka")
+        (setq dsh-emacs--sessions
+              (dsh-emacs-test--session-items
+               (list (list (cons 'sessionId "sess-ka")
+                           (cons 'blank :json-false)
+                           (cons 'agentPreset "standard"))
+                     (list (cons 'sessionId "sess-kb")
+                           (cons 'blank :json-false)
+                           (cons 'agentPreset "standard")))))
+        (cl-letf (((symbol-function 'dsh-emacs-events-connect)
+                   (lambda (chat) (push (list 'connect chat) connects)))
+                  ((symbol-function 'dsh-emacs-events-disconnect)
+                   (lambda (&optional chat)
+                     (push (list 'disconnect chat) disconnects)))
+                  ((symbol-function 'dsh-emacs--load-history)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'pop-to-buffer)
+                   (lambda (&rest _) nil)))
+          (dsh-emacs-open-session "sess-kb"))
+        (let ((buf-b dsh-emacs--current-buffer))
+          ;; 新会话自己建连
+          (when (and connects (eq (nth 1 (car connects)) buf-b))
+            (dsh-test-pass "open-second-session-connects-its-own-stream"))
+          ;; A 的流没有被断开
+          (when (not (cl-some (lambda (d) (eq (nth 1 d) buf-a))
+                              disconnects))
+            (dsh-test-pass "open-second-session-keeps-previous-stream")))
+        ;; 重开同一会话：仍是自建连（自身旧流由 connect 内部断开）
+        (setq disconnects nil connects nil)
+        (cl-letf (((symbol-function 'dsh-emacs-events-connect)
+                   (lambda (chat) (push (list 'connect chat) connects)))
+                  ((symbol-function 'dsh-emacs-events-disconnect)
+                   (lambda (&optional chat)
+                     (push (list 'disconnect chat) disconnects)))
+                  ((symbol-function 'dsh-emacs--load-history)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'pop-to-buffer)
+                   (lambda (&rest _) nil)))
+          (dsh-emacs-open-session "sess-kb"))
+        (when (and connects
+                   (eq (nth 1 (car connects)) dsh-emacs--current-buffer))
+          (dsh-test-pass "reopen-same-session-reconnects-itself")))
+    (setq dsh-emacs--sessions old-sessions
+          dsh-emacs--current-buffer old-current-buffer
+          dsh-emacs--current-session old-current-session)
+    (dolist (b (buffer-list))
+      (let ((sid (buffer-local-value 'dsh-emacs--buffer-session b)))
+        (when (member sid '("sess-ka" "sess-kb"))
+          (kill-buffer b))))
+    (remhash "sess-ka" dsh-emacs--chat-buffers)
+    (remhash "sess-kb" dsh-emacs--chat-buffers)))
+
+;; --- 测试 43c: 发送时会话若完全没有流则先重连再轮询（自愈） ---
+(let* ((chat (get-buffer-create " *t43c-chat*"))
+       (connects nil)
+       (polled nil)
+       (old-current-session dsh-emacs--current-session))
+  (unwind-protect
+      (progn
+        (with-current-buffer chat
+          (dsh-emacs-mode)
+          (setq-local dsh-emacs--buffer-session "sess-sh")
+          (setq dsh-emacs--event-ready nil
+                dsh-emacs--event-process nil))
+        ;; 场景 1：完全无流（进程都不存在）→ 重连 + 轮询
+        (with-current-buffer chat
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (_method _params cb)
+                       (funcall cb t '((accepted . t)))))
+                    ((symbol-function 'dsh-emacs--get-input)
+                     (lambda () ""))
+                    ((symbol-function 'dsh-emacs--ml-busy-set)
+                     (lambda (&rest _) nil))
+                    ((symbol-function 'dsh-emacs-events-connect)
+                     (lambda (c) (push c connects)))
+                    ((symbol-function 'dsh-emacs--start-polling)
+                     (lambda () (setq polled t)))
+                    ((symbol-function 'dsh-emacs-events--watchdog-start)
+                     (lambda () nil)))
+            (dsh-emacs--submit-prompt "hi")))
+        (when (and (eq (car connects) chat) polled)
+          (dsh-test-pass "submit-heals-streamless-buffer-with-reconnect"))
+        ;; 场景 2：握手进行中（进程在但没 ready）→ 不重复建连，只轮询
+        (setq connects nil polled nil)
+        (let ((proc (make-pipe-process :name " *t43c-proc*"
+                                       :buffer " *t43c-proc*")))
+          (unwind-protect
+              (progn
+                (with-current-buffer chat
+                  (setq dsh-emacs--event-ready nil
+                        dsh-emacs--event-process proc))
+                (with-current-buffer chat
+                  (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                             (lambda (_m _p cb)
+                               (funcall cb t '((accepted . t)))))
+                            ((symbol-function 'dsh-emacs--get-input)
+                             (lambda () ""))
+                            ((symbol-function 'dsh-emacs--ml-busy-set)
+                             (lambda (&rest _) nil))
+                            ((symbol-function 'dsh-emacs-events-connect)
+                             (lambda (c) (push c connects)))
+                            ((symbol-function 'dsh-emacs--start-polling)
+                             (lambda () (setq polled t)))
+                            ((symbol-function 'dsh-emacs-events--watchdog-start)
+                             (lambda () nil)))
+                    (dsh-emacs--submit-prompt "hi2")))
+                (when (and (null connects) polled)
+                  (dsh-test-pass "submit-in-handshake-keeps-single-stream")))
+            (delete-process proc))))
+    (setq dsh-emacs--current-session old-current-session)
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
 ;; --- 测试 44: 聊天缓冲从不显示 modified / 关闭不提示保存 ---
 (with-temp-buffer
   (dsh-emacs-mode)

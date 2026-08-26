@@ -1021,10 +1021,14 @@ When the input line is not visible because the window was scrolled up to\nread h
 
 ;;;###autoload
 (defun dsh-emacs-open-session (session-id)
-  "Open session SESSION-ID."
+  "Open session SESSION-ID.
+Connects a per-session mux stream for the chat buffer WITHOUT touching
+other open sessions' streams: with several chats live, each buffer keeps
+its own realtime stream (tearing the previous one down here used to
+leave it stream-less — polling-only and unable to ever switch back to
+realtime)."
   (interactive)
   (dsh-emacs--unpin-input-window)
-  (dsh-emacs-events-disconnect dsh-emacs--current-buffer)
   (setq dsh-emacs--current-session session-id)
   (let* ((existing (gethash session-id dsh-emacs--chat-buffers))
          (buf (if (and existing (buffer-live-p existing))
@@ -1655,6 +1659,18 @@ the running spinner lights up, and the watchdog starts."
                                         (dsh-emacs--render-user-message message))
                                       (dsh-emacs-render--follow-stream)
                                       (unless dsh-emacs--event-ready
+                                        ;; 流不在线时自愈：连进程都不存在说明
+                                        ;; 该会话的 mux 已断开且无人重连（旧版
+                                        ;; 打开新会话会误拆上一个会话的流——
+                                        ;; 见 `dsh-emacs-open-session'）——先
+                                        ;; 重连再轮询，让「switches back to
+                                        ;; realtime」的承诺成立；握手途中的
+                                        ;; 进程由 connect 的 health check 兜底，
+                                        ;; 这里不重复建连。
+                                        (when (not (process-live-p
+                                                    dsh-emacs--event-process))
+                                          (dsh-emacs-events-connect
+                                           (current-buffer)))
                                         (dsh-emacs--start-polling))))
                                   (when (buffer-live-p input-buffer)
                                     (with-current-buffer input-buffer
