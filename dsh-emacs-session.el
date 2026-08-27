@@ -141,7 +141,11 @@ active workspace filter)."
   "Render the session list, grouped by workspace."
   (let ((sessions dsh-emacs--sessions)
         (workspaces dsh-emacs--workspaces)
-        (inhibit-read-only t))
+        (inhibit-read-only t)
+        ;; 重绘后仍停在同一个会话行上：列表在事件/刷新/自动刷新之间重建时，
+        ;; 光标不弹回顶部，hl-line 高亮也随之保持（否则导航中列表自己“跳走”，
+        ;; 体感就是卡顿）。
+        (restore-id (dsh-emacs-session-id-at-point)))
     (erase-buffer)
     
     ;; Header
@@ -160,7 +164,15 @@ active workspace filter)."
       
       ;; Group sessions by workspace
       (dolist (group (dsh-emacs-session--group-sessions sessions workspaces))
-        (dsh-emacs-session--render-group group)))))
+        (dsh-emacs-session--render-group group)))
+    ;; Restore the previously focused session row, if it is still listed.
+    (when restore-id
+      (goto-char (point-min))
+      (catch 'dsh-session-restored
+        (while (not (eobp))
+          (when (equal restore-id (dsh-emacs-session-id-at-point))
+            (throw 'dsh-session-restored t))
+          (forward-line 1))))))
 
 (defun dsh-emacs-session--group-sessions (sessions workspaces)
   "Group SESSIONS by WORKSPACES.
