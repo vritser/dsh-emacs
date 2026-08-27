@@ -123,8 +123,8 @@ active workspace filter)."
   (setq truncate-lines t)
   (setq cursor-type nil)
   (setq-local line-spacing 0.2)
-  ;; Highlight the focused session row with a more obvious background.
-  (setq-local hl-line-face 'dsh-emacs-session-selected-face)
+  ;; Use the user's theme highlight for the focused row (default `hl-line'
+  ;; face); do not impose a custom background.
   (hl-line-mode 1)
   (add-hook 'kill-buffer-hook #'dsh-emacs-session--auto-refresh-stop nil t)
   (dsh-emacs-session--auto-refresh-start)

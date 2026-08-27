@@ -215,16 +215,6 @@
 	:type 'string
 	:group 'dsh-emacs-faces)
 
-(defcustom dsh-emacs-color-session-selected-bg "#dbeafe"
-	"Background of the focused row in the session list (light)."
-	:type 'string
-	:group 'dsh-emacs-faces)
-
-(defcustom dsh-emacs-color-session-selected-bg-dark "#3b4252"
-	"Background of the focused row in the session list (dark)."
-	:type 'string
-	:group 'dsh-emacs-faces)
-
 ;;; ---------------------------------------------------------------------------
 ;;; 品牌 / 强调
 ;;; ---------------------------------------------------------------------------
@@ -530,13 +520,6 @@ Bold, no italic — matching dsh web's thinkingToggle style."
 (defface dsh-emacs-session-id-face
 	'((t :inherit font-lock-comment-face :slant italic))
 	"Session ID in session list (info view)."
-	:group 'dsh-emacs-faces)
-
-(defface dsh-emacs-session-selected-face
-	`((((background light)) :background ,dsh-emacs-color-session-selected-bg :extend t)
-		(((background dark))  :background ,dsh-emacs-color-session-selected-bg-dark :extend t)
-		(t :inherit region))
-	"Focused session row in session list."
 	:group 'dsh-emacs-faces)
 
 (defface dsh-emacs-session-status-face
