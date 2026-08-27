@@ -462,21 +462,24 @@ still handled by `dsh-emacs-footer-note-request' for the context window)."
 (defvar-local dsh-emacs--ml-busy nil
   "Non-nil while this chat buffer's dsh session is executing a prompt.")
 
-(defvar dsh-emacs--ml-busy-index 0
-  "Current frame index of the mode-line running animation.")
+(defvar-local dsh-emacs--ml-busy-index 0
+  "Current frame index of the mode-line running animation.
+Buffer-local: each busy session owns its animation frame, so two sessions
+running at once never fight over one counter (the index is only advanced
+by the owning buffer's own timer).")
 
-(defvar dsh-emacs--ml-busy-timer nil
-  "Timer object driving the mode-line running animation.")
+(defvar-local dsh-emacs--ml-busy-timer nil
+  "Timer object driving the mode-line running animation.
+Buffer-local: every busy chat buffer drives its own animation; a single
+global timer would let one session's `turn/end' (rendered in a hidden
+buffer) cancel the visible session's spinner.")
 
-(defvar dsh-emacs--ml-busy-buffer nil
-  "Buffer whose mode-line the running animation is driving.")
-
-(defun dsh-emacs--ml-busy-tick ()
+(defun dsh-emacs--ml-busy-tick (buffer)
   "Advance one frame of the mode-line running animation and redraw it.
-Auto-stops when the owning buffer is gone or no longer busy."
-  (when (and dsh-emacs--ml-busy-timer
-             (buffer-live-p dsh-emacs--ml-busy-buffer))
-    (with-current-buffer dsh-emacs--ml-busy-buffer
+Auto-stops when BUFFER is gone or no longer busy.  BUFFER is passed
+explicitly because the timer callback may otherwise run in any buffer."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
       (if (and dsh-emacs--ml-busy (timerp dsh-emacs--ml-busy-timer))
           (progn
             (setq dsh-emacs--ml-busy-index
@@ -492,18 +495,16 @@ Auto-stops when the owning buffer is gone or no longer busy."
 (defun dsh-emacs--ml-busy-start ()
   "Start the mode-line running animation for the current buffer."
   (dsh-emacs--ml-busy-stop)
-  (setq dsh-emacs--ml-busy-buffer (current-buffer)
-        dsh-emacs--ml-busy-index 0
+  (setq dsh-emacs--ml-busy-index 0
         dsh-emacs--ml-busy-timer
         (run-at-time nil dsh-emacs--ml-busy-interval
-                     #'dsh-emacs--ml-busy-tick)))
+                     #'dsh-emacs--ml-busy-tick (current-buffer))))
 
 (defun dsh-emacs--ml-busy-stop ()
   "Stop the mode-line running animation and cancel its timer."
-  (when dsh-emacs--ml-busy-timer
+  (when (timerp dsh-emacs--ml-busy-timer)
     (cancel-timer dsh-emacs--ml-busy-timer))
   (setq dsh-emacs--ml-busy-timer nil
-        dsh-emacs--ml-busy-buffer nil
         dsh-emacs--ml-busy-index 0))
 
 (defun dsh-emacs--ml-busy-set (flag)

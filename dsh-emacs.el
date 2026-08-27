@@ -250,8 +250,8 @@ NOT resolve their target from this variable alone — they read
 (defvar-local dsh-emacs--pending-user-messages nil
   "Text of messages the user sent but that are not yet confirmed in session.history.")
 
-(defvar dsh-emacs--poll-timer nil
-  "Polling timer.")
+(defvar-local dsh-emacs--poll-timer nil
+  "Polling timer (per chat buffer, like every other stream variable).")
 
 (defvar-local dsh-emacs--poll-inflight nil
   "Whether the current buffer already has a history request in flight.")

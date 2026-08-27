@@ -5192,6 +5192,64 @@ so the code under test can read fields through the protocol accessors."
           (dsh-test-pass "turn-end-extinguishes-busy")))
     (kill-buffer buf)))
 
+;; --- 测试 98k: 多 session 并发 —— busy / command spinner 状态按 buffer 隔离 ---
+;; 回归：ml-busy 的 timer 与 command-spinners 一度是全局的——A 会话在生成时，
+;; B 会话的 turn/end（在隐藏 buffer 里照常渲染）会把全局 timer 取消、掐掉 A 的
+;; spinner；两个 buffer 的乐观命令行（pending-<name> 同 key）也会互相覆盖。
+(let ((buf-a (generate-new-buffer " *dsh-multi-a*"))
+      (buf-b (generate-new-buffer " *dsh-multi-b*")))
+  (unwind-protect
+      (progn
+        (with-current-buffer buf-a
+          (dsh-emacs-mode)
+          (dsh-emacs--ml-busy-set t)
+          (when (and dsh-emacs--ml-busy (timerp dsh-emacs--ml-busy-timer))
+            (dsh-test-pass "multi-session-busy-a-lit")))
+        (with-current-buffer buf-b
+          (dsh-emacs-mode)
+          (dsh-emacs--ml-busy-set t)
+          (when (and dsh-emacs--ml-busy (timerp dsh-emacs--ml-busy-timer))
+            (dsh-test-pass "multi-session-busy-b-lit"))
+          ;; B 结束：只熄 B 自己的 spinner
+          (dsh-emacs--ml-busy-set nil)
+          (when (null dsh-emacs--ml-busy)
+            (dsh-test-pass "multi-session-busy-b-cleared")))
+        ;; 关键：B 的 turn/end 不能把 A 的 spinner 一起掐掉
+        (with-current-buffer buf-a
+          (when (and dsh-emacs--ml-busy (timerp dsh-emacs--ml-busy-timer))
+            (dsh-test-pass "multi-session-busy-a-survives-b-clear"))
+          (dsh-emacs--ml-busy-clear))
+        ;; command spinner：同 key 的乐观行在各自 buffer 里互不覆盖
+        (with-current-buffer buf-a
+          (setq dsh-emacs--show-commands t
+                dsh-emacs--command-blocks (make-hash-table :test 'equal)
+                dsh-emacs--pending-command nil
+                dsh-emacs--command-spinners (make-hash-table :test 'equal))
+          (dsh-emacs-render-command-optimistic "/compact")
+          (when (eq (nth 0 (gethash "pending-compact"
+                                    dsh-emacs--command-spinners))
+                    buf-a)
+            (dsh-test-pass "multi-session-command-spinner-a")))
+        (with-current-buffer buf-b
+          (setq dsh-emacs--show-commands t
+                dsh-emacs--command-blocks (make-hash-table :test 'equal)
+                dsh-emacs--pending-command nil
+                dsh-emacs--command-spinners (make-hash-table :test 'equal))
+          (dsh-emacs-render-command-optimistic "/compact")
+          (when (eq (nth 0 (gethash "pending-compact"
+                                    dsh-emacs--command-spinners))
+                    buf-b)
+            (dsh-test-pass "multi-session-command-spinner-b"))
+          (dsh-emacs--command-spinner-clear-all))
+        (with-current-buffer buf-a
+          (when (eq (nth 0 (gethash "pending-compact"
+                                    dsh-emacs--command-spinners))
+                    buf-a)
+            (dsh-test-pass "multi-session-command-spinner-a-survives-b"))
+          (dsh-emacs--command-spinner-clear-all)))
+    (kill-buffer buf-a)
+    (kill-buffer buf-b)))
+
 ;; --- 测试 98a: 乐观命令行渲染（optimistic command row） ---
 (let ((buf (generate-new-buffer " *dsh-cmd-opt*")))
   (unwind-protect

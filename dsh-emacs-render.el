@@ -666,6 +666,7 @@ miss the entry is cleaned up.")
         dsh-emacs--streaming-thinking nil
         dsh-emacs--tool-states (make-hash-table :test 'equal)
         dsh-emacs--command-blocks (make-hash-table :test 'equal)
+        dsh-emacs--command-spinners (make-hash-table :test 'equal)
         dsh-emacs--pending-command nil
         dsh-emacs--group-counter 0
         dsh-emacs--current-group-id nil
@@ -1327,10 +1328,15 @@ classic shell spinner in slash.sh).")
 
 
 
-(defvar dsh-emacs--command-spinners (make-hash-table :test 'equal)
+(defvar-local dsh-emacs--command-spinners (make-hash-table :test 'equal)
   "Live running-command animations, keyed by COMMAND-ID.
 Each value is (BUFFER TIMER INDEX): BUFFER is the chat buffer the row lives
-in, TIMER the repeating `run-at-time' timer, INDEX the next frame index.")
+in, TIMER the repeating `run-at-time' timer, INDEX the next frame index.
+
+Buffer-local: several chats may run commands concurrently, and the
+optimistic temp ids (`pending-<name>') collide across buffers — a global
+table would let one session's spinner overwrite/cancel another's.  Each
+chat buffer gets its own hash in `dsh-emacs-render--reset-tool-tracking'.")
 
 (defun dsh-emacs--command-spinner-start (command-id buffer)
   "Start the running `-\\|/' animation for COMMAND-ID in BUFFER.
