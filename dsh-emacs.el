@@ -409,10 +409,22 @@ mean the method is not exposed by this dsh server version (e.g.
                         (goto-char (point-min))
                         (re-search-forward "^$")
                         (delete-region (point) (point-min))
-                        (dsh-emacs--decode-response-body)
-                        (goto-char (point-min))
-                        (let* ((response (json-read))
-                               (unwrapped (dsh-emacs--unwrap-response response)))
+                        (let* ((response
+                                (condition-case err
+                                    (progn
+                                      (dsh-emacs--decode-response-body)
+                                      (goto-char (point-min))
+                                      (json-read))
+                                  (error
+                                   ;; 体无法解析（非 JSON、断流等）：打印缘由
+                                   ;; 但仍把回调派发出去（ok=nil），调用方因此
+                                   ;; 总能走到自己的失败分支，而不是被静默丢弃。
+                                   (message "RPC response error: %s"
+                                            (error-message-string err))
+                                   nil)))
+                               (unwrapped (and response
+                                               (dsh-emacs--unwrap-response
+                                                response))))
                           (let ((ok (car unwrapped))
                                 (value (cdr unwrapped)))
                             (kill-buffer)
