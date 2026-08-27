@@ -406,6 +406,17 @@ so the code under test can read fields through the protocol accessors."
 (when (stringp (dsh-emacs-session--compact-time (* (float-time) 1000)))
   (dsh-test-pass "session-time-formats-milliseconds"))
 
+;; --- 测试: 会话列表时间列对齐 —— 按显示宽度填充（CJK 占 2 列） ---
+(let* ((ascii (dsh-emacs-session--pad-right "hello" 45))
+       (cjk (dsh-emacs-session--pad-right "自动摘要名称" 45))
+       (trunc (dsh-emacs-session--pad-right
+               (make-string 60 ?x) 45)))
+  (when (and (= 45 (string-width ascii))
+             (= 45 (string-width cjk))
+             (= 45 (string-width trunc))
+             (not (equal ascii cjk)))
+    (dsh-test-pass "session-pad-right-aligns-wide-characters")))
+
 (when (and (stringp (dsh-emacs--client-time-zone))
            (not (string-empty-p (dsh-emacs--client-time-zone)))
            (dsh-emacs--valid-iana-time-zone-p

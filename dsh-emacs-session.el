@@ -382,15 +382,22 @@ the workspace context applies to the whole group."
          ;; Status indicator
          (status-dot (dsh-emacs-session--status-dot status))
 
-         ;; Build compact row: dot + title (padded to fixed width) + time
+         ;; Column at which the time begins, measured from the left margin.
+         ;; indent + status dot (1 col) + separator space + 46-column title
+         ;; field + 2-col gap.  `:align-to' is used instead of literal space
+         ;; padding so the column holds even when a title's rendered glyph
+         ;; width differs from `string-width' (proportional/CJK fonts), which
+         ;; would otherwise let the time drift right/left.
+         (time-column (+ (or indent 0) 1 49))
          (row (concat
                (make-string (or indent 0) ?\s)
                status-dot " "
-               ;; Pad the title so the time is right-aligned at a fixed column,
-               ;; keeping a clear gap between the title and the time.
-               (propertize (dsh-emacs-session--pad-right title-str 45)
+               ;; Pad to a fixed width so over-long titles truncate and short
+               ;; ones keep a readable gap; the exact column is then pinned by
+               ;; the :align-to below regardless of title glyph widths.
+               (propertize (dsh-emacs-session--pad-right title-str 46)
                            'face 'dsh-emacs-session-title-face)
-               "  "
+               (propertize " " 'display `(space :align-to ,time-column))
                (propertize (or time-str "") 'face 'dsh-emacs-muted-face))))
     
     ;; Insert row with text properties for selection and (optionally) the
@@ -439,10 +446,15 @@ Accept both numeric and string timestamps in seconds or milliseconds."
        (t (format "%dy" (/ diff (* 365 86400))))))))
 
 (defun dsh-emacs-session--pad-right (str width)
-  "Pad STR to WIDTH with spaces on the right."
-  (if (>= (length str) width)
-      (substring str 0 width)
-    (concat str (make-string (- width (length str)) ?\s))))
+  "Pad STR to WIDTH display columns with trailing spaces.
+WIDTH is measured in display columns (`string-width'): wide characters
+(CJK, emoji) count 2, so the session list's time column stays aligned
+for both ASCII and Chinese titles.  Over-wide strings are truncated to
+WIDTH display columns without splitting a wide character."
+  (let ((w (string-width str)))
+    (if (<= w width)
+        (concat str (make-string (- width w) ?\s))
+      (truncate-string-to-width str width))))
 
 (defun dsh-emacs-session--compute-status (session running)
   "Compute session status: 'running, 'approval, 'pending, or 'idle.
