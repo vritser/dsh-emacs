@@ -100,6 +100,7 @@
 ;; at runtime from teardown only.
 (declare-function dsh-emacs--ml-busy-clear "dsh-emacs-footer" ())
 (declare-function dsh-emacs--command-spinner-clear-all "dsh-emacs-render" ())
+(declare-function dsh-emacs--command-spinner-revive "dsh-emacs-render" ())
 ;; Runtime dependencies defined in dsh-emacs.el / dsh-emacs-render.el; used
 ;; by the stream-health watchdog only.
 (declare-function dsh-emacs--rpc-async "dsh-emacs" (method params callback))
@@ -577,7 +578,14 @@ wedged with no recovery scheduled — the exact limbo observed on this build."
         ;; Connect health (repeating): while the handshake is pending, every
         ;; 2s check that the socket is really being read; a wedged socket is
         ;; killed so `dsh-emacs-events--lost' starts HTTP polling and retries.
-        (dsh-emacs-events--health-start)))))
+        (dsh-emacs-events--health-start)
+        ;; A mid-command stream drop just ran `dsh-emacs-events-disconnect'
+        ;; (above), which cancels every row spinner so a detached conversation
+        ;; never keeps animating.  If this connect is a reconnect for the same
+        ;; chat buffer while a slash command is still running, re-arm its
+        ;; spinner (a no-op for fresh buffers and already-settled rows).
+        (when (fboundp 'dsh-emacs--command-spinner-revive)
+          (dsh-emacs--command-spinner-revive))))))
 
 (defun dsh-emacs-events-disconnect (&optional chat)
   "Disconnect CHAT's dsh event stream."

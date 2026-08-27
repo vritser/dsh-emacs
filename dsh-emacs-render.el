@@ -1388,6 +1388,22 @@ buffer, because a timer callback may otherwise run in any buffer."
              (dsh-emacs--command-spinner-stop command-id))
            dsh-emacs--command-spinners))
 
+(defun dsh-emacs--command-spinner-revive ()
+  "Re-arm the running-command animation after a stream reconnect.
+`dsh-emacs-events-disconnect' cancels every spinner (so a detached
+conversation never keeps animating); when the same chat buffer reconnects
+mid-command, its rows are still on screen and still pending, so restart the
+animation for each such entry.  No-op when the command already settled
+(`command/done' restyled the row: color-key is no longer `tool-pending'),
+the row no longer exists, or there is nothing to revive."
+  (dolist (command-id (hash-table-keys dsh-emacs--command-blocks))
+    (when-let* ((entry (gethash command-id dsh-emacs--command-blocks))
+                (block (dsh-emacs-ui-find-block (format "%s-%s" (nth 0 entry)
+                                                        (nth 1 entry))))
+                (state (get-text-property (car block) 'dsh-emacs-ui-state))
+                ((eq (map-elt state :color-key) 'tool-pending)))
+      (dsh-emacs--command-spinner-start command-id (current-buffer)))))
+
 (defun dsh-emacs-render--command-tint-running (ns block-id)
   "Tint running slash-command row NS-BLOCK-ID like a running tool row.
 Applies `dsh-emacs-tool-pending-face' (orange, bold) to the whole block

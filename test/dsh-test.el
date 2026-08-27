@@ -5001,6 +5001,103 @@ so the code under test can read fields through the protocol accessors."
 (when (assoc "bash" dsh-emacs--tool-icon-svgs)
   (dsh-test-pass "command-bash-icon-svg-template"))
 
+;; --- 测试 98f: 流重连（disconnect+connect）后复活仍在运行的 command spinner ---
+(let ((buf (generate-new-buffer " *dsh-cmd-revive*"))
+      (old-spinners dsh-emacs--command-spinners))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq dsh-emacs--command-spinners (make-hash-table :test 'equal))
+        (dsh-emacs-render-event
+         '((type . "command/run") (seq . 50)
+           (data . ((commandId . "rv1") (name . "goal")))))
+        ;; 模拟 disconnect（重连/切会话）清掉所有动画
+        (dsh-emacs--command-spinner-clear-all)
+        (when (= 0 (hash-table-count dsh-emacs--command-spinners))
+          (dsh-test-pass "command-spinner-revive-clear-all"))
+        ;; connect 复活：同一 chat buffer 里行还在、color-key 仍 pending
+        (dsh-emacs--command-spinner-revive)
+        (when (and (gethash "rv1" dsh-emacs--command-spinners)
+                   (timerp (nth 1 (gethash "rv1" dsh-emacs--command-spinners))))
+          (dsh-test-pass "command-spinner-revive-restarts"))
+        ;; 复活后照常推进帧
+        (dsh-emacs--command-spinner-tick "rv1")
+        (dsh-emacs--command-spinner-tick "rv1")
+        (when (= 2 (nth 2 (gethash "rv1" dsh-emacs--command-spinners)))
+          (dsh-test-pass "command-spinner-revive-advances")))
+    (setq dsh-emacs--command-spinners old-spinners)
+    (kill-buffer buf)))
+
+;; done 已把行换成成功色（color-key != tool-pending）：复活不得重启
+(let ((buf (generate-new-buffer " *dsh-cmd-revive-done*"))
+      (old-spinners dsh-emacs--command-spinners))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq dsh-emacs--command-spinners (make-hash-table :test 'equal))
+        (dsh-emacs-render-event
+         '((type . "command/run") (seq . 52)
+           (data . ((commandId . "rv2") (name . "goal")))))
+        (dsh-emacs-render-event
+         '((type . "command/done") (seq . 53)
+           (data . ((commandId . "rv2") (kind . "success")
+                    (text . "ok")))))
+        (dsh-emacs--command-spinner-clear-all)
+        (dsh-emacs--command-spinner-revive)
+        (when (null (gethash "rv2" dsh-emacs--command-spinners))
+          (dsh-test-pass "command-spinner-revive-skips-settled")))
+    (setq dsh-emacs--command-spinners old-spinners)
+    (kill-buffer buf)))
+
+;; 行已被删除（entry 残留）：复活不得重启动画
+(let ((buf (generate-new-buffer " *dsh-cmd-revive-gone*"))
+      (old-spinners dsh-emacs--command-spinners))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq dsh-emacs--command-spinners (make-hash-table :test 'equal))
+        (dsh-emacs-render-event
+         '((type . "command/run") (seq . 54)
+           (data . ((commandId . "rv3") (name . "goal")))))
+        (when-let* ((entry (gethash "rv3" dsh-emacs--command-blocks))
+                    (qid (format "%s-%s" (nth 0 entry) (nth 1 entry)))
+                    (blk (dsh-emacs-ui--find-block qid)))
+          (let ((inhibit-read-only t))
+            (delete-region (car blk) (cdr blk))))
+        (dsh-emacs--command-spinner-clear-all)
+        (dsh-emacs--command-spinner-revive)
+        (when (null (gethash "rv3" dsh-emacs--command-spinners))
+          (dsh-test-pass "command-spinner-revive-skips-missing-block")))
+    (setq dsh-emacs--command-spinners old-spinners)
+    (kill-buffer buf)))
+
+;; 98f2: events-connect（重连也走它）里真的调用了 revive
+(let ((buf (generate-new-buffer " *dsh-cmd-connect-revive*"))
+      (revives 0)
+      (old-spinners dsh-emacs--command-spinners))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq dsh-emacs--command-spinners (make-hash-table :test 'equal))
+        (cl-letf (((symbol-function 'open-network-stream)
+                   (lambda (&rest _) (prog1 :fake-proc)))
+                  ((symbol-function 'set-process-query-on-exit-flag)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'process-put)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'set-process-filter)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'set-process-sentinel)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'dsh-emacs--command-spinner-revive)
+                   (lambda () (setq revives (1+ revives)))))
+          (dsh-emacs-events-connect buf)
+          (dsh-emacs-events--health-stop))
+        (when (> revives 0)
+          (dsh-test-pass "command-spinner-revive-wired-in-connect")))
+    (setq dsh-emacs--command-spinners old-spinners)
+    (kill-buffer buf)))
+
 ;; --- 测试 98a: 乐观命令行渲染（optimistic command row） ---
 (let ((buf (generate-new-buffer " *dsh-cmd-opt*")))
   (unwind-protect
