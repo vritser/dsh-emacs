@@ -75,6 +75,15 @@ nil = collapsed by default (only tool title + summary are shown)."
   :type 'boolean
   :group 'dsh-emacs-render)
 
+(defcustom dsh-emacs-show-commands t
+  "Whether slash commands (/goal, /compact, ...) show in the transcript.
+Command `command/run' + `command/done' events render as one flow node:
+the run creates the muted label, the done restyles it with a short status
+and folds the outcome text into a collapsible body below (collapsed by
+default); the error kind turns the node red."
+  :type 'boolean
+  :group 'dsh-emacs-render)
+
 (defcustom dsh-emacs-assistant-divider nil
   "Whether to draw a divider between assistant message bodies.
 Off by default to reduce visual noise."
@@ -131,6 +140,7 @@ Off by default to reduce visual noise."
     ("write"  . "✏️")
     ("edit"   . "✏️")
     ("code"   . "</>")
+    ("command" . "⚡")
     ("others" . "✨"))
   "Variant -> emoji fallback icon, mirroring dsh web's VariantIcons by meaning:
 - bash    = terminal            (IconApiOutline14)
@@ -139,6 +149,7 @@ Off by default to reduce visual noise."
 - write   = pencil              (IconEditOutline16)
 - edit    = pencil              (IconEditOutline16)
 - code    = code brackets       (IconCodeOutline16)
+- command = lightning           (slash commands, IconFlash16 style)
 - others  = sparkle             (IconSparkle16)
 
 The emoji is only a terminal / non-SVG fallback; graphical Emacs renders the
@@ -155,6 +166,7 @@ real dsh-web SVG icons (see `dsh-emacs--tool-icon-svgs').")
     ("write" . "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\"><path d=\"M9.94076 1.34942C10.7047 0.90231 11.6503 0.902415 12.4143 1.34942C12.7061 1.52015 12.9688 1.79118 13.3104 2.13284C13.6521 2.47448 13.9231 2.73721 14.0939 3.02894C14.5408 3.79294 14.5409 4.73856 14.0939 5.50251C13.9231 5.79415 13.652 6.05704 13.3104 6.39861L6.65932 13.0497C6.28068 13.4284 6.00695 13.7108 5.66543 13.9097C5.32391 14.1085 4.94315 14.2074 4.42705 14.3498L3.24394 14.6761C2.77527 14.8054 2.34538 14.9262 2.00131 14.9684C1.65196 15.0112 1.17964 15.0013 0.810764 14.6325C0.441921 14.2637 0.432107 13.7913 0.47486 13.442C0.517035 13.0979 0.6379 12.668 0.767181 12.1993L1.09352 11.0162C1.23588 10.5001 1.33481 10.1193 1.5336 9.77784C1.7325 9.43632 2.0149 9.1626 2.39355 8.78395L9.04466 2.13284C9.38625 1.79126 9.64911 1.52016 9.94076 1.34942ZM15.5427 14.8398H7.55223L8.96707 13.425H15.5427V14.8398ZM3.39382 9.78422C2.965 10.213 2.84244 10.3436 2.75709 10.49C2.67183 10.6366 2.61862 10.8079 2.45733 11.3925L2.13099 12.5756C2.00183 13.0439 1.92194 13.3419 1.88863 13.5536C2.10041 13.5204 2.39872 13.4416 2.86764 13.3123L4.05075 12.9859C4.63544 12.8246 4.80669 12.7715 4.95323 12.6862C5.09968 12.6008 5.23022 12.4783 5.65905 12.0494L10.721 6.98644L8.45577 4.72121L3.39382 9.78422ZM11.7 2.57079C11.3774 2.38198 10.9777 2.38198 10.6551 2.57079C10.5602 2.62647 10.4487 2.72931 10.0449 3.13311L9.45604 3.72094L11.7213 5.98617L12.3102 5.39833C12.7139 4.99457 12.8168 4.88307 12.8725 4.78818C13.0613 4.46561 13.0612 4.06585 12.8725 3.74326C12.8169 3.64827 12.7146 3.53752 12.3102 3.13311C11.9057 2.72863 11.795 2.6264 11.7 2.57079Z\" fill=\"__C__\" stroke=\"none\"/></svg>")
     ("edit" . "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\"><path d=\"M9.94076 1.34942C10.7047 0.90231 11.6503 0.902415 12.4143 1.34942C12.7061 1.52015 12.9688 1.79118 13.3104 2.13284C13.6521 2.47448 13.9231 2.73721 14.0939 3.02894C14.5408 3.79294 14.5409 4.73856 14.0939 5.50251C13.9231 5.79415 13.652 6.05704 13.3104 6.39861L6.65932 13.0497C6.28068 13.4284 6.00695 13.7108 5.66543 13.9097C5.32391 14.1085 4.94315 14.2074 4.42705 14.3498L3.24394 14.6761C2.77527 14.8054 2.34538 14.9262 2.00131 14.9684C1.65196 15.0112 1.17964 15.0013 0.810764 14.6325C0.441921 14.2637 0.432107 13.7913 0.47486 13.442C0.517035 13.0979 0.6379 12.668 0.767181 12.1993L1.09352 11.0162C1.23588 10.5001 1.33481 10.1193 1.5336 9.77784C1.7325 9.43632 2.0149 9.1626 2.39355 8.78395L9.04466 2.13284C9.38625 1.79126 9.64911 1.52016 9.94076 1.34942ZM15.5427 14.8398H7.55223L8.96707 13.425H15.5427V14.8398ZM3.39382 9.78422C2.965 10.213 2.84244 10.3436 2.75709 10.49C2.67183 10.6366 2.61862 10.8079 2.45733 11.3925L2.13099 12.5756C2.00183 13.0439 1.92194 13.3419 1.88863 13.5536C2.10041 13.5204 2.39872 13.4416 2.86764 13.3123L4.05075 12.9859C4.63544 12.8246 4.80669 12.7715 4.95323 12.6862C5.09968 12.6008 5.23022 12.4783 5.65905 12.0494L10.721 6.98644L8.45577 4.72121L3.39382 9.78422ZM11.7 2.57079C11.3774 2.38198 10.9777 2.38198 10.6551 2.57079C10.5602 2.62647 10.4487 2.72931 10.0449 3.13311L9.45604 3.72094L11.7213 5.98617L12.3102 5.39833C12.7139 4.99457 12.8168 4.88307 12.8725 4.78818C13.0613 4.46561 13.0612 4.06585 12.8725 3.74326C12.8169 3.64827 12.7146 3.53752 12.3102 3.13311C11.9057 2.72863 11.795 2.6264 11.7 2.57079Z\" fill=\"__C__\" stroke=\"none\"/></svg>")
     ("code" . "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\"><path d=\"M12.3368 1.53569L11.931 4.43172H14.8086V5.79673H11.7404L11.1962 9.67859H14.2839V11.0436H11.0056L10.4994 14.6529L9.14873 14.4643L9.62731 11.0436H5.75876L5.25252 14.6529L3.90186 14.4643L4.38043 11.0436H1.69141V9.67859H4.57104L5.11417 5.79673H2.21609V4.43172H5.30581L5.73724 1.34713L7.08995 1.53569L6.68414 4.43172H10.5527L10.9841 1.34713L12.3368 1.53569ZM5.94937 9.67859H9.81791L10.361 5.79673H6.49353L5.94937 9.67859Z\" fill=\"__C__\" stroke=\"none\"/></svg>")
+    ("command" . "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\"><path d=\"M9.64572 1.0455C9.76513 0.755118 10.0095 0.530578 10.309 0.437078C10.6086 0.343578 10.9369 0.394798 11.1939 0.575858L11.2012 0.581418C11.3182 0.661738 11.4221 0.760918 11.5034 0.8755C11.6954 1.14086 11.8542 1.4732 12.0085 1.8645C12.3203 2.6551 12.5387 3.65868 12.7963 5.00636L13.1411 6.51662C13.3881 6.97662 13.2748 7.53122 12.8678 7.86842C12.4607 8.20542 11.9025 8.19562 11.5073 7.84522C11.475 7.81655 11.4443 7.78658 11.4152 7.75542C11.4172 8.25776 11.3912 8.75092 11.3373 9.22898C11.2168 10.2971 11.0096 11.2154 10.7187 11.9567C10.5838 12.3118 10.3567 12.6263 10.0195 12.8129C9.92472 12.8645 9.82446 12.9061 9.72037 12.9368C9.82774 13.3274 9.86604 13.7345 9.83316 14.1389C9.80302 14.5069 9.62146 14.8444 9.32762 15.0619C9.03356 15.2793 8.65482 15.3692 8.27122 15.2454C7.87092 15.116 7.52282 14.872 7.26235 14.5431C6.89096 14.0741 6.55986 13.2548 6.16811 11.9501C5.80842 10.7459 5.40551 9.12869 4.97117 7.10983C4.86597 6.62643 4.98747 6.12163 5.29587 5.74463C5.60427 5.36763 6.06447 5.16503 6.53547 5.19483C7.22692 5.23743 7.92050 5.30787 8.60580 5.40420C8.62320 5.31802 8.64380 5.23258 8.66757 5.14810C8.69923 5.08838 8.71202 5.02050 8.70402 4.95382C8.68602 4.79682 8.55462 4.67382 8.41242 4.58502C8.29972 4.51512 8.17252 4.44762 8.03562 4.39882C7.76116 4.30336 7.57267 4.01694 7.56703 3.73038C7.56103 3.41998 7.68723 3.12158 7.92803 2.91498C8.14663 2.72838 8.43559 2.64336 8.71785 2.68403C9.14985 2.74463 9.48305 2.83943 9.64572 1.0455ZM11.9092 9.31463C11.8775 9.97603 11.6655 10.5722 11.3551 11.0817C11.1287 11.4805 10.8322 11.8266 10.4862 12.0999C10.3972 12.1841 10.3009 12.2605 10.1987 12.328C10.5802 13.5469 10.8160 14.1493 10.9275 14.1975C11.4897 14.4287 12.0083 14.0268 12.0416 13.4145C12.0657 12.9633 11.9724 12.3789 11.7989 11.7176C11.7692 11.6139 11.7377 11.5103 11.7043 11.4070C12.0070 11.0933 12.2912 10.7631 12.4902 10.3871C12.7589 9.87770 12.8951 9.32482 12.8930 8.76790C12.7832 8.96782 12.6543 9.15691 12.5087 9.32210C12.3467 9.51423 12.1243 9.65222 11.9092 9.31463Z\" fill=\"__C__\" stroke=\"none\"/></svg>")
     ("others" . "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\"><path d=\"M6.1 3.1Q6.6 7.8 11.3 8.3Q6.6 8.8 6.1 13.5Q5.6 8.8 0.9 8.3Q5.6 7.8 6.1 3.1Z\" fill=\"__C__\" stroke=\"none\"/><path d=\"M11.9 1Q12.2 3.7 14.9 4Q12.2 4.3 11.9 7Q11.6 4.3 8.9 4Q11.6 3.7 11.9 1Z\" fill=\"__C__\" stroke=\"none\"/><path d=\"M12.5 9.4Q12.7 11.4 14.7 11.6Q12.7 11.8 12.5 13.8Q12.3 11.8 10.3 11.6Q12.3 11.4 12.5 9.4Z\" fill=\"__C__\" stroke=\"none\"/></svg>"))
   "Variant -> dsh-web SVG icon template, with a \"__C__\" fill placeholder.
 Graphical Emacs renders these via `create-image'; terminal Emacs falls back to
@@ -613,11 +625,25 @@ collapsible Think fragment.")
 (defvar-local dsh-emacs--current-group-completed 0
   "Number of tool calls in current group that have completed.")
 
+(defvar-local dsh-emacs--command-blocks (make-hash-table :test 'equal)
+  "Map from commandId -> (NS BLOCK-ID LABEL) of rendered slash-command nodes.
+`command/run' creates the entry and the fragment; `command/done' (matched
+by commandId) finds the entry to restyle the same node.")
+
+(defvar-local dsh-emacs--pending-command nil
+  "When non-nil, an optimistic slash-command row rendered before the RPC round-trip.
+Value is (TEMP-COMMAND-ID LABEL) where TEMP-COMMAND-ID is the temporary key
+used in `dsh-emacs--command-blocks' and LABEL is the display name.
+The real `command/run' event replaces this entry; on RPC error or admission
+miss the entry is cleaned up.")
+
 (defun dsh-emacs-render--reset-tool-tracking ()
   "Reset tool tracking state. Called on full transcript reload."
   (setq dsh-emacs--streaming-assistant nil
         dsh-emacs--streaming-thinking nil
         dsh-emacs--tool-states (make-hash-table :test 'equal)
+        dsh-emacs--command-blocks (make-hash-table :test 'equal)
+        dsh-emacs--pending-command nil
         dsh-emacs--group-counter 0
         dsh-emacs--current-group-id nil
         dsh-emacs--current-group-count 0
@@ -1076,9 +1102,12 @@ The block gets one blank line before and after (see
        :summary summary :args body-text :call-time ts :ns ns
        :group-id dsh-emacs--current-group-id)
       ;; Apply pending face to the block border + body background.
+      ;; Use add-face-text-property (APPEND) to merge with existing face
+      ;; attributes (e.g. a Nerd Font :family on icon glyphs).
       (when-let* ((b (dsh-emacs-ui-find-block (format "%s-%s" ns block-id))))
         (let ((inhibit-read-only t))
-          (put-text-property (car b) (cdr b) 'face 'dsh-emacs-tool-pending-face))))
+          (add-face-text-property (car b) (cdr b)
+                                  'dsh-emacs-tool-pending-face t))))
     ;; Return seq via the helper to keep helper structure.
     (dsh-emacs-render--event-seq event)))
 
@@ -1191,15 +1220,18 @@ toggle — which strips faces — keeps them readable)."
                                                   ('success 'tool-success)
                                                   ('error 'tool-error)
                                                   (_ 'tool-stopped)))
-            ;; Re-face the block border/body.
+            ;; Re-face the block border/body.  Merge (APPEND) so Nerd Font
+            ;; :family on icon glyphs is preserved.
             (when-let* ((b (dsh-emacs-ui-find-block qualified-id)))
               (let ((inhibit-read-only t))
-                (put-text-property (car b) (cdr b)
-                                   'face (pcase state
-                                             ('success 'dsh-emacs-tool-success-face)
-                                             ('error 'dsh-emacs-tool-error-face)
-                                             ('stopped 'dsh-emacs-tool-stopped-face)
-                                             (_ 'dsh-emacs-tool-pending-face))))))
+                (add-face-text-property
+                 (car b) (cdr b)
+                 (pcase state
+                   ('success 'dsh-emacs-tool-success-face)
+                   ('error 'dsh-emacs-tool-error-face)
+                   ('stopped 'dsh-emacs-tool-stopped-face)
+                   (_ 'dsh-emacs-tool-pending-face))
+                 t))))
           ;; Track the new state.
           (dsh-emacs-render--set-tool-state
            call-id :state state :result full-text :exit-code exit-code)
@@ -1244,6 +1276,318 @@ toggle — which strips faces — keeps them readable)."
      :create-new t :expanded t
      :insert-before insert-point)))
 
+(defun dsh-emacs-render-command-label (name &optional _args)
+  "Return the display string for slash command NAME.
+The leading \"/\" is stripped from NAME so the row reads e.g. \"compact\".
+ARGS is ignored — command rows show only the command name, not the
+user's input text."
+  (if (and (stringp name) (string-prefix-p "/" name))
+      (substring name 1)
+    (or name "")))
+
+(defun dsh-emacs-render--command-status-text (state)
+  "Short status suffix for a slash-command node STATE (success/error)."
+  (pcase state
+    ('success "✓ done")
+    ('error "✗ failed")
+    (_ nil)))
+
+;;; ---------------------------------------------------------------------------
+;;; Slash-command row styling: nerd-icons leading + running braille spinner
+;;; ---------------------------------------------------------------------------
+
+(defcustom dsh-emacs-command-nerd-icons t
+  "Use the Nerd Fonts terminal glyph (nf-cod-terminal) as the leading icon
+of slash-command rows when the optional `nerd-icons' package is available.
+A Nerd Font must be installed for the glyph to render; without one the row
+falls back to the plain emoji/SVG icon.  Set to nil to always use the
+built-in fallback."
+  :type 'boolean
+  :group 'dsh-emacs-render)
+
+(defconst dsh-emacs--command-icon-name "nf-cod-terminal"
+  "nerd-icons icon name of the slash-command leading icon.")
+
+(defconst dsh-emacs--command-spinner-frames
+  '("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+  "Frames of the running slash-command leading animation (braille spinner).")
+
+(defconst dsh-emacs--command-spinner-interval 0.08
+  "Seconds between running-command animation frames (~12.5fps, like the
+mode-line busy animation in dsh-emacs-footer.el).")
+
+
+
+(defvar dsh-emacs--command-spinners (make-hash-table :test 'equal)
+  "Live running-command animations, keyed by COMMAND-ID.
+Each value is (BUFFER TIMER INDEX): BUFFER is the chat buffer the row lives
+in, TIMER the repeating `run-at-time' timer, INDEX the next frame index.")
+
+(defvar dsh-emacs--nerd-icon-prefix-map
+  '(("dev" . nerd-icons-devicon)
+    ("cod" . nerd-icons-codicon)
+    ("oct" . nerd-icons-octicon)
+    ("fa"  . nerd-icons-faicon)
+    ("seti" . nerd-icons-seti)
+    ("he"  . nerd-icons-helix)
+    ("md"  . nerd-icons-material)
+    ("ioe" . nerd-icons-ionicon)
+    ("weather" . nerd-icons-weather)
+    ("uiicons" . nerd-icons-uiicons)
+    ("devicons" . nerd-icons-devicons))
+  "Alist mapping nerd-icons prefix segments to their lookup functions.
+The key is the SET part of a \"nf-SET-NAME\" icon identifier.")
+
+(defun dsh-emacs-render--nerd-icon (name &optional fallback icon-fn)
+  "Return the Nerd Fonts glyph for icon NAME as a display string.
+NAME is a nerd-icons name such as \"nf-cod-terminal\" or \"nf-dev-terminal\".
+ICON-FN, when given, is the nerd-icons lookup function to call (e.g.
+`nerd-icons-codicon'); when nil the function is auto-detected from the
+\"nf-SET-\" prefix in NAME via `dsh-emacs--nerd-icon-prefix-map'.  The
+optional `nerd-icons' package is loaded on demand when
+`dsh-emacs-command-nerd-icons' is non-nil; FALLBACK is returned when the
+package is unavailable or the glyph lookup fails.  The glyph keeps its
+original `face' property (which carries the Nerd Font `:family'); the UI
+pipeline in `dsh-emacs-ui--top-border' merges label faces with
+`add-face-text-property' so the font family is preserved."
+  (if (and dsh-emacs-command-nerd-icons
+           (or (featurep 'nerd-icons)
+               (require 'nerd-icons nil t)))
+      (let ((fn (or icon-fn
+                    (and (stringp name)
+                         (string-match "\\`nf-\\([a-z]+\\)-" name)
+                         (cdr (assoc (match-string 1 name)
+                                     dsh-emacs--nerd-icon-prefix-map))))))
+        (when (and fn (fboundp fn))
+          (condition-case nil
+              (funcall fn name)
+            (error fallback))))
+    fallback))
+
+(defun dsh-emacs--command-spinner-start (command-id buffer)
+  "Start the running braille animation for COMMAND-ID in BUFFER.
+Replaces any existing animation for the same command (idempotent)."
+  (dsh-emacs--command-spinner-stop command-id)
+  (let ((timer (run-at-time dsh-emacs--command-spinner-interval
+                            dsh-emacs--command-spinner-interval
+                            #'dsh-emacs--command-spinner-tick
+                            command-id)))
+    (puthash command-id (list buffer timer 0)
+             dsh-emacs--command-spinners)))
+
+(defun dsh-emacs--command-spinner-tick (command-id)
+  "Advance COMMAND-ID's spinner one frame and redraw its row label.
+Auto-stops when the chat buffer is gone or the row no longer exists.
+The per-buffer `dsh-emacs--command-blocks' lookup happens inside the chat
+buffer, because a timer callback may otherwise run in any buffer."
+  (let ((rec (gethash command-id dsh-emacs--command-spinners)))
+    (when rec
+      (let ((buffer (nth 0 rec))
+            (timer (nth 1 rec)))
+        (if (and (buffer-live-p buffer)
+                 (timerp timer))
+            (with-current-buffer buffer
+              (if (gethash command-id dsh-emacs--command-blocks)
+                  (let* ((entry (gethash command-id dsh-emacs--command-blocks))
+                         (next-index (mod (1+ (nth 2 rec))
+                                          (length dsh-emacs--command-spinner-frames))))
+                    (setcar (nthcdr 2 rec) next-index)
+                    (dsh-emacs-ui-update-fragment
+                     (dsh-emacs-ui-make-fragment
+                      :namespace-id (nth 0 entry)
+                      :block-id (nth 1 entry)
+                      :label-left (concat
+                                   (dsh-emacs-render--tool-leading
+                                    (or (nth 3 entry) "")
+                                    'pending)
+                                   (propertize (nth 2 entry)
+                                               'face 'dsh-emacs-tool-title-face)
+                                   " "
+                                   (nth next-index
+                                        dsh-emacs--command-spinner-frames))
+                      :style 'minimal
+                      :color-key 'tool-pending)))
+                (dsh-emacs--command-spinner-stop command-id)))
+          (dsh-emacs--command-spinner-stop command-id))))))
+
+(defun dsh-emacs--command-spinner-stop (command-id)
+  "Cancel COMMAND-ID's running animation and drop its state."
+  (let ((rec (gethash command-id dsh-emacs--command-spinners)))
+    (when rec
+      (let ((timer (nth 1 rec)))
+        (when (timerp timer)
+          (cancel-timer timer))))
+    (remhash command-id dsh-emacs--command-spinners)))
+
+(defun dsh-emacs--command-spinner-clear-all ()
+  "Cancel every running command spinner (event-stream teardown)."
+  (maphash (lambda (command-id _rec)
+             (dsh-emacs--command-spinner-stop command-id))
+           dsh-emacs--command-spinners))
+
+(defun dsh-emacs-render-command-optimistic (line)
+  "Render a slash-command row immediately for LINE (e.g. \"/compact\").
+This is the optimistic path called from `dsh-emacs--submit-prompt' before
+the RPC round-trip, so the user sees the command row instantly.  The temp
+entry is tracked in `dsh-emacs--pending-command' and will be replaced by
+the real `command/run' event when it arrives."
+  (when (and dsh-emacs-show-commands line)
+    (let* ((parsed (dsh-emacs-command-parse line))
+           (name (car parsed))
+           (args (cdr parsed))
+           (temp-id (format "pending-%s" name))
+           (label (dsh-emacs-render-command-label
+                   (concat "/" name) args))
+           (icon (or (dsh-emacs-render--nerd-icon
+                      dsh-emacs--command-icon-name)
+                     (dsh-emacs-render--tool-icon "command")))
+           (ns (dsh-emacs-render--make-namespace))
+           (block-id (format "cmd-%s" temp-id)))
+      (when (and name (not (gethash temp-id dsh-emacs--command-blocks)))
+        (puthash temp-id (list ns block-id label icon)
+                 dsh-emacs--command-blocks)
+        (setq dsh-emacs--pending-command (list temp-id label))
+        (dsh-emacs-ui-update-fragment
+         (dsh-emacs-ui-make-fragment
+          :namespace-id ns :block-id block-id
+          :label-left (concat
+                       (dsh-emacs-render--tool-leading icon 'pending)
+                       (propertize label 'face 'dsh-emacs-tool-title-face)
+                       " "
+                       (car dsh-emacs--command-spinner-frames))
+          :style 'minimal
+          :color-key 'tool-pending)
+         :create-new t :expanded t
+         :insert-before (dsh-emacs-render--input-insert-point))
+        (dsh-emacs--command-spinner-start temp-id
+                                          (current-buffer))))))
+
+(defun dsh-emacs-render-command-cleanup-optimistic ()
+  "Remove the optimistic slash-command row (if any) on RPC error or miss.
+Stops the spinner, deletes the fragment, and clears `dsh-emacs--pending-command'."
+  (when dsh-emacs--pending-command
+    (let* ((temp-id (nth 0 dsh-emacs--pending-command))
+           (entry (gethash temp-id dsh-emacs--command-blocks)))
+      (dsh-emacs--command-spinner-stop temp-id)
+      (when entry
+        (let* ((qualified-id (format "%s-%s" (nth 0 entry) (nth 1 entry)))
+               (block (dsh-emacs-ui-find-block qualified-id)))
+          (when block
+            (let ((inhibit-read-only t))
+              (delete-region (car block) (cdr block))))))
+      (remhash temp-id dsh-emacs--command-blocks))
+    (setq dsh-emacs--pending-command nil)))
+
+(defun dsh-emacs-render-command (event)
+  "Render a `command/run' or `command/done' EVENT as one flow node,
+mirroring dsh web's command rows: a leading icon (nf-cod-terminal from the
+optional `nerd-icons' package, `⚡' otherwise) followed by the command name
+and a braille spinner while running (see `dsh-emacs--command-spinner-frames');
+on completion the header shows only the command name + a short status
+(`✓ done' / `✗ failed', green on success, red on error), and the outcome
+text is folded into a collapsible body below, collapsed by default.
+
+Run creates the node; done (matched by commandId) restyles it — success
+turns the row green, error red.  Events on load render in seq order, so
+a run followed by its done (the usual shape) becomes a single node.
+Returns the event seq."
+  (let ((seq (dsh-emacs-render--event-seq event)))
+    (when dsh-emacs-show-commands
+      (let* ((type (dsh-emacs-render--aget "type" event))
+             (data (dsh-emacs-render--event-data event))
+             (command-id (dsh-emacs-render--aget "commandId" data))
+             (ns (dsh-emacs-render--make-namespace)))
+        (when command-id
+          (let* ((block-id (format "cmd-%s" command-id))
+                 (label (dsh-emacs-render-command-label
+                         (dsh-emacs-render--aget "name" data)
+                         (dsh-emacs-render--aget "args" data)))
+                 (icon (or (dsh-emacs-render--nerd-icon
+                            dsh-emacs--command-icon-name)
+                           (dsh-emacs-render--tool-icon "command"))))
+            (if (equal type "command/run")
+                (progn
+                  ;; Clean up the optimistic row if one is pending for
+                  ;; this command name (instant feedback → real event).
+                  (when dsh-emacs--pending-command
+                    (let* ((temp-id (nth 0 dsh-emacs--pending-command))
+                           (temp-entry (gethash temp-id
+                                                dsh-emacs--command-blocks)))
+                      (dsh-emacs--command-spinner-stop temp-id)
+                      (when temp-entry
+                        (let* ((qid (format "%s-%s"
+                                            (nth 0 temp-entry)
+                                            (nth 1 temp-entry)))
+                               (blk (dsh-emacs-ui-find-block qid)))
+                          (when blk
+                            (let ((inhibit-read-only t))
+                              (delete-region (car blk) (cdr blk))))))
+                      (remhash temp-id dsh-emacs--command-blocks))
+                    (setq dsh-emacs--pending-command nil))
+                  ;; Now render with the real command-id.
+                  (puthash command-id (list ns block-id label icon)
+                           dsh-emacs--command-blocks)
+                  (dsh-emacs-ui-update-fragment
+                   (dsh-emacs-ui-make-fragment
+                    :namespace-id ns :block-id block-id
+                    :label-left (concat
+                                 (dsh-emacs-render--tool-leading icon 'pending)
+                                 (propertize label 'face 'dsh-emacs-tool-title-face)
+                                 " "
+                                 (car dsh-emacs--command-spinner-frames))
+                    :style 'minimal
+                    :color-key 'tool-pending)
+                   :create-new t :expanded nil
+                   :insert-before (dsh-emacs-render--input-insert-point))
+                  (dsh-emacs--command-spinner-start command-id
+                                                    (current-buffer)))
+              (when-let* ((entry (gethash command-id
+                                          dsh-emacs--command-blocks)))
+                (dsh-emacs--command-spinner-stop command-id)
+                (let* ((kind (dsh-emacs-render--aget "kind" data))
+                       (ok (not (equal kind "error")))
+                       (state (if ok 'success 'error))
+                       (text (dsh-emacs-render--aget "text" data))
+                       (entry-icon (or (nth 3 entry)
+                                       (dsh-emacs-render--nerd-icon
+                                        dsh-emacs--command-icon-name)
+                                       (dsh-emacs-render--tool-icon "command")))
+                       (qualified-id (format "%s-%s" (nth 0 entry)
+                                             (nth 1 entry))))
+                  (dsh-emacs-ui-update-fragment
+                   (dsh-emacs-ui-make-fragment
+                    :namespace-id (nth 0 entry) :block-id (nth 1 entry)
+                    :label-left (concat
+                                 (dsh-emacs-render--tool-leading entry-icon state)
+                                 (propertize (nth 2 entry)
+                                             'face 'dsh-emacs-tool-title-face))
+                    ;; The header shows only the command name + a short status,
+                    ;; never the (possibly long, multi-line) result.  The result
+                    ;; body is a collapsible section below, collapsed by default,
+                    ;; so `goal' is not truncated to `goal…' by top-border.
+                    :label-right (propertize
+                                   (or (dsh-emacs-render--command-status-text state)
+                                       "")
+                                   'face (if ok
+                                             'dsh-emacs-tool-success-face
+                                           'dsh-emacs-tool-error-face))
+                    :body (and (stringp text) (not (string-empty-p text)) text)
+                    :style 'minimal
+                    :color-key (if ok 'tool-success 'tool-error))
+                   :create-new nil)
+                  (dsh-emacs-ui-restyle-block
+                   qualified-id (if ok 'tool-success 'tool-error))
+                  ;; 节点边框/正文着色与状态一致（merge 保留 icon 的 :family）
+                  (when-let* ((b (dsh-emacs-ui-find-block qualified-id)))
+                    (let ((inhibit-read-only t))
+                      (add-face-text-property
+                       (car b) (cdr b)
+                       (if ok
+                           'dsh-emacs-tool-success-face
+                         'dsh-emacs-tool-error-face)
+                       t))))))))))
+    seq))
+
 ;;; ---------------------------------------------------------------------------
 ;;; 顶层 dispatcher
 ;;; ---------------------------------------------------------------------------
@@ -1266,6 +1610,8 @@ toggle — which strips faces — keeps them readable)."
                           (dsh-emacs-footer-note-header event)))
       ("tool/call" (setq seq (dsh-emacs-render-tool-call event)))
       ("tool/result" (setq seq (dsh-emacs-render-tool-result event)))
+      ("command/run" (setq seq (dsh-emacs-render-command event)))
+      ("command/done" (setq seq (dsh-emacs-render-command event)))
       ("turn/start" (setq seq (dsh-emacs-render-turn-start event)))
       ("turn/end" (setq seq (dsh-emacs-render-turn-end event)))
       (_ nil))

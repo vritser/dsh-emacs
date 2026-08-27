@@ -448,6 +448,28 @@ so the code under test can read fields through the protocol accessors."
     (error
      (dsh-test-fail "input-area-writable" (error-message-string err)))))
 
+;; --- 测试 17b: 输入区不继承 prompt 的 accent face ---
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-footer-setup)
+  (let* ((pos (marker-position dsh-emacs--input-marker))
+         (prompt-face (get-text-property (1- pos) 'face)))
+    ;; Precondition: the ❯ prompt itself carries the accent face.
+    (when prompt-face
+      (dsh-test-pass "input-prompt-carries-face"))
+    ;; Typing runs `insert-and-inherit' (Emacs 31 `self-insert-command'),
+    ;; which copies the previous character's face.  The prompt's
+    ;; `rear-nonsticky' list must exclude `face', otherwise manual input
+    ;; turns blue while pasted/completed text stays default colored.
+    (goto-char pos)
+    (insert-and-inherit "t")
+    (let ((typed-face (get-text-property pos 'face)))
+      (if (null typed-face)
+          (dsh-test-pass "input-rejects-prompt-face-inheritance")
+        (dsh-test-fail "input-rejects-prompt-face-inheritance"
+                       (format "typed text inherited prompt face %S"
+                               typed-face))))))
+
 ;; --- 测试 18: UTF-8 response decoding ---
 (with-temp-buffer
   (set-buffer-multibyte nil)
@@ -595,11 +617,35 @@ so the code under test can read fields through the protocol accessors."
 (with-temp-buffer
   (dsh-emacs-mode)
   (setq dsh-emacs--poll-inflight t)
+  ;; 把缓冲显示进窗口，让防重叠分支真正被走到（未显示的缓冲轮询会被跳过）
+  (set-window-buffer (selected-window) (current-buffer))
   (condition-case nil
       (progn
         (dsh-emacs--poll-update)
         (dsh-test-pass "stream-polling-avoids-overlap"))
     (error nil)))
+
+;; 隐藏缓冲的轮询跳过（1Hz 全量 history RPC + 渲染是全局卡顿来源，
+;; 不可见的渲染没有意义）；显示进窗口后正常轮询。
+(let ((buf (generate-new-buffer " *dsh-poll-skip*"))
+      (calls nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq dsh-emacs--current-session "sess-poll")
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method _params _cb)
+                     (push method calls))))
+          ;; 未显示（无窗口）：跳过轮询，不发 session.history
+          (dsh-emacs--poll-update)
+          (when (null calls)
+            (dsh-test-pass "stream-polling-skips-buried-buffers"))
+          ;; 显示进窗口：正常轮询
+          (set-window-buffer (selected-window) buf)
+          (dsh-emacs--poll-update)
+          (when (equal calls '("session.history"))
+            (dsh-test-pass "stream-polling-runs-when-visible"))))
+    (kill-buffer buf)))
 
 ;; --- 测试 22: 丢失输入 marker 后消息仍插入到输入框上方 ---
 (with-temp-buffer
@@ -2604,6 +2650,48 @@ so the code under test can read fields through the protocol accessors."
                 (dsh-test-pass "new-session-outside-workspace-ungrouped")))))
       (kill-buffer buf)))
 
+;; --- 测试 62b: 重绘保持光标所在的会话行（事件/刷新间不弹回顶部） ---
+(let* ((dsh-emacs--archived-sessions nil)
+       (dsh-emacs--current-session nil)
+       (dsh-emacs-session--filter-ws-id nil)
+       (dsh-emacs-session--filter-ws-title nil)
+       (sessions (dsh-emacs-test--session-items
+                  (list (list (cons 'sessionId "s-one")
+                              (cons 'blank :json-false)
+                              (cons 'cwd "/tmp/x")
+                              (cons 'updatedAt 300))
+                        (list (cons 'sessionId "s-two")
+                              (cons 'blank :json-false)
+                              (cons 'cwd "/tmp/y")
+                              (cons 'updatedAt 200))
+                        (list (cons 'sessionId "s-three")
+                              (cons 'blank :json-false)
+                              (cons 'cwd "/tmp/z")
+                              (cons 'updatedAt 100)))))
+       (old-sessions dsh-emacs--sessions)
+       (old-ws dsh-emacs--workspaces)
+       (buf (generate-new-buffer " *dsh-sess-restore*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (let ((dsh-emacs--sessions sessions)
+              (dsh-emacs--workspaces nil))
+          (dsh-emacs-session--render)
+          ;; 把光标定位到 s-two 行
+          (goto-char (point-min))
+          (catch 'found
+            (while (not (eobp))
+              (when (equal "s-two" (dsh-emacs-session-id-at-point))
+                (throw 'found t))
+              (forward-line 1)))
+          (let ((expect (dsh-emacs-session-id-at-point)))
+            ;; 重绘后光标应仍在同一会话行上
+            (dsh-emacs-session--render)
+            (when (equal expect (dsh-emacs-session-id-at-point))
+              (dsh-test-pass "session-render-keeps-focused-row")))))
+    (kill-buffer buf))
+  (setq dsh-emacs--sessions old-sessions
+        dsh-emacs--workspaces old-ws))
+
 ;; --- 测试 63: session/title 事件实时更新标题（server 自动重命名） ---
 ;; server 在前 1-2 轮对话后自动重命名（摘要标题），通过 mux 流广播
 ;; `session/title' 事件；emacs 侧应实时：更新缓存 title-value、重命名
@@ -4349,6 +4437,813 @@ so the code under test can read fields through the protocol accessors."
       (user-error
        (when (string-match-p "not reachable" (error-message-string err))
          (dsh-test-pass "open-web-guard-fails-with-guidance"))))))
+
+;; --- 测试 94: slash 命令解析（与 dsh 注册表一致的准入语法） ---
+(let ((cases '(("/compact" "compact" "")
+               ("/goal set x" "goal" " set x")
+               ("/plan\toff" "plan" "\toff")       ; TAB 边界也是分隔符
+               ("  /compact  " "compact" "")
+               ("/goal-set_x run" "goal-set_x" " run")
+               ("/compactx" "compactx" "")))
+      (ok t))
+  (dolist (c cases)
+    (let ((parsed (dsh-emacs-command-parse (car c))))
+      (unless (and (string= (car parsed) (nth 1 c))
+                   (string= (cdr parsed) (nth 2 c)))
+        (setq ok nil))))
+  (when ok (dsh-test-pass "command-parse-admits-slash-lines")))
+
+(let ((not-commands '("/" "" "hello" "/usr/local" "/Compact" "//" "/2025"
+                      "http://x" nil)))
+  (when (cl-every (lambda (s) (null (dsh-emacs-command-parse s)))
+                  not-commands)
+    (dsh-test-pass "command-parse-rejects-non-commands")))
+
+;; --- 测试 95: commands.execute 载荷与 on-done 语义 ---
+(let ((calls nil)
+      (done nil))
+  (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+             (lambda (method params cb)
+               (push (list method params) calls)
+               (funcall cb t '((commandId . "c1")
+                               (result . ((kind . "success")
+                                          (text . "ok"))))))))
+    (dsh-emacs-command-execute
+     "sess-exec" "/compact" nil
+     (lambda (ok ex _err) (setq done (list ok ex))))
+    (let* ((call (car calls))
+           (args (cdr (assq 'args (cadr call))))
+           (images (cdr (assq 'images args))))
+      (when (and (string= "commands/execute" (car call))
+                 (string= "/compact" (cdr (assq 'line args)))
+                 (string= "sess-exec" (cdr (assq 'agentId args)))
+                 (vectorp images) (zerop (length images))
+                 (equal done
+                        (list t (dsh-protocol-command-execution--from-alist
+                                 '((commandId . "c1")
+                                   (result . ((kind . "success")
+                                              (text . "ok"))))))))
+        (dsh-test-pass "command-execute-wire-and-on-done")))))
+
+(let ((missed nil))
+  (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+             (lambda (_m _p cb) (funcall cb t nil))))
+    (dsh-emacs-command-execute "s" "/nope" nil
+                               (lambda (ok ex _err)
+                                 (setq missed (list ok ex)))))
+  (when (equal missed '(t nil))
+    (dsh-test-pass "command-execute-miss-reports-nil")))
+
+(let ((calls nil))
+  (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+             (lambda (m p cb)
+               (push (list m p) calls)
+               (funcall cb t nil))))
+    (dsh-emacs-command-execute
+     "s" "/goal" '((mediaType . "image/png") (data . "x")) nil))
+  (let ((args (cdr (assq 'args (cadr (car calls))))))
+    (when (equal (cdr (assq 'images args))
+                 '((mediaType . "image/png") (data . "x")))
+      (dsh-test-pass "command-execute-passes-images"))))
+
+;; --- 测试 96: submit-prompt 分发 slash 命令 ---
+(let ((buf (generate-new-buffer " *dsh-slash-submit*"))
+      (calls nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq dsh-emacs--current-session "sess-slash")
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method params cb)
+                     (push (list method params) calls)
+                     (if (string= method "commands/execute")
+                         (let ((line (cdr (assq 'line
+                                                (cdr (assq 'args params))))))
+                           (if (equal line "/frobnicate")
+                               (funcall cb t nil)
+                             (funcall cb t '((commandId . "c9")
+                                             (result . ((kind . "success")
+                                                        (text . "done")))))))
+                       (funcall cb t '((accepted . t))))))
+                  ((symbol-function 'dsh-emacs--ml-busy-set)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'dsh-emacs-events-connect)
+                   (lambda (_c) nil))
+                  ((symbol-function 'dsh-emacs--start-polling)
+                   (lambda () nil))
+                  ((symbol-function 'dsh-emacs-events--watchdog-start)
+                   (lambda () nil)))
+          ;; 普通消息 → session.prompt（原路径不变）
+          (dsh-emacs--submit-prompt "hi")
+          (let* ((call (car calls))
+                 (content (cdr (assq 'content (cadr call))))
+                 (part (and content (aref content 0))))
+            (when (and (string= "session.prompt" (car call))
+                       (string= "hi" (cdr (assq 'text part))))
+              (dsh-test-pass "submit-plain-sends-session-prompt")))
+          ;; 已知命令 → commands.execute，且不再发 session.prompt
+          (setq calls nil)
+          (dsh-emacs--submit-prompt "/compact")
+          (let* ((call (car calls))
+                 (args (cdr (assq 'args (cadr call)))))
+            (when (and (string= "commands/execute" (car call))
+                       (string= "/compact" (cdr (assq 'line args)))
+                       (= (length calls) 1))
+              (dsh-test-pass "submit-slash-routes-to-execute")))
+          ;; 未命中注册表 → 回退成普通消息（浏览器同款语义）
+          (setq calls nil)
+          (dsh-emacs--submit-prompt "/frobnicate")
+          (let* ((prompt-call (car calls))
+                 (content (cdr (assq 'content (cadr prompt-call))))
+                 (part (and content (aref content 0))))
+            (when (and (= (length calls) 2)
+                       (string= "session.prompt" (car prompt-call))
+                       (string= "commands/execute" (car (cadr calls)))
+                       (string= "/frobnicate" (cdr (assq 'text part))))
+              (dsh-test-pass "submit-unknown-slash-falls-back-to-plain")))))
+    (kill-buffer buf)))
+
+;; --- 测试 96b: slash 提交立即清空输入区（不等 RPC 往返） ---
+(let ((buf (generate-new-buffer " *dsh-slash-clear*"))
+      (old-hist dsh-emacs--input-history)
+      (old-pos dsh-emacs--input-history-pos))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq dsh-emacs--current-session "sess-clear")
+        (setq dsh-emacs--input-history-pos 0)   ; 假装处于浏览态
+        (goto-char (point-max))
+        (insert "/compact ")
+        ;; rpc 永不回调（真实 url-retrieve 的往返没回来/离线）：输入也必须
+        ;; 已清空、历史已记录——清空不再依赖回调。
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_m _p _cb) nil)))
+          (dsh-emacs--submit-prompt (dsh-emacs--get-input)))
+        (when (and (string-empty-p (dsh-emacs--get-input))
+                   (string= "/compact " (car dsh-emacs--input-history))
+                   (null dsh-emacs--input-history-pos))
+          (dsh-test-pass "submit-slash-clears-and-records-immediately")))
+    (kill-buffer buf)
+    (setq dsh-emacs--input-history old-hist
+          dsh-emacs--input-history-pos old-pos)))
+
+;; --- 测试 96c: slash 传输失败 → 恢复原文（且不覆盖新输入） ---
+(let ((buf (generate-new-buffer " *dsh-slash-fail*"))
+      (captured nil)
+      (old-hist dsh-emacs--input-history)
+      (old-pos dsh-emacs--input-history-pos))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq dsh-emacs--current-session "sess-fail")
+        (goto-char (point-max))
+        (insert "/compact")
+        ;; 传输失败（ok=nil）：输入区仍为空 → 恢复原文方便重试
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_m _p cb) (setq captured cb)
+                     (funcall cb nil "boom"))))
+          (dsh-emacs--submit-prompt "/compact"))
+        (when (string= "/compact" (dsh-emacs--get-input))
+          (dsh-test-pass "submit-slash-restores-on-transport-failure"))
+        ;; 回调迟到、用户已输入新内容 → 不覆盖
+        (goto-char (point-max))
+        (insert "/new-typed")
+        (funcall captured nil "boom")
+        (when (string-match-p "new-typed" (dsh-emacs--get-input))
+          (dsh-test-pass "submit-slash-failure-keeps-new-typing")))
+    (kill-buffer buf)
+    (setq dsh-emacs--input-history old-hist
+          dsh-emacs--input-history-pos old-pos)))
+
+;; --- 测试 96d: slash 提交历史只记一次（miss 回落与受理两条路径） ---
+(let ((buf (generate-new-buffer " *dsh-slash-hist*"))
+      (old-hist dsh-emacs--input-history)
+      (old-pos dsh-emacs--input-history-pos))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq dsh-emacs--current-session "sess-hist")
+        ;; 未命中注册表 → 回落普通消息：历史只在提交时记一次
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method _p cb)
+                     (if (string= method "commands/execute")
+                         (funcall cb t nil)
+                       (funcall cb t '((accepted . t)))))))
+          (dsh-emacs--submit-prompt "/frobnicate"))
+        (when (= 1 (cl-count "/frobnicate" dsh-emacs--input-history
+                             :test #'string=))
+          (dsh-test-pass "submit-slash-miss-records-history-once"))
+        (setq dsh-emacs--input-history nil)
+        ;; 受理：历史同样只记一次（提交时）
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method _p cb)
+                     (if (string= method "commands/execute")
+                         (funcall cb t '((commandId . "c9")
+                                         (result . ((kind . "success")))))
+                       (funcall cb t '((accepted . t)))))))
+          (dsh-emacs--submit-prompt "/compact"))
+        (when (= 1 (cl-count "/compact" dsh-emacs--input-history
+                             :test #'string=))
+          (dsh-test-pass "submit-slash-admit-records-history-once")))
+    (kill-buffer buf)
+    (setq dsh-emacs--input-history old-hist
+          dsh-emacs--input-history-pos old-pos)))
+
+;; --- 测试 97: 命令目录（commands.list）解析与缓存 ---
+(let* ((cmd (dsh-protocol-command--from-alist
+             '((name . "compact") (description . "Compact history")))))
+  (when (and (string= "compact" (dsh-protocol-command-name cmd))
+             (string= "Compact history"
+                      (dsh-protocol-command-description cmd))
+             (null (dsh-protocol-command-input cmd)))
+    (dsh-test-pass "command-from-alist-bare")))
+
+(let* ((cmd (dsh-protocol-command--from-alist
+             '((name . "goal") (description . "goal ops")
+               (input . ((hint . "[<objective>]") (images . t))))))
+       (input (dsh-protocol-command-input cmd)))
+  (when (and (string= "[<objective>]" (dsh-protocol-command-input-hint input))
+             (dsh-protocol-command-input-images input))
+    (dsh-test-pass "command-from-alist-with-input")))
+
+(let ((sid "sess-cat")
+      (rpc-calls 0)
+      (old dsh-emacs--command-catalogs))
+  (unwind-protect
+      (cl-letf (((symbol-function 'dsh-emacs--rpc-request)
+                 (lambda (_m _p)
+                   (setq rpc-calls (1+ rpc-calls))
+                   (cons t [((name . "compact") (description . "c"))
+                            ((name . "goal") (description . "g"))]))))
+        (let ((items (dsh-emacs-command-catalog-sync sid))
+              (again (dsh-emacs-command-catalog-sync sid)))
+          (when (and (= (length items) 2)
+                     (string= "goal"
+                              (dsh-protocol-command-name (cadr items)))
+                     (= rpc-calls 1)
+                     (equal again items))
+            (dsh-test-pass "command-catalog-sync-caches"))))
+    (setq dsh-emacs--command-catalogs old)))
+
+(let ((sid "sess-async")
+      (fetched nil)
+      (old dsh-emacs--command-catalogs))
+  (unwind-protect
+      (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (_m _p cb)
+                   (funcall cb t [((name . "plan") (description . "p"))]))))
+        (dsh-emacs-command-catalog-fetch sid
+                                         (lambda (items)
+                                           (setq fetched items)))
+        (when (and fetched
+                   (string= "plan"
+                            (dsh-protocol-command-name (car fetched))))
+          (dsh-test-pass "command-catalog-fetch-async")))
+    (setq dsh-emacs--command-catalogs old)))
+
+;; 同会话多次 fetch 后缓存里该 session 只能有一条（assoc-delete-all 修复：
+;; 用 assq-delete-all 时字符串键按 eq 比较，旧条目删不掉，alist 无限累积）
+(let ((sid "sess-dedup")
+      (old dsh-emacs--command-catalogs))
+  (unwind-protect
+      (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (_m _p cb)
+                   (funcall cb t [((name . "a") (description . "A"))]))))
+        ;; 两次独立 fetch（前一次已完成、inflight 已清空）
+        (dsh-emacs-command-catalog-fetch sid)
+        (dsh-emacs-command-catalog-fetch sid)
+        (let* ((entries (cl-remove-if-not
+                         (lambda (e) (string= sid (car e)))
+                         dsh-emacs--command-catalogs)))
+          (when (= (length entries) 1)
+            (dsh-test-pass "command-catalog-single-entry-per-session"))))
+    (setq dsh-emacs--command-catalogs old)))
+
+;; 会话打开时空闲预取：调度 idle timer；目录已缓存时不再调度
+(let ((sid "sess-prefetch")
+      (old dsh-emacs--command-catalogs)
+      (old-pref dsh-emacs-command-prefetch)
+      (old-delay dsh-emacs-command-prefetch-delay)
+      (timers nil))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs-command-prefetch t
+              dsh-emacs-command-prefetch-delay 0.05)
+        (let ((timer (dsh-emacs-command-catalog-prefetch sid)))
+          (when timer (push timer timers))
+          (when (timerp timer)
+            (dsh-test-pass "command-catalog-prefetch-schedules-idle")))
+        ;; 已缓存 → 守卫拒绝再次调度
+        (dsh-emacs-command--cache-catalog
+         sid (list (dsh-protocol-command--from-alist '((name . "x")))))
+        (let ((before (length timer-list)))
+          (dsh-emacs-command-catalog-prefetch sid)
+          (when (= (length timer-list) before)
+            (dsh-test-pass "command-catalog-prefetch-skips-when-cached"))))
+    (mapc #'cancel-timer timers)
+    (setq dsh-emacs--command-catalogs old
+          dsh-emacs-command-prefetch old-pref
+          dsh-emacs-command-prefetch-delay old-delay)))
+
+;; 手动刷新：清掉过期缓存并从服务器重拉
+(let ((sid "sess-refresh")
+      (calls 0)
+      (old dsh-emacs--command-catalogs)
+      (old-inflight dsh-emacs--command-fetch-inflight))
+  (unwind-protect
+      (progn
+        ;; 预置一条过期缓存
+        (dsh-emacs-command--cache-catalog
+         sid (list (dsh-protocol-command--from-alist '((name . "old")))))
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_m _p cb)
+                     (setq calls (1+ calls))
+                     (funcall cb t [((name . "new") (description . "N"))]))))
+          (dsh-emacs-command-catalog-refresh sid)
+          (let ((items (dsh-emacs-command-catalog sid)))
+            (when (and (= calls 1)
+                       items
+                       (string= "new" (dsh-protocol-command-name (car items))))
+              (dsh-test-pass "command-catalog-refresh-replaces-cache")))))
+    (setq dsh-emacs--command-catalogs old
+          dsh-emacs--command-fetch-inflight old-inflight)))
+
+;; --- 测试 98: command/run + command/done 渲染 ---
+(let ((buf (generate-new-buffer " *dsh-cmd-render*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (let* ((run-seq (dsh-emacs-render-event
+                         '((type . "command/run") (seq . 10)
+                           (data . ((commandId . "c1") (name . "goal")
+                                    (args . " set x"))))))
+               (done-seq (dsh-emacs-render-event
+                          '((type . "command/done") (seq . 11)
+                            (data . ((commandId . "c1")
+                                     (kind . "success")
+                                     (text . "goal snapshot"))))))
+               (txt (buffer-string))
+               (above-input (buffer-substring (point-min)
+                                              dsh-emacs--input-marker)))
+          (let* ((qid (format "%s-cmd-%s" (dsh-emacs-render--make-namespace) "c1"))
+                 (blk (dsh-emacs-ui--find-block qid))
+                 (state (and blk (get-text-property (car blk) 'dsh-emacs-ui-state))))
+            (when (and (= run-seq 10) (= done-seq 11)
+                       ;; label = "goal" (args stripped, no / prefix) + short status
+                       (string-match-p "goal" txt)
+                       (string-match-p "done" txt)
+                       ;; 结果被折叠到 body：不显示在缓冲里，但保留在片段状态
+                       (not (string-match-p "goal snapshot" txt))
+                       state
+                       (equal (map-elt state :body) "goal snapshot")
+                       (map-elt state :collapsed)
+                       ;; 节点必须插在输入区（❯ 行）上方，而不是缓冲末尾
+                       (string-match-p "goal" above-input)
+                       (string-match-p "done" above-input))
+              (dsh-test-pass "command-render-run-and-done"))))
+        ;; 错误 kind 也渲染（● 前缀 + ✗ failed + 正文）
+        (dsh-emacs-render-event
+         '((type . "command/run") (seq . 12)
+           (data . ((commandId . "c2") (name . "permission")
+                    (args . "")))))
+        (dsh-emacs-render-event
+         '((type . "command/done") (seq . 13)
+           (data . ((commandId . "c2") (kind . "error")
+                    (text . "unknown preset")))))
+        (let* ((txt (buffer-string))
+               (qid (format "%s-cmd-%s" (dsh-emacs-render--make-namespace) "c2"))
+               (blk (dsh-emacs-ui--find-block qid))
+               (state (and blk (get-text-property (car blk) 'dsh-emacs-ui-state))))
+          (when (and (string-match-p "● permission" txt)
+                     (string-match-p "failed" txt)
+                     ;; 错误结果同样折叠进 body
+                     (not (string-match-p "unknown preset" txt))
+                     state
+                     (equal (map-elt state :body) "unknown preset")
+                     (map-elt state :collapsed))
+            (dsh-test-pass "command-render-error-kind"))))
+    (kill-buffer buf)))
+
+(when (and (string= "compact" (dsh-emacs-render-command-label "compact" ""))
+           (string= "goal" (dsh-emacs-render-command-label
+                             "goal" " set x"))
+           (string= "goal" (dsh-emacs-render-command-label "goal" nil)))
+  (dsh-test-pass "command-render-label"))
+
+;; --- 测试 98a: command row 样式 —— result 前缀 + spinner 生命周期 ---
+(let ((buf (generate-new-buffer " *dsh-cmd-prefix*"))
+      (old-spinners dsh-emacs--command-spinners))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq dsh-emacs--command-spinners (make-hash-table :test 'equal))
+        (dsh-emacs-render-event
+         '((type . "command/run") (seq . 20)
+           (data . ((commandId . "pfx1") (name . "compact") (args . "")))))
+        (dsh-emacs-render-event
+         '((type . "command/done") (seq . 21)
+           (data . ((commandId . "pfx1") (kind . "success")
+                    (text . "Compacted 174 history items")))))
+        (let* ((txt (buffer-string))
+               (qid (format "%s-cmd-%s" (dsh-emacs-render--make-namespace) "pfx1"))
+               (blk (dsh-emacs-ui--find-block qid))
+               (state (and blk (get-text-property (car blk) 'dsh-emacs-ui-state))))
+          (when (and (string-match-p "compact" txt)
+                     (string-match-p "done" txt)
+                     ;; 结果折叠进 body
+                     (not (string-match-p "Compacted 174 history items" txt))
+                     state
+                     (equal (map-elt state :body) "Compacted 174 history items")
+                     (map-elt state :collapsed)
+                     ;; done 停掉了 spinner（hash 清空 + 无残留 timer）
+                     (null (gethash "pfx1" dsh-emacs--command-spinners)))
+            (dsh-test-pass "command-result-prefix-and-spinner-stopped"))))
+    (setq dsh-emacs--command-spinners old-spinners)
+    (kill-buffer buf)))
+
+(let ((buf (generate-new-buffer " *dsh-cmd-spin*"))
+      (old-spinners dsh-emacs--command-spinners))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq dsh-emacs--command-spinners (make-hash-table :test 'equal))
+        (dsh-emacs-render-event
+         '((type . "command/run") (seq . 30)
+           (data . ((commandId . "spin1") (name . "goal")))))
+        ;; run 启动了动画：timer 在跑
+        (when (and (gethash "spin1" dsh-emacs--command-spinners)
+                   (timerp (nth 1 (gethash "spin1" dsh-emacs--command-spinners))))
+          (dsh-test-pass "command-spinner-starts"))
+        ;; 手动推 2 帧：索引推进且 label 换帧（batch 里 timer 不自动 fire）
+        (dsh-emacs--command-spinner-tick "spin1")
+        (dsh-emacs--command-spinner-tick "spin1")
+        (when (= 2 (nth 2 (gethash "spin1" dsh-emacs--command-spinners)))
+          (dsh-test-pass "command-spinner-advances"))
+        ;; done 停表：hash 清空
+        (dsh-emacs-render-event
+         '((type . "command/done") (seq . 31)
+           (data . ((commandId . "spin1") (kind . "success")
+                    (text . "ok")))))
+        (when (null (gethash "spin1" dsh-emacs--command-spinners))
+          (dsh-test-pass "command-spinner-done-stops")))
+    (setq dsh-emacs--command-spinners old-spinners)
+    (kill-buffer buf)))
+
+(let ((buf (generate-new-buffer " *dsh-cmd-clear*"))
+      (old-spinners dsh-emacs--command-spinners))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq dsh-emacs--command-spinners (make-hash-table :test 'equal))
+        (dsh-emacs-render-event
+         '((type . "command/run") (seq . 40)
+           (data . ((commandId . "clear1") (name . "goal") (args . "")))))
+        (dsh-emacs-render-event
+         '((type . "command/run") (seq . 41)
+           (data . ((commandId . "clear2") (name . "goal") (args . "")))))
+        (dsh-emacs--command-spinner-clear-all)
+        (when (= 0 (hash-table-count dsh-emacs--command-spinners))
+          (dsh-test-pass "command-spinner-clear-all")))
+    (setq dsh-emacs--command-spinners old-spinners)
+    (kill-buffer buf)))
+
+;; --- 测试 98b: command 行首 nerd-icons 字形（nf-dev-terminal） ---
+(let ((dsh-emacs-command-nerd-icons nil))
+  (when (equal (dsh-emacs-render--nerd-icon "nf-dev-terminal" "⚡") "⚡")
+    (dsh-test-pass "command-nerd-icon-disabled-fallback")))
+
+;; 默认开启但包不可用时（emacs -Q 下 nerd-icons 不在 load-path）同样回退。
+(when (equal (dsh-emacs-render--nerd-icon "nf-cod-terminal" "⚡") "⚡")
+  (dsh-test-pass "command-nerd-icon-unavailable-fallback"))
+
+;; 可用时直接用 nerd-icons 字形（mock require/featurep/nerd-icons-codicon）。
+(cl-letf (((symbol-function 'require) (lambda (&rest _) t))
+          ((symbol-function 'featurep) (lambda (&rest _) t))
+          ((symbol-function 'nerd-icons-codicon)
+           (lambda (_name)
+             (propertize "TERM" 'face '(:family "Mock Font" :weight normal)))))
+  (let ((result (dsh-emacs-render--nerd-icon "nf-cod-terminal" "⚡")))
+    (when (and (string-match-p "TERM" result)
+               ;; The glyph keeps its original face with :family from
+               ;; nerd-icons-codicon; the UI pipeline merges label faces
+               ;; via add-face-text-property so the family survives.
+               (equal (plist-get (get-text-property 0 'face result) :family)
+                      "Mock Font"))
+      (dsh-test-pass "command-nerd-icon-uses-glyph"))))
+
+;; 支持任意 nerd-icons 类型：通过名称前缀自动检测 icon 函数
+(cl-letf (((symbol-function 'require) (lambda (&rest _) t))
+          ((symbol-function 'featurep) (lambda (&rest _) t))
+          ((symbol-function 'nerd-icons-devicon)
+           (lambda (_name) "DEV"))
+          ((symbol-function 'nerd-icons-codicon)
+           (lambda (_name) "COD"))
+          ((symbol-function 'nerd-icons-octicon)
+           (lambda (_name) "OCT")))
+  (let ((dev  (dsh-emacs-render--nerd-icon "nf-dev-terminal" "?"))
+        (cod  (dsh-emacs-render--nerd-icon "nf-cod-terminal" "?"))
+        (oct  (dsh-emacs-render--nerd-icon "nf-oct-alert" "?")))
+    (when (and (equal dev "DEV")
+               (equal cod "COD")
+               (equal oct "OCT"))
+      (dsh-test-pass "command-nerd-icon-multi-set"))))
+
+;; --- 测试 98a: 乐观命令行渲染（optimistic command row） ---
+(let ((buf (generate-new-buffer " *dsh-cmd-opt*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (let ((dsh-emacs-show-commands t)
+              (dsh-emacs--command-blocks (make-hash-table :test 'equal))
+              (dsh-emacs--pending-command nil)
+              (dsh-emacs--command-spinners (make-hash-table :test 'equal)))
+          (cl-letf (((symbol-function 'dsh-emacs-render--nerd-icon)
+                     (lambda (&rest _) "⚡")))
+            (dsh-emacs-render-command-optimistic "/compact")
+            ;; temp entry stored in command-blocks
+            (let ((entry (gethash "pending-compact"
+                                  dsh-emacs--command-blocks)))
+              (when (and entry
+                         dsh-emacs--pending-command
+                         (equal (car dsh-emacs--pending-command) "pending-compact"))
+                (dsh-test-pass "command-optimistic-creates-temp-entry"))))))
+    (kill-buffer buf)))
+
+;; --- 测试 98b: command/run 替换乐观行 ---
+(let ((buf (generate-new-buffer " *dsh-cmd-opt-repl*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (let ((dsh-emacs-show-commands t)
+              (dsh-emacs--command-blocks (make-hash-table :test 'equal))
+              (dsh-emacs--pending-command nil)
+              (dsh-emacs--command-spinners (make-hash-table :test 'equal)))
+          (cl-letf (((symbol-function 'dsh-emacs-render--nerd-icon)
+                     (lambda (&rest _) "⚡")))
+            ;; Step 1: optimistic render
+            (dsh-emacs-render-command-optimistic "/compact")
+            (when (gethash "pending-compact" dsh-emacs--command-blocks)
+              ;; Step 2: real command/run event arrives
+              (dsh-emacs-render-command
+               '((type . "command/run") (seq . 10)
+                 (data . ((commandId . "real-123")
+                          (name . "/compact") (args . "")))))
+              ;; temp entry removed, real entry present
+              (when (and (null (gethash "pending-compact"
+                                        dsh-emacs--command-blocks))
+                         (gethash "real-123"
+                                  dsh-emacs--command-blocks)
+                         (null dsh-emacs--pending-command))
+                (dsh-test-pass "command-run-replaces-optimistic"))))))
+    (kill-buffer buf)))
+(let ((calls nil)
+      (read-called nil)
+      (dsh-emacs--current-session "sess-menu"))
+  (cl-letf (((symbol-function 'dsh-emacs--rpc-request)
+             (lambda (_m _p)
+               (cons t [((name . "goal") (description . "goal ops")
+                         (input . ((hint . "[<objective>]"))))
+                        ((name . "compact") (description . "compact"))])))
+            ((symbol-function 'completing-read)
+             (lambda (&rest _) "/goal"))
+            ((symbol-function 'read-string)
+             (lambda (&rest _) (setq read-called t) "set x"))
+            ((symbol-function 'dsh-emacs--rpc-async)
+             (lambda (method params cb)
+               (push (list method params) calls)
+               (funcall cb t '((commandId . "c3")
+                               (result . ((kind . "success")
+                                          (text . "t"))))))))
+    (dsh-emacs-command)
+    (let* ((call (car calls))
+           (args (cdr (assq 'args (cadr call)))))
+      (when (and (string= "commands/execute" (car call))
+                 (string= "/goal set x" (cdr (assq 'line args)))
+                 read-called)
+        (dsh-test-pass "command-menu-hint-prompts-args")))))
+
+(let ((calls nil)
+      (read-called nil)
+      (dsh-emacs--current-session "sess-menu2"))
+  (cl-letf (((symbol-function 'dsh-emacs--rpc-request)
+             (lambda (_m _p)
+               (cons t [((name . "compact") (description . "compact"))])))
+            ((symbol-function 'completing-read)
+             (lambda (&rest _) "/compact"))
+            ((symbol-function 'read-string)
+             (lambda (&rest _) (setq read-called t) "x"))
+            ((symbol-function 'dsh-emacs--rpc-async)
+             (lambda (method params cb)
+               (push (list method params) calls)
+               (funcall cb t '((commandId . "c4")
+                               (result . ((kind . "success")
+                                          (text . "t"))))))))
+    (dsh-emacs-command)
+    (let* ((call (car calls))
+           (args (cdr (assq 'args (cadr call)))))
+      (when (and (string= "commands/execute" (car call))
+                 (string= "/compact" (cdr (assq 'line args)))
+                 (null read-called))
+        (dsh-test-pass "command-menu-bare-no-args")))))
+
+;; --- 测试 100: 输入区 /name 补全 ---
+(let ((buf (generate-new-buffer " *dsh-capf*"))
+      (old dsh-emacs--command-catalogs))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-command--cache-catalog
+         "sess-cap"
+         (list (dsh-protocol-command--from-alist
+                '((name . "goal") (description . "d")))
+               (dsh-protocol-command--from-alist
+                '((name . "compact") (description . "d")))))
+        (setq dsh-emacs--current-session "sess-cap")
+        ;; 裸 "/" 也返回整个目录（web 的 trigger 行为）
+        (goto-char dsh-emacs--input-marker)
+        (insert "/")
+        (let* ((comp (dsh-emacs-command-completion-at-point))
+               (cands (nth 2 comp)))
+          (when (and comp
+                     (member "/goal " cands)
+                     (member "/compact " cands))
+            (dsh-test-pass "command-capf-bare-slash-lists-all")))
+        ;; 清空后 "/go" 前缀仍返回全部候选（过滤交给补全框架）
+        (delete-region dsh-emacs--input-marker (point-max))
+        (goto-char dsh-emacs--input-marker)
+        (insert "/go")
+        (let* ((comp (dsh-emacs-command-completion-at-point))
+               (cands (nth 2 comp)))
+          (when (and comp
+                     (member "/goal " cands)
+                     (member "/compact " cands))
+            (dsh-test-pass "command-capf-completes-prefix")))
+        (goto-char dsh-emacs--input-marker)
+        (insert "/goal ")
+        (when (null (dsh-emacs-command-completion-at-point))
+          (dsh-test-pass "command-capf-off-after-space"))
+        (goto-char (point-min))
+        (when (null (dsh-emacs-command-completion-at-point))
+          (dsh-test-pass "command-capf-off-in-transcript")))
+    (setq dsh-emacs--command-catalogs old)
+    (kill-buffer buf)))
+
+;; 候选是纯字符串，描述走标准 metadata（annotation-function / company-kind）：
+;; corfu 弹窗按真实宽度排版（其他 mode 同款样式），不用 display 属性撑宽
+(let ((buf (generate-new-buffer " *dsh-capf-meta*"))
+      (old dsh-emacs--command-catalogs))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-command--cache-catalog
+         "sess-cap-meta"
+         (list (dsh-protocol-command--from-alist
+                '((name . "goal") (description . "Set and track goals.")))
+               (dsh-protocol-command--from-alist
+                '((name . "compact") (description . "Condense context.")))
+               (dsh-protocol-command--from-alist
+                '((name . "export") (description . "Export this session.")))))
+        (setq dsh-emacs--current-session "sess-cap-meta")
+        (goto-char dsh-emacs--input-marker)
+        (insert "/")
+        (let* ((comp (dsh-emacs-command-completion-at-point))
+               (cands (nth 2 comp))
+               (meta (nthcdr 3 comp))
+               (ann (plist-get meta :annotation-function)))
+          (when (and comp
+                     (= 3 (length cands))
+                     (cl-every (lambda (c) (null (text-properties-at 0 c)))
+                               cands)
+                     (functionp ann)
+                     (string= "Set and track goals." (funcall ann "/goal "))
+                     (string= "Condense context." (funcall ann "/compact "))
+                     ;; `:company-kind' 是"候选 → kind 符号"的函数
+                     ;; （nerd-icons-corfu 的 kindfunc 约定，裸符号会被 funcall）
+                     (let ((kindf (plist-get meta :company-kind)))
+                       (and (functionp kindf)
+                            (eq 'command (funcall kindf "/goal ")))))
+            (dsh-test-pass "command-capf-metadata-annotation-kind"))))
+    (setq dsh-emacs--command-catalogs old)
+    (kill-buffer buf)))
+
+;; 内容驱动的自动补全触发器：dsh-emacs--slash-token 判定输入区 /NAME 前缀
+(let ((buf (generate-new-buffer " *dsh-slash-token*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        ;; 输入区恰为 "/" → token "/"（web 的 trigger 形态）
+        (goto-char dsh-emacs--input-marker)
+        (insert "/")
+        (when (string= "/" (dsh-emacs--slash-token))
+          (dsh-test-pass "slash-token-on-bare-slash"))
+        ;; 继续输入 "/go" → token 变长
+        (insert "go")
+        (when (string= "/go" (dsh-emacs--slash-token))
+          (dsh-test-pass "slash-token-grows-with-input"))
+        ;; 非 / 开头 → nil；带空格（已完成）→ nil
+        (goto-char dsh-emacs--input-marker)
+        (delete-region dsh-emacs--input-marker (dsh-emacs--input-end))
+        (insert "hello")
+        (when (null (dsh-emacs--slash-token))
+          (dsh-test-pass "slash-token-off-plain-message"))
+        (goto-char dsh-emacs--input-marker)
+        (delete-region dsh-emacs--input-marker (dsh-emacs--input-end))
+        (insert "/goal ")
+        (when (null (dsh-emacs--slash-token))
+          (dsh-test-pass "slash-token-off-completed-token")))
+    (kill-buffer buf)))
+
+;; 目录未缓存时，首次触发也同步补齐（否则输入 "/" 弹空列表）
+(let ((buf (generate-new-buffer " *dsh-capf-sync*"))
+      (old dsh-emacs--command-catalogs)
+      (rpc-calls 0))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq dsh-emacs--current-session "sess-sync")
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-request)
+                   (lambda (_m _p)
+                     (setq rpc-calls (1+ rpc-calls))
+                     (cons t [((name . "compact") (description . "c"))
+                              ((name . "goal") (description . "g"))]))))
+          (goto-char dsh-emacs--input-marker)
+          (insert "/")
+          (let* ((comp (dsh-emacs-command-completion-at-point))
+                 (cands (nth 2 comp)))
+            (when (and comp
+                       (= rpc-calls 1)
+                       (member "/goal " cands)
+                       (member "/compact " cands))
+              (dsh-test-pass "command-capf-sync-fetches-uncached-catalog")))))
+    (setq dsh-emacs--command-catalogs old)
+    (kill-buffer buf)))
+
+;; TAB 在聊天缓冲里必须落到 completion-at-point（slash 补全的键盘入口）
+(when (eq (lookup-key dsh-emacs-mode-map (kbd "TAB"))
+          #'completion-at-point)
+  (dsh-test-pass "chat-mode-tab-bound-to-completion-at-point"))
+
+;; corfu 用户：dsh-emacs-mode 把 "/" 接进 corfu-auto-trigger（官方自动弹机制）。
+;; corfu-auto 可用时（require 成功 + hook 函数已定义）才接线。
+(let ((buf (generate-new-buffer " *dsh-corfu-wire*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (defvar corfu-mode nil)
+        (defvar corfu-auto nil)
+        (defvar corfu-auto-trigger "")
+        (cl-letf (((symbol-function 'require) (lambda (&rest _) t)))
+          (defalias 'corfu-auto--post-command #'ignore)
+          (dsh-emacs-mode)
+          (when (and (buffer-local-value 'corfu-auto buf)
+                     (string-match-p "/" (buffer-local-value
+                                          'corfu-auto-trigger buf))
+                     (memq 'corfu-auto--post-command
+                           (buffer-local-value 'post-command-hook buf)))
+            (dsh-test-pass "corfu-slash-auto-wired"))))
+    (kill-buffer buf)))
+
+;; corfu 装了但 corfu-auto 未安装：不接 trigger/hook——否则内置兜底
+;; 被 `corfu-auto' 置 t 禁用、且往 post-command-hook 挂 void-function。
+(let ((buf (generate-new-buffer " *dsh-corfu-guard*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (defvar corfu-mode nil)
+        (defvar corfu-auto nil)
+        (cl-letf (((symbol-function 'require) (lambda (&rest _) nil)))
+          (dsh-emacs-mode)
+          (when (and (not (buffer-local-value 'corfu-auto buf))
+                     (not (memq 'corfu-auto--post-command
+                                (buffer-local-value 'post-command-hook buf))))
+            (dsh-test-pass "corfu-auto-missing-no-wiring"))))
+    (kill-buffer buf)))
+
+;; corfu auto 已接管时，dsh-emacs 的自触发不再动作（避免双弹）
+(let ((buf (generate-new-buffer " *dsh-corfu-skip*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--slash-pop-token "old")
+        (goto-char dsh-emacs--input-marker)
+        (insert "/")
+        (let ((corfu-auto t))          ; 模拟 corfu-auto 已开启
+          (dsh-emacs--slash-auto-complete)
+          (when (string= "old" dsh-emacs--slash-pop-token)
+            (dsh-test-pass "slash-auto-complete-skipped-when-corfu-auto"))))
+    (kill-buffer buf)))
+
+;; 开关 dsh-emacs-slash-auto-complete 关闭时，自触发静默
+(let ((buf (generate-new-buffer " *dsh-slash-off*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--slash-pop-token "old")
+        (goto-char dsh-emacs--input-marker)
+        (insert "/")
+        (let ((dsh-emacs-slash-auto-complete nil))
+          (dsh-emacs--slash-auto-complete)
+          (when (string= "old" dsh-emacs--slash-pop-token)
+            (dsh-test-pass "slash-auto-complete-off-when-disabled"))))
+    (kill-buffer buf)))
 
 (princ "\n===== 测试总结 =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))

@@ -265,6 +265,16 @@ HINT is a verb for the action (e.g. \"toggle\")."
 ;;; 边框渲染
 ;;; ---------------------------------------------------------------------------
 
+(defun dsh-emacs-ui--label-merge (text)
+  "Merge `dsh-emacs-ui-label-face' into TEXT and add the fragment keymap.
+Unlike `propertize' which overwrites the `face' property, this uses
+`add-face-text-property' to APPEND the label face so pre-existing face
+attributes (e.g. a Nerd Font `:family' on icon glyphs) are preserved."
+  (let ((s (copy-sequence text)))
+    (add-face-text-property 0 (length s) 'dsh-emacs-ui-label-face t s)
+    (put-text-property 0 (length s) 'keymap dsh-emacs-ui-fragment-map s)
+    s))
+
 (defun dsh-emacs-ui--top-border (label-left label-right collapsed-p _expanded &optional style)
   "Render the top border line with labels.
 Returns (BORDER-STRING . CONTENT-WIDTH).
@@ -306,22 +316,20 @@ with no fold indicator; bordered fragments keep a leading [+-] indicator."
         ;; with no leading or trailing fold indicator.
         (cons
          (concat
-          (propertize truncated-left 'face 'dsh-emacs-ui-label-face
-                      'keymap dsh-emacs-ui-fragment-map)
+          (dsh-emacs-ui--label-merge truncated-left)
           (when (and truncated-right (> (length truncated-right) 0))
             (concat gap-string
-                    (propertize truncated-right 'face 'dsh-emacs-ui-label-face
-                                'keymap dsh-emacs-ui-fragment-map))))
+                    (dsh-emacs-ui--label-merge truncated-right))))
          box-width)
       (cons
        (concat
         (dsh-emacs-ui--make-border-string (concat (alist-get 'top-left chars) "── "))
         (propertize leading-indicator 'face 'dsh-emacs-ui-fold-indicator-face 'keymap dsh-emacs-ui-fragment-map)
-        (propertize truncated-left 'face 'dsh-emacs-ui-label-face 'keymap dsh-emacs-ui-fragment-map)
+        (dsh-emacs-ui--label-merge truncated-left)
         (when (> (length fill-left-str) 0)
           (dsh-emacs-ui--make-border-string fill-left-str))
         (when (and truncated-right (> (length truncated-right) 0))
-          (concat " " (propertize truncated-right 'face 'dsh-emacs-ui-label-face 'keymap dsh-emacs-ui-fragment-map) " "))
+          (concat " " (dsh-emacs-ui--label-merge truncated-right) " "))
         (dsh-emacs-ui--make-border-string (concat "──" (alist-get 'top-right chars))))
        box-width))))
 
@@ -346,7 +354,7 @@ STYLE selects border characters."
          (content-width (string-width content))
          (padding (max 0 (- bw content-width))))
     (if (eq style 'minimal)
-        (concat (dsh-emacs-ui--make-border-string (concat v " ")) content)
+        content
       (concat
        (dsh-emacs-ui--make-border-string (concat v " "))
        content
@@ -480,10 +488,13 @@ Style is taken from MODEL's :style property (\\='rounded or \\='sharp)."
           (dsh-emacs-ui--insert-read-only line)
           (dsh-emacs-ui--insert-read-only "\n"))))
      (t
-      ;; No body, just empty line
-      (dsh-emacs-ui--insert-read-only
-       (dsh-emacs-ui--body-line "" box-width style))
-      (dsh-emacs-ui--insert-read-only "\n")))
+      ;; No body: minimal style is a flat single line — skip the empty body
+      ;; line so command rows stay compact.  Bordered styles need the empty
+      ;; body to maintain the box structure.
+      (unless (eq style 'minimal)
+        (dsh-emacs-ui--insert-read-only
+         (dsh-emacs-ui--body-line "" box-width style))
+        (dsh-emacs-ui--insert-read-only "\n"))))
 
     (setq body-end (point))
 

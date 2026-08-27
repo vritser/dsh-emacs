@@ -44,6 +44,7 @@ The design language draws on mainstream coding agents (agent-shell, pi, opencode
 - **Smart collapsing**: tool calls and thinking blocks are folded by default and expand on demand
 - **Asynchronous polling**: session history is polled automatically after sending, and stops automatically when the WebSocket reconnects
 - **Server bootstrap on demand**: before any server-touching command, the server address is probed — down, the `dsh` CLI is located (asking to install it when missing) and `dsh web --no-open` is started in the background and awaited, so the first `M-x dsh-emacs` just works
+- **Slash commands**: a `/name` line in the input area is dispatched to the host command registry (`commands.execute`) instead of the model — `/goal`, `/compact`, `/plan`, `/permission`, `/export`, `/feedback` … run server-side and render their outcome in the transcript. Unknown slash lines fall back to a plain message (the same semantics as dsh web). Typing `/` at the start of the input pops the live command catalog immediately (web-style trigger; corfu popup, stock `*Completions*` list, or vertico in-region — the list filters as you keep typing), `TAB` completes `/name` anytime, and `M-x dsh-emacs-command` picks a command with its argument hint. Details in [Slash Commands](#slash-commands).
 - **Zero dependencies**: uses only the built-in `url` / `json` libraries; Emacs 27+
 
 ## Model Picker
@@ -176,6 +177,7 @@ Provider/model configuration is **owned by dsh**, not by dsh-emacs — this pack
 | `C-c C-k` | `dsh-emacs-copy-code-block` | Copy the fenced code block under point |
 | `C-c C-a` | `dsh-emacs-attach-file` | Attach an image and send it as a prompt |
 | `C-c C-m` | `dsh-emacs-select-model` | Choose a model for the session |
+| `TAB` | `completion-at-point` | Complete the `/name` slash command in the input area |
 | `M-p` / `M-n` | `dsh-emacs-input-history-back/forward` | Recall previously submitted prompts |
 
 Send rule: sends the text after the `❯ ` prompt in the input area. The input field and the reply live **in the same buffer** (agent-shell style): the `❯` input line stays at the bottom of the transcript, replies stream in above it, and the cursor always stays in the input area — chat buffers set a telega-style scroll discipline (`scroll-conservatively`/`next-screen-context-lines`/`scroll-error-top-bottom`), so the prompt line stays visible while typing and page commands land on line boundaries; scrolling away to read history does not pull the view back.
@@ -183,6 +185,36 @@ Send rule: sends the text after the `❯ ` prompt in the input area. The input f
 **Workspace path**: each session buffer's `default-directory` automatically points at that session's workspace (the `cwd` from `session.list`, consistent with the list/grouping), so `M-x magit-status`, `M-x dired` or `project-*` commands run directly in the corresponding project directory from the chat buffer; it stays in sync after session-list refreshes/renames.
 
 **No save prompts**: session transcripts are never written to disk, and the chat buffer always stays in unmodified state — closing the buffer (`C-x k`, tab/window-manager close) never shows a "buffer modified, save?" prompt.
+
+## Slash Commands
+
+dsh exposes a **host-side command registry** — slash commands are real server features, not client-side tricks. dsh-emacs dispatches `/name` lines typed after the `❯ ` prompt through the same `commands.execute` RPC the web UI uses: the host admits only registered commands (and never feeds them to the model), then logs `command/run` + `command/done` session events, which dsh-emacs renders as one web-style flow node in the transcript — a terminal icon (the Nerd Fonts `nf-cod-terminal` glyph when the optional `nerd-icons` package is available, `⚡` otherwise) followed by the command name, a braille spinner while the command is running, and on completion a short status (`✓ done` / `✗ failed`, green on success / red on error) in the header while the outcome text is folded into a collapsible body below, collapsed by default (`RET` on the row expands it). Disable the Nerd Fonts glyph with `dsh-emacs-command-nerd-icons`.
+
+**Semantics** (mirror dsh web): a leading `/name` where `name` is lowercase `[a-z][a-z0-9_-]*` followed by whitespace or end of line is a command line — `/compact`, `/goal set …`, `/plan off`. Anything else (including `/usr/local/…`, `//`, `Hello`) sends as an ordinary message. A command line that does **not** match the server registry falls back to a plain message.
+
+> Note: `session.send`-style editing of history is not a thing here — a command line never reaches the model; only the fallback (unknown) case does.
+
+**Command catalog** — the current web profile registers the following (the exact list varies by server version; dsh-emacs reads it live from `commands.list`):
+
+| Command | Input hint |
+|---|---|
+| `/compact` | — |
+| `/export` | — |
+| `/feedback` | `<text>` |
+| `/goal` | `[<objective>\|clear\|edit <objective>\|pause\|resume]` |
+| `/permission` | `<preset>` |
+| `/plan` | `[off\|message]` |
+
+**Three ways to run a command:**
+
+- **Type it**: `/goal set 改进模型选择器` + `C-c C-c` — dsh-emacs parses the line, calls `commands.execute`, records it in the input history and **clears the input immediately** (web-style; no waiting on the RPC round trip). If the transport fails the line is restored into the input (only while it is still empty) so you can retry. The outcome renders when the `command/done` event arrives.
+- **Trigger popup**: typing `/` as the first character of the input area pops the command list immediately (web-style). With corfu (loaded), chat buffers buffer-locally enable `corfu-auto` and put `/` into `corfu-auto-trigger`, so corfu itself fires the popup on the `/` keypress — no timers involved; other setups fall back to a post-command `completion-at-point` trigger (stock `*Completions*` list, vertico in-region). Either way the list live-filters as you keep typing (`/go` narrows to `/goal`…), and a message that merely starts with `/` (e.g. `/usr/local/...`) dismisses the list by just continuing to type. The whole auto-pop can be disabled with `dsh-emacs-slash-auto-complete` (`TAB` and `M-x dsh-emacs-command` still work).
+- **Menu**: `M-x dsh-emacs-command` — reads the live catalog (`commands.list`, cached per session), shows command + description in `completing-read`, and prompts for the argument when the command declares an input hint.
+- **Completion**: `TAB` in the input area completes the `/name` token over the cached catalog (a bare `/` lists everything). Candidates already include a trailing space, so `TAB` directly after `/goal` lets you type its arguments. `TAB` is bound to `completion-at-point` in chat buffers.
+
+The catalog is **pre-fetched**: opening a session starts a short idle-time fetch of `commands.list`, so the first `/` or `TAB` is served from cache instead of blocking on a synchronous round trip (disable with `dsh-emacs-command-prefetch`; tune the idle gap with `dsh-emacs-command-prefetch-delay`). If the host registers new commands while a session stays open, run `M-x dsh-emacs-command-catalog-refresh` to re-fetch and re-cache the catalog on demand.
+
+Commands that accept inline images (`goal`/`plan` declare `images: true`) receive the empty image array from dsh-emacs; image-bearing command input is not wired yet.
 
 ## Session List Key Bindings
 

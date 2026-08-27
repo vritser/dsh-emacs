@@ -34,6 +34,10 @@
 ;;                       authorable has-document)
 ;;                        └─ dsh-protocol-agent-preset (id trust
 ;;                             is-default name description broken)
+;;   commands.list    → dsh-protocol-command (name description input)
+;;                        └─ dsh-protocol-command-input (hint images)
+;;   commands.execute → dsh-protocol-command-execution (command-id
+;;                        result kind text)
 ;;
 ;; 转换入口都接受 wire alist；注意 wire 中的数组（vector）在 struct 里
 ;; 一律归一为 list。业务代码写入缓存 struct 后，读取统一用 `dsh-protocol-*'
@@ -302,6 +306,58 @@ AUTHORABLE / HAS-DOCUMENT flags the management UI needs."
 ;; 将 wire alist 归一为 struct 的便捷入口：已是 struct 则原样返回。
 ;; 这样业务函数可以同时接受“协议响应”和“转换后的 struct”两种形态，
 ;; 调用方（以及既有测试里的裸 alist fixture）无需改动。
+;; ---------------------------------------------------------------------------
+;; commands.list / commands.execute
+;; ---------------------------------------------------------------------------
+
+;; The `commands.list' response VALUE is a bare array of command items (no
+;; envelope object), so callers map it with `dsh-protocol--list' +
+;; `dsh-protocol-command--from-alist' directly.
+
+(cl-defstruct (dsh-protocol-command-input
+               (:constructor dsh-protocol-command-input--from-alist
+                             (alist
+                              &aux
+                              (hint (cdr (assq 'hint alist)))
+                              (images (cdr (assq 'images alist))))))
+  "The optional `input' descriptor of a command item: HINT is the argument
+placeholder, IMAGES whether the command accepts inline images."
+  hint
+  images)
+
+(cl-defstruct (dsh-protocol-command
+               (:constructor dsh-protocol-command--from-alist
+                             (alist
+                              &aux
+                              (name (cdr (assq 'name alist)))
+                              (description (cdr (assq 'description alist)))
+                              (input (let ((input (cdr (assq 'input alist))))
+                                       (and input
+                                            (dsh-protocol-command-input--from-alist
+                                             input)))))))
+  "One `commands.list' item: a slash command the host can execute."
+  name
+  description
+  input)
+
+(cl-defstruct (dsh-protocol-command-execution
+               (:constructor dsh-protocol-command-execution--from-alist
+                             (alist
+                              &aux
+                              (command-id (cdr (assq 'commandId alist)))
+                              (result (cdr (assq 'result alist)))
+                              (kind (let ((r (cdr (assq 'result alist))))
+                                      (and r (cdr (assq 'kind r)))))
+                              (text (let ((r (cdr (assq 'result alist))))
+                                      (and r (cdr (assq 'text r))))))))
+  "The admitted `commands.execute' response value: COMMAND-ID pairs the
+`command/run' / `command/done' session events, KIND is \\='success or
+\\='error, TEXT the optional outcome text."
+  command-id
+  result
+  kind
+  text)
+
 (defun dsh-protocol--struct (struct-alist-pred constructor value)
   "Return VALUE as a struct via CONSTRUCTOR if needed.
 STRUCT-ALIST-PRED distinguishes an already-converted struct from a wire

@@ -99,6 +99,7 @@
 ;; Defined in dsh-emacs-footer.el, which loads after this module.  Referenced
 ;; at runtime from teardown only.
 (declare-function dsh-emacs--ml-busy-clear "dsh-emacs-footer" ())
+(declare-function dsh-emacs--command-spinner-clear-all "dsh-emacs-render" ())
 ;; Runtime dependencies defined in dsh-emacs.el / dsh-emacs-render.el; used
 ;; by the stream-health watchdog only.
 (declare-function dsh-emacs--rpc-async "dsh-emacs" (method params callback))
@@ -601,9 +602,12 @@ wedged with no recovery scheduled — the exact limbo observed on this build."
           (when (process-live-p process)
             (delete-process process)))
         ;; Tearing down the stream: stop the mode-line running spinner so it
-        ;; never keeps ticking in a detached conversation.
+        ;; never keeps ticking in a detached conversation, and cancel any
+        ;; running slash-command row animations.
         (when (fboundp 'dsh-emacs--ml-busy-clear)
-          (dsh-emacs--ml-busy-clear))))))
+          (dsh-emacs--ml-busy-clear))
+        (when (fboundp 'dsh-emacs--command-spinner-clear-all)
+          (dsh-emacs--command-spinner-clear-all))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Host stream (`/api/events.host') — workspace/session/archive changes

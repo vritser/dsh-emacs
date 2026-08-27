@@ -59,6 +59,7 @@
 (require 'dsh-emacs-events)
 (require 'dsh-emacs-footer)
 (require 'dsh-emacs-server)
+(require 'dsh-emacs-command)
 (require 'dsh-emacs-session)
 
 ;;; ---------------------------------------------------------------------------
@@ -890,6 +891,9 @@ realtime)."
       ;; keeps the previous maximum, which would filter out the freshly
       ;; fetched history (and with it the usage/model feed) entirely.
       (setq dsh-emacs--anchor-seq 0)
+      ;; 空闲预取 slash 命令目录（commands.list）：首次 "/" / TAB 不再同步
+      ;; 往返阻塞。目录按会话缓存，打开即有 session-id 才拉得了。
+      (dsh-emacs-command-catalog-prefetch session-id)
       ;; Footer setup appends its anchor newline at point-max.  Return point
       ;; to the editable prompt so the cursor stays on the `❯' line.
       (goto-char dsh-emacs--input-marker)
@@ -1229,9 +1233,17 @@ the session list regroups immediately (the host stream also repaints)."
     (define-key map (kbd "C-c C-m") #'dsh-emacs-select-model)
     (define-key map (kbd "M-p") #'dsh-emacs-input-history-back)
     (define-key map (kbd "M-n") #'dsh-emacs-input-history-forward)
+    ;; 输入区以 "/" 开头时 TAB 补全 slash 命令名（无论弹出菜单是否开着）
+    (define-key map (kbd "TAB") #'completion-at-point)
     (define-key map [drag-n-drop] #'dsh-emacs--dnd-attach)
     map)
   "Keymap for chat mode.")
+
+(defvar corfu-auto-trigger ""
+  "Corfu's auto-completion trigger characters (defined by corfu when loaded).
+Chat buffers append \"/\" buffer-locally so typing a slash pops the
+slash-command list via corfu's own mechanism; the stub keeps
+byte-compilation clean when corfu is absent.")
 
 (defun dsh-emacs--chat-buffer-clear-modified ()
   "`kill-buffer-query-functions' hook: drop the modified flag so killing a
@@ -1268,6 +1280,9 @@ and prompt \"save?\".  Clearing is cheap (a flag), not a content change."
   (buffer-disable-undo)
   (setq-local comment-start "// ")
   (setq-local comment-end "")
+  ;; 输入区以 "/" 开头时，TAB 补全 slash 命令名（见 dsh-emacs-command.el）
+  (setq-local completion-at-point-functions
+              '(dsh-emacs-command-completion-at-point))
 
   ;; Footer/mode-line 拼接由 `dsh-emacs-footer-setup' 完成（会话创建时调用），
   ;; 这里不再覆盖 mode-line-format，保留用户的默认 modeline。
@@ -1284,6 +1299,28 @@ and prompt \"save?\".  Clearing is cheap (a flag), not a content change."
   (add-hook 'pre-command-hook #'dsh-emacs--route-typing-to-input nil t)
   ;; 输入时立即滚动到输入区
   (add-hook 'post-command-hook #'dsh-emacs--reveal-input-when-typing nil t)
+  ;; 输入区出现 "/name" 前缀时自动弹出 slash 命令补全（内容驱动；
+  ;; corfu 用户的自动弹由 corfu-auto 接管，见下）
+  (add-hook 'post-command-hook #'dsh-emacs--slash-auto-complete nil t)
+  ;; corfu 用户的 slash 补全：把 "/" 加进 `corfu-auto-trigger'，输入 "/" 时
+  ;; corfu 立即（无视 corfu-auto-prefix）查询 capf 并弹命令列表——官方机制、
+  ;; 零自建定时器，popup 开启后继续输入由 corfu 自己过滤。corfu 未加载或
+  ;; corfu-auto 未安装的环境（stock *Completions* 等）由上面的
+  ;; `dsh-emacs--slash-auto-complete' 走 completion-at-point 兜底——因此这里
+  ;; 必须用 `require' 返回值把关：装了 corfu 但没装 corfu-auto 时既不能把
+  ;; `corfu-auto' 置为 t（否则上面的兜底被禁用、弹出彻底失效），也不能挂
+  ;; 未定义的 `corfu-auto--post-command'（void-function）。
+  (when (and dsh-emacs-slash-auto-complete (boundp 'corfu-mode)
+             (require 'corfu-auto nil t)
+             (fboundp 'corfu-auto--post-command))
+    (setq-local corfu-auto t)
+    ;; 保留用户自定的 trigger 字符，追加 "/"
+    (setq-local corfu-auto-trigger
+                (concat (if (stringp corfu-auto-trigger)
+                            corfu-auto-trigger
+                          "")
+                        "/"))
+    (add-hook 'post-command-hook #'corfu-auto--post-command 10 t))
   (setq dsh-emacs--tool-calls (make-hash-table :test 'equal))
   (setq dsh-emacs--activity-groups (make-hash-table :test 'equal))
   (setq dsh-emacs--pending-user-messages nil
@@ -1407,6 +1444,60 @@ the text after the `❯ ' prompt is submitted."
       (delete-region dsh-emacs--input-marker (dsh-emacs--input-end))
       (goto-char dsh-emacs--input-marker))))
 
+(defvar-local dsh-emacs--slash-pop-token nil
+  "The /NAME token that last triggered the automatic completion popup.
+Content-driven de-dup: the popup is re-triggered only after the token
+text changes, so every keystroke while a command prefix is in progress
+refreshes the candidate list (web-style live filtering).")
+
+(defun dsh-emacs--slash-token ()
+  "Return the in-progress /NAME token in the input area, or nil.
+The token is the text from the `❯ ' prompt up to point when it is
+\"/\" followed by zero or more `[a-z0-9_-]' — the web-style trigger
+shape — and nil otherwise (transcript, other prefixes, a completed
+token with trailing space)."
+  (when (and dsh-emacs--input-marker
+             (marker-buffer dsh-emacs--input-marker)
+             (>= (point) dsh-emacs--input-marker))
+    (let ((case-fold-search nil)
+          (txt (buffer-substring-no-properties
+                dsh-emacs--input-marker (point))))
+      (when (string-match-p "\\`/[a-z0-9_-]*\\'" txt)
+        txt))))
+
+(defun dsh-emacs--slash-auto-complete ()
+  "Pop the slash-command completion list whenever a /NAME token is in progress.
+`post-command-hook' entry, content-driven (no key-event dependency):
+typing \"/\" at the start of the input area immediately opens the
+command catalog, and each keystroke that extends the token re-triggers
+it so the list live-filters (/go narrows to /goal …).  The actual
+`completion-at-point' runs on a short idle delay and re-checks the
+token, so stale timers from fast typing are dropped; the completion UI
+(corfu popup, stock *Completions* list, vertico in-region) renders the
+candidates.  Messages that merely start with \"/\" (e.g.
+\"/usr/local/...\") filter the list to nothing and keep typing
+uninterrupted.
+
+No-op when corfu auto-completion has taken over for this buffer
+(`corfu-auto' is buffer-locally t): corfu's own trigger handles the
+popup then, so this fallback only serves non-corfu setups."
+  (when (and dsh-emacs-slash-auto-complete
+             (not (and (boundp 'corfu-auto) corfu-auto))
+             (let ((token (dsh-emacs--slash-token)))
+               (and token (not (string= token dsh-emacs--slash-pop-token)))))
+    (setq dsh-emacs--slash-pop-token (dsh-emacs--slash-token))
+    (let ((buf (current-buffer)))
+      (run-with-idle-timer
+       0.1 nil
+       (lambda ()
+         (when (and (buffer-live-p buf)
+                    (get-buffer-window buf)
+                    (with-current-buffer buf
+                      (equal (dsh-emacs--slash-token)
+                             dsh-emacs--slash-pop-token)))
+           (with-current-buffer buf
+             (completion-at-point))))))))
+
 (defun dsh-emacs--valid-iana-time-zone-p (zone)
   "Return non-nil when ZONE names an installed IANA timezone."
   (and (stringp zone)
@@ -1448,13 +1539,70 @@ ambiguous and are not accepted by the dsh API."
         (setcdr (nthcdr (1- len) dsh-emacs--input-history) nil)))))
 
 (defun dsh-emacs--submit-prompt (message &optional images)
+  "Submit MESSAGE to the current session.
+
+Slash-command lines (leading \"/name\") are routed to
+`commands.execute' instead of the model: the host admits only
+registered commands, and an admission miss falls back to sending the
+line as an ordinary message (the same semantics as dsh web).  Other
+lines go through `dsh-emacs--submit-plain' unchanged.  IMAGES, when
+given, is a list of wire-ready attachment alists
+\((mediaType . M) (data . B64) (name . N)); they ride along as the
+`images' payload of `session.prompt' so the model sees them
+immediately."
+  (if (dsh-emacs-command-parse message)
+      (let ((session-id (dsh-emacs--active-session-id))
+            (input-buffer (current-buffer)))
+        ;; 提交即清空输入区、记入输入历史——不等 RPC 往返（网页同款手感）：
+        ;; 命令是否被 host 受理由 `commands.execute' 的响应决定，结果由
+        ;; command/run + command/done 会话事件渲染。
+        (dsh-emacs--push-input-history message)
+        (setq dsh-emacs--input-history-pos nil
+              dsh-emacs--input-history-pending nil)
+        (when (buffer-live-p input-buffer)
+          (with-current-buffer input-buffer
+            (dsh-emacs--clear-input)))
+        ;; 立即渲染命令行（乐观路径）——不等 RPC 往返。
+        (when (buffer-live-p input-buffer)
+          (with-current-buffer input-buffer
+            (dsh-emacs-render-command-optimistic message)))
+        (dsh-emacs-command-execute
+         session-id (string-trim message) images
+         (lambda (ok execution err)
+           ;; 回调可能运行在 process filter 里：吞掉 C-g 的 quit。
+           (condition-case nil
+               (cond
+                ((null ok)
+                 ;; 传输失败（HTTP/解析错误）：清除乐观行，恢复原文。
+                 (when (buffer-live-p input-buffer)
+                   (with-current-buffer input-buffer
+                     (dsh-emacs-render-command-cleanup-optimistic)
+                     (when (string-empty-p
+                            (or (dsh-emacs--get-input) ""))
+                       (dsh-emacs--replace-input message))))
+                 (message "Command failed to run: %S"
+                          (or err "transport error")))
+                ((null execution)
+                 ;; 未命中注册表 → 清除乐观行，按普通消息发送（浏览器同款语义）；
+                 ;; 历史已在提交时记录，不再重复记入。
+                 (when (buffer-live-p input-buffer)
+                   (with-current-buffer input-buffer
+                     (dsh-emacs-render-command-cleanup-optimistic)))
+                 (dsh-emacs--submit-plain message images t))
+                (t nil))       ; 受理：乐观行由 command/run 事件替换
+             (quit nil)))))
+    (dsh-emacs--submit-plain message images)))
+
+(defun dsh-emacs--submit-plain (message &optional images skip-history)
   "Submit MESSAGE (a plain string) to the current session.
 
 IMAGES, when given, is a list of wire-ready attachment alists
 \((mediaType . M) (data . B64) (name . N)); they ride along as the
 `images' payload of `session.prompt' so the model sees them immediately.
 On acceptance the message is echoed into the transcript (when non-empty),
-the running spinner lights up, and the watchdog starts."
+the running spinner lights up, and the watchdog starts.  Non-nil
+SKIP-HISTORY suppresses the input-history push: used by the slash-command
+fallback after the line was already recorded at submit time."
   (let* ((session-id (dsh-emacs--active-session-id))
          (chat-buffer (and (boundp 'dsh-emacs--buffer-session)
                            dsh-emacs--buffer-session
@@ -1470,7 +1618,8 @@ the running spinner lights up, and the watchdog starts."
                           (lambda (ok value)
                             (if ok
                                 (progn
-                                  (dsh-emacs--push-input-history message)
+                                  (unless skip-history
+                                    (dsh-emacs--push-input-history message))
                                   (setq dsh-emacs--input-history-pos nil
                                         dsh-emacs--input-history-pending nil)
                                   ;; Render immediately in the transcript even
