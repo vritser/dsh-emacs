@@ -52,14 +52,21 @@
 - **Auto-commit is disabled**: only commit when the user explicitly says
   so; keep changes in the working tree until then. `git add` (staging)
   without committing is fine when needed.
-- Conventional Commits, English single-line summary; multiple topics
-  separated by `;`
+- **One atomic commit per topic**: changes mixing several concerns (e.g. a
+  `feat` and a `fix`) are split into one commit per concern first; a
+  subject that needs several topics is a sign to split further.
+- Conventional Commits, English single-line summary — **keep it short**:
+  one concise clause `<type>: verb + what changed`, e.g.
+  `fix: restore mode-line busy after stream reconnect`. Do not enumerate
+  details in the subject line (long multi-clause summaries get reworded).
+- Local, unpushed history may be rewritten (reword/split/rebase) when the
+  user asks for it.
 - Standard types (Angular convention, all usable):
   - `feat:` new feature / `fix:` bug fix
   - `docs:` documentation (README/AGENTS/IMPLEMENTATION)
   - `style:` formatting, `refactor:` (no behavior change), `perf:` perf
   - `test:` tests, `build:` build, `ci:` CI, `chore:` misc, `revert:` rollback
-- Historical reference: `feat: model picker sticky provider groups; reasoning-effort selection`
+- Recent example: `fix: restore mode-line busy after stream reconnect`
 
 ## Known pitfalls (do not repeat)
 
