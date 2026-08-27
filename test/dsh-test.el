@@ -1006,9 +1006,19 @@ so the code under test can read fields through the protocol accessors."
   (let* ((ns (dsh-emacs-render--make-namespace))
          (block (dsh-emacs-test--tool-block-text (format "%s-tool-w1" ns))))
     (when (and block
-               (string-match-p "🔍 Web Search" block)
-               (not (string-match-p "🔍 Search · cats" block)))
-      (dsh-test-pass "tool-web-search-title-keeps-variant-icon"))))
+               (string-match-p "🌐 Web Search" block)
+               (not (string-match-p "🌐 Search · cats" block)))
+      (dsh-test-pass "tool-web-search-title-keeps-globe-icon"))))
+
+;; web_search 的 SVG 图标覆盖为地球（harness WebRow: globe for web search,
+;; magnifier family for grep/glob），且与 search variant 的放大镜不同
+(when (and (string= (cdr (assoc "web_search" dsh-emacs--tool-name-icon-keys)) "web")
+           (string-match-p "fill-rule=\"evenodd\""
+                           (dsh-emacs-render--tool-icon-svg "search" "#a78bfa" "web_search"))
+           (not (string-equal
+                 (dsh-emacs-render--tool-icon-svg "search" "#a78bfa" "web_search")
+                 (dsh-emacs-render--tool-icon-svg "search" "#a78bfa"))))
+  (dsh-test-pass "tool-web-search-globe-svg-override"))
 
 (with-temp-buffer
   (dsh-emacs-mode)
