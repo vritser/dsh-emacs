@@ -1293,7 +1293,7 @@ user's input text."
     (_ nil)))
 
 ;;; ---------------------------------------------------------------------------
-;;; Slash-command row styling: nerd-icons leading + running braille spinner
+;;; Slash-command row styling: nerd-icons leading + running `-\|/' spinner
 ;;; ---------------------------------------------------------------------------
 
 (defcustom dsh-emacs-command-nerd-icons t
@@ -1309,12 +1309,14 @@ built-in fallback."
   "nerd-icons icon name of the slash-command leading icon.")
 
 (defconst dsh-emacs--command-spinner-frames
-  '("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
-  "Frames of the running slash-command leading animation (braille spinner).")
+  '("-" "\\" "|" "/")
+  "Frames of the running slash-command leading animation.
+The classic shell `-\\|/' spinner (the same frames as slash.sh), so the
+row animates with familiar 4-frame terminal rhythm.")
 
-(defconst dsh-emacs--command-spinner-interval 0.08
-  "Seconds between running-command animation frames (~12.5fps, like the
-mode-line busy animation in dsh-emacs-footer.el).")
+(defconst dsh-emacs--command-spinner-interval 0.1
+  "Seconds between running-command animation frames (~10fps, like the
+classic shell spinner in slash.sh).")
 
 
 
@@ -1365,7 +1367,7 @@ pipeline in `dsh-emacs-ui--top-border' merges label faces with
     fallback))
 
 (defun dsh-emacs--command-spinner-start (command-id buffer)
-  "Start the running braille animation for COMMAND-ID in BUFFER.
+  "Start the running `-\\|/' animation for COMMAND-ID in BUFFER.
 Replaces any existing animation for the same command (idempotent)."
   (dsh-emacs--command-spinner-stop command-id)
   (let ((timer (run-at-time dsh-emacs--command-spinner-interval
@@ -1482,7 +1484,8 @@ Stops the spinner, deletes the fragment, and clears `dsh-emacs--pending-command'
   "Render a `command/run' or `command/done' EVENT as one flow node,
 mirroring dsh web's command rows: a leading icon (nf-cod-terminal from the
 optional `nerd-icons' package, `⚡' otherwise) followed by the command name
-and a braille spinner while running (see `dsh-emacs--command-spinner-frames');
+and a classic `-\|/' spinner while running (see
+`dsh-emacs--command-spinner-frames');
 on completion the header shows only the command name + a short status
 (`✓ done' / `✗ failed', green on success, red on error), and the outcome
 text is folded into a collapsible body below, collapsed by default.
