@@ -354,20 +354,12 @@
 
 (defface dsh-emacs-thinking-face
 	`((((background light))
-		 :foreground ,dsh-emacs-color-thinking :slant italic :weight bold)
+		 :foreground ,dsh-emacs-color-thinking :weight bold)
 		(((background dark))
-		 :foreground ,dsh-emacs-color-thinking-dark :slant italic :weight bold)
+		 :foreground ,dsh-emacs-color-thinking-dark :weight bold)
 		(t :inherit font-lock-builtin-face :weight bold))
-	"Thinking block label (dsh web IconThink icon + Think)."
-	:group 'dsh-emacs-faces)
-
-(defface dsh-emacs-thinking-body-face
-	`((((background light))
-		 :slant italic)
-		(((background dark))
-		 :slant italic)
-		(t :inherit font-lock-comment-face :slant italic))
-	"Thinking block body (italic, no background box)."
+	"Thinking block label (dsh web IconThink icon + Think).
+Bold, no italic — matching dsh web's thinkingToggle style."
 	:group 'dsh-emacs-faces)
 
 ;;; ---------------------------------------------------------------------------

@@ -2346,19 +2346,13 @@ so the code under test can read fields through the protocol accessors."
     (setq dsh-emacs--input-history old-hist
           dsh-emacs--input-history-pos old-pos)))
 
-;; --- 测试 55: thinking 块正文不再有深色背景（回归：此前 body face 带
-;; `:background'，展开后图标行正下方出现一块深色；现要求透明/主题背景） ---
-(let ((bg (face-attribute 'dsh-emacs-thinking-body-face :background nil)))
-  ;; face-attribute 返回的是符号 unspecified / unspecified-bg（表示未显式
-  ;; 设置、沿用默认），而不是字符串；只要不是显式颜色（如旧版 "#1f1b16"）即符合
+;; --- 测试 55: thinking face 无显式背景（沿用主题背景） ---
+(let ((bg (face-attribute 'dsh-emacs-thinking-face :background nil)))
   (when (or (null bg)
             (memq bg '(unspecified unspecified-bg)))
-    (dsh-test-pass "thinking-body-face-no-background")))
+    (dsh-test-pass "thinking-face-no-background")))
 
-;; --- 测试 56: thinking 块 body face 只作用于正文行（回归：body-start
-;; 用固定偏移 (+ block-start 2) 会把 label 行（图标 + Think）也盖进
-;; `dsh-emacs-thinking-body-face'，思考完成瞬间图标底下出现黑色矩形；
-;; 流式阶段无此 face 应用所以正常） ---
+;; --- 测试 56: thinking 整行贴同一 face（label + body 均带 thinking-face） ---
 (let ((buf (generate-new-buffer " *dsh-think-face*"))
       (dsh-emacs-thinking-expand-by-default t))
   (unwind-protect
@@ -2366,22 +2360,22 @@ so the code under test can read fields through the protocol accessors."
         (insert "###HEAD\n")
         (dsh-emacs-render--render-thinking-block
          "t" "b1" "first body line\nsecond body line" 1 (point-max))
-        ;; label 行（含图标）不得带 body face
+        ;; label 行（含图标）应带 thinking-face
         (goto-char (point-min))
         (search-forward "Think" nil t)
         (let ((faces (seq-uniq
                       (mapcar (lambda (p) (get-text-property p 'face))
                               (number-sequence (line-beginning-position)
                                                (line-end-position))))))
-          (when (not (memq 'dsh-emacs-thinking-body-face faces))
-            (dsh-test-pass "thinking-block-label-no-body-face")))
-        ;; label 下一行才是正文：body face 必须出现在这里
+          (when (memq 'dsh-emacs-thinking-face faces)
+            (dsh-test-pass "thinking-block-label-gets-face")))
+        ;; body 行也应带 thinking-face
         (forward-line 1)
         (let ((faces (seq-uniq
                       (mapcar (lambda (p) (get-text-property p 'face))
                               (number-sequence (line-beginning-position)
                                                (line-end-position))))))
-          (when (memq 'dsh-emacs-thinking-body-face faces)
+          (when (memq 'dsh-emacs-thinking-face faces)
             (dsh-test-pass "thinking-block-body-gets-face"))))
     (kill-buffer buf)))
 
