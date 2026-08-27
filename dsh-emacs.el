@@ -2235,32 +2235,22 @@ seeing a historical `turn/end'."
                                   ;; processes only newly arrived chunks.
                                   (dsh-emacs-render-history-events events t))
                               (message "Polling error: %S" value))
-                            ;; Check for turn completion regardless.
-                            ;; IMPORTANT: never cancel the poll timer here.
-                            ;; The fetched window (maxMessages => ~850 raw
+                            ;; Do NOT stop the spinner from the raw window tail:
+                            ;; the fetched window (maxMessages => ~850 raw
                             ;; events) can end at the *previous* turn's
                             ;; turn/end even while the current turn is still
-                            ;; in flight, and while the WebSocket is wedged
-                            ;; this timer is the ONLY channel that will ever
-                            ;; show the reply.  Cancelling on a historical
-                            ;; turn/end leaves a WS-down session render-dead.
-                            ;; The 101 handler / disconnect / watchdog own
-                            ;; stopping this timer instead.
-                            (when (and ok value)
-                              (let ((events (dsh-emacs--sequence-list
-                                             (cdr (assq 'events value)))))
-                                (when (dsh-emacs--turn-complete-p events)
-                                  ;; Turn finished: stop the running spinner.
-                                  (dsh-emacs--ml-busy-set nil)))))))))
-
-(defun dsh-emacs--turn-complete-p (events)
-  "Return non-nil when EVENTS indicates that a turn is complete."
-  (when events
-    (let* ((last-entry (car (last (append events nil))))
-           (ev (and last-entry (cdr (assq 'event last-entry)))))
-      (when ev
-        (let ((type (cdr (assq 'type ev))))
-          (equal type "turn/end"))))))
+                            ;; in flight, so a tail check would kill the busy
+                            ;; flag (and with it the C-c C-c interrupt gate)
+                            ;; mid-turn.  The spinner clears at render time
+                            ;; when a *new* `turn/end' (seq > anchor) is
+                            ;; processed; a stale, already-rendered tail is
+                            ;; skipped by the anchor diff and must change
+                            ;; nothing.  Also never cancel the poll timer here:
+                            ;; while the WebSocket is wedged this timer is the
+                            ;; ONLY channel that will ever show the reply (the
+                            ;; 101 handler / disconnect / watchdog own
+                            ;; stopping it instead).
+                            )))))
 
 (defun dsh-emacs-refresh ()
   "Refresh the current session."

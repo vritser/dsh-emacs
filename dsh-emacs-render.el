@@ -1258,8 +1258,17 @@ toggle — which strips faces — keeps them readable)."
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-render-turn-start (event)
-  "Record a `turn/start' event without adding visual chrome."
+  "Record a `turn/start' event without adding visual chrome.
+The event stream is the authoritative source for turn liveness: a replayed
+or re-fetched history whose tail is a `turn/start' without a matching
+`turn/end' means the turn is still in flight, so re-light the mode-line
+running spinner (idempotent — the send path already lit it, and a
+`turn/end' later clears it)."
   (dsh-emacs-render--close-current-group)
+  ;; A turn started (or a still-open turn was replayed after a reconnect /
+  ;; session reopen): light the mode-line running spinner.
+  (when (fboundp 'dsh-emacs--ml-busy-set)
+    (dsh-emacs--ml-busy-set t))
   (dsh-emacs-render--event-seq event))
 
 (defun dsh-emacs-render-turn-end (event)

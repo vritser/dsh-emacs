@@ -5098,6 +5098,100 @@ so the code under test can read fields through the protocol accessors."
     (setq dsh-emacs--command-spinners old-spinners)
     (kill-buffer buf)))
 
+;; --- 测试 98g: 重连（connect→disconnect→恢复）不丢 mode-line busy flag ---
+;; 回归：切走再切回期间流断掉、reconnect 时 disconnect 会清掉 busy flag，
+;; 而 busy flag 正是 C-c C-c 打断（session.cancel）的开关 —— 丢了它就会
+;; 出现「无法打断、提示 Please enter a message」。
+(let ((buf (generate-new-buffer " *dsh-ml-reconnect-busy*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        ;; 模拟 turn 在飞行：busy flag 被 send 路径点亮（含 timer）
+        (dsh-emacs--ml-busy-set t)
+        (cl-letf (((symbol-function 'open-network-stream)
+                   (lambda (&rest _) (prog1 :fake-proc)))
+                  ((symbol-function 'set-process-query-on-exit-flag)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'process-put)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'set-process-filter)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'set-process-sentinel)
+                   (lambda (&rest _) nil)))
+          ;; 重连（connect 内部先 disconnect 清 busy，再按 was-busy 恢复）
+          (dsh-emacs-events-connect buf)
+          (dsh-emacs-events--health-stop))
+        (when (and dsh-emacs--ml-busy
+                   (timerp dsh-emacs--ml-busy-timer))
+          (dsh-test-pass "reconnect-keeps-busy-flag"))
+        (dsh-emacs--ml-busy-clear))
+    (kill-buffer buf)))
+
+;; --- 测试 98h: 空闲/已结算时重连不点亮 busy —— 不得出现幽灵 spinner ---
+(let ((buf (generate-new-buffer " *dsh-ml-reconnect-idle*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs--ml-busy-clear)
+        (cl-letf (((symbol-function 'open-network-stream)
+                   (lambda (&rest _) (prog1 :fake-proc)))
+                  ((symbol-function 'set-process-query-on-exit-flag)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'process-put)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'set-process-filter)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'set-process-sentinel)
+                   (lambda (&rest _) nil)))
+          (dsh-emacs-events-connect buf)
+          (dsh-emacs-events--health-stop))
+        (when (null dsh-emacs--ml-busy)
+          (dsh-test-pass "reconnect-idle-keeps-busy-off")))
+    (kill-buffer buf)))
+
+;; --- 测试 98i: 轮询的历史窗口尾部是旧 turn/end 时，不得清掉在飞的 busy ---
+;; 回归：`dsh-emacs--poll-update' 曾用窗口尾部 turn/end 直接 ml-busy-set nil，
+;; 而窗口可以停在*上一个* turn 的 turn/end 上（当前 turn 仍在飞行）——切走
+;; 再回来时首个可见轮询就把 busy flag 灭掉，打断随之失效。
+(let ((buf (generate-new-buffer " *dsh-ml-poll-stale-tail*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq dsh-emacs--current-session "sess-poll-tail")
+        ;; 先渲染一个新 turn/end（seq 5），把 anchor 推到 5、busy 熄灭
+        (dsh-emacs-render-event '((type . "turn/end") (seq . 5)))
+        ;; 当前 turn 在飞：busy 重新点亮（send 路径或 turn/start 路由）
+        (dsh-emacs--ml-busy-set t)
+        ;; 轮询拉回的窗口尾部正好是那个已渲染过的旧 turn/end（seq 5 ≤ anchor）
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_method _params cb)
+                     (funcall cb t '((events . [((event .
+                                                    ((type . "turn/end")
+                                                     (seq . 5))))])))))
+                  ((symbol-function 'get-buffer-window)
+                   (lambda (_buffer &optional _all) (selected-frame))))
+          (dsh-emacs--poll-update))
+        (when dsh-emacs--ml-busy
+          (dsh-test-pass "poll-stale-turn-end-keeps-busy"))
+        (dsh-emacs--ml-busy-clear))
+    (kill-buffer buf)))
+
+;; --- 测试 98j: 事件流决定 busy —— turn/start 点亮、turn/end 熄灭 ---
+;; 重开会话/重拉历史时，未闭合 turn（有 turn/start 无 turn/end）也要亮 spinner。
+(let ((buf (generate-new-buffer " *dsh-turn-open*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs--ml-busy-clear)
+        (dsh-emacs-render-event '((type . "turn/start") (seq . 1)))
+        (when (and dsh-emacs--ml-busy
+                   (timerp dsh-emacs--ml-busy-timer))
+          (dsh-test-pass "turn-start-lights-busy"))
+        (dsh-emacs-render-event '((type . "turn/end") (seq . 2)))
+        (when (null dsh-emacs--ml-busy)
+          (dsh-test-pass "turn-end-extinguishes-busy")))
+    (kill-buffer buf)))
+
 ;; --- 测试 98a: 乐观命令行渲染（optimistic command row） ---
 (let ((buf (generate-new-buffer " *dsh-cmd-opt*")))
   (unwind-protect
