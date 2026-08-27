@@ -2201,15 +2201,20 @@ seeing a historical `turn/end'."
 
 (defun dsh-emacs--poll-update ()
   "Poll once for updates."
-  ;; 只拉取最新的事件窗口（maxMessages 语义 = 最新 N 条消息的事件，
-  ;; 服务端最少返回约 850 条原始事件，一分钟内的新内容必然在其中），
-  ;; 由渲染层按 seq 锚点跳过已渲染部分。全量历史（可达数万条/数 MB JSON）
-  ;; 只在会话打开时加载一次；轮询每次都解析全量是本包卡顿的主要来源。
-  ;; The timer runs at a Web-like cadence, but HTTP responses can take
-  ;; longer than that cadence.  Never issue overlapping history requests:
-  ;; overlapping callbacks would race the seq anchor and make chunks appear
-  ;; out of order.
-  (unless dsh-emacs--poll-inflight
+  ;; 隐藏的聊天缓冲不轮询：1Hz 的全量 `session.history'（~850 条原始事件）
+  ;; HTTP 往返 + 渲染是全局卡顿的主要来源之一，而不可见缓冲的渲染没有
+  ;; 意义。切回该缓冲后下一个 tick（≤1s）立即恢复，且 WS 恢复时 101 处理器
+  ;; 仍会照常取消本定时器。
+  (when (get-buffer-window (current-buffer) 0)
+    ;; 只拉取最新的事件窗口（maxMessages 语义 = 最新 N 条消息的事件，
+    ;; 服务端最少返回约 850 条原始事件，一分钟内的新内容必然在其中），
+    ;; 由渲染层按 seq 锚点跳过已渲染部分。全量历史（可达数万条/数 MB JSON）
+    ;; 只在会话打开时加载一次；轮询每次都解析全量是本包卡顿的主要来源。
+    ;; The timer runs at a Web-like cadence, but HTTP responses can take
+    ;; longer than that cadence.  Never issue overlapping history requests:
+    ;; overlapping callbacks would race the seq anchor and make chunks appear
+    ;; out of order.
+    (unless dsh-emacs--poll-inflight
     (setq dsh-emacs--poll-inflight t)
     (dsh-emacs--rpc-async "session.history"
                           `((sessionId . ,(dsh-emacs--active-session-id))
@@ -2239,7 +2244,7 @@ seeing a historical `turn/end'."
                                              (cdr (assq 'events value)))))
                                 (when (dsh-emacs--turn-complete-p events)
                                   ;; Turn finished: stop the running spinner.
-                                  (dsh-emacs--ml-busy-set nil))))))))
+                                  (dsh-emacs--ml-busy-set nil)))))))))
 
 (defun dsh-emacs--turn-complete-p (events)
   "Return non-nil when EVENTS indicates that a turn is complete."
