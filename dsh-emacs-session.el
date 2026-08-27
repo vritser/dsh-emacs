@@ -172,6 +172,17 @@ active workspace filter)."
         (while (not (eobp))
           (when (equal restore-id (dsh-emacs-session-id-at-point))
             (throw 'dsh-session-restored t))
+          (forward-line 1))))
+    ;; On a fresh buffer (no previously focused row) the `insert` calls above
+    ;; leave point at the end; park it on the first session row instead so the
+    ;; list opens with the cursor (and hl-line) at the top, not the bottom.
+    ;; A buffer with no rows simply stays at the header.
+    (unless restore-id
+      (goto-char (point-min))
+      (catch 'dsh-first-row
+        (while (not (eobp))
+          (when (dsh-emacs-session-id-at-point)
+            (throw 'dsh-first-row t))
           (forward-line 1))))))
 
 (defun dsh-emacs-session--group-sessions (sessions workspaces)
