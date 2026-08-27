@@ -1303,20 +1303,8 @@ user's input text."
     (_ nil)))
 
 ;;; ---------------------------------------------------------------------------
-;;; Slash-command row styling: nerd-icons leading + running `-\|/' spinner
+;;; Slash-command row styling: bash terminal icon + running `-\|/' spinner
 ;;; ---------------------------------------------------------------------------
-
-(defcustom dsh-emacs-command-nerd-icons t
-  "Use the Nerd Fonts terminal glyph (nf-cod-terminal) as the leading icon
-of slash-command rows when the optional `nerd-icons' package is available.
-A Nerd Font must be installed for the glyph to render; without one the row
-falls back to the plain emoji/SVG icon.  Set to nil to always use the
-built-in fallback."
-  :type 'boolean
-  :group 'dsh-emacs-render)
-
-(defconst dsh-emacs--command-icon-name "nf-cod-terminal"
-  "nerd-icons icon name of the slash-command leading icon.")
 
 (defconst dsh-emacs--command-spinner-frames
   '("-" "\\" "|" "/")
@@ -1334,47 +1322,6 @@ classic shell spinner in slash.sh).")
   "Live running-command animations, keyed by COMMAND-ID.
 Each value is (BUFFER TIMER INDEX): BUFFER is the chat buffer the row lives
 in, TIMER the repeating `run-at-time' timer, INDEX the next frame index.")
-
-(defvar dsh-emacs--nerd-icon-prefix-map
-  '(("dev" . nerd-icons-devicon)
-    ("cod" . nerd-icons-codicon)
-    ("oct" . nerd-icons-octicon)
-    ("fa"  . nerd-icons-faicon)
-    ("seti" . nerd-icons-seti)
-    ("he"  . nerd-icons-helix)
-    ("md"  . nerd-icons-material)
-    ("ioe" . nerd-icons-ionicon)
-    ("weather" . nerd-icons-weather)
-    ("uiicons" . nerd-icons-uiicons)
-    ("devicons" . nerd-icons-devicons))
-  "Alist mapping nerd-icons prefix segments to their lookup functions.
-The key is the SET part of a \"nf-SET-NAME\" icon identifier.")
-
-(defun dsh-emacs-render--nerd-icon (name &optional fallback icon-fn)
-  "Return the Nerd Fonts glyph for icon NAME as a display string.
-NAME is a nerd-icons name such as \"nf-cod-terminal\" or \"nf-dev-terminal\".
-ICON-FN, when given, is the nerd-icons lookup function to call (e.g.
-`nerd-icons-codicon'); when nil the function is auto-detected from the
-\"nf-SET-\" prefix in NAME via `dsh-emacs--nerd-icon-prefix-map'.  The
-optional `nerd-icons' package is loaded on demand when
-`dsh-emacs-command-nerd-icons' is non-nil; FALLBACK is returned when the
-package is unavailable or the glyph lookup fails.  The glyph keeps its
-original `face' property (which carries the Nerd Font `:family'); the UI
-pipeline in `dsh-emacs-ui--top-border' merges label faces with
-`add-face-text-property' so the font family is preserved."
-  (if (and dsh-emacs-command-nerd-icons
-           (or (featurep 'nerd-icons)
-               (require 'nerd-icons nil t)))
-      (let ((fn (or icon-fn
-                    (and (stringp name)
-                         (string-match "\\`nf-\\([a-z]+\\)-" name)
-                         (cdr (assoc (match-string 1 name)
-                                     dsh-emacs--nerd-icon-prefix-map))))))
-        (when (and fn (fboundp fn))
-          (condition-case nil
-              (funcall fn name)
-            (error fallback))))
-    fallback))
 
 (defun dsh-emacs--command-spinner-start (command-id buffer)
   "Start the running `-\\|/' animation for COMMAND-ID in BUFFER.
@@ -1418,7 +1365,11 @@ buffer, because a timer callback may otherwise run in any buffer."
                                    (nth next-index
                                         dsh-emacs--command-spinner-frames))
                       :style 'minimal
-                      :color-key 'tool-pending)))
+                      :color-key 'tool-pending))
+                    ;; The label change above caused a full delete + re-insert,
+                    ;; so re-apply the tool-row pending tint to the whole row.
+                    (dsh-emacs-render--command-tint-running
+                     (nth 0 entry) (nth 1 entry)))
                 (dsh-emacs--command-spinner-stop command-id)))
           (dsh-emacs--command-spinner-stop command-id))))))
 
@@ -1437,6 +1388,17 @@ buffer, because a timer callback may otherwise run in any buffer."
              (dsh-emacs--command-spinner-stop command-id))
            dsh-emacs--command-spinners))
 
+(defun dsh-emacs-render--command-tint-running (ns block-id)
+  "Tint running slash-command row NS-BLOCK-ID like a running tool row.
+Applies `dsh-emacs-tool-pending-face' (orange, bold) to the whole block
+with merge semantics, so the leading icon's Nerd Font :family survives.
+The spinner tick re-inserts the row every frame, so call this after every
+fragment update while the command is running."
+  (when-let* ((b (dsh-emacs-ui-find-block (format "%s-%s" ns block-id))))
+    (let ((inhibit-read-only t))
+      (add-face-text-property (car b) (cdr b)
+                              'dsh-emacs-tool-pending-face t))))
+
 (defun dsh-emacs-render-command-optimistic (line)
   "Render a slash-command row immediately for LINE (e.g. \"/compact\").
 This is the optimistic path called from `dsh-emacs--submit-prompt' before
@@ -1450,9 +1412,7 @@ the real `command/run' event when it arrives."
            (temp-id (format "pending-%s" name))
            (label (dsh-emacs-render-command-label
                    (concat "/" name) args))
-           (icon (or (dsh-emacs-render--nerd-icon
-                      dsh-emacs--command-icon-name)
-                     (dsh-emacs-render--tool-icon "command")))
+           (icon (dsh-emacs-render--tool-icon "bash"))
            (ns (dsh-emacs-render--make-namespace))
            (block-id (format "cmd-%s" temp-id)))
       (when (and name (not (gethash temp-id dsh-emacs--command-blocks)))
@@ -1471,6 +1431,7 @@ the real `command/run' event when it arrives."
           :color-key 'tool-pending)
          :create-new t :expanded t
          :insert-before (dsh-emacs-render--input-insert-point))
+        (dsh-emacs-render--command-tint-running ns block-id)
         (dsh-emacs--command-spinner-start temp-id
                                           (current-buffer))))))
 
@@ -1492,9 +1453,9 @@ Stops the spinner, deletes the fragment, and clears `dsh-emacs--pending-command'
 
 (defun dsh-emacs-render-command (event)
   "Render a `command/run' or `command/done' EVENT as one flow node,
-mirroring dsh web's command rows: a leading icon (nf-cod-terminal from the
-optional `nerd-icons' package, `⚡' otherwise) followed by the command name
-and a classic `-\|/' spinner while running (see
+mirroring dsh web's command rows: a leading bash terminal icon (the same
+dsh-web SVG as bash tool rows, the `💻' emoji in terminal Emacs) followed
+by the command name and a classic `-\|/' spinner while running (see
 `dsh-emacs--command-spinner-frames');
 on completion the header shows only the command name + a short status
 (`✓ done' / `✗ failed', green on success, red on error), and the outcome
@@ -1515,9 +1476,7 @@ Returns the event seq."
                  (label (dsh-emacs-render-command-label
                          (dsh-emacs-render--aget "name" data)
                          (dsh-emacs-render--aget "args" data)))
-                 (icon (or (dsh-emacs-render--nerd-icon
-                            dsh-emacs--command-icon-name)
-                           (dsh-emacs-render--tool-icon "command"))))
+                 (icon (dsh-emacs-render--tool-icon "bash")))
             (if (equal type "command/run")
                 (progn
                   ;; Clean up the optimistic row if one is pending for
@@ -1552,6 +1511,7 @@ Returns the event seq."
                     :color-key 'tool-pending)
                    :create-new t :expanded nil
                    :insert-before (dsh-emacs-render--input-insert-point))
+                  (dsh-emacs-render--command-tint-running ns block-id)
                   (dsh-emacs--command-spinner-start command-id
                                                     (current-buffer)))
               (when-let* ((entry (gethash command-id
@@ -1562,9 +1522,7 @@ Returns the event seq."
                        (state (if ok 'success 'error))
                        (text (dsh-emacs-render--aget "text" data))
                        (entry-icon (or (nth 3 entry)
-                                       (dsh-emacs-render--nerd-icon
-                                        dsh-emacs--command-icon-name)
-                                       (dsh-emacs-render--tool-icon "command")))
+                                       (dsh-emacs-render--tool-icon "bash")))
                        (qualified-id (format "%s-%s" (nth 0 entry)
                                              (nth 1 entry))))
                   (dsh-emacs-ui-update-fragment

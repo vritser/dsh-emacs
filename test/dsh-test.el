@@ -4911,46 +4911,95 @@ so the code under test can read fields through the protocol accessors."
     (setq dsh-emacs--command-spinners old-spinners)
     (kill-buffer buf)))
 
-;; --- 测试 98b: command 行首 nerd-icons 字形（nf-dev-terminal） ---
-(let ((dsh-emacs-command-nerd-icons nil))
-  (when (equal (dsh-emacs-render--nerd-icon "nf-dev-terminal" "⚡") "⚡")
-    (dsh-test-pass "command-nerd-icon-disabled-fallback")))
+;; --- 测试 98c: 运行中 command 行与 tool 行一致 —— 整行 pending 着色 ---
+(let ((buf (generate-new-buffer " *dsh-cmd-tint*"))
+      (old-spinners dsh-emacs--command-spinners))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq dsh-emacs--command-spinners (make-hash-table :test 'equal))
+        (dsh-emacs-render-event
+         '((type . "command/run") (seq . 60)
+           (data . ((commandId . "tint1") (name . "goal")))))
+        (let* ((qid (format "%s-cmd-%s" (dsh-emacs-render--make-namespace) "tint1"))
+               (blk (dsh-emacs-ui--find-block qid))
+               (tinted (and blk
+                            (seq-every-p
+                             (lambda (pos)
+                               (memq 'dsh-emacs-tool-pending-face
+                                     (ensure-list (get-text-property pos 'face))))
+                             (number-sequence (car blk) (1- (cdr blk)))))))
+          (when tinted
+            (dsh-test-pass "command-running-tints-whole-block")))
+        ;; spinner tick 每帧整行重建，着色必须不丢
+        (dsh-emacs--command-spinner-tick "tint1")
+        (let* ((qid (format "%s-cmd-%s" (dsh-emacs-render--make-namespace) "tint1"))
+               (blk (dsh-emacs-ui--find-block qid)))
+          (when (and blk
+                     (seq-every-p
+                      (lambda (pos)
+                        (memq 'dsh-emacs-tool-pending-face
+                              (ensure-list (get-text-property pos 'face))))
+                      (number-sequence (car blk) (1- (cdr blk)))))
+            (dsh-test-pass "command-running-tint-survives-tick"))))
+    (setq dsh-emacs--command-spinners old-spinners)
+    (kill-buffer buf)))
 
-;; 默认开启但包不可用时（emacs -Q 下 nerd-icons 不在 load-path）同样回退。
-(when (equal (dsh-emacs-render--nerd-icon "nf-cod-terminal" "⚡") "⚡")
-  (dsh-test-pass "command-nerd-icon-unavailable-fallback"))
+;; --- 测试 98d: 乐观 command 行同样带整行 pending 着色 ---
+(let ((buf (generate-new-buffer " *dsh-cmd-opt-tint*"))
+      (old-spinners dsh-emacs--command-spinners))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (let ((dsh-emacs-show-commands t)
+              (dsh-emacs--command-blocks (make-hash-table :test 'equal))
+              (dsh-emacs--pending-command nil)
+              (dsh-emacs--command-spinners (make-hash-table :test 'equal)))
+          (dsh-emacs-render-command-optimistic "/compact")
+          (let* ((entry (gethash "pending-compact" dsh-emacs--command-blocks))
+                 (blk (and entry
+                           (dsh-emacs-ui--find-block
+                            (format "%s-%s" (nth 0 entry) (nth 1 entry))))))
+            (when (and blk
+                       (seq-every-p
+                        (lambda (pos)
+                          (memq 'dsh-emacs-tool-pending-face
+                                (ensure-list (get-text-property pos 'face))))
+                        (number-sequence (car blk) (1- (cdr blk)))))
+              (dsh-test-pass "command-optimistic-tints-whole-block")))))
+    (setq dsh-emacs--command-spinners old-spinners)
+    (kill-buffer buf)))
 
-;; 可用时直接用 nerd-icons 字形（mock require/featurep/nerd-icons-codicon）。
-(cl-letf (((symbol-function 'require) (lambda (&rest _) t))
-          ((symbol-function 'featurep) (lambda (&rest _) t))
-          ((symbol-function 'nerd-icons-codicon)
-           (lambda (_name)
-             (propertize "TERM" 'face '(:family "Mock Font" :weight normal)))))
-  (let ((result (dsh-emacs-render--nerd-icon "nf-cod-terminal" "⚡")))
-    (when (and (string-match-p "TERM" result)
-               ;; The glyph keeps its original face with :family from
-               ;; nerd-icons-codicon; the UI pipeline merges label faces
-               ;; via add-face-text-property so the family survives.
-               (equal (plist-get (get-text-property 0 'face result) :family)
-                      "Mock Font"))
-      (dsh-test-pass "command-nerd-icon-uses-glyph"))))
+;; --- 测试 98e: command 行首图标为 bash 终端（与 tool 行一致） ---
+(let ((buf (generate-new-buffer " *dsh-cmd-bash-icon*"))
+      (old-spinners dsh-emacs--command-spinners))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq dsh-emacs--command-spinners (make-hash-table :test 'equal))
+        (dsh-emacs-render-event
+         '((type . "command/run") (seq . 70)
+           (data . ((commandId . "bash1") (name . "goal")))))
+        (let ((txt (buffer-string)))
+          (when (string-match-p "💻" txt)
+            (dsh-test-pass "command-leading-icon-is-bash")))
+        ;; done 后依旧保留 bash 图标
+        (dsh-emacs--command-spinner-tick "bash1")
+        (dsh-emacs-render-event
+         '((type . "command/done") (seq . 71)
+           (data . ((commandId . "bash1") (kind . "success")
+                    (text . "ok")))))
+        (let ((txt (buffer-string)))
+          (when (string-match-p "💻" txt)
+            (dsh-test-pass "command-done-keeps-bash-icon"))))
+    (setq dsh-emacs--command-spinners old-spinners)
+    (kill-buffer buf)))
 
-;; 支持任意 nerd-icons 类型：通过名称前缀自动检测 icon 函数
-(cl-letf (((symbol-function 'require) (lambda (&rest _) t))
-          ((symbol-function 'featurep) (lambda (&rest _) t))
-          ((symbol-function 'nerd-icons-devicon)
-           (lambda (_name) "DEV"))
-          ((symbol-function 'nerd-icons-codicon)
-           (lambda (_name) "COD"))
-          ((symbol-function 'nerd-icons-octicon)
-           (lambda (_name) "OCT")))
-  (let ((dev  (dsh-emacs-render--nerd-icon "nf-dev-terminal" "?"))
-        (cod  (dsh-emacs-render--nerd-icon "nf-cod-terminal" "?"))
-        (oct  (dsh-emacs-render--nerd-icon "nf-oct-alert" "?")))
-    (when (and (equal dev "DEV")
-               (equal cod "COD")
-               (equal oct "OCT"))
-      (dsh-test-pass "command-nerd-icon-multi-set"))))
+;; batch（非图形）下图标表给出 bash emoji 兜底；SVG 模板存在供 GUI 渲染
+(when (equal (cdr (assoc "bash" dsh-emacs--variant-icons)) "💻")
+  (dsh-test-pass "command-bash-icon-emoji-fallback"))
+(when (assoc "bash" dsh-emacs--tool-icon-svgs)
+  (dsh-test-pass "command-bash-icon-svg-template"))
 
 ;; --- 测试 98a: 乐观命令行渲染（optimistic command row） ---
 (let ((buf (generate-new-buffer " *dsh-cmd-opt*")))
@@ -4961,16 +5010,14 @@ so the code under test can read fields through the protocol accessors."
               (dsh-emacs--command-blocks (make-hash-table :test 'equal))
               (dsh-emacs--pending-command nil)
               (dsh-emacs--command-spinners (make-hash-table :test 'equal)))
-          (cl-letf (((symbol-function 'dsh-emacs-render--nerd-icon)
-                     (lambda (&rest _) "⚡")))
-            (dsh-emacs-render-command-optimistic "/compact")
-            ;; temp entry stored in command-blocks
-            (let ((entry (gethash "pending-compact"
-                                  dsh-emacs--command-blocks)))
-              (when (and entry
-                         dsh-emacs--pending-command
-                         (equal (car dsh-emacs--pending-command) "pending-compact"))
-                (dsh-test-pass "command-optimistic-creates-temp-entry"))))))
+          (dsh-emacs-render-command-optimistic "/compact")
+          ;; temp entry stored in command-blocks
+          (let ((entry (gethash "pending-compact"
+                                dsh-emacs--command-blocks)))
+            (when (and entry
+                       dsh-emacs--pending-command
+                       (equal (car dsh-emacs--pending-command) "pending-compact"))
+              (dsh-test-pass "command-optimistic-creates-temp-entry")))))
     (kill-buffer buf)))
 
 ;; --- 测试 98b: command/run 替换乐观行 ---
@@ -4982,23 +5029,21 @@ so the code under test can read fields through the protocol accessors."
               (dsh-emacs--command-blocks (make-hash-table :test 'equal))
               (dsh-emacs--pending-command nil)
               (dsh-emacs--command-spinners (make-hash-table :test 'equal)))
-          (cl-letf (((symbol-function 'dsh-emacs-render--nerd-icon)
-                     (lambda (&rest _) "⚡")))
-            ;; Step 1: optimistic render
-            (dsh-emacs-render-command-optimistic "/compact")
-            (when (gethash "pending-compact" dsh-emacs--command-blocks)
-              ;; Step 2: real command/run event arrives
-              (dsh-emacs-render-command
-               '((type . "command/run") (seq . 10)
-                 (data . ((commandId . "real-123")
-                          (name . "/compact") (args . "")))))
-              ;; temp entry removed, real entry present
-              (when (and (null (gethash "pending-compact"
-                                        dsh-emacs--command-blocks))
-                         (gethash "real-123"
-                                  dsh-emacs--command-blocks)
-                         (null dsh-emacs--pending-command))
-                (dsh-test-pass "command-run-replaces-optimistic"))))))
+          ;; Step 1: optimistic render
+          (dsh-emacs-render-command-optimistic "/compact")
+          (when (gethash "pending-compact" dsh-emacs--command-blocks)
+            ;; Step 2: real command/run event arrives
+            (dsh-emacs-render-command
+             '((type . "command/run") (seq . 10)
+               (data . ((commandId . "real-123")
+                        (name . "/compact") (args . "")))))
+            ;; temp entry removed, real entry present
+            (when (and (null (gethash "pending-compact"
+                                      dsh-emacs--command-blocks))
+                       (gethash "real-123"
+                                dsh-emacs--command-blocks)
+                       (null dsh-emacs--pending-command))
+              (dsh-test-pass "command-run-replaces-optimistic")))))
     (kill-buffer buf)))
 (let ((calls nil)
       (read-called nil)
