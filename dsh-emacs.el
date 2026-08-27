@@ -1366,12 +1366,19 @@ All welcome text is marked read-only; only the region after ❯ is writable."
       ;; 把整个欢迎区域标记为 read-only（使用 text property 而非 buffer-read-only）
       (put-text-property welcome-start (point) 'read-only t)
       (put-text-property welcome-start (point) 'front-sticky '(read-only))
-      ;; Do not let the read-only property leak into the input inserted at
-      ;; the end of the prompt.  Text properties are sticky by default, so
-      ;; inserting immediately after the prompt would otherwise signal
-      ;; `text-read-only' even though the insertion point itself has no
-      ;; `read-only' property.
-      (put-text-property welcome-start (point) 'rear-nonsticky '(read-only)))
+      ;; Do not let properties leak into the input inserted at the end of the
+      ;; prompt.  Text properties are sticky by default, so inserting
+      ;; immediately after the prompt would otherwise inherit them:
+      ;;  - `read-only': would signal `text-read-only' even though the
+      ;;    insertion point itself has no `read-only' property.
+      ;;  - `face` / `font-lock-face': typing runs `insert-and-inherit'
+      ;;    (Emacs 31 `self-insert-command'), which copies the previous
+      ;;    character's face.  Without the exclusion, manual input after
+      ;;    `❯ ' inherited the prompt's accent face (blue) while pasted
+      ;;    (`yank' strips faces) or completed (plain `insert') text stayed
+      ;;    default coloured — the "half blue, half white" input line.
+      (put-text-property welcome-start (point) 'rear-nonsticky
+                         '(read-only face font-lock-face)))
     ;; 标记输入开始位置（marker 会自动跟随文本插入/删除）
     (setq dsh-emacs--input-marker (point-marker))))
 
