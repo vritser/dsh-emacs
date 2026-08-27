@@ -317,9 +317,16 @@ answer clears the filter.  `g' refreshes while keeping the filter."
                                        (dsh-protocol-workspace-path ws)))
                                   (dsh-protocol-workspace-workspace-id ws)))
                           workspaces))
+         ;; require-match is nil so an empty answer (which clears the filter)
+         ;; is accepted — a literal `t' would force a valid candidate and make
+         ;; it impossible to type empty to restore the full list.
          (picked (completing-read "Filter by workspace (empty to clear): "
-                                  entries nil t)))
-    (if (string-empty-p picked)
+                                  entries nil nil)))
+    (if (or (string-empty-p picked)
+            ;; A typed string that matches no known workspace also means
+            ;; "show all" (leave the filter cleared), rather than silently
+            ;; picking a nil workspace-id.
+            (null (assoc picked entries)))
         (setq dsh-emacs-session--filter-ws-id nil
               dsh-emacs-session--filter-ws-title nil)
       (setq dsh-emacs-session--filter-ws-id (cdr (assoc picked entries))
