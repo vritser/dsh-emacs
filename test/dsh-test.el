@@ -5250,6 +5250,38 @@ so the code under test can read fields through the protocol accessors."
     (kill-buffer buf-a)
     (kill-buffer buf-b)))
 
+;; --- 测试 98l: 乐观用户回显不重复 —— mux 先于 HTTP 回调送达 user/message ---
+;; 回归：pending 登记原在 session.prompt 的 HTTP 回调里，而 mux 流可能抢先
+;; 送达同一 user/message（此时 pending 为空 → 渲染一版真实消息），回调随后又
+;; 渲染一遍乐观回显 → 「偶尔渲染两个 user input message」。修复：pending 在
+;; RPC 发出前登记，任何时刻到达的事件都能被去重闸门消费。
+(let ((buf (generate-new-buffer " *dsh-submit-race*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq dsh-emacs--current-session "sess-race")
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_method _params cb)
+                     ;; 模拟 mux 流在 HTTP 响应回调之前送达同一 user/message
+                     (dsh-emacs-events--dispatch-event
+                      (current-buffer)
+                      '((type . "user/message") (seq . 42)
+                        (data . ((content . [((type . "text")
+                                              (text . "race-msg"))])))))
+                     (funcall cb t '((ok . t))))))
+          (dsh-emacs--submit-plain "race-msg" nil t))
+        (let ((n (1- (length (split-string
+                              (buffer-substring-no-properties (point-min)
+                                                              (point-max))
+                              "race-msg")))))
+          (when (= 1 n)
+            (dsh-test-pass "user-echo-no-duplicate-when-stream-wins")))
+        (when (null dsh-emacs--pending-user-messages)
+          (dsh-test-pass "user-pending-consumed-by-stream-event"))
+        (dsh-emacs--ml-busy-clear)
+        (dsh-emacs-events--watchdog-stop))
+    (kill-buffer buf)))
+
 ;; --- 测试 98a: 乐观命令行渲染（optimistic command row） ---
 (let ((buf (generate-new-buffer " *dsh-cmd-opt*")))
   (unwind-protect

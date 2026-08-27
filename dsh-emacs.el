@@ -1633,6 +1633,17 @@ fallback after the line was already recorded at submit time."
                     (clientTimeZone . ,(dsh-emacs--client-time-zone)))))
     (when images
       (setq payload (append payload (list (cons 'images images)))))
+    ;; Track the optimistic echo BEFORE the RPC round-trip: the mux may
+    ;; deliver the canonical `user/message' at any moment — even before the
+    ;; HTTP response is processed — and `dsh-emacs-render--consume-pending-user-message'
+    ;; is the only dedup gate.  The entry must already exist when the event
+    ;; arrives, or the echo (rendered on acceptance) and the canonical copy
+    ;; would both render.
+    (when (buffer-live-p chat-buffer)
+      (with-current-buffer chat-buffer
+        (unless (string-empty-p message)
+          (setq dsh-emacs--pending-user-messages
+                (append dsh-emacs--pending-user-messages (list message))))))
     (dsh-emacs--rpc-async "session.prompt" payload
                           (lambda (ok value)
                             (if ok
@@ -1646,10 +1657,6 @@ fallback after the line was already recorded at submit time."
                                   ;; bottom input buffer.
                                   (when (buffer-live-p chat-buffer)
                                     (with-current-buffer chat-buffer
-                                      (unless (string-empty-p message)
-                                        (setq dsh-emacs--pending-user-messages
-                                              (append dsh-emacs--pending-user-messages
-                                                      (list message))))
                                       ;; dsh is now executing: light up the
                                       ;; mode-line running spinner.
                                       (dsh-emacs--ml-busy-set t)
@@ -1676,7 +1683,15 @@ fallback after the line was already recorded at submit time."
                                   (when (buffer-live-p input-buffer)
                                     (with-current-buffer input-buffer
                                       (dsh-emacs--clear-input))))
-                              (message "Failed to send: %S" value))))))
+                              (message "Failed to send: %S" value)
+                              ;; The server rejected the prompt, so no
+                              ;; `user/message' will ever arrive to consume the
+                              ;; optimistic entry; drop it, lest the same text
+                              ;; sent again later swallow the real event.
+                              (when (buffer-live-p chat-buffer)
+                                (with-current-buffer chat-buffer
+                                  (setq dsh-emacs--pending-user-messages
+                                        (delq message dsh-emacs--pending-user-messages)))))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;;  附件 / 模型选择 / 输入历史
