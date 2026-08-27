@@ -5282,6 +5282,60 @@ so the code under test can read fields through the protocol accessors."
         (dsh-emacs-events--watchdog-stop))
     (kill-buffer buf)))
 
+;; --- 测试 98m: turn/end 带 reason.kind=error（429 等模型失败）渲染可见错误行 ---
+(let ((buf (generate-new-buffer " *dsh-turn-error*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs--ml-busy-clear)
+        (dsh-emacs-render-event
+         '((type . "turn/start") (seq . 1) (data . ((turn . 1)))))
+        (when (and dsh-emacs--ml-busy (timerp dsh-emacs--ml-busy-timer))
+          (dsh-test-pass "turn-error-lights-busy-before-end"))
+        ;; 模型失败：turn/end + data.reason.kind = "error"
+        (dsh-emacs-render-event
+         '((type . "turn/end") (seq . 2) (data . ((turn . 1)
+           (reason . ((kind . "error")
+                      (error . ((code . "insufficient_quota")
+                                (message . "Allocated quota exceeded")))))))))
+        (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+          (when (and (null dsh-emacs--ml-busy)
+                     (string-match-p "insufficient_quota" text)
+                     (string-match-p "Allocated quota exceeded" text))
+            (dsh-test-pass "turn-error-renders-visible-row"))))
+    (kill-buffer buf)))
+
+;; --- 测试 98n: 成功 / 打断的 turn/end 不渲染错误行 ---
+(let ((buf (generate-new-buffer " *dsh-turn-ok*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-render-event
+         '((type . "turn/end") (seq . 1)
+           (data . ((turn . 1) (reason . ((kind . "completed")))))))
+        ;; 成功结束：无错误行
+        (when (not (string-match-p "✗ Model error"
+                                   (buffer-substring-no-properties
+                                    (point-min) (point-max))))
+          (dsh-test-pass "turn-success-no-error-row"))
+        ;; 打断（reason.kind=cancelled）：同样不渲染错误行
+        (dsh-emacs-render-event
+         '((type . "turn/end") (seq . 2)
+           (data . ((turn . 2) (reason . ((kind . "cancelled")))))))
+        (when (not (string-match-p "✗ Model error"
+                                   (buffer-substring-no-properties
+                                    (point-min) (point-max))))
+          (dsh-test-pass "turn-cancelled-no-error-row")))
+    (kill-buffer buf)))
+
+;; --- 测试 98o: 非信封格式的失败响应（供应商错误体透传）unwrap 出消息 ---
+(let* ((response (json-read-from-string
+                  "{\"message\":\"Allocated quota exceeded, please increase your quota limit.\",\"code\":\"insufficient_quota\"}"))
+       (unwrapped (dsh-emacs--unwrap-response response)))
+  (when (and (null (car unwrapped))
+             (string-match-p "Allocated quota exceeded" (cdr unwrapped)))
+    (dsh-test-pass "unwrap-leaked-error-body-surfaces-message")))
+
 ;; --- 测试 98a: 乐观命令行渲染（optimistic command row） ---
 (let ((buf (generate-new-buffer " *dsh-cmd-opt*")))
   (unwind-protect

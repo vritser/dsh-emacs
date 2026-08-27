@@ -1273,12 +1273,45 @@ running spinner (idempotent — the send path already lit it, and a
   (dsh-emacs-render--event-seq event))
 
 (defun dsh-emacs-render-turn-end (event)
-  "Record a `turn/end' event without adding visual chrome."
+  "Record a `turn/end' event; surface a failed model run.
+A terminal `turn/end' whose DATA.REASON.KIND is \"error\" (dsh web's
+turn-error node — the provider rejected the run: quota, rate, ...)
+renders as a visible error row; anything else just clears the running
+spinner."
   (dsh-emacs-render--close-current-group)
   ;; The turn finished: stop the mode-line running spinner.
   (when (fboundp 'dsh-emacs--ml-busy-set)
     (dsh-emacs--ml-busy-set nil))
+  ;; A failed run must not be silently swallowed: dsh signals it as
+  ;; `turn/end' + data.reason.kind = \"error\", mirroring dsh web's
+  ;; turn-error node.
+  (let ((failure (dsh-emacs-render--turn-failure event)))
+    (when failure
+      (dsh-emacs-render-info
+       (if (cdr failure)
+           (format "✗ Model error (%s)" (cdr failure))
+         "✗ Model error")
+       (car failure))))
   (dsh-emacs-render--event-seq event))
+
+(defun dsh-emacs-render--turn-failure (event)
+  "Return (MESSAGE . CODE) for EVENT's terminal turn failure, or nil.
+Mirrors dsh web's turn-error definition: a `turn/end' event whose
+DATA.REASON.KIND is \"error\" carries the provider failure in
+DATA.REASON.ERROR ({code, message, ...})."
+  (let* ((data (dsh-emacs-render--event-data event))
+         (reason (dsh-emacs-render--aget "reason" data))
+         (kind (dsh-emacs-render--aget "kind" reason))
+         (error (dsh-emacs-render--aget "error" reason)))
+    (when (equal kind "error")
+      (cond
+       ((stringp error) (cons error nil))
+       ((listp error)
+        (cons (or (dsh-emacs-render--aget "message" error)
+                  (format "%S" error))
+              (let ((code (dsh-emacs-render--aget "code" error)))
+                (and (stringp code) (not (string-empty-p code)) code))))
+       (t (cons "Model run failed" nil))))))
 
 (defun dsh-emacs-render-info (label text &optional block-id)
   "Render a one-off informational fragment (interrupts, errors, polling errors)."

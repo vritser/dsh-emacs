@@ -324,7 +324,14 @@ RESPONSE is the parsed JSON object from the server."
     ;; in Elisp.  Test the boolean explicitly instead of using `if ok'.
     (if (and ok (not (eq ok :json-false)))
         (cons t (cdr (assq 'value result)))
-      (cons nil (cdr (assq 'error result))))))
+      ;; Not an ok envelope: prefer the envelope's error, then a provider
+      ;; error body that leaked through the HTTP response (no `result' key,
+      ;; e.g. a model-studio quota rejection) so callers show the real
+      ;; reason instead of nil.
+      (cons nil (or (cdr (assq 'error result))
+                    (cdr (assq 'message response))
+                    (cdr (assq 'error response))
+                    nil)))))
 
 (defun dsh-emacs--decode-response-body ()
   "Decode the current HTTP response body as UTF-8 in place.
