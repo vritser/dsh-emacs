@@ -132,6 +132,7 @@ The dsh CLI is auto-managed out of the box; a manually run server also works:
 
 - **Auto-detection & install**: when the `dsh` executable is missing, the first server-touching command asks whether to install it (`npm install -g @deepseek-ai/dsh`, customizable via `dsh-emacs-server-install-command`); declining gives manual instructions.
 - **Server auto-start** (`dsh-emacs-server-auto-start`, default `t`): the probe checks `dsh-emacs-base-url`; if nothing answers, `dsh web --host H --port P --no-open` is spawned in the background (host/port come from the base URL) and dsh-emacs waits up to `dsh-emacs-server-wait-seconds` for it to become ready. The spawned process is tracked and stopped on Emacs exit (or via `M-x dsh-emacs-server-stop`); set the option to `nil` to manage the server yourself.
+- **Eager background start** (`dsh-emacs-server-start-on-init`, default `nil`): when non-nil the server is spawned in the background 1 s after `after-init-hook`, so by the time the user opens a session the server is likely already running.  The launch is fire-and-forget — no Emacs freeze at startup.  The first `dsh-emacs-server-ensure` call will still block until the server is ready, but the wait is usually zero if the server finished initializing during idle time.
 - **Manual server**: a server you start yourself is just used — dsh-emacs never kills it:
 
 ```sh

@@ -51,6 +51,15 @@ instructions instead of starting anything."
   :type 'boolean
   :group 'dsh-emacs-server)
 
+(defcustom dsh-emacs-server-start-on-init nil
+  "Whether to start the dsh server eagerly at Emacs startup.
+When non-nil the server is launched in the background shortly after
+`dsh-emacs-mode' is first activated, so by the time the user opens a
+session the server is likely already running.  When nil (the default)
+the server is started lazily on the first command that needs it."
+  :type 'boolean
+  :group 'dsh-emacs-server)
+
 (defcustom dsh-emacs-server-wait-seconds 30
   "How long `dsh-emacs-server-ensure' waits for a freshly started server.
 The first boot of `dsh web' loads the whole plugin tree and can take
@@ -257,7 +266,7 @@ fast when the spawned process already exited; otherwise signals
           (setq last-report (floor waited))
           (message "Waiting for dsh server... %ds/%ds"
                    last-report dsh-emacs-server-wait-seconds)))
-      (sleep-for 0.2))
+      (sleep-for 0.1))
     (cond
      ((dsh-emacs--server-alive-p)
       (message "dsh server ready at %s" (dsh-emacs--server-base-url))
@@ -284,6 +293,11 @@ reachable at `dsh-emacs-base-url' is left alone (message + t).  When the
    ((dsh-emacs--server-alive-p)
     (message "dsh server already running at %s" (dsh-emacs--server-base-url))
     t)
+   ((and dsh-emacs--server-process
+         (process-live-p dsh-emacs--server-process))
+    ;; Process already launching (e.g. from init-time background start).
+    ;; Don't spawn a duplicate — just wait for it to become ready.
+    (dsh-emacs--server-wait-ready))
    (t
     (let* ((bin (or (dsh-emacs--server-bin)
                     (dsh-emacs--server-ensure-installed)))
@@ -352,6 +366,29 @@ service."
     (delete-process dsh-emacs--server-process)))
 
 (add-hook 'kill-emacs-hook #'dsh-emacs-server--teardown)
+
+(defun dsh-emacs-server--maybe-start-on-init ()
+  "Fire-and-forget: launch the dsh server in the background after init.
+Only runs when `dsh-emacs-server-start-on-init' is non-nil.  The server
+process is spawned without waiting — the first `dsh-emacs-server-ensure'
+call will block until it is ready, so the user never sees a freeze at
+startup."
+  (when (and dsh-emacs-server-start-on-init
+             (not noninteractive)
+             (not (dsh-emacs--server-alive-p))
+             (not dsh-emacs--server-process))
+    (run-at-time 1 nil
+      (lambda ()
+        (condition-case nil
+            (when (and (not (dsh-emacs--server-alive-p))
+                       (not dsh-emacs--server-process))
+              (when-let* ((bin (or (dsh-emacs--server-bin)
+                                   (dsh-emacs--server-ensure-installed)))
+                          (host-port (dsh-emacs--server-host-port)))
+                (dsh-emacs--server-launch bin (car host-port) (cdr host-port))))
+          (error nil))))))
+
+(add-hook 'after-init-hook #'dsh-emacs-server--maybe-start-on-init)
 
 (provide 'dsh-emacs-server)
 
