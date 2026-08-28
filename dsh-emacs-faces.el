@@ -95,16 +95,6 @@
 	:type 'string
 	:group 'dsh-emacs-faces)
 
-(defcustom dsh-emacs-color-assistant-bg "#f5f6f8"
-	"Assistant message background (light)."
-	:type 'string
-	:group 'dsh-emacs-faces)
-
-(defcustom dsh-emacs-color-assistant-bg-dark "#252a34"
-	"Assistant message background (dark)."
-	:type 'string
-	:group 'dsh-emacs-faces)
-
 (defcustom dsh-emacs-color-tool-pending-border "#b45f06"
 	"Tool pending border (light)."
 	:type 'string
@@ -240,10 +230,8 @@
 	:group 'dsh-emacs-faces)
 
 (defface dsh-emacs-assistant-body-face
-	`((((background light)) :background ,dsh-emacs-color-assistant-bg :extend t)
-		(((background dark)) :background ,dsh-emacs-color-assistant-bg-dark :extend t)
-		(t :inherit default))
-	"Assistant message body background, distinct from user messages."
+	'((t))
+	"Assistant message body (no background, matches default)."
 	:group 'dsh-emacs-faces)
 
 ;;; ---------------------------------------------------------------------------
