@@ -105,6 +105,14 @@ Off by default to reduce visual noise."
   :type 'integer
   :group 'dsh-emacs-render)
 
+(defcustom dsh-emacs-max-buffer-size 200000
+  "Maximum character count of the chat transcript buffer.
+When the buffer exceeds this size old content is silently trimmed from the
+top to prevent unbounded memory growth and redisplay slowdown in long
+sessions.  Set to nil to disable trimming."
+  :type '(choice integer (const nil))
+  :group 'dsh-emacs-render)
+
 (defcustom dsh-emacs-group-consecutive-tools 3
   "How many consecutive tool calls are grouped into one activity group."
   :type 'integer
@@ -1892,32 +1900,52 @@ Returns the event seq."
         (setq dsh-emacs--pending-user-messages (nreverse remaining)))
       matched)))
 
+(defun dsh-emacs-render--trim-buffer ()
+  "Trim old transcript content when the buffer exceeds `dsh-emacs-max-buffer-size'.
+Deletes the earliest content while preserving the input prompt area."
+  (when (and dsh-emacs-max-buffer-size
+             (> (buffer-size) dsh-emacs-max-buffer-size))
+    (let* ((limit dsh-emacs-max-buffer-size)
+           (trim-to (- (point-max) (/ limit 2))))
+      (when (> trim-to (point-min))
+        (let ((inhibit-read-only t))
+          (delete-region (point-min) trim-to))))))
+
 (defun dsh-emacs-render-history-events (events &optional stream)
   "Render EVENTS in seq order, optionally processing live STREAM chunks.
 EVENTS is a vector/sequence of {\"event\": alist} entries.  Renders only
 entries with seq > `dsh-emacs--anchor-seq'.  During an initial history load,
 STREAM should be nil: completed `assistant/message' snapshots are sufficient
 and avoid replaying thousands of old deltas.  Polling passes STREAM non-nil
-to render new `assistant/chunk' events as they arrive."
+to render new `assistant/chunk' events as they arrive.
+The loop yields to the input queue every 5 events so that user keystrokes
+interrupt the batch and keep the UI responsive."
   (let ((rendered 0)
-        (entries (if (vectorp events) (append events nil) events)))
-    (dolist (entry entries)
-      (let* ((ev (dsh-emacs-render--aget "event" entry))
-             (seq (and ev (dsh-emacs-render--event-seq ev))))
-        (when (and ev
-                   (> (or seq 0) (or dsh-emacs--anchor-seq 0))
-                   (or stream
-                       (not (equal (dsh-emacs-render--aget "type" ev)
-                                   "assistant/chunk"))))
-          (if (dsh-emacs-render--consume-pending-user-message ev)
-              ;; The optimistic copy is already visible.  Still advance the
-              ;; anchor so this canonical event is not processed repeatedly.
-              (when (integerp seq)
-                (setq dsh-emacs--anchor-seq seq))
-            (when (dsh-emacs-render-event ev)
-              (setq rendered (1+ rendered)))))))
+        (entries (if (vectorp events) (append events nil) events))
+        (counter 0))
+    (while-no-input
+      (dolist (entry entries)
+        (let* ((ev (dsh-emacs-render--aget "event" entry))
+               (seq (and ev (dsh-emacs-render--event-seq ev))))
+          (when (and ev
+                     (> (or seq 0) (or dsh-emacs--anchor-seq 0))
+                     (or stream
+                         (not (equal (dsh-emacs-render--aget "type" ev)
+                                     "assistant/chunk"))))
+            (if (dsh-emacs-render--consume-pending-user-message ev)
+                ;; The optimistic copy is already visible.  Still advance the
+                ;; anchor so this canonical event is not processed repeatedly.
+                (when (integerp seq)
+                  (setq dsh-emacs--anchor-seq seq))
+              (when (dsh-emacs-render-event ev)
+                (setq rendered (1+ rendered)))))
+          ;; Yield every 5 events so the user can interrupt and see progress.
+          (cl-incf counter)
+          (when (and (>= counter 5) (sit-for 0))
+            (setq counter 0)))))
     (when (> rendered 0)
-      (dsh-emacs-render--follow-stream))
+      (dsh-emacs-render--follow-stream)
+      (dsh-emacs-render--trim-buffer))
     rendered))
 
 (provide 'dsh-emacs-render)
