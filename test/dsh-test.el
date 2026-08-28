@@ -5786,13 +5786,13 @@ so the code under test can read fields through the protocol accessors."
                (string-match-p "second" (car (cadr index))))
       (dsh-test-pass "imenu-user-index"))))
 
-;; --- 测试 60: dsh-emacs--workspace-sessions ---
+;; --- 测试 102: dsh-emacs--workspace-sessions ---
 (let ((s1 (dsh-protocol-session--from-alist
          (list (cons 'sessionId "s1") (cons 'title "First")
-               (cons 'blank :json-false))))
+               (cons 'updatedAt 2000) (cons 'blank :json-false))))
       (s2 (dsh-protocol-session--from-alist
          (list (cons 'sessionId "s2") (cons 'title "Second")
-               (cons 'blank :json-false))))
+               (cons 'updatedAt 1000) (cons 'blank :json-false))))
       (s3 (dsh-protocol-session--from-alist
          (list (cons 'sessionId "s3") (cons 'title "Blank")
                (cons 'blank t))))
@@ -5815,7 +5815,7 @@ so the code under test can read fields through the protocol accessors."
                (string= "s1" (dsh-protocol-session-session-id (car result)))
                (string= "s2" (dsh-protocol-session-session-id (cadr result))))
       (dsh-test-pass "workspace-sessions-filters-and-sorts"))))
-;; --- 测试 61: dsh-emacs--workspace-sessions empty workspace ---
+;; --- 测试 103: dsh-emacs--workspace-sessions empty workspace ---
 (let* ((w-empty (dsh-protocol-workspace--from-alist
               (list (cons 'workspaceId "empty-ws")
                     (cons 'title "Empty")
@@ -5833,7 +5833,7 @@ so the code under test can read fields through the protocol accessors."
         dsh-emacs--archived-sessions nil)
   (when (null (dsh-emacs--workspace-sessions "empty-ws"))
     (dsh-test-pass "workspace-sessions-empty-returns-nil")))
-;; --- 测试 62: dsh-emacs--workspace-sessions unknown workspace ---
+;; --- 测试 104: dsh-emacs--workspace-sessions unknown workspace ---
 (let* ((w1 (dsh-protocol-workspace--from-alist
            (list (cons 'workspaceId "w1")
                  (cons 'title "WS")
@@ -5851,7 +5851,12 @@ so the code under test can read fields through the protocol accessors."
         dsh-emacs--archived-sessions nil)
   (when (null (dsh-emacs--workspace-sessions "unknown-ws"))
     (dsh-test-pass "workspace-sessions-unknown-returns-nil")))
-;; --- 测试 63: dsh-emacs-switch-session 排除当前会话 ---
+;; --- 测试 105: dsh-emacs-switch-session 排除当前会话 ---
+(defun dsh-test-completion-items (coll)
+  "Return COLL's completion strings (text properties stripped).
+COLL is a completion table (possibly metadata-wrapped), so extract
+candidates as the UI would via `all-completions', not by destructuring."
+  (mapcar #'substring-no-properties (all-completions "" coll)))
 (let* ((w1 (dsh-protocol-workspace--from-alist
            (list (cons 'workspaceId "w1")
                  (cons 'title "WS")
@@ -5874,15 +5879,15 @@ so the code under test can read fields through the protocol accessors."
   (cl-letf (((symbol-function 'completing-read)
              (lambda (_prompt coll &rest _)
                (setq collection coll)
-               ;; 选择候选项第一项（当前会话已被排除，= s2）
-               (caar coll)))
+               ;; 选择候选项第一项（当前会话被排除后只剩 s2）
+               (car (dsh-test-completion-items coll))))
             ((symbol-function 'dsh-emacs-open-session)
              (lambda (sid) (setq opened sid))))
     (dsh-emacs-switch-session))
   (when (and (equal opened "s2")
-             (not (member "s1" (mapcar #'cdr collection))))
+             (= (length (dsh-test-completion-items collection)) 1))
     (dsh-test-pass "switch-session-excludes-current")))
-;; --- 测试 64: dsh-emacs-switch-session 无其他会话时给出提示 ---
+;; --- 测试 106: dsh-emacs-switch-session 无其他会话时给出提示 ---
 (let* ((w1 (dsh-protocol-workspace--from-alist
            (list (cons 'workspaceId "w1")
                  (cons 'title "WS")
@@ -5908,6 +5913,68 @@ so the code under test can read fields through the protocol accessors."
   (when (and (not prompted)
              (member "No other sessions in this workspace" msgs))
     (dsh-test-pass "switch-session-no-others-message")))
+;; --- 测试 107: dsh-emacs-switch-session 候选按活跃时间排序（ungrouped 回退）---
+(let ((s-old (dsh-protocol-session--from-alist
+              (list (cons 'sessionId "s-old") (cons 'title "Old")
+                    (cons 'updatedAt 1000) (cons 'blank :json-false))))
+      (s-new (dsh-protocol-session--from-alist
+              (list (cons 'sessionId "s-new") (cons 'title "New")
+                    (cons 'updatedAt 2000) (cons 'blank :json-false))))
+      (collection nil)
+      (opened nil))
+  (setq dsh-emacs--workspaces nil
+        dsh-emacs--sessions (list s-old s-new) ; 缓存顺序 ≠ 活跃顺序
+        dsh-emacs--archived-sessions nil
+        dsh-emacs--current-session "s-cur")
+  (cl-letf (((symbol-function 'completing-read)
+             (lambda (_prompt coll &rest _)
+               (setq collection coll)
+               ;; 选择第一项；按活跃时间排序后它应是 s-new
+               (car (dsh-test-completion-items coll))))
+            ((symbol-function 'dsh-emacs-open-session)
+             (lambda (sid) (setq opened sid))))
+    (dsh-emacs-switch-session))
+  (when (and (equal opened "s-new") ; 排序后第一候选 = s-new（updatedAt 更大）
+             (= (length (dsh-test-completion-items collection)) 2))
+    (dsh-test-pass "switch-session-sorts-by-recency")))
+;; --- 测试 108: switch-session 的补全带保序 metadata（框架无关） ---
+(let ((s1 (dsh-protocol-session--from-alist
+           (list (cons 'sessionId "s1") (cons 'title "One")
+                 (cons 'updatedAt 1000) (cons 'blank :json-false))))
+      (sort-fn 'unset))
+  (setq dsh-emacs--workspaces nil
+        dsh-emacs--sessions (list s1)
+        dsh-emacs--archived-sessions nil
+        dsh-emacs--current-session "s0")
+  (cl-letf (((symbol-function 'completing-read)
+             (lambda (_prompt coll &rest _)
+               (setq sort-fn (completion-metadata-get
+                              (completion-metadata "" coll nil)
+                              'display-sort-function))
+               "s1")))
+    (dsh-emacs-switch-session))
+  (when (eq sort-fn 'identity)
+    (dsh-test-pass "switch-session-attaches-preserve-order-metadata")))
+;; --- 测试 109: ivy-mode 下 switch-session 禁用 ivy 排序 ---
+(let ((s1 (dsh-protocol-session--from-alist
+           (list (cons 'sessionId "s1") (cons 'title "One")
+                 (cons 'updatedAt 1000) (cons 'blank :json-false))))
+      (ivy-alist-seen 'unset))
+  (setq dsh-emacs--workspaces nil
+        dsh-emacs--sessions (list s1)
+        dsh-emacs--archived-sessions nil
+        dsh-emacs--current-session "s0"
+        ivy-mode t) ; 模拟用户启用 ivy
+  (cl-letf (((symbol-function 'completing-read)
+             (lambda (_prompt _coll &rest _)
+               (setq ivy-alist-seen ivy-sort-functions-alist)
+               "s1")))
+    (dsh-emacs-switch-session))
+  (setq ivy-mode nil)
+  (when (and (consp ivy-alist-seen)
+             (eq (car (car ivy-alist-seen)) t)
+             (null (cdr (car ivy-alist-seen))))
+    (dsh-test-pass "switch-session-disables-ivy-sort")))
 (princ "\n===== 测试总结 =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))
       (fail (cl-count-if (lambda (r) (not (cdr r))) dsh-test-results)))

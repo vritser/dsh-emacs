@@ -1001,6 +1001,30 @@ order."
       (when (equal workspace-id (dsh-protocol-workspace-workspace-id ws))
         (throw 'found (dsh-protocol-workspace-path ws))))))
 
+;; `ivy-mode' 开启时 `ivy-sort-functions-alist' 接管排序；开关我们按用户
+;; 实际启用的补全框架适配（见 `dsh-emacs--completing-read-ordered'）。
+;; defvar 声明只为消 byte-compile 警告并保证动态绑定；框架未加载时无副作用。
+(defvar ivy-sort-functions-alist)
+
+(defun dsh-emacs--completing-read-ordered (prompt collection &rest args)
+  "`completing-read'，但保持 COLLECTION 传入顺序不被补全框架重排。
+按用户实际启用的补全框架适配，不写死任何一家：
+- vertico / corfu / stock minibuffer：读取 completion metadata 的
+  `display-sort-function'（vertico--sort-function / corfu 均优先于各自
+  的排序开关），这里把它设为 identity，框架自动放弃重排；
+- ivy：不读该 metadata，按 collection/caller 从 `ivy-sort-functions-alist'
+  取排序函数——动态绑定为 ((t . nil))（docstring: nil = no sorting），
+  仅本次调用生效；
+- 其余框架（selectrum 等）同样遵循 display-sort-function 约定。
+PROMPT/COLLECTION/ARGS 语义与 `completing-read' 完全一致。"
+  (let ((ordered (completion-table-with-metadata
+                  collection
+                  '((display-sort-function . identity)))))
+    (if (bound-and-true-p ivy-mode)
+        (let ((ivy-sort-functions-alist '((t))))
+          (apply #'completing-read prompt ordered args))
+      (apply #'completing-read prompt ordered args))))
+
 ;;;###autoload
 (defun dsh-emacs-switch-session ()
   "Switch to another session in the same workspace as the current one.
@@ -1019,19 +1043,20 @@ workspaces), falls back to switching any cached session."
                 (throw 'found
                       (dsh-protocol-workspace-workspace-id ws))))))
          (candidates
-          (cl-remove-if
-           (lambda (s)
-             (equal (dsh-protocol-session-session-id s) session-id))
-           (if workspace-id
-               (dsh-emacs--workspace-sessions workspace-id)
-             dsh-emacs--sessions))))
+          (dsh-emacs-session--sort-by-recency
+           (cl-remove-if
+            (lambda (s)
+              (equal (dsh-protocol-session-session-id s) session-id))
+            (if workspace-id
+                (dsh-emacs--workspace-sessions workspace-id)
+              dsh-emacs--sessions)))))
     (if (null candidates)
         (message "No other sessions in this workspace")
       (let* ((entries (mapcar (lambda (s)
                                 (let ((id (dsh-protocol-session-session-id s)))
                                   (cons (or (dsh-emacs--chat-title id) id) id)))
                               candidates))
-             (picked (completing-read
+             (picked (dsh-emacs--completing-read-ordered
                       (dsh-emacs--switch-prompt workspace-id)
                       entries nil t)))
         (when picked
