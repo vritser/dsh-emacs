@@ -5765,6 +5765,27 @@ so the code under test can read fields through the protocol accessors."
     (when (not (string-match-p (regexp-quote "Alpha") (buffer-string)))
       (dsh-test-pass "todo-summary-only-no-toggle"))))
 
+;; imenu: user message index
+(with-temp-buffer
+  (let ((inhibit-read-only t))
+    (insert "dsh  DeepSeek Harness\n\n")
+    (insert "\u276f hello world\n")
+    (insert "\u276f second message here\n")
+    ;; Simulate the user-message property
+    (let ((start1 (string-match "\u276f hello" (buffer-string)))
+          (start2 (string-match "\u276f second" (buffer-string))))
+      (when start1
+        (put-text-property (+ (point-min) start1) (+ (point-min) start1 12)
+                           'dsh-emacs-user-message t))
+      (when start2
+        (put-text-property (+ (point-min) start2) (+ (point-min) start2 20)
+                           'dsh-emacs-user-message t))))
+  (let ((index (dsh-emacs-imenu-create-user-index)))
+    (when (and (= (length index) 2)
+               (string-match-p "hello world" (car (car index)))
+               (string-match-p "second" (car (cadr index))))
+      (dsh-test-pass "imenu-user-index"))))
+
 (princ "\n===== 测试总结 =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))
       (fail (cl-count-if (lambda (r) (not (cdr r))) dsh-test-results)))

@@ -1285,6 +1285,34 @@ some tab/window managers query `buffer-modified-p' before closing a buffer
 and prompt \"save?\".  Clearing is cheap (a flag), not a content change."
   (set-buffer-modified-p nil))
 
+(defun dsh-emacs-imenu-create-user-index ()
+  "Build an imenu index of user messages in the current buffer.
+Each entry maps a human-readable label to the message's start position.
+Users can jump to any historical input via `M-x imenu' (or consult-imenu,
+vertico, etc.)."
+  (let ((index '()))
+    (save-excursion
+      (goto-char (point-min))
+      (while (< (point) (point-max))
+        (let ((pos (next-single-property-change (point) 'dsh-emacs-user-message nil (point-max))))
+          (if (>= pos (point-max))
+              (goto-char (point-max))
+            (goto-char pos)
+            (when (get-text-property pos 'dsh-emacs-user-message)
+              (let* ((line-num (line-number-at-pos pos))
+                     (line-end (line-end-position))
+                     (raw (buffer-substring-no-properties pos line-end))
+                     (content (if (string-prefix-p "\u276f " raw)
+                                  (substring raw 2)
+                                raw))
+                     (preview (if (> (length content) 60)
+                                  (concat (substring content 0 57) "...")
+                                content))
+                     (label (format "%d: %s" line-num preview)))
+                (push (cons label pos) index)))
+            (goto-char (1+ pos))))))
+    (nreverse index)))
+
 (define-derived-mode dsh-emacs-mode fundamental-mode "DSH"
   "DeepSeek Harness chat mode.
 \\{dsh-emacs-mode-map}"
@@ -1306,6 +1334,9 @@ and prompt \"save?\".  Clearing is cheap (a flag), not a content change."
   ;; 输入区以 "/" 开头时，TAB 补全 slash 命令名（见 dsh-emacs-command.el）
   (setq-local completion-at-point-functions
               '(dsh-emacs-command-completion-at-point))
+
+  ;; imenu: 按 user message 索引，M-x imenu 可跳转到任意历史输入
+  (setq-local imenu-create-index-function #'dsh-emacs-imenu-create-user-index)
 
   ;; Footer/mode-line 拼接由 `dsh-emacs-footer-setup' 完成（会话创建时调用），
   ;; 这里不再覆盖 mode-line-format，保留用户的默认 modeline。
