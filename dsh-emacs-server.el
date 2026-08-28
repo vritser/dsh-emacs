@@ -282,30 +282,37 @@ fast when the spawned process already exited; otherwise signals
 ;;; 公开命令
 ;;; ---------------------------------------------------------------------------
 
-(defun dsh-emacs-server-start ()
+(defun dsh-emacs-server-start (&optional wait)
   "Start the dsh server as a managed background process.
 Spawns `dsh web --host H --port P --no-open' (H/P from
-`dsh-emacs-base-url') and waits for it to answer.  A server already
-reachable at `dsh-emacs-base-url' is left alone (message + t).  When the
-`dsh' CLI is missing, asks to install it first."
-  (interactive)
+`dsh-emacs-base-url').  A server already reachable is left alone.
+When WAIT is non-nil (or called from Lisp), block until the server
+answers; interactively launch and return immediately so the UI stays
+responsive."
+  (interactive (list nil))
   (cond
    ((dsh-emacs--server-alive-p)
     (message "dsh server already running at %s" (dsh-emacs--server-base-url))
     t)
    ((and dsh-emacs--server-process
          (process-live-p dsh-emacs--server-process))
-    ;; Process already launching (e.g. from init-time background start).
-    ;; Don't spawn a duplicate — just wait for it to become ready.
-    (dsh-emacs--server-wait-ready))
+    (if wait
+        (dsh-emacs--server-wait-ready)
+      (message "dsh server already starting at %s" (dsh-emacs--server-base-url))
+      nil))
    (t
     (let* ((bin (or (dsh-emacs--server-bin)
                     (dsh-emacs--server-ensure-installed)))
            (host-port (dsh-emacs--server-host-port)))
       (dsh-emacs--server-launch bin (car host-port) (cdr host-port))
-      (message "Starting dsh server: %s web --host %s --port %d --no-open"
-               bin (car host-port) (cdr host-port))
-      (dsh-emacs--server-wait-ready)))))
+      (if wait
+          (progn
+            (message "Starting dsh server: %s web --host %s --port %d --no-open"
+                     bin (car host-port) (cdr host-port))
+            (dsh-emacs--server-wait-ready))
+        (message "Starting dsh server in background: %s web --host %s --port %d --no-open"
+                 bin (car host-port) (cdr host-port))
+        nil)))))
 
 (defun dsh-emacs-server-stop ()
   "Stop the dsh server process this package started (if any).
@@ -352,7 +359,7 @@ service."
   (when (not noninteractive)
     (unless (dsh-emacs--server-alive-p)
       (if dsh-emacs-server-auto-start
-          (dsh-emacs-server-start)
+          (dsh-emacs-server-start t)
         (user-error "dsh server not reachable at %s.  Start it with M-x dsh-emacs-server-start (or `dsh web --no-open'), or set `dsh-emacs-server-auto-start' to t"
                     (dsh-emacs--server-base-url))))))
 

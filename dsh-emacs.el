@@ -546,7 +546,11 @@ Updates the mode-line name (list title) and the workspace directory."
 (defun dsh-emacs-list-sessions ()
   "Fetch the session list and refresh workspaces."
   (interactive)
-  (dsh-emacs-server-ensure)
+  ;; Non-blocking: launch the server in the background if needed.
+  ;; The RPC call handles failure gracefully (server not ready yet → empty
+  ;; list, user can retry).  The blocking `ensure' happens later in
+  ;; `dsh-emacs-open-session' when the user actually selects a session.
+  (dsh-emacs-server-start)
   (dsh-emacs-events--host-refresh-begin)
   (dsh-emacs--rpc-async "session.list" nil
                         (lambda (ok value)
