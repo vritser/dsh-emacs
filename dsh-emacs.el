@@ -543,15 +543,8 @@ Updates the mode-line name (list title) and the workspace directory."
            dsh-emacs--chat-buffers))
 
 ;;;###autoload
-(defun dsh-emacs-list-sessions ()
-  "Fetch the session list and refresh workspaces."
-  (interactive)
-  ;; Non-blocking: launch the server in the background if needed.
-  ;; The RPC call handles failure gracefully (server not ready yet → empty
-  ;; list, user can retry).  The blocking `ensure' happens later in
-  ;; `dsh-emacs-open-session' when the user actually selects a session.
-  (dsh-emacs-server-start)
-  (dsh-emacs-events--host-refresh-begin)
+(defun dsh-emacs-list-sessions--fetch ()
+  "Fetch the session list via RPC and populate `dsh-emacs--sessions'."
   (dsh-emacs--rpc-async "session.list" nil
                         (lambda (ok value)
                           (unwind-protect
@@ -579,6 +572,30 @@ Updates the mode-line name (list title) and the workspace directory."
                             ;; while the refresh was in flight, so the list never
                             ;; rolls back below the stream's latest state.
                             (dsh-emacs-events--host-refresh-drain)))))
+
+(defun dsh-emacs-list-sessions--fetch-when-ready (attempts)
+  "Poll until the server is alive, then fetch the session list.
+ATTEMPTS counts remaining retries (0.5 s apart).  Gives up silently
+after exhausting attempts so the user is not spammed with errors."
+  (if (dsh-emacs--server-alive-p)
+      (dsh-emacs-list-sessions--fetch)
+    (if (> attempts 0)
+        (run-at-time 0.5 nil #'dsh-emacs-list-sessions--fetch-when-ready
+                     (1- attempts))
+      (message "dsh: server did not become ready — retry with M-x dsh-emacs"))))
+
+(defun dsh-emacs-list-sessions ()
+  "Fetch the session list and refresh workspaces."
+  (interactive)
+  ;; Non-blocking: launch the server in the background if needed.
+  ;; When the server was just started, poll until it's ready before
+  ;; firing the RPC to avoid a 404 race.
+  (let ((alive (dsh-emacs-server-start)))
+    (dsh-emacs-events--host-refresh-begin)
+    (if alive
+        (dsh-emacs-list-sessions--fetch)
+      ;; Server just launched — wait for it (up to ~5 s).
+      (dsh-emacs-list-sessions--fetch-when-ready 10))))
 
 ;;;###autoload
 (defun dsh-emacs-new-session (&optional cwd workspace-id preset)
