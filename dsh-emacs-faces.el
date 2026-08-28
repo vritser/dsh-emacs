@@ -339,6 +339,24 @@
 	:group 'dsh-emacs-faces)
 
 ;;; ---------------------------------------------------------------------------
+;;; todo 计划行
+;;; ---------------------------------------------------------------------------
+
+(defface dsh-emacs-todo-text-face
+	`((((background light)) :foreground ,dsh-emacs-color-tool-success-border)
+		(((background dark))  :foreground ,dsh-emacs-color-tool-success-border-dark)
+		(t :inherit default))
+	"Todo row title / summary text (green, non-italic)."
+	:group 'dsh-emacs-faces)
+
+(defface dsh-emacs-todo-check-face
+	`((((background light)) :foreground ,dsh-emacs-color-tool-success-border)
+		(((background dark))  :foreground ,dsh-emacs-color-tool-success-border-dark)
+		(t :inherit success))
+	"Todo item checkbox glyph (☑/☐, green)."
+	:group 'dsh-emacs-faces)
+
+;;; ---------------------------------------------------------------------------
 ;;; 思考块
 ;;; ---------------------------------------------------------------------------
 

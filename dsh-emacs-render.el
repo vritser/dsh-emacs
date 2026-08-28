@@ -110,6 +110,36 @@ Off by default to reduce visual noise."
   :type 'integer
   :group 'dsh-emacs-render)
 
+(defcustom dsh-emacs-show-todos t
+  "Whether to render the session's todo (plan) rows.
+Each `todo_write' snapshot renders ONE row in the transcript (like a tool
+card), showing the latest whole checklist; the rows accumulate in the order the
+todo events arrive.  Set to nil to suppress todo rows entirely."
+  :type 'boolean
+  :group 'dsh-emacs-render)
+
+(defcustom dsh-emacs-todo-title "Todo"
+  "Title shown on each todo (plan) row header in the transcript."
+  :type 'string
+  :group 'dsh-emacs-render)
+
+(defcustom dsh-emacs-todo-expand-by-default nil
+  "Whether todo rows start expanded showing the checklist.
+nil (default): each todo row starts collapsed showing only the header line
+(icon + title + progress summary); RET or click expands to reveal the
+checklist body.  Set to t to show the full checklist on first render."
+  :type 'boolean
+  :group 'dsh-emacs-render)
+
+(defcustom dsh-emacs-todo-summary-only nil
+  "Whether todo rows show only the progress summary.
+When non-nil each row renders as a single passive line carrying the icon +
+title and the task count/progress summary, with no per-item checklist body and
+no fold toggle (RET/click are inert).  Set to nil to restore the interactive
+collapsible checklist."
+  :type 'boolean
+  :group 'dsh-emacs-render)
+
 ;;; ---------------------------------------------------------------------------
 ;;; 工具 variant / icon / summary
 ;;; ---------------------------------------------------------------------------
@@ -312,6 +342,40 @@ otherwise it falls back to the \"✶\" glyph used by terminal Emacs."
                          'svg t :ascent 'center :height 1.0)))
         (error "✶"))
     "✶"))
+
+(defconst dsh-emacs--todo-icon-svg-template
+  "<svg width=\"14\" height=\"14\" viewBox=\"0 0 14 14\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M13.3277 9.69629V10.976H7.28086V9.69629H13.3277Z\" fill=\"__C__\"/><path d=\"M13.3277 2.97256V4.25225H7.28086V2.97256H13.3277Z\" fill=\"__C__\"/><path d=\"M4.64512 10.336C4.64505 9.62755 4.07081 9.05322 3.3623 9.05322C2.65386 9.05329 2.07956 9.62759 2.07949 10.336C2.07949 11.0445 2.65382 11.6188 3.3623 11.6188C4.07085 11.6188 4.64512 11.0446 4.64512 10.336ZM5.92559 10.336C5.92559 11.7515 4.77777 12.8993 3.3623 12.8993C1.94689 12.8993 0.799805 11.7515 0.799805 10.336C0.799871 8.92066 1.94693 7.7736 3.3623 7.77354C4.77773 7.77354 5.92552 8.92062 5.92559 10.336Z\" fill=\"__C__\"/><path d=\"M4.64531 3.6123C4.6453 2.90382 4.07098 2.32949 3.3625 2.32949C2.65403 2.32951 2.0797 2.90383 2.07969 3.6123C2.07969 4.32079 2.65402 4.8951 3.3625 4.89512C4.07099 4.89512 4.64531 4.3208 4.64531 3.6123ZM5.925 3.6123C5.925 5.02772 4.77792 6.1748 3.3625 6.1748C1.9471 6.17479 0.8 5.02771 0.8 3.6123C0.800013 2.19691 1.9471 1.04982 3.3625 1.0498C4.77791 1.0498 5.92499 2.1969 5.925 3.6123Z\" fill=\"__C__\"/></svg>"
+  "dsh web's plan/todo icon (a checklist: two rows + bullet marks) as an SVG
+template with a \"__C__\" fill placeholder.  The color comes from the surrounding
+line's face; graphical Emacs renders it via `create-image', terminal Emacs
+falls back to a list glyph.")
+
+(defun dsh-emacs-render--todo-icon-svg (color)
+  "Return the dsh-web plan checklist icon filled with COLOR."
+  (replace-regexp-in-string "__C__" color dsh-emacs--todo-icon-svg-template t t))
+
+(defun dsh-emacs-render--todo-icon ()
+  "Return the todo row leading glyph as a display string.
+In graphical Emacs with SVG support this is the real dsh-web plan checklist
+icon, tinted with the tool purple accent (`dsh-emacs-tool-icon-face'); it is
+distinct from the green row text.  Terminal Emacs falls back to the \"▤\"
+glyph carrying that same face."
+  (let ((glyph (if (and (display-graphic-p)
+                        (fboundp 'image-type-available-p)
+                        (image-type-available-p 'svg))
+                   (condition-case nil
+                       (let* ((fg (face-foreground 'dsh-emacs-tool-icon-face nil t))
+                              (color (if (and fg (not (equal fg "unspecified")))
+                                         fg
+                                       "#a78bfa")))
+                         (propertize "▤"
+                                     'display
+                                     (create-image
+                                      (dsh-emacs-render--todo-icon-svg color)
+                                      'svg t :ascent 'center :height 1.0)))
+                     (error "▤"))
+                 "▤")))
+    (propertize glyph 'face 'dsh-emacs-tool-icon-face)))
 
 (defun dsh-emacs-render--tool-variant (tool-name)
   "Return (VARIANT . ICON) for TOOL-NAME.
@@ -671,7 +735,11 @@ miss the entry is cleaned up.")
         dsh-emacs--group-counter 0
         dsh-emacs--current-group-id nil
         dsh-emacs--current-group-count 0
-        dsh-emacs--current-group-completed 0))
+        dsh-emacs--current-group-completed 0)
+  ;; Todo strip folds its snapshot from replayed `tool/call' events, so clear
+  ;; the state and the fragment; the replay rebuilds it.
+  (when (boundp 'dsh-emacs--todo-namespace)
+    (dsh-emacs-render-todo-clear)))
 
 (defun dsh-emacs-render--tool-state (tool-call-id)
   "Return the tracked state plist for TOOL-CALL-ID, or nil."
@@ -1044,6 +1112,152 @@ The block gets one blank line before and after (see
                               'dsh-emacs-thinking-face t))))
 
 ;;; ---------------------------------------------------------------------------
+;;; 渲染器：todo 计划行（每事件一行，像 tool 卡）
+;;; ---------------------------------------------------------------------------
+;;; dsh 的 `todo_write' 工具每次携带整份清单的全量替换快照（[{content,
+;;; status}]）。每次快照都在 chat transcript 内渲染**一行**独立的可折叠
+;;; fragment（namespace "todo"，block-id = call-id），并且像 tool 事件那样
+;;; 一行一行按时间顺序堆叠，而不是常驻单块原位更新。清单为空时不渲染任何行。
+
+(defconst dsh-emacs--todo-namespace "todo"
+  "Namespace for the rendered todo (plan) rows.")
+
+(defvar-local dsh-emacs--todo-list nil
+  "Latest whole todo list snapshot as (\"content\" . \"status\") cells, or nil.
+nil (or empty) means there is no plan yet.")
+
+(defun dsh-emacs-render--todo-parse (args-raw)
+  "Parse a `todo_write' ARGS-RAW JSON string into an ordered list of
+\(\"content\" . \"status\") cells.  Empty/invalid content is dropped and a
+missing or unknown status defaults to \"pending\".  Returns nil on any error."
+  (let (result)
+    (when (and args-raw (stringp args-raw) (not (string-empty-p args-raw)))
+      (let* ((parsed (condition-case nil (json-read-from-string args-raw) (error nil)))
+             (todos (and (listp parsed) (dsh-emacs-render--aget "todos" parsed))))
+        (dolist (cell (append todos nil))
+          (when (consp cell)
+            (let ((content (dsh-emacs-render--aget "content" cell))
+                  (status (dsh-emacs-render--aget "status" cell)))
+              (when (and (stringp content) (not (string-empty-p content)))
+                (push (cons content
+                            (if (member status '("pending" "in_progress" "completed"))
+                                status "pending"))
+                      result)))))))
+    (nreverse result)))
+
+(defun dsh-emacs-render--todo-counts (list)
+  "Return (DONE ACTIVE PENDING) counts for LIST of (\\\"content\\\" . STATUS) cells."
+  (let ((done 0) (active 0))
+    (dolist (cell list)
+      (pcase (cdr cell)
+        ("completed" (setq done (1+ done)))
+        ("in_progress" (setq active (1+ active)))))
+    (list done active (max 0 (- (length list) done active)))))
+
+(defun dsh-emacs-render--todo-summary (list)
+  "Compact progress label for LIST, e.g. \\\"2/5 completed · 1 in progress\\\".
+Zero-count segments are omitted (a non-empty list keeps at least one)."
+  (let* ((counts (dsh-emacs-render--todo-counts list))
+         (done (nth 0 counts))
+         (active (nth 1 counts))
+         (pending (nth 2 counts))
+         (total (length list))
+         (parts '()))
+    (when (> done 0) (push (format "%d/%d completed" done total) parts))
+    (when (> active 0) (push (format "%d in progress" active) parts))
+    (when (> pending 0) (push (format "%d pending" pending) parts))
+    (mapconcat #'identity (nreverse parts) " · ")))
+
+(defun dsh-emacs-render--todo-glyph (status)
+  "Checkbox glyph for STATUS: ☑ (completed), ☐ (pending/in progress)."
+  (pcase status
+    ("completed" "☑")
+    (_ "☐")))
+
+(defun dsh-emacs-render--todo-glyph-face (_status)
+  "Face for the STATUS checkbox glyph (green, per dsh web's plan checkbox)."
+  'dsh-emacs-todo-check-face)
+
+(defun dsh-emacs-render--todo-body (list)
+  "Render LIST as a multi-line checkbox string, one `☑|☐ CONTENT — STATUS'
+line per item.  The checkbox glyph carries `dsh-emacs-todo-check-face' (green);
+`split-string' preserves these text properties through the fragment body
+renderer.  `line-spacing' is pinned to 0 so a theme's line-spacing does not
+spread the rows apart (each todo is one line)."
+  (propertize
+   (mapconcat
+    (lambda (cell)
+      (let* ((status (cdr cell))
+             (glyph (propertize (dsh-emacs-render--todo-glyph status)
+                                'face (dsh-emacs-render--todo-glyph-face status)))
+             (word (pcase status
+                     ("completed" "completed")
+                     ("in_progress" "in progress")
+                     (_ "pending"))))
+        (concat "  " glyph " " (car cell) " — " word)))
+    list
+    "\n")
+   'line-spacing 0))
+
+(defun dsh-emacs-render--todo-block-id (call-id)
+  "Return the per-event block-id of a todo row with CALL-ID."
+  (or call-id "unknown"))
+
+(defun dsh-emacs-render--todo-qualified-id (call-id)
+  "Return the qualified-id of the todo row for CALL-ID."
+  (dsh-emacs-ui--qualified-id dsh-emacs--todo-namespace
+                              (dsh-emacs-render--todo-block-id call-id)))
+
+(defun dsh-emacs-render--todo-row (list call-id)
+  "Render one todo row for the whole snapshot LIST at the event's position.
+Like a tool card, each `todo_write' snapshot gets its own collapsible row in
+the transcript; a nil/empty LIST or `dsh-emacs-show-todos' nil renders nothing."
+  (when (and dsh-emacs-show-todos list (car list))
+    (let* ((insert-point (dsh-emacs-render--input-insert-point))
+           (summary-only dsh-emacs-todo-summary-only)
+           (sum (dsh-emacs-render--todo-summary list))
+           (body (unless summary-only (dsh-emacs-render--todo-body list)))
+           ;; Title + summary in the todo green accent (`dsh-emacs-todo-text-face',
+           ;; non-italic); the leading checklist icon keeps the tool purple.
+           ;; Separator: one space each side.
+           (label (concat (dsh-emacs-render--todo-icon) " "
+                          (propertize dsh-emacs-todo-title
+                                      'face 'dsh-emacs-todo-text-face)
+                          " · "
+                          (propertize sum
+                                      'face 'dsh-emacs-todo-text-face))))
+      (dsh-emacs-ui-update-fragment
+       (dsh-emacs-ui-make-fragment
+        :namespace-id dsh-emacs--todo-namespace
+        :block-id (dsh-emacs-render--todo-block-id call-id)
+        :label-left label
+        :label-right nil
+        :body body
+        :style 'minimal
+        :color-key 'tool-pending
+        :non-foldable (and summary-only t))
+       :expanded dsh-emacs-todo-expand-by-default
+       :insert-before insert-point))))
+
+(defun dsh-emacs-render-todo-clear ()
+  "Clear the latest todo snapshot state.  Rendered todo rows stay in the
+transcript; they are removed with the buffer on a session reset/replay."
+  (setq dsh-emacs--todo-list nil))
+
+(defun dsh-emacs-render-todo-write (event)
+  "Handle a `todo_write' tool event: render a new todo row at the event's
+position in the transcript, one row per snapshot (like a tool card).  Returns
+the event seq but renders no ordinary tool card."
+  (let* ((data (dsh-emacs-render--event-data event))
+         (args (dsh-emacs-render--aget "arguments" data))
+         (list (dsh-emacs-render--todo-parse args))
+         (call-id (or (dsh-emacs-render--aget "callId" data)
+                      (format "seq-%s" (dsh-emacs-render--event-seq event)))))
+    (setq dsh-emacs--todo-list list)
+    (dsh-emacs-render--todo-row list call-id)
+    (dsh-emacs-render--event-seq event)))
+
+;;; ---------------------------------------------------------------------------
 ;;; 渲染器：工具调用（活动组的一部分）
 ;;; ---------------------------------------------------------------------------
 
@@ -1064,9 +1278,13 @@ The block gets one blank line before and after (see
 
 (defun dsh-emacs-render-tool-call (event)
   "Render a `tool/call' event. Returns seq."
-  (if (not dsh-emacs-show-tool-calls)
-      nil
-    (let* ((seq (dsh-emacs-render--event-seq event))
+  (let ((name (dsh-emacs-render--aget "name" (dsh-emacs-render--event-data event))))
+    (if (equal name "todo_write")
+        ;; todo_write updates the live plan strip, not an ordinary tool card.
+        (dsh-emacs-render-todo-write event)
+      (if (not dsh-emacs-show-tool-calls)
+          nil
+        (let* ((seq (dsh-emacs-render--event-seq event))
          (data (dsh-emacs-render--event-data event))
          (call-id (dsh-emacs-render--aget "callId" data))
          (name (dsh-emacs-render--aget "name" data))
@@ -1120,7 +1338,7 @@ The block gets one blank line before and after (see
           (add-face-text-property (car b) (cdr b)
                                   'dsh-emacs-tool-pending-face t))))
     ;; Return seq via the helper to keep helper structure.
-    (dsh-emacs-render--event-seq event)))
+    (dsh-emacs-render--event-seq event)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; 渲染器：工具结果（dsh web 风格 ioCard）

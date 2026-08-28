@@ -147,7 +147,8 @@ two-space gap."
                                        label-left label-right body
                                        group-id group-label (group-expanded t)
                                        (style 'rounded) (color-key nil)
-                                       (hide-label-on-collapse nil))
+                                       (hide-label-on-collapse nil)
+                                       (non-foldable nil))
   "Create a fragment model alist.
 NAMESPACE-ID, BLOCK-ID, LABEL-LEFT, LABEL-RIGHT, and BODY are the keys.
 GROUP-ID nests this fragment under a collapsible group header.
@@ -167,7 +168,8 @@ HIDE-LABEL-ON-COLLAPSE non-nil suppresses the right-side label when folded."
                  (cons :group-expanded group-expanded)
                  (cons :style (or style 'rounded))
                  (cons :color-key (dsh-emacs-ui--string-or-nil color-key))
-                 (cons :hide-label-on-collapse hide-label-on-collapse))))
+                 (cons :hide-label-on-collapse hide-label-on-collapse)
+                 (cons :non-foldable non-foldable))))
     m))
 
 (cl-defun dsh-emacs-ui-make-group-model (&key (namespace-id "global") (block-id "1")
@@ -265,17 +267,20 @@ HINT is a verb for the action (e.g. \"toggle\")."
 ;;; 边框渲染
 ;;; ---------------------------------------------------------------------------
 
-(defun dsh-emacs-ui--label-merge (text)
+(defun dsh-emacs-ui--label-merge (text &optional non-foldable)
   "Merge `dsh-emacs-ui-label-face' into TEXT and add the fragment keymap.
 Unlike `propertize' which overwrites the `face' property, this uses
 `add-face-text-property' to APPEND the label face so pre-existing face
-attributes (e.g. a Nerd Font `:family' on icon glyphs) are preserved."
+attributes (e.g. a Nerd Font `:family' on icon glyphs) are preserved.
+NON-FOLDABLE non-nil suppresses the fold keymap so the label renders as a
+passive line (no RET/click toggle)."
   (let ((s (copy-sequence text)))
     (add-face-text-property 0 (length s) 'dsh-emacs-ui-label-face t s)
-    (put-text-property 0 (length s) 'keymap dsh-emacs-ui-fragment-map s)
+    (unless non-foldable
+      (put-text-property 0 (length s) 'keymap dsh-emacs-ui-fragment-map s))
     s))
 
-(defun dsh-emacs-ui--top-border (label-left label-right collapsed-p _expanded &optional style)
+(defun dsh-emacs-ui--top-border (label-left label-right collapsed-p _expanded &optional style non-foldable)
   "Render the top border line with labels.
 Returns (BORDER-STRING . CONTENT-WIDTH).
 STYLE selects border characters (\\='rounded or \\='sharp).
@@ -316,20 +321,23 @@ with no fold indicator; bordered fragments keep a leading [+-] indicator."
         ;; with no leading or trailing fold indicator.
         (cons
          (concat
-          (dsh-emacs-ui--label-merge truncated-left)
+          (dsh-emacs-ui--label-merge truncated-left non-foldable)
           (when (and truncated-right (> (length truncated-right) 0))
             (concat gap-string
-                    (dsh-emacs-ui--label-merge truncated-right))))
+                    (dsh-emacs-ui--label-merge truncated-right non-foldable))))
          box-width)
       (cons
        (concat
         (dsh-emacs-ui--make-border-string (concat (alist-get 'top-left chars) "── "))
-        (propertize leading-indicator 'face 'dsh-emacs-ui-fold-indicator-face 'keymap dsh-emacs-ui-fragment-map)
-        (dsh-emacs-ui--label-merge truncated-left)
+        (if non-foldable
+            (dsh-emacs-ui--make-border-string leading-indicator)
+          (propertize leading-indicator 'face 'dsh-emacs-ui-fold-indicator-face
+                      'keymap dsh-emacs-ui-fragment-map))
+        (dsh-emacs-ui--label-merge truncated-left non-foldable)
         (when (> (length fill-left-str) 0)
           (dsh-emacs-ui--make-border-string fill-left-str))
         (when (and truncated-right (> (length truncated-right) 0))
-          (concat " " (dsh-emacs-ui--label-merge truncated-right) " "))
+          (concat " " (dsh-emacs-ui--label-merge truncated-right non-foldable) " "))
         (dsh-emacs-ui--make-border-string (concat "──" (alist-get 'top-right chars))))
        box-width))))
 
@@ -449,9 +457,10 @@ Style is taken from MODEL's :style property (\\='rounded or \\='sharp)."
          (label-right (map-elt model :label-right))
          (body (unless group (map-elt model :body)))
          (hide-label-on-collapse (map-elt model :hide-label-on-collapse))
+         (non-foldable (map-elt model :non-foldable))
          (collapsed (not expanded))
          (effective-label-right (if (and collapsed hide-label-on-collapse) nil label-right))
-         (top-info (dsh-emacs-ui--top-border label-left effective-label-right collapsed expanded style))
+         (top-info (dsh-emacs-ui--top-border label-left effective-label-right collapsed expanded style non-foldable))
          (top-border (car top-info))
          (box-width (cdr top-info))
          (body-start nil)
@@ -515,6 +524,7 @@ Style is taken from MODEL's :style property (\\='rounded or \\='sharp)."
                        (cons :style style)
                        (cons :color-key (map-elt model :color-key))
                        (cons :hide-label-on-collapse hide-label-on-collapse)
+                       (cons :non-foldable non-foldable)
                        (cons :navigatable (or group (and body t)))
                        (cons :body body))))
       (put-text-property block-start block-end 'dsh-emacs-ui-state state)
@@ -690,6 +700,7 @@ before that position (useful for buffers with a fixed input area)."
                          (old-style (map-elt state :style))
                          (old-color-key (map-elt state :color-key))
                          (old-hide-label (map-elt state :hide-label-on-collapse))
+                         (old-non-foldable (map-elt state :non-foldable))
                          (final-model (list (cons :namespace-id namespace-id)
                                             (cons :block-id block-id)
                                             (cons :kind old-kind)
@@ -705,7 +716,11 @@ before that position (useful for buffers with a fixed input area)."
                                             (cons :hide-label-on-collapse
                                                   (if (map-elt model :hide-label-on-collapse)
                                                       (map-elt model :hide-label-on-collapse)
-                                                    old-hide-label)))))
+                                                    old-hide-label))
+                                            (cons :non-foldable
+                                                  (if (map-elt model :non-foldable)
+                                                      (map-elt model :non-foldable)
+                                                    old-non-foldable)))))
 
                     (if (or new-label-left new-label-right)
                         ;; Header changed: do a full delete + re-insert instead of
@@ -736,7 +751,9 @@ before that position (useful for buffers with a fixed input area)."
                                          (cons :style (map-elt model :style))
                                          (cons :color-key (map-elt model :color-key))
                                          (cons :hide-label-on-collapse
-                                               (map-elt model :hide-label-on-collapse))))
+                                               (map-elt model :hide-label-on-collapse))
+                                         (cons :non-foldable
+                                               (map-elt model :non-foldable))))
                       (padding-start (point)))
                  ;; Insert at the specified position, or at point-max
                  (if insert-before
@@ -798,11 +815,12 @@ Returns non-nil on success."
              (state (get-text-property start 'dsh-emacs-ui-state))
              (collapsed (map-elt state :collapsed))
              (style (or (map-elt state :style) 'minimal))
+             (non-foldable (map-elt state :non-foldable))
              (line-end (save-excursion (goto-char start) (line-end-position)))
              (header (car (dsh-emacs-ui--top-border
                            (or label-left (map-elt state :label-left))
                            (or label-right (map-elt state :label-right))
-                           collapsed t style))))
+                           collapsed t style non-foldable))))
         (goto-char start)
         (delete-region start (min (point-max) (1+ line-end)))
         (goto-char start)
@@ -830,7 +848,7 @@ header line; bordered styles use a hidden-count placeholder."
            (state (get-text-property (point) 'dsh-emacs-ui-state))
            (qualified-id (map-elt state :qualified-id))
            (block (dsh-emacs-ui--find-block qualified-id)))
-      (when block
+      (when (and block (not (map-elt state :non-foldable)))
         (let* ((block-start (car block))
                (block-end (cdr block))
                (new-collapsed (not (map-elt state :collapsed)))

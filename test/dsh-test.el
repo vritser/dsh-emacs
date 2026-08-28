@@ -5640,6 +5640,131 @@ so the code under test can read fields through the protocol accessors."
             (dsh-test-pass "slash-auto-complete-off-when-disabled"))))
     (kill-buffer buf)))
 
+;; --- 测试 101: todo 计划行 —— 解析 / 每事件一行（像 tool 卡）/ 折叠 ---
+;; 101a: 全量快照折叠：丢弃空 content、未知 status 默认 pending、计数正确
+(let ((l (dsh-emacs-render--todo-parse
+          "{\"todos\":[{\"content\":\"a\",\"status\":\"pending\"},{\"content\":\"b\",\"status\":\"in_progress\"},{\"content\":\"c\",\"status\":\"completed\"},{\"content\":\"\",\"status\":\"completed\"},{\"content\":\"d\"}]}")))
+  (when (and (= (length l) 4)
+             (equal (dsh-emacs-render--todo-counts l) '(1 1 2))
+             (string-match-p "1/4 completed" (dsh-emacs-render--todo-summary l)))
+    (dsh-test-pass "todo-parse-drops-invalid-defaults-status")))
+
+;; 101b: 首次 todo_write 渲染**一行** todo 行（含进度/待办 glyph），不生成普通工具卡
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-footer-setup)
+  (setq-local dsh-emacs-todo-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "t1" "todo_write"
+    "{\"todos\":[{\"content\":\"A\",\"status\":\"in_progress\"},{\"content\":\"B\",\"status\":\"pending\"}]}"))
+  (let ((txt (buffer-string)))
+    (when (and (dsh-emacs-ui-find-block (dsh-emacs-render--todo-qualified-id "t1"))
+               ;; items are ☐ checkboxes (in_progress/pending) with status words
+               (string-match-p (regexp-quote "☐") txt)
+               (string-match-p "in progress" txt)
+               (string-match-p "pending" txt)
+               ;; Leading icon is the dsh-web checklist icon (fallback "▤" in
+               ;; non-graphical Emacs), not the old "☑".
+               (string-match-p (regexp-quote "▤") txt)
+               (not (string-match-p (regexp-quote "☑") txt))
+               (not (string-match-p "tool-t1" txt)))
+      (dsh-test-pass "todo-row-renders-on-write-no-card"))))
+
+;; 101c: 每次 todo_write 都渲染新一行（像 tool 卡），随对话积累，不覆盖
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-footer-setup)
+  (setq-local dsh-emacs-todo-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "t1" "todo_write"
+    "{\"todos\":[{\"content\":\"A\",\"status\":\"in_progress\"},{\"content\":\"B\",\"status\":\"pending\"}]}"))
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 2 "t2" "todo_write"
+    "{\"todos\":[{\"content\":\"A\",\"status\":\"completed\"},{\"content\":\"B\",\"status\":\"in_progress\"},{\"content\":\"C\",\"status\":\"pending\"}]}"))
+  (let ((txt (buffer-string)))
+    (when (and (dsh-emacs-ui-find-block (dsh-emacs-render--todo-qualified-id "t1"))
+               (dsh-emacs-ui-find-block (dsh-emacs-render--todo-qualified-id "t2"))
+               (string-match-p "1/3 completed" txt)
+               (string-match-p (regexp-quote "C") txt)
+               (string-match-p (regexp-quote "☑") txt))
+      (dsh-test-pass "todo-each-write-renders-new-row"))))
+
+;; 101d: 会话重置清空最新 todo 快照状态
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-footer-setup)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "t1" "todo_write"
+    "{\"todos\":[{\"content\":\"A\",\"status\":\"pending\"}]}"))
+  (dsh-emacs-render--reset-tool-tracking)
+  (when (null dsh-emacs--todo-list)
+    (dsh-test-pass "todo-reset-clears-list")))
+
+;; 101e: todo 行可折叠/展开（默认折叠：仅 header，checklist 隐藏）
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-footer-setup)
+  (setq-local dsh-emacs-todo-expand-by-default nil)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "t1" "todo_write"
+    "{\"todos\":[{\"content\":\"Alpha\",\"status\":\"in_progress\"},{\"content\":\"Beta\",\"status\":\"pending\"}]}"))
+  (let* ((b (dsh-emacs-ui-find-block (dsh-emacs-render--todo-qualified-id "t1")))
+         (blk (and b (buffer-substring-no-properties (car b) (cdr b)))))
+    (when (and b (string-match-p "Todo" blk)
+               (not (string-match-p (regexp-quote "Alpha") (buffer-string))))
+      (dsh-test-pass "todo-row-collapsed-by-default"))
+    ;; 展开：checklist 显现（含状态 glyph）
+    (goto-char (car b))
+    (dsh-emacs-ui-toggle-fragment)
+    (let ((txt (buffer-string)))
+      (when (and (string-match-p (regexp-quote "Alpha") txt)
+                 (string-match-p (regexp-quote "☐") txt))
+        (dsh-test-pass "todo-row-expands-on-toggle")))
+    ;; 再折叠：checklist 重新隐藏
+    (goto-char (car b))
+    (dsh-emacs-ui-toggle-fragment)
+    (when (not (string-match-p (regexp-quote "Alpha") (buffer-string)))
+      (dsh-test-pass "todo-row-recollapses-on-toggle"))))
+
+;; 101f: summary-only 模式：只显示计数/进度，隐藏 checklist 详情与折叠切换
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-footer-setup)
+  (setq-local dsh-emacs-todo-summary-only t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "t1" "todo_write"
+    "{\"todos\":[{\"content\":\"Alpha\",\"status\":\"in_progress\"},{\"content\":\"Beta\",\"status\":\"pending\"},{\"content\":\"Gamma\",\"status\":\"completed\"}]}"))
+  (let* ((b (dsh-emacs-ui-find-block (dsh-emacs-render--todo-qualified-id "t1")))
+         (blk (and b (buffer-substring-no-properties (car b) (cdr b)))))
+    (when (and b
+               (string-match-p "1/3 completed" (buffer-string))
+               (not (string-match-p (regexp-quote "Alpha") (buffer-string)))
+               (not (string-match-p (regexp-quote "Beta") (buffer-string)))
+               (not (string-match-p (regexp-quote "Gamma") (buffer-string))))
+      (dsh-test-pass "todo-summary-only-hides-details"))
+    ;; 文字段（标题）着绿色 `dsh-emacs-todo-text-face'（非斜体）
+    (when (and b
+               (let ((m (string-match "Todo" blk)))
+                 (and m
+                      (let ((f (get-text-property (+ (car b) m) 'face)))
+                        (or (eq f 'dsh-emacs-todo-text-face)
+                            (memq 'dsh-emacs-todo-text-face
+                                  (if (listp f) f (list f))))))))
+      (dsh-test-pass "todo-row-text-green"))
+    ;; 行首 icon 着工具紫 `dsh-emacs-tool-icon-face'
+    (when (and b
+               (let ((f (get-text-property (car b) 'face)))
+                 (or (eq f 'dsh-emacs-tool-icon-face)
+                     (memq 'dsh-emacs-tool-icon-face
+                           (if (listp f) f (list f))))))
+      (dsh-test-pass "todo-icon-purple-face"))
+    ;; 折叠切换应失效：反复 toggle 都不应显现 checklist
+    (goto-char (car b))
+    (dsh-emacs-ui-toggle-fragment)
+    (dsh-emacs-ui-toggle-fragment)
+    (when (not (string-match-p (regexp-quote "Alpha") (buffer-string)))
+      (dsh-test-pass "todo-summary-only-no-toggle"))))
+
 (princ "\n===== 测试总结 =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))
       (fail (cl-count-if (lambda (r) (not (cdr r))) dsh-test-results)))
