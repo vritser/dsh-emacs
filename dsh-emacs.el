@@ -947,6 +947,98 @@ realtime)."
       (dsh-emacs--load-history session-id))
     (pop-to-buffer dsh-emacs--current-buffer)))
 
+;; ---------------------------------------------------------------------------
+;;  在同一 workspace 内切换 session（chat buffer 中直接切）
+;; ---------------------------------------------------------------------------
+
+(defun dsh-emacs--workspace-sessions (workspace-id)
+  "Return SESSIONS belonging to WORKSPACE-ID, excluding archived,
+subagent and blank rows.  Returns a list of session structs in recency
+order."
+  (let* ((archived dsh-emacs--archived-sessions)
+         (current dsh-emacs--current-session)
+         (ws-by-id
+          (catch 'found
+            (dolist (ws dsh-emacs--workspaces)
+              (when (equal workspace-id
+                             (dsh-protocol-workspace-workspace-id ws))
+                (throw 'found ws))))))
+    (if (null ws-by-id)
+        nil
+      (let ((session-ids (dsh-protocol-workspace-session-ids ws-by-id)))
+        (dsh-emacs-session--sort-by-recency
+         (cl-remove-if
+          (lambda (s)
+            (let ((sid (dsh-protocol-session-session-id s)))
+              (or (and archived (gethash sid archived))
+                  (dsh-protocol-session-origin s)
+                  (not (member sid session-ids))
+                  (let ((blank (dsh-protocol-session-blank s)))
+                    (and blank (not (eq blank :json-false))
+                         (not (equal sid current)))))))
+          dsh-emacs--sessions))))))
+
+(defun dsh-emacs--switch-prompt (workspace-id)
+  "Return the completing-read prompt for switching sessions in WORKSPACE-ID."
+  (if workspace-id
+      (format "Switch session in %s: "
+              (or (dsh-emacs--workspace-title workspace-id)
+                  (dsh-emacs-session--workspace-basename
+                   (dsh-emacs--workspace-path workspace-id))))
+    "Switch session: "))
+
+(defun dsh-emacs--workspace-title (workspace-id)
+  "Return the title of the workspace with WORKSPACE-ID, or nil."
+  (catch 'found
+    (dolist (ws dsh-emacs--workspaces)
+      (when (equal workspace-id (dsh-protocol-workspace-workspace-id ws))
+        (throw 'found (dsh-protocol-workspace-title ws))))))
+
+(defun dsh-emacs--workspace-path (workspace-id)
+  "Return the path of the workspace with WORKSPACE-ID, or nil."
+  (catch 'found
+    (dolist (ws dsh-emacs--workspaces)
+      (when (equal workspace-id (dsh-protocol-workspace-workspace-id ws))
+        (throw 'found (dsh-protocol-workspace-path ws))))))
+
+;;;###autoload
+(defun dsh-emacs-switch-session ()
+  "Switch to another session in the same workspace as the current one.
+Prompts for a session from the current workspace's session list; opens or
+focuses its chat buffer on selection.  The current session itself is
+never offered.  When all sessions are in the Ungrouped bucket (no known
+workspaces), falls back to switching any cached session."
+  (interactive)
+  (dsh-emacs-server-ensure)
+  (let* ((session-id (dsh-emacs--active-session-id))
+         (workspace-id
+          (catch 'found
+            (dolist (ws dsh-emacs--workspaces)
+              (when (member session-id
+                            (dsh-protocol-workspace-session-ids ws))
+                (throw 'found
+                      (dsh-protocol-workspace-workspace-id ws))))))
+         (candidates
+          (cl-remove-if
+           (lambda (s)
+             (equal (dsh-protocol-session-session-id s) session-id))
+           (if workspace-id
+               (dsh-emacs--workspace-sessions workspace-id)
+             dsh-emacs--sessions))))
+    (if (null candidates)
+        (message "No other sessions in this workspace")
+      (let* ((entries (mapcar (lambda (s)
+                                (let ((id (dsh-protocol-session-session-id s)))
+                                  (cons (or (dsh-emacs--chat-title id) id) id)))
+                              candidates))
+             (picked (completing-read
+                      (dsh-emacs--switch-prompt workspace-id)
+                      entries nil t)))
+        (when picked
+          (let ((target-id (cdr (assoc picked entries))))
+            (when target-id
+              (dsh-emacs-open-session target-id))))))))
+
 (defun dsh-emacs--completing-session-id (prompt)
   "Read a session id with completion against the cached session list.
 Choices show the display title (like the list); the returned value is
@@ -1266,6 +1358,7 @@ the session list regroups immediately (the host stream also repaints)."
     (define-key map (kbd "C-c C-c") #'dsh-emacs-send-or-stop)
     (define-key map (kbd "C-c C-r") #'dsh-emacs-refresh)
     (define-key map (kbd "C-c C-l") #'dsh-emacs-list-sessions-display)
+    (define-key map (kbd "C-c C-s") #'dsh-emacs-switch-session)
     (define-key map (kbd "C-c C-w") #'dsh-emacs-copy-transcript)
     (define-key map (kbd "C-c C-f") #'dsh-emacs-footer-toggle)
     (define-key map (kbd "C-c C-k") #'dsh-emacs-copy-code-block)

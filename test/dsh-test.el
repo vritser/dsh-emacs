@@ -5786,6 +5786,128 @@ so the code under test can read fields through the protocol accessors."
                (string-match-p "second" (car (cadr index))))
       (dsh-test-pass "imenu-user-index"))))
 
+;; --- 测试 60: dsh-emacs--workspace-sessions ---
+(let ((s1 (dsh-protocol-session--from-alist
+         (list (cons 'sessionId "s1") (cons 'title "First")
+               (cons 'blank :json-false))))
+      (s2 (dsh-protocol-session--from-alist
+         (list (cons 'sessionId "s2") (cons 'title "Second")
+               (cons 'blank :json-false))))
+      (s3 (dsh-protocol-session--from-alist
+         (list (cons 'sessionId "s3") (cons 'title "Blank")
+               (cons 'blank t))))
+      (s4 (dsh-protocol-session--from-alist
+         (list (cons 'sessionId "s4") (cons 'title "Stray")
+               (cons 'blank :json-false))))
+      (s5 (dsh-protocol-session--from-alist
+         (list (cons 'sessionId "s5") (cons 'title "Subagent")
+               (cons 'origin "subagent") (cons 'blank :json-false))))
+      (w1 (dsh-protocol-workspace--from-alist
+         (list (cons 'workspaceId "w1") (cons 'title "MyWS")
+               (cons 'path "/tmp/ws")
+               (cons 'sessionIds ["s1" "s2" "s3" "s5"])
+               (cons 'createdAt "x") (cons 'updatedAt "x")))))
+  (setq dsh-emacs--workspaces (list w1)
+        dsh-emacs--sessions (list s1 s2 s3 s4 s5)
+        dsh-emacs--archived-sessions nil)
+  (let ((result (dsh-emacs--workspace-sessions "w1")))
+    (when (and (= (length result) 2)
+               (string= "s1" (dsh-protocol-session-session-id (car result)))
+               (string= "s2" (dsh-protocol-session-session-id (cadr result))))
+      (dsh-test-pass "workspace-sessions-filters-and-sorts"))))
+;; --- 测试 61: dsh-emacs--workspace-sessions empty workspace ---
+(let* ((w-empty (dsh-protocol-workspace--from-alist
+              (list (cons 'workspaceId "empty-ws")
+                    (cons 'title "Empty")
+                    (cons 'path "/tmp/empty")
+                    (cons 'sessionIds [])
+                    (cons 'createdAt "x")
+                    (cons 'updatedAt "x"))))
+       (sessions (list (dsh-protocol-session--from-alist
+                        (list (cons 'sessionId "s99")
+                              (cons 'title "Stray")
+                              (cons 'blank :json-false)))))
+       (workspaces (list w-empty)))
+  (setq dsh-emacs--workspaces workspaces
+        dsh-emacs--sessions sessions
+        dsh-emacs--archived-sessions nil)
+  (when (null (dsh-emacs--workspace-sessions "empty-ws"))
+    (dsh-test-pass "workspace-sessions-empty-returns-nil")))
+;; --- 测试 62: dsh-emacs--workspace-sessions unknown workspace ---
+(let* ((w1 (dsh-protocol-workspace--from-alist
+           (list (cons 'workspaceId "w1")
+                 (cons 'title "WS")
+                 (cons 'path "/tmp/ws")
+                 (cons 'sessionIds ["s1"])
+                 (cons 'createdAt "x")
+                 (cons 'updatedAt "x"))))
+       (sessions (list (dsh-protocol-session--from-alist
+                        (list (cons 'sessionId "s1")
+                              (cons 'title "One")
+                              (cons 'blank :json-false)))))
+       (workspaces (list w1)))
+  (setq dsh-emacs--workspaces workspaces
+        dsh-emacs--sessions sessions
+        dsh-emacs--archived-sessions nil)
+  (when (null (dsh-emacs--workspace-sessions "unknown-ws"))
+    (dsh-test-pass "workspace-sessions-unknown-returns-nil")))
+;; --- 测试 63: dsh-emacs-switch-session 排除当前会话 ---
+(let* ((w1 (dsh-protocol-workspace--from-alist
+           (list (cons 'workspaceId "w1")
+                 (cons 'title "WS")
+                 (cons 'path "/tmp/ws")
+                 (cons 'sessionIds ["s1" "s2"])
+                 (cons 'createdAt "x")
+                 (cons 'updatedAt "x"))))
+       (s1 (dsh-protocol-session--from-alist
+            (list (cons 'sessionId "s1") (cons 'title "Cur")
+                  (cons 'blank :json-false))))
+       (s2 (dsh-protocol-session--from-alist
+            (list (cons 'sessionId "s2") (cons 'title "Other")
+                  (cons 'blank :json-false))))
+       (collection nil)
+       (opened nil))
+  (setq dsh-emacs--workspaces (list w1)
+        dsh-emacs--sessions (list s1 s2)
+        dsh-emacs--archived-sessions nil
+        dsh-emacs--current-session "s1")
+  (cl-letf (((symbol-function 'completing-read)
+             (lambda (_prompt coll &rest _)
+               (setq collection coll)
+               ;; 选择候选项第一项（当前会话已被排除，= s2）
+               (caar coll)))
+            ((symbol-function 'dsh-emacs-open-session)
+             (lambda (sid) (setq opened sid))))
+    (dsh-emacs-switch-session))
+  (when (and (equal opened "s2")
+             (not (member "s1" (mapcar #'cdr collection))))
+    (dsh-test-pass "switch-session-excludes-current")))
+;; --- 测试 64: dsh-emacs-switch-session 无其他会话时给出提示 ---
+(let* ((w1 (dsh-protocol-workspace--from-alist
+           (list (cons 'workspaceId "w1")
+                 (cons 'title "WS")
+                 (cons 'path "/tmp/ws")
+                 (cons 'sessionIds ["s1"])
+                 (cons 'createdAt "x")
+                 (cons 'updatedAt "x"))))
+       (s1 (dsh-protocol-session--from-alist
+            (list (cons 'sessionId "s1") (cons 'title "Solo")
+                  (cons 'blank :json-false))))
+       (prompted nil)
+       (msgs nil))
+  (setq dsh-emacs--workspaces (list w1)
+        dsh-emacs--sessions (list s1)
+        dsh-emacs--archived-sessions nil
+        dsh-emacs--current-session "s1")
+  (cl-letf (((symbol-function 'completing-read)
+             (lambda (&rest _) (setq prompted t) nil))
+            ((symbol-function 'message)
+             (lambda (fmt &rest args)
+               (push (apply #'format fmt args) msgs))))
+    (dsh-emacs-switch-session))
+  (when (and (not prompted)
+             (member "No other sessions in this workspace" msgs))
+    (dsh-test-pass "switch-session-no-others-message")))
 (princ "\n===== 测试总结 =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))
       (fail (cl-count-if (lambda (r) (not (cdr r))) dsh-test-results)))
