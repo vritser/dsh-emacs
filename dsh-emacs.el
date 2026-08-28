@@ -2619,8 +2619,13 @@ whole frame."
   (let* ((id (dsh-emacs-render--aget "id" question))
          (text (or (dsh-emacs-render--aget "question" question)
                    "Question"))
+         ;; Hide the session label when the user is already in the
+         ;; asking buffer — it is redundant.
+         (same-buffer (and (boundp 'dsh-emacs--buffer-session)
+                           (equal dsh-emacs--buffer-session session-id)))
          (where (concat
-                 (if (and session-id (not (string-empty-p session-id)))
+                 (if (and session-id (not (string-empty-p session-id))
+                          (not same-buffer))
                      (format "[%s] "
                              (dsh-emacs--question-session-label
                               session-id))
