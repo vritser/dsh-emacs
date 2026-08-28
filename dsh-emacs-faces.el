@@ -95,16 +95,6 @@
 	:type 'string
 	:group 'dsh-emacs-faces)
 
-(defcustom dsh-emacs-color-user-bg "#e8f1fb"
-	"User message card background (light)."
-	:type 'string
-	:group 'dsh-emacs-faces)
-
-(defcustom dsh-emacs-color-user-bg-dark "#1c2733"
-	"User message card background (dark)."
-	:type 'string
-	:group 'dsh-emacs-faces)
-
 (defcustom dsh-emacs-color-assistant-bg "#f5f6f8"
 	"Assistant message background (light)."
 	:type 'string
@@ -238,10 +228,8 @@
 	:group 'dsh-emacs-faces)
 
 (defface dsh-emacs-user-block-face
-	`((((background light)) :background ,dsh-emacs-color-user-bg :extend t)
-		(((background dark))  :background ,dsh-emacs-color-user-bg-dark :extend t)
-		(t :inherit region))
-	"User message card background (light cyan tint, extends to end of line)."
+	'((t))
+	"User message card background (no background, matches default)."
 	:group 'dsh-emacs-faces)
 
 (defface dsh-emacs-assistant-face
