@@ -334,8 +334,9 @@ segments render."
         (let ((text (dsh-emacs-footer--render-segment sym)))
           (when (and text (not (string-empty-p text)))
             (push text parts))))
-      (when parts
-        (mapconcat #'identity (nreverse parts) separator-propertized)))))
+      (if parts
+          (mapconcat #'identity (nreverse parts) separator-propertized)
+        ""))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Footer 行渲染（在 dsh-emacs.el 中由 mode-line-format 钩入）
@@ -569,19 +570,22 @@ rendered tokens (faces on `CH99%') keep their color."
 
 (defun dsh-emacs-footer--modeinline ()
   "Return the compact stats segment for the mode line: \"(model ↑in ↓out CH%)\".
-Empty string when `dsh-emacs-footer-enabled' is nil or nothing renders, so
-the pre-existing mode line is untouched when idle.  Percent signs are
-escaped (%%): mode-line strings undergo `%'-sequence expansion, so a raw
-`%' followed by the closing paren would swallow it.  A trailing space also
-keeps the closing paren off the window's right edge, where right-aligned
-mode lines (doom-modeline) clip the last visible column."
-  (let ((txt (dsh-emacs-footer-format)))
-    (if (string-empty-p txt)
-        ""
-      (let ((escaped (dsh-emacs-footer--escape-percent txt)))
-        (concat (propertize "(" 'face 'dsh-emacs-footer-separator-face)
-                escaped
-                (propertize ") " 'face 'dsh-emacs-footer-separator-face))))))
+Empty string outside dsh-emacs buffers, when `dsh-emacs-footer-enabled'
+is nil, or nothing renders, so the pre-existing mode line is untouched
+when idle.  Percent signs are escaped (%%): mode-line strings undergo
+`%'-sequence expansion, so a raw `%' followed by the closing paren
+would swallow it.  A trailing space also keeps the closing paren off
+the window's right edge, where right-aligned mode lines (doom-modeline)
+clip the last visible column."
+  (if (not (derived-mode-p 'dsh-emacs-mode))
+      ""
+    (let ((txt (dsh-emacs-footer-format)))
+      (if (string-empty-p txt)
+          ""
+        (let ((escaped (dsh-emacs-footer--escape-percent txt)))
+          (concat (propertize "(" 'face 'dsh-emacs-footer-separator-face)
+                  escaped
+                  (propertize ") " 'face 'dsh-emacs-footer-separator-face)))))))
 
 (defun dsh-emacs-footer--splice (base)
   "Return BASE with the dsh mode-line segments spliced in.
@@ -612,10 +616,12 @@ width-filling renderer.  BASE is the pre-existing mode-line-format list."
 
 (defun dsh-emacs-footer--doom-segment ()
   "Doom-modeline segment body: the running animation right after the DSH
-mode name, followed by the compact dsh stats.  Empty when idle, so
-doom-modeline's layout stays untouched."
-  (concat (dsh-emacs-footer--ml-indicator)
-          (dsh-emacs-footer--modeinline)))
+mode name, followed by the compact dsh stats.  Empty when idle or
+outside a dsh-emacs buffer, so doom-modeline's layout stays untouched."
+  (if (not (derived-mode-p 'dsh-emacs-mode))
+      ""
+    (concat (dsh-emacs-footer--ml-indicator)
+            (dsh-emacs-footer--modeinline))))
 
 (defun dsh-emacs-footer--install-doom-segment ()
   "Register the dsh stats as a doom-modeline segment after `major-mode'.
