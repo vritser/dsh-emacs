@@ -96,6 +96,7 @@
 (declare-function dsh-emacs-session--render "dsh-emacs-session" ())
 (declare-function dsh-emacs--normalize-archived "dsh-emacs" (archived))
 (declare-function dsh-emacs-footer-set-context-snapshot "dsh-emacs-footer" (pressure window))
+(declare-function dsh-emacs-server--basic-auth-header "dsh-emacs-server" ())
 
 ;; Defined in dsh-emacs-footer.el, which loads after this module.  Referenced
 ;; at runtime from teardown only.
@@ -136,8 +137,15 @@ overrides it via the `dsh-emacs-event-path' process property."
                          (if (and port (not (memq port '(80 443))))
                              (format ":%s" port)
                            ""))))
-    (let ((request (format "GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\nOrigin: %s\r\n\r\n"
-                           path host-header key origin)))
+    (let* ((auth (and (fboundp 'dsh-emacs-server--basic-auth-header)
+                      (dsh-emacs-server--basic-auth-header)))
+           (request (concat
+                     (format "GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\nOrigin: %s\r\n"
+                             path host-header key origin)
+                     ;; nginx basic auth 下握手必须带认证头，否则 401 拒绝、
+                     ;; 实时事件流（mux/host）全部断连。
+                     (if auth (format "%s: %s\r\n" (car auth) (cdr auth)) "")
+                     "\r\n")))
       (process-send-string process request))))
 
 (defun dsh-emacs-events--random-mask ()

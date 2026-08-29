@@ -4553,6 +4553,139 @@ so the code under test can read fields through the protocol accessors."
        (when (string-match-p "not reachable" (error-message-string err))
          (dsh-test-pass "server-ensure-auto-start-nil-errors"))))))
 
+;; --- 测试 84b: 远程 base-url + down → 不启动/不装 CLI，报不可达 ---
+(let* ((dsh-emacs-base-url "http://dsh-remote.example:3080")
+       (noninteractive nil)
+       (started 0))
+  (cl-letf (((symbol-function 'dsh-emacs--server-alive-p) (lambda () nil))
+            ((symbol-function 'dsh-emacs-server-start)
+             (lambda (&optional _wait) (setq started (1+ started)))))
+    (condition-case err
+        (dsh-emacs-server-ensure)
+      (user-error
+       (when (and (= 0 started)   ; 远程绝不走本地启动
+                  (string-match-p "not reachable" (error-message-string err))
+                  (string-match-p "remote" (error-message-string err)))
+         (dsh-test-pass "server-ensure-remote-no-start"))))))
+
+;; --- 测试 84c: 本地/远程 host 判定 ---
+(let ((dsh-emacs-base-url "http://127.0.0.1:3080")
+      (noninteractive nil))
+  (when (dsh-emacs--server-local-host-p)
+    (dsh-test-pass "server-local-host-loopback")))
+(let ((dsh-emacs-base-url "http://localhost:3080")
+      (noninteractive nil))
+  (when (dsh-emacs--server-local-host-p)
+    (dsh-test-pass "server-local-host-localhost")))
+(let ((dsh-emacs-base-url "http://dsh-remote.example:3080")
+      (noninteractive nil))
+  (when (not (dsh-emacs--server-local-host-p))
+    (dsh-test-pass "server-local-host-remote-false")))
+;; IPv6 loopback：url-host 带方括号（"[::1]"），host-name 剥后判本地
+(let ((dsh-emacs-base-url "http://[::1]:3080")
+      (noninteractive nil))
+  (when (and (equal "::1" (dsh-emacs--server-host-name))
+             (dsh-emacs--server-local-host-p))
+    (dsh-test-pass "server-local-host-ipv6-loopback")))
+;; 内网 IP：非 loopback 主机 → 判远程
+(let ((dsh-emacs-base-url "http://192.168.1.100:3080")
+      (noninteractive nil))
+  (when (not (dsh-emacs--server-local-host-p))
+    (dsh-test-pass "server-local-host-private-ip-remote")))
+
+;; --- 测试 84d: 远程 base-url + start-on-init → 不 spawn 本地服务器 ---
+(let ((dsh-emacs-base-url "http://dsh-remote.example:3080")
+      (dsh-emacs-server-start-on-init t)
+      (spawned 0))
+  (cl-letf (((symbol-function 'dsh-emacs--server-alive-p) (lambda () nil))
+            ((symbol-function 'dsh-emacs--server-bin) (lambda () "/usr/bin/dsh"))
+            ((symbol-function 'dsh-emacs--server-launch)
+             (lambda (&rest _) (setq spawned (1+ spawned))))
+            ((symbol-function 'run-at-time)
+             ;; 立即执行定时器体，让 spawn 判定同步跑完
+             (lambda (_delay _repeat fn &rest args)
+               (apply fn args))))
+    (dsh-emacs-server--maybe-start-on-init))
+  (when (= 0 spawned)
+    (dsh-test-pass "server-remote-init-no-spawn")))
+
+;; --- 测试 84e: nginx basic auth —— base-url 带 userinfo 时生成认证头 ---
+(let ((dsh-emacs-base-url "http://alice:secret@dsh-remote.example:3080"))
+  (let ((hdr (dsh-emacs-server--basic-auth-header)))
+    (when (and (equal "Authorization" (car hdr))
+               (equal (concat "Basic "
+                              (base64-encode-string "alice:secret" t))
+                      (cdr hdr)))
+      (dsh-test-pass "server-basic-auth-header-built"))))
+(let ((dsh-emacs-base-url "http://dsh-remote.example:3080"))
+  (when (null (dsh-emacs-server--basic-auth-header))
+    (dsh-test-pass "server-no-auth-header-without-userinfo")))
+
+;; --- 测试 84f: WebSocket 握手带 Basic 认证头（nginx basic auth 场景） ---
+(let ((dsh-emacs-base-url "http://alice:secret@127.0.0.1:3080")
+      (sent nil))
+  (cl-letf (((symbol-function 'dsh-emacs-events--random-mask)
+             (lambda () (apply #'unibyte-string (list 1 2 3 4))))
+            ((symbol-function 'process-send-string)
+             (lambda (_proc string) (setq sent string))))
+    (dsh-emacs-events--send-handshake
+     (make-pipe-process :name "ws-test" :buffer (get-buffer-create " *ws*"))))
+  (when (and sent
+             (string-match-p "Authorization: Basic [A-Za-z0-9+/=]+" sent))
+    (dsh-test-pass "server-websocket-handshake-carries-basic-auth")))
+
+;; --- 测试 84g: HTTPS base-url 探针走 url 库（TLS）路径 ---
+(let ((dsh-emacs-base-url "https://probe.example:443")
+      (noninteractive nil))
+  (cl-letf (((symbol-function 'dsh-emacs--server-probe-https)
+             (lambda () t))
+            ((symbol-function 'dsh-emacs--server-probe-plain)
+             (lambda () (error "plain probe must not run for https"))))
+    (when (dsh-emacs--server-probe)
+      (dsh-test-pass "server-probe-https-dispatch"))))
+(let ((dsh-emacs-base-url "http://probe.example:3080")
+      (noninteractive nil))
+  (cl-letf (((symbol-function 'dsh-emacs--server-probe-https)
+             (lambda () (error "https probe must not run for http")))
+            ((symbol-function 'dsh-emacs--server-probe-plain)
+             (lambda () t)))
+    (when (dsh-emacs--server-probe)
+      (dsh-test-pass "server-probe-http-dispatch"))))
+
+;; --- 测试 84h: https 探针有界超时 + 空返回不误杀当前 buffer ---
+;; url-retrieve-synchronously 返回 nil（超时/拒绝）时，探针必须返回 nil，
+;; 且不能因 (kill-buffer nil) 删掉调用者当前所在 buffer。
+(let ((dsh-emacs-base-url "https://probe.example:443")
+      (victim (generate-new-buffer " *probe-victim*")))
+  (unwind-protect
+      (with-current-buffer victim
+        (cl-letf (((symbol-function 'url-retrieve-synchronously)
+                   (lambda (&rest _) nil)))   ; 模拟超时返回 nil
+          (let ((result (condition-case e
+                            (dsh-emacs--server-probe-https)
+                          (error (list :err e)))))
+            (when (and (null result)
+                       (eq (current-buffer) victim)
+                       (buffer-live-p victim))
+              (dsh-test-pass "server-probe-https-timeout-nil-safe")))))
+    (kill-buffer victim)))
+
+;; --- 测试 84i: https 探针 200/401 判活，用完即杀返回 buffer ---
+(let ((dsh-emacs-base-url "https://probe.example:443")
+      (ok t))
+  (dolist (status '("200" "401"))
+    (cl-letf (((symbol-function 'url-retrieve-synchronously)
+               (lambda (&rest _)
+                 (let ((b (generate-new-buffer " *probe-http*")))
+                   (with-current-buffer b
+                     (insert (format "HTTP/1.1 %s X\r\nContent-Length: 0\r\n\r\n"
+                                     status))
+                     b)))))
+      (unless (dsh-emacs--server-probe-https)
+        (setq ok nil))))
+  (when ok
+    (dsh-test-pass "server-probe-https-status-200-401-alive")))
+
 ;; --- 测试 85: 安装流程：接受 → 运行安装并返回 dsh 路径 ---
 (cl-letf (((symbol-function 'dsh-emacs--server-bin) (lambda () nil))
           ((symbol-function 'y-or-n-p) (lambda (_prompt) t))

@@ -35,6 +35,9 @@
 (require 'url-parse)
 (require 'dsh-emacs-ui)
 
+(declare-function url-retrieve-synchronously "url"
+                  (url &optional silent inhibit-cookies timeout))
+
 (defgroup dsh-emacs-server nil
   "dsh server bootstrap: probe, auto-start, and on-demand install."
   :group 'dsh-emacs
@@ -113,52 +116,117 @@ for standalone use of this module.")
 
 (defun dsh-emacs--server-host-port ()
   "Return the (HOST . PORT) pair the base URL points at.
-Used both to probe the server and to hand `dsh web' its --host/--port."
+Used both to probe the server and to hand `dsh web' its --host/--port.
+HOST keeps any IPv6 brackets from the URL (\"[::1]\"), which is what an
+HTTP Host header needs."
   (let ((parsed (url-generic-parse-url (dsh-emacs--server-base-url))))
     (cons (or (url-host parsed) "127.0.0.1")
           (or (url-port parsed) 80))))
 
+(defun dsh-emacs--server-host-name ()
+  "Return the base URL's host without IPv6 brackets (\"::1\" for \"[::1]\").
+For sockets (`open-network-stream') and host comparisons: the bracket form
+is valid only inside URLs / Host headers, not as an address to resolve."
+  (let ((host (car (dsh-emacs--server-host-port))))
+    (if (and (> (length host) 2)
+             (eq (aref host 0) ?\[)
+             (eq (aref host (1- (length host))) ?\]))
+        (substring host 1 -1)
+      host)))
+
+(defun dsh-emacs-server--basic-auth-header ()
+  "Return (\"Authorization\" . \"Basic ...\") when the base URL carries
+userinfo (http://user:pass@host...), or nil.  Shared by the raw-TCP probe,
+the WebSocket handshake, and any hand-built request.  The `url' library
+(RPC path) derives the same header from the URL itself, so this exists
+only for the non-url code paths."
+  (let* ((parsed (url-generic-parse-url (dsh-emacs--server-base-url)))
+         (user (url-user parsed))
+         (pass (url-password parsed)))
+    (when (and user (not (string-empty-p user)))
+      (cons "Authorization"
+            (concat "Basic "
+                    (base64-encode-string
+                     (encode-coding-string (concat user ":" (or pass "")) 'utf-8)
+                     t))))))
+
 (defun dsh-emacs--server-probe ()
   "Probe `dsh-emacs-base-url' directly (no cache).
-A raw TCP connection — no `url-retrieve' machinery, so it works headless
-and is as cheap as the loopback round-trip it is.  Sends `GET /' and
-accepts output until the status line arrives or 2s elapse; returns
-non-nil only for an HTTP 200.  Connection refused (nothing listening)
-fails instantly with nil.  Errors are CONTAINED: an unparseable URL,
-resolution failure, or a wedged socket all read as \"not alive\"."
+Two paths: plain HTTP uses a raw TCP connection (cheap, headless-friendly,
+sets a Basic Authorization header when the URL carries userinfo); HTTPS
+goes through the `url' library, which is the only way to speak TLS here.
+Returns non-nil for HTTP 200 or 401 — 401 means the server IS there, it
+just demands authentication, so it counts as alive.  Connection refused
+(nothing listening) fails instantly with nil.  Errors are CONTAINED: an
+unparseable URL, resolution failure, or a wedged socket all read as
+\"not alive\"."
   (ignore-errors
-    (let* ((host-port (dsh-emacs--server-host-port))
-           (host (car host-port))
-           (port (cdr host-port))
-           (buf (generate-new-buffer " *dsh-server-probe*"))
-           (result nil))
+    (if (equal (url-type (url-generic-parse-url (dsh-emacs--server-base-url)))
+               "https")
+        (dsh-emacs--server-probe-https)
+      (dsh-emacs--server-probe-plain))))
+
+(defun dsh-emacs--server-probe-https ()
+  "Probe an `https' base URL via `url-retrieve' (TLS path).
+Bounded to a 5s wait: a peer that accepts TCP but never completes the
+TLS handshake (firewall/proxy wedge) must not hang the probe.  A nil
+return — timeout or `url-retrieve' refusing — reads as \"not alive\"
+and must not touch the caller's current buffer (`kill-buffer' on nil
+would delete it), hence the `when buf' guard."
+  (let ((buf (url-retrieve-synchronously
+              (concat (dsh-emacs--server-base-url) "/") t nil 5)))
+    (when buf
       (unwind-protect
-          (let ((proc (open-network-stream "dsh-server-probe" buf
-                                           host port :type 'plain)))
-            (set-process-query-on-exit-flag proc nil)
-            (set-process-filter
-             proc (lambda (_proc string)
-                    (with-current-buffer buf
-                      (goto-char (point-max))
-                      (insert string))))
-            (process-send-string
-             proc (format "GET / HTTP/1.0\r\nHost: %s:%d\r\n\r\n"
-                          host port))
-            (let ((deadline (+ (float-time) 2.0)))
-              (while (and (process-live-p proc)
-                          (with-current-buffer buf
-                            (not (string-match-p "\r?\n" (buffer-string))))
-                          (< (float-time) deadline))
-                (accept-process-output proc 0.2)))
-            (when (process-live-p proc)
-              (delete-process proc))
-            (with-current-buffer buf
-              (when (string-match "^HTTP/1\\.[01] \\([0-9]+\\)"
-                                  (buffer-string))
-                (setq result (equal (match-string 1 (buffer-string))
-                                    "200")))))
-        (kill-buffer buf))
-      result)))
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (when (re-search-forward "^HTTP/[0-9.]+ \\([0-9]+\\)" nil t)
+              (let ((code (match-string 1)))
+                (or (equal code "200") (equal code "401")))))
+        (kill-buffer buf)))))
+
+(defun dsh-emacs--server-probe-plain ()
+  "Probe a plain-http base URL with a raw TCP `GET /' (no URL machinery)."
+  (let* ((host-port (dsh-emacs--server-host-port))
+         (host (dsh-emacs--server-host-name))
+         ;; Host header needs the bracket form for IPv6 ("[::1]:3080"),
+         ;; the socket address must not have them ("::1").
+         (host-header (car host-port))
+         (port (cdr host-port))
+         (auth (dsh-emacs-server--basic-auth-header))
+         (buf (generate-new-buffer " *dsh-server-probe*"))
+         (result nil))
+    (unwind-protect
+        (let ((proc (open-network-stream "dsh-server-probe" buf
+                                         host port :type 'plain)))
+          (set-process-query-on-exit-flag proc nil)
+          (set-process-filter
+           proc (lambda (_proc string)
+                  (with-current-buffer buf
+                    (goto-char (point-max))
+                    (insert string))))
+          (process-send-string
+           proc (concat (format "GET / HTTP/1.0\r\nHost: %s:%d\r\n"
+                                host-header port)
+                        (if auth
+                            (format "%s: %s\r\n" (car auth) (cdr auth))
+                          "")
+                        "\r\n"))
+          (let ((deadline (+ (float-time) 2.0)))
+            (while (and (process-live-p proc)
+                        (with-current-buffer buf
+                          (not (string-match-p "\r?\n" (buffer-string))))
+                        (< (float-time) deadline))
+              (accept-process-output proc 0.2)))
+          (when (process-live-p proc)
+            (delete-process proc))
+          (with-current-buffer buf
+            (when (string-match "^HTTP/1\\.[01] \\([0-9]+\\)"
+                                (buffer-string))
+              (let ((code (match-string 1 (buffer-string))))
+                (setq result (or (equal code "200")
+                                 (equal code "401")))))))
+      (kill-buffer buf))
+    result))
 
 (defun dsh-emacs--server-alive-p ()
   "Return non-nil when the dsh server answers at the base URL.
@@ -347,20 +415,40 @@ the session list, `C-c C-r' in a chat buffer)."
     (browse-url url)
     (message "Opened %s" url)))
 
+(defun dsh-emacs--server-local-host-p ()
+  "Return t when `dsh-emacs-base-url' points at the local machine.
+A probe failure against a REMOTE base-url must not trigger the local
+spawn/install path: there is no local `dsh' CLI to install and no local
+server to start — the remote server problem is one of reachability, not
+of missing tooling.  Only loopback hosts (127.0.0.1, localhost, ::1) are
+\"local\"."
+  (let ((host (dsh-emacs--server-host-name)))
+    (member (downcase host)
+            '("127.0.0.1" "localhost" "::1" "0.0.0.0"))))
+
 (defun dsh-emacs-server-ensure ()
   "Ensure the dsh server is reachable before a server-touching command.
-With `dsh-emacs-server-auto-start' non-nil and no server answering at
-`dsh-emacs-base-url', the `dsh' CLI is located (asking to install it when
-missing) and the server is launched, waiting until it answers.  With
-auto-start nil this fails with startup instructions instead.  No-op in
-batch (`noninteractive') runs, so the mocked-RPC unit suite needs no
-service."
+With `dsh-emacs-server-auto-start' non-nil and no server answering at a
+LOCAL `dsh-emacs-base-url', the `dsh' CLI is located (asking to install
+it when missing) and the server is launched, waiting until it answers.
+With auto-start nil this fails with startup instructions instead.
+
+Against a REMOTE base-url (non-loopback host, e.g. a dsh server deployed
+on another machine) this never spawns or installs: the CLI would only
+start a LOCAL server, which is not what a remote deployment wants.
+A probe failure there signals the address/network problem and lets the
+user fix `dsh-emacs-base-url', while a successful probe proceeds as
+usual.  No-op in batch (`noninteractive') runs, so the mocked-RPC unit
+suite needs no service."
   (interactive)
   (when (not noninteractive)
     (unless (dsh-emacs--server-alive-p)
-      (if dsh-emacs-server-auto-start
-          (dsh-emacs-server-start t)
-        (user-error "dsh server not reachable at %s.  Start it with M-x dsh-emacs-server-start (or `dsh web --no-open'), or set `dsh-emacs-server-auto-start' to t"
+      (if (dsh-emacs--server-local-host-p)
+          (if dsh-emacs-server-auto-start
+              (dsh-emacs-server-start t)
+            (user-error "dsh server not reachable at %s.  Start it with M-x dsh-emacs-server-start (or `dsh web --no-open'), or set `dsh-emacs-server-auto-start' to t"
+                        (dsh-emacs--server-base-url)))
+        (user-error "dsh server at %s is not reachable.  Check `dsh-emacs-base-url' and the network path to the remote server (the CLI would only start a local server, so it is not used here)"
                     (dsh-emacs--server-base-url))))))
 
 ;;; ---------------------------------------------------------------------------
@@ -376,12 +464,15 @@ service."
 
 (defun dsh-emacs-server--maybe-start-on-init ()
   "Fire-and-forget: launch the dsh server in the background after init.
-Only runs when `dsh-emacs-server-start-on-init' is non-nil.  The server
-process is spawned without waiting — the first `dsh-emacs-server-ensure'
-call will block until it is ready, so the user never sees a freeze at
-startup."
+Only runs when `dsh-emacs-server-start-on-init' is non-nil AND the base
+URL points at the local machine — a remote deployment is never spawned
+from here (the CLI would start a local server; the remote one is managed
+where it runs).  The server process is spawned without waiting — the
+first `dsh-emacs-server-ensure' call will block until it is ready, so the
+user never sees a freeze at startup."
   (when (and dsh-emacs-server-start-on-init
              (not noninteractive)
+             (dsh-emacs--server-local-host-p)
              (not (dsh-emacs--server-alive-p))
              (not dsh-emacs--server-process))
     (run-at-time 1 nil
