@@ -1988,7 +1988,7 @@ fence (e.g. \"python\", \"elisp\").  When the resolved mode is
 loadable, CODE is fontified in a temporary buffer and returned
 with face properties applied.  Otherwise CODE is returned
 unchanged."
-  (if-let ((mode (dsh-emacs-markdown--resolve-lang-mode lang))
+  (if-let* ((mode (dsh-emacs-markdown--resolve-lang-mode lang))
            ((fboundp mode)))
       (with-temp-buffer
         (insert code)
