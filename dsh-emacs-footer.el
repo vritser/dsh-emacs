@@ -186,10 +186,26 @@ seconds; a nil (non-repo) result is cached the same way."
 ;;; 各段格式化
 ;;; ---------------------------------------------------------------------------
 
+(defun dsh-emacs-footer--annotate (text tooltip)
+  "Return TEXT with TOOLTIP attached as its `help-echo' plus the
+standard mode-line hover affordance: `mouse-face' set to
+`mode-line-highlight', so the segment's extent shows a box border
+while the mouse is over it (the same face the built-in mode-line
+elements use; GUI renders it as a released-button box, terminal as
+inverse video).  Passes TEXT through unchanged when nil/empty,
+keeping the existing hidden-segment semantics intact."
+  (if (or (null text) (string-empty-p text))
+      text
+    (propertize text 'help-echo tooltip
+                'mouse-face 'mode-line-highlight)))
+
 (defun dsh-emacs-footer--segment-cwd ()
   "Render the cwd segment."
   (let ((cwd (dsh-emacs-footer--shorten-cwd (or dsh-emacs--footer-cwd default-directory))))
-    (propertize cwd 'face 'dsh-emacs-footer-face)))
+    (dsh-emacs-footer--annotate
+     (propertize cwd 'face 'dsh-emacs-footer-face)
+     (format "Working directory: %s"
+             (or dsh-emacs--footer-cwd default-directory)))))
 
 (defun dsh-emacs-footer--segment-branch ()
   "Render the git branch segment (cached; see
@@ -197,9 +213,11 @@ seconds; a nil (non-repo) result is cached the same way."
   (let ((branch (or dsh-emacs--footer-branch
                     (dsh-emacs-footer--cached-branch))))
     (when (and branch (not (string-empty-p branch)))
-      (concat (propertize "(" 'face 'dsh-emacs-footer-face)
-              (propertize branch 'face 'dsh-emacs-footer-face)
-              (propertize ")" 'face 'dsh-emacs-footer-face)))))
+      (dsh-emacs-footer--annotate
+       (concat (propertize "(" 'face 'dsh-emacs-footer-face)
+               (propertize branch 'face 'dsh-emacs-footer-face)
+               (propertize ")" 'face 'dsh-emacs-footer-face))
+       (format "Git branch: %s" branch)))))
 
 (defun dsh-emacs-footer--segment-model ()
   "Render the model segment.
@@ -209,19 +227,26 @@ set (e.g. a session that predates request events)."
                    (and (boundp 'dsh-emacs-default-model)
                         dsh-emacs-default-model))))
     (when (and model (not (string-empty-p model)))
-      (propertize model 'face 'dsh-emacs-footer-face))))
+      (dsh-emacs-footer--annotate
+       (propertize model 'face 'dsh-emacs-footer-face)
+       (format "Model: %s — reasoning model of this session (switch with C-c C-m)"
+               model)))))
 
 (defun dsh-emacs-footer--segment-effort ()
   "Render the reasoning-effort segment (effortId, e.g. \"max\")."
   (when (and dsh-emacs--footer-effort
              (not (string-empty-p dsh-emacs--footer-effort)))
-    (propertize dsh-emacs--footer-effort 'face 'dsh-emacs-footer-face)))
+    (dsh-emacs-footer--annotate
+     (propertize dsh-emacs--footer-effort 'face 'dsh-emacs-footer-face)
+     (format "Reasoning effort: %s" dsh-emacs--footer-effort))))
 
 (defun dsh-emacs-footer--segment-preset ()
   "Render the agent-preset segment (agentPreset, e.g. \"code\")."
   (when (and dsh-emacs--footer-preset
              (not (string-empty-p dsh-emacs--footer-preset)))
-    (propertize dsh-emacs--footer-preset 'face 'dsh-emacs-footer-face)))
+    (dsh-emacs-footer--annotate
+     (propertize dsh-emacs--footer-preset 'face 'dsh-emacs-footer-face)
+     (format "Agent preset: %s" dsh-emacs--footer-preset))))
 
 (defun dsh-emacs-footer--segment-tokens ()
   "Render the token usage segment."
@@ -243,8 +268,20 @@ set (e.g. a session that predates request events)."
       (when ch (push (propertize (format "CH%.0f%%" ch)
                                  'face 'dsh-emacs-footer-token-face) parts))
       (when parts
-        (mapconcat #'identity (nreverse parts)
-                   (propertize " " 'face 'dsh-emacs-footer-separator-face))))))
+        (let* ((seg (mapconcat
+                     #'identity
+                     (delq nil
+                           (list
+                            (and (> input 0)
+                                 (format "↑%s in" (dsh-emacs-format-tokens input)))
+                            (and (> output 0)
+                                 (format "↓%s out" (dsh-emacs-format-tokens output)))
+                            (and ch (format "CH%.0f%% cache hit" ch))))
+                     " ")))
+          (dsh-emacs-footer--annotate
+           (mapconcat #'identity (nreverse parts)
+                      (propertize " " 'face 'dsh-emacs-footer-separator-face))
+           (format "Token usage: %s" seg)))))))
 
 (defun dsh-emacs-footer--segment-ctx ()
   "Render the context-window usage percentage segment.
@@ -260,15 +297,22 @@ segment renders nothing (nil hides it)."
          (pct (and pressure window (> window 0)
                    (min 100.0 (* 100.0 (/ (float pressure) window))))))
     (when pct
-      (propertize (dsh-emacs-format-percent pct)
-                  'face (dsh-emacs-ctx-face pct)))))
+      (dsh-emacs-footer--annotate
+       (propertize (dsh-emacs-format-percent pct)
+                   'face (dsh-emacs-ctx-face pct))
+       (format "Context window: %s (%s / %s tokens)"
+               (dsh-emacs-format-percent pct)
+               (dsh-emacs-format-tokens pressure)
+               (dsh-emacs-format-tokens window))))))
 
 (defun dsh-emacs-footer--segment-cost ()
   "Render the cost segment."
   (when dsh-emacs--footer-usage
     (let ((cost (dsh-emacs-usage-cost dsh-emacs--footer-usage)))
       (when (> cost 0)
-        (propertize (dsh-emacs-format-cost cost) 'face 'dsh-emacs-footer-cost-face)))))
+        (dsh-emacs-footer--annotate
+         (propertize (dsh-emacs-format-cost cost) 'face 'dsh-emacs-footer-cost-face)
+         (format "Session cost: %s" (dsh-emacs-format-cost cost)))))))
 
 (defun dsh-emacs-footer--render-segment (sym)
   "Render footer segment named SYM."
@@ -516,7 +560,9 @@ running (space on both sides, ready to sit right after the DSH mode name)."
   (let ((frame (dsh-emacs--ml-busy-indicator)))
     (if (string-empty-p frame)
         ""
-      (concat " " frame " "))))
+      (propertize (concat " " frame " ")
+                  'help-echo "dsh is running a request…"
+                  'mouse-face 'mode-line-highlight))))
 
 (defun dsh-emacs-footer--escape-percent (txt)
   "Escape `%' in TXT for mode-line display, keeping text properties.

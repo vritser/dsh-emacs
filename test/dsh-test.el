@@ -153,6 +153,34 @@ so the code under test can read fields through the protocol accessors."
              (string-match "CH92%%" txt))
     (dsh-test-pass "modeinline wraps stats in parens and escapes percent")))
 
+;; --- 测试 5e+1: footer 分段携带 help-echo tooltip，空值透传 ---
+(let ((dsh-emacs-footer-format-spec '(:separator " " :segments (model effort preset ctx))))
+  (setq dsh-emacs--footer-model "m1"
+        dsh-emacs--footer-effort "max"
+        dsh-emacs--footer-preset "standard"
+        dsh-emacs--footer-context-pressure 1234
+        dsh-emacs--footer-context-window-server 10000)
+  (let* ((txt (dsh-emacs-footer-format))
+         (model-pos (string-match "m1" txt))
+         (ctx-pos (string-match "12\\.3%" txt))
+         (model-tip (and model-pos (get-text-property model-pos 'help-echo txt)))
+         (effort-tip (and (string-match "max" txt)
+                          (get-text-property (match-beginning 0) 'help-echo txt)))
+         (ctx-tip (and ctx-pos (get-text-property ctx-pos 'help-echo txt))))
+    (when (and (string-match-p "Model: m1" model-tip)
+               (string-match-p "Reasoning effort: max" effort-tip)
+               (string-match-p "1\\.2k" ctx-tip)
+               (string-match-p "10k" ctx-tip)
+               (eq 'mode-line-highlight
+                   (get-text-property model-pos 'mouse-face txt)))
+      (dsh-test-pass "footer-segments-carry-help-echo")))
+  (setq dsh-emacs--footer-context-pressure nil
+        dsh-emacs--footer-context-window-server nil))
+(let ((nil-tip (dsh-emacs-footer--annotate nil "x"))
+      (empty-tip (dsh-emacs-footer--annotate "" "x")))
+  (when (and (null nil-tip) (equal "" empty-tip))
+    (dsh-test-pass "annotate-passes-nil-and-empty-through")))
+
 ;; --- 测试 5f: request/header 喂 model 与 reasoningEffort（rc.1 事件形状） ---
 (let ((hdr '(("type" . "request/header")
              ("seq" . 11)
