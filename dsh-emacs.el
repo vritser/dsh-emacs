@@ -619,6 +619,17 @@ after exhausting attempts so the user is not spammed with errors."
       (dsh-emacs-list-sessions--fetch-when-ready 10))))
 
 ;;;###autoload
+(defun dsh-emacs--new-session-workspace ()
+  "Resolve the workspace to create the next session in, or nil.
+Precedence: the workspace under point (session list header / New Session
+row), then — inside a chat buffer — the current session's workspace.
+Nil means create in CWD (session lands in the Ungrouped bucket)."
+  (or (dsh-emacs-workspace-id-at-point)
+      (and (derived-mode-p 'dsh-emacs-mode)
+           (dsh-emacs--workspace-for-session
+            (dsh-emacs--active-session-id)))))
+
+;;;###autoload
 (defun dsh-emacs-new-session (&optional cwd workspace-id preset)
   "Create a new session.
 CWD is the working directory; with WORKSPACE-ID the session is created
@@ -628,12 +639,13 @@ host pick its default preset.
 
 Interactively, when point sits on a workspace header or its empty
 New Session row (in the session list), the session is created in that
+workspace; inside a chat buffer, it is created in the current session's
 workspace; otherwise in CWD.  With a prefix argument, first choose the
 agent preset from the live `agentPreset.list' roster (falling back to
 the built-in presets before the first roster arrives); without one
 the session uses `dsh-emacs-default-preset'."
   (interactive
-   (let ((ws (dsh-emacs-workspace-id-at-point)))
+   (let ((ws (dsh-emacs--new-session-workspace)))
      (list nil ws
            (if current-prefix-arg
                (dsh-emacs--read-preset dsh-emacs-default-preset)
@@ -682,14 +694,14 @@ the session uses `dsh-emacs-default-preset'."
 ;;;###autoload
 (defun dsh-emacs-new-session-choose-preset ()
   "Create a new session after choosing its agent preset.
-Like `dsh-emacs-new-session' (the workspace at point decides the
-creation context), but always reads the preset first — bound to `C' in
-the session list, next to `c' which creates immediately with
-`dsh-emacs-default-preset'.  C-g during the preset prompt cancels the
-creation."
+Like `dsh-emacs-new-session' (the workspace under point, or the current
+chat session's workspace, decides the creation context), but always reads
+the preset first — bound to `C' in the session list, next to `c' which
+creates immediately with `dsh-emacs-default-preset'.  C-g during the
+preset prompt cancels the creation."
   (interactive)
   (dsh-emacs-server-ensure)
-  (dsh-emacs-new-session nil (dsh-emacs-workspace-id-at-point)
+  (dsh-emacs-new-session nil (dsh-emacs--new-session-workspace)
                          (dsh-emacs--read-preset dsh-emacs-default-preset)))
 
 (defun dsh-emacs--cache-new-session (session-id &optional workspace-id preset)
@@ -1027,6 +1039,13 @@ order."
       (when (equal workspace-id (dsh-protocol-workspace-workspace-id ws))
         (throw 'found (dsh-protocol-workspace-path ws))))))
 
+(defun dsh-emacs--workspace-for-session (session-id)
+  "Return the workspace id SESSION-ID belongs to, or nil when ungrouped."
+  (catch 'found
+    (dolist (ws dsh-emacs--workspaces)
+      (when (member session-id (dsh-protocol-workspace-session-ids ws))
+        (throw 'found (dsh-protocol-workspace-workspace-id ws))))))
+
 ;; `ivy-mode' 开启时 `ivy-sort-functions-alist' 接管排序；开关我们按用户
 ;; 实际启用的补全框架适配（见 `dsh-emacs--completing-read-ordered'）。
 ;; defvar 声明只为消 byte-compile 警告并保证动态绑定；框架未加载时无副作用。
@@ -1061,13 +1080,7 @@ workspaces), falls back to switching any cached session."
   (interactive)
   (dsh-emacs-server-ensure)
   (let* ((session-id (dsh-emacs--active-session-id))
-         (workspace-id
-          (catch 'found
-            (dolist (ws dsh-emacs--workspaces)
-              (when (member session-id
-                            (dsh-protocol-workspace-session-ids ws))
-                (throw 'found
-                      (dsh-protocol-workspace-workspace-id ws))))))
+         (workspace-id (dsh-emacs--workspace-for-session session-id))
          (candidates
           (dsh-emacs-session--sort-by-recency
            (cl-remove-if

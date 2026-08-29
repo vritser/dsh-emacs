@@ -2797,6 +2797,59 @@ so the code under test can read fields through the protocol accessors."
                 (dsh-test-pass "new-session-outside-workspace-ungrouped")))))
       (kill-buffer buf)))
 
+  ;; 5) 在 chat buffer（会话）中调用：新会话归属当前会话所在 workspace
+  (let ((calls nil)
+        (buf (generate-new-buffer " *dsh-chat-create*"))
+        (w1 (dsh-protocol-workspace--from-alist
+             (list (cons 'workspaceId "w-here")
+                   (cons 'title "Here")
+                   (cons 'path "/tmp/dsh-here")
+                   (cons 'sessionIds ["s-here" "s-other"])
+                   (cons 'createdAt "x") (cons 'updatedAt "x")))))
+    (unwind-protect
+        (with-current-buffer buf
+          (dsh-emacs-mode)
+          (setq-local dsh-emacs--buffer-session "s-here")
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (method params cb)
+                       (push (list method params) calls)
+                       (funcall cb t '((sessionId . "s-child")))))
+                    ((symbol-function 'dsh-emacs-open-session)
+                     (lambda (_sid) nil))
+                    (dsh-emacs--workspaces (list w1)))
+            (call-interactively #'dsh-emacs-new-session)
+            (let* ((call (car calls))
+                   (params (cadr call)))
+              (when (and (string= "session.create" (car call))
+                         (string= "w-here"
+                                  (cdr (assq 'workspaceId params)))
+                         (null (assq 'cwd params)))
+                (dsh-test-pass "new-session-in-chat-uses-session-workspace")))))
+      (kill-buffer buf)))
+
+  ;; 6) chat buffer 中，但当前会话不在任何 workspace：仍走 cwd（ungrouped）
+  (let ((calls nil)
+        (buf (generate-new-buffer " *dsh-chat-create-ungrouped*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (dsh-emacs-mode)
+          (setq-local dsh-emacs--buffer-session "s-lonely")
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (method params cb)
+                       (push (list method params) calls)
+                       (funcall cb t '((sessionId . "s-child2")))))
+                    ((symbol-function 'dsh-emacs-open-session)
+                     (lambda (_sid) nil))
+                    (dsh-emacs--workspaces nil))
+            (call-interactively #'dsh-emacs-new-session)
+            (let* ((call (car calls))
+                   (params (cadr call)))
+              (when (and (string= "session.create" (car call))
+                         (null (assq 'workspaceId params))
+                         (assq 'cwd params))
+                (dsh-test-pass "new-session-in-ungrouped-chat-uses-cwd")))))
+      (kill-buffer buf)))
+
 ;; --- 测试 62b: 重绘保持光标所在的会话行（事件/刷新间不弹回顶部） ---
 (let* ((dsh-emacs--archived-sessions nil)
        (dsh-emacs--current-session nil)
