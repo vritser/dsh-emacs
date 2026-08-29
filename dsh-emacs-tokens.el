@@ -180,19 +180,6 @@ one yields a zero struct."
     (dsh-emacs--alist-state event-alist "data")
     "usage")))
 
-;;; ---------------------------------------------------------------------------
-;;; context window 百分比
-;;; ---------------------------------------------------------------------------
-
-(defun dsh-emacs-format-ctx-percent (input cache-read cache-write context-window)
-  "Return context-window usage percent (0..100), nil when unknown.
-INPUT + CACHE-READ + CACHE-WRITE over CONTEXT-WINDOW, capped at 100.
-Format the result for display with `dsh-emacs-format-percent'."
-  (when (and context-window (> context-window 0))
-    (let* ((used (+ (or input 0) (or cache-read 0) (or cache-write 0)))
-           (pct (* 100.0 (/ (float used) context-window))))
-      (min 100.0 pct))))
-
 (defun dsh-emacs-ctx-face (pct)
   "Return the appropriate footer-context face for PCT."
   (cond

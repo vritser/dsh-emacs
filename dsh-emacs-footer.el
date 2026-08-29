@@ -151,6 +151,18 @@ Nil (no repo) is cached too so non-git dirs never spawn git per redraw.")
 (defvar-local dsh-emacs--footer-context-window nil
   "Context window size in tokens for percentage calc.")
 
+(defvar-local dsh-emacs--footer-context-window-server nil
+  "Context window from the server's `contextPressure' snapshot (tokens).
+Paired with `dsh-emacs--footer-context-pressure': both come from the same
+projection object, so the ctx% divisor always matches the pressure — even
+right after a model switch.  Nil falls back to the legacy window chain.")
+
+(defvar-local dsh-emacs--footer-context-pressure nil
+  "Server-reported current context occupancy (pressureTokens), or nil.
+Fed from the session struct's `contextPressure' snapshot when the list
+refreshes; pairs with `dsh-emacs--footer-context-window-server'.  Nil
+falls back to the legacy cumulative-usage formula.")
+
 (defvar-local dsh-emacs--footer-usage nil
   "Latest usage struct (see `dsh-emacs-usage').")
 
@@ -267,33 +279,22 @@ set (e.g. a session that predates request events)."
         (mapconcat #'identity (nreverse parts)
                    (propertize " " 'face 'dsh-emacs-footer-separator-face))))))
 
-(defun dsh-emacs-footer--ctx-window ()
-  "Resolve the context-window size (tokens) for the ctx segment, or nil.
-Precedence: the buffer-local window fed by a live `request/context' event,
-then `dsh-emacs-footer-context-window-alist' keyed by the current model,
-then the plain `dsh-emacs-footer-context-window' default.  Nil (unknown)
-hides the ctx segment."
-  (or dsh-emacs--footer-context-window
-      (let ((model (and dsh-emacs--footer-model
-                        (not (string-empty-p dsh-emacs--footer-model))
-                        dsh-emacs--footer-model)))
-        (and model
-             (cdr (assoc model dsh-emacs-footer-context-window-alist))))
-      dsh-emacs-footer-context-window))
-
 (defun dsh-emacs-footer--segment-ctx ()
-  "Render the context-window usage percentage segment."
-  (let ((window (dsh-emacs-footer--ctx-window)))
-    (when (and dsh-emacs--footer-usage window)
-      (let* ((u dsh-emacs--footer-usage)
-             (pct (dsh-emacs-format-ctx-percent
-                   (dsh-emacs-usage-input u)
-                   (dsh-emacs-usage-cache-read u)
-                   (dsh-emacs-usage-cache-write u)
-                   window)))
-        ;; PCT 是数字（0..100），face 按阈值着色，显示再转字符串。
-        (propertize (dsh-emacs-format-percent pct)
-                    'face (dsh-emacs-ctx-face pct))))))
+  "Render the context-window usage percentage segment.
+Only the server's `contextPressure' snapshot is meaningful here: the
+segment shows pressureTokens / the same snapshot's contextWindow (the
+current prompt's actual occupancy).  Cumulative token usage (input +
+cacheRead + cacheWrite) is a session lifetime total — it is NOT \"in\"
+the context now, cacheRead alone is usually many times the window, so it
+must never be used as ctx% numerator.  Without a server snapshot the
+segment renders nothing (nil hides it)."
+  (let* ((pressure dsh-emacs--footer-context-pressure)
+         (window dsh-emacs--footer-context-window-server)
+         (pct (and pressure window (> window 0)
+                   (min 100.0 (* 100.0 (/ (float pressure) window))))))
+    (when pct
+      (propertize (dsh-emacs-format-percent pct)
+                  'face (dsh-emacs-ctx-face pct)))))
 
 (defun dsh-emacs-footer--segment-cost ()
   "Render the cost segment."
@@ -418,10 +419,26 @@ still handled by `dsh-emacs-footer-note-request' for the context window)."
   (setq dsh-emacs--footer-context-window (and n (integerp n) n))
   (dsh-emacs-footer-update))
 
-(defun dsh-emacs-footer-set-model (model)
-  "Set the displayed model name to MODEL (a string)."
-  (setq dsh-emacs--footer-model model)
+(defun dsh-emacs-footer-set-context-snapshot (pressure window)
+  "Set the server `contextPressure' snapshot: PRESSURE used / WINDOW total.
+Both values must come from the same projection object: keeping them
+paired guarantees the ctx% numerator/divisor are never mixed across a
+model switch (a new model's window with an old model's occupancy would be
+garbage).  Nil clears the snapshot (falls back to legacy calculation)."
+  (setq dsh-emacs--footer-context-pressure (and pressure (integerp pressure) pressure)
+        dsh-emacs--footer-context-window-server (and window (integerp window) window))
   (dsh-emacs-footer-update))
+
+(defun dsh-emacs-footer-set-model (model)
+  "Set the displayed model name to MODEL (a string).
+When the model actually changes, the event-fed context window from the
+old model's `request/context' is invalidated, so the ctx% window resolution
+re-runs against the new model (server snapshot, then alist)."
+  (let ((changed (not (equal dsh-emacs--footer-model model))))
+    (setq dsh-emacs--footer-model model)
+    (when changed
+      (setq dsh-emacs--footer-context-window nil))
+    (dsh-emacs-footer-update)))
 
 (defun dsh-emacs-footer-set-effort (effort)
   "Set the displayed reasoning effort to EFFORT (an effortId string, or nil)."

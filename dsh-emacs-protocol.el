@@ -89,7 +89,23 @@
                                       (v (and p (cdr (assq 'values p))))
                                       (st (and v
                                                (cdr (assq 'sessionStats v)))))
-                                 (and st (cdr (assq 'pendingInteraction st))))))))
+                                 (and st (cdr (assq 'pendingInteraction st)))))
+                              ;; projections.values.contextPressure —— 服务器对
+                              ;; 当前上下文占用的权威估计（ctx% 段用它而不是
+                              ;; 累计 token 用量，后者是会话总量、会远超窗口）
+                              (context-pressure
+                               (let* ((p (cdr (assq 'projections alist)))
+                                      (v (and p (cdr (assq 'values p))))
+                                      (cp (and v
+                                               (cdr (assq 'contextPressure v)))))
+                                 (and cp (cdr (assq 'pressureTokens cp)))))
+                              ;; 同一 contextPressure 对象里的窗口大小
+                              (context-window
+                               (let* ((p (cdr (assq 'projections alist)))
+                                      (v (and p (cdr (assq 'values p))))
+                                      (cp (and v
+                                               (cdr (assq 'contextPressure v)))))
+                                 (and cp (cdr (assq 'contextWindow cp))))))))
   "One `session.list' item."
   session-id
   title
@@ -101,7 +117,9 @@
   origin
   parent-session-id
   title-value
-  pending-interaction)
+  pending-interaction
+  context-pressure
+  context-window)
 
 (cl-defstruct (dsh-protocol-workspace
                (:constructor dsh-protocol-workspace--from-alist

@@ -77,16 +77,6 @@ so the code under test can read fields through the protocol accessors."
              (= 150 (dsh-emacs-usage-output u1)))
     (dsh-test-pass "usage-add")))
 
-;; --- 测试 5: 上下文百分比 ---
-(let ((pct (dsh-emacs-format-ctx-percent 1000 0 0 2000)))
-  (when (and (= 50.0 pct)
-             (string= "50.0%" (dsh-emacs-format-percent pct)))
-    (dsh-test-pass "format-ctx-percent")))
-
-(let ((pct (dsh-emacs-format-ctx-percent 3000 0 0 2000)))
-  (when (= 100.0 pct)
-    (dsh-test-pass "format-ctx-percent capped at 100")))
-
 ;; --- 测试 5b: usage 解析（真实 dsh 事件形状：data.usage + camelCase）---
 (let* ((event '(("type" . "assistant/message")
                 ("seq" . 103)
@@ -188,34 +178,59 @@ so the code under test can read fields through the protocol accessors."
   (when (= 1 fired)
     (dsh-test-pass "render-dispatches-request-header-to-footer")))
 
-;; --- 测试 5h: ctx 窗口解析优先级：buffer-local > 模型映射表 > 默认值 ---
-(let ((dsh-emacs-footer-context-window-alist
-       '(("deepseek-v4-flash" . 1000000)
-         ("other-model" . 65536)))
+;; --- 测试 5i: session 结构解析 contextPressure 投影（pressure+window 成对） ---
+(let* ((session (dsh-protocol-session--from-alist
+                 (list (cons 'sessionId "ctx-1")
+                       (cons 'projections
+                             (list (cons 'values
+                                         (list (cons 'contextPressure
+                                                     (list (cons 'pressureTokens 129946)
+                                                           (cons 'projectedTokens 130028)
+                                                           (cons 'contextWindow 262144)))))))))))
+  (when (and (= 129946 (dsh-protocol-session-context-pressure session))
+             (= 262144 (dsh-protocol-session-context-window session)))
+    (dsh-test-pass "session-struct-parses-context-pressure")))
+
+;; --- 测试 5j: ctx 段优先服务器快照（pressure/window 同快照成对除） ---
+;; 模拟真实会话：pressure 12.99 万 / window 26.2 万 ≈ 49.6%；旧公式会把
+;; 累计 cacheRead（数百万）算成 100% 满红——服务器快照路径要给出 49.6%。
+(let ((dsh-emacs-footer-format-spec '(:separator " " :segments (ctx))))
+  (setq dsh-emacs--footer-context-pressure 129946
+        dsh-emacs--footer-context-window-server 262144
+        dsh-emacs--footer-context-window nil
+        dsh-emacs--footer-usage (dsh-emacs-make-usage 295045 90220 7020928 0))
+  (let ((txt (dsh-emacs-footer-format)))
+    (when (and (string-match "49.6%" txt)
+               (not (string-match "100.0%" txt)))
+      (dsh-test-pass "ctx-segment-uses-server-snapshot")))
+  (setq dsh-emacs--footer-context-pressure nil
+        dsh-emacs--footer-context-window-server nil
+        dsh-emacs--footer-context-window nil
+        dsh-emacs--footer-usage nil))
+
+;; --- 测试 5k: 模型切换清空事件窗口（防旧模型窗口残留） ---
+(let ((dsh-emacs-footer-context-window-alist '(("new-model" . 65536)))
       (dsh-emacs-footer-context-window nil))
-  ;; 仅模型已知 → 走映射表
-  (setq dsh-emacs--footer-model "deepseek-v4-flash"
-        dsh-emacs--footer-context-window nil)
-  (when (= 1000000 (dsh-emacs-footer--ctx-window))
-    (dsh-test-pass "ctx-window-resolves-from-model-alist"))
-  ;; buffer-local（来自实时 request/context）> 映射表
-  (setq dsh-emacs--footer-context-window 200000)
-  (when (= 200000 (dsh-emacs-footer--ctx-window))
-    (dsh-test-pass "ctx-window-buffer-local-wins"))
-  ;; 模型不在表内 → 默认值兜底
-  (setq dsh-emacs--footer-model "ghost-model"
-        dsh-emacs--footer-context-window nil
-        dsh-emacs-footer-context-window 131072)
-  (when (= 131072 (dsh-emacs-footer--ctx-window))
-    (dsh-test-pass "ctx-window-falls-back-to-default"))
-  ;; 全部未知 → nil（ctx 段隐藏）
+  (setq dsh-emacs--footer-model "old-model"
+        dsh-emacs--footer-context-window 262144) ; 旧模型 request/context 残留
+  (dsh-emacs-footer-set-model "new-model")
+  (when (null dsh-emacs--footer-context-window)
+    (dsh-test-pass "model-switch-clears-event-window"))
   (setq dsh-emacs--footer-model nil
-        dsh-emacs-footer-context-window nil)
-  (when (null (dsh-emacs-footer--ctx-window))
-    (dsh-test-pass "ctx-window-unknown-hides-segment"))
-  (setq dsh-emacs--footer-model nil
-        dsh-emacs--footer-context-window nil
-        dsh-emacs-footer-context-window nil))
+        dsh-emacs--footer-context-window nil))
+
+;; --- 测试 5l: 无服务器快照时 ctx 段隐藏（累计 usage 不再兜底当 ctx% ---
+(let ((dsh-emacs-footer-format-spec '(:separator " " :segments (ctx))))
+  ;; 只有累计 usage、没有服务器 pressure 快照 → ctx 段必须不渲染。
+  ;; 累计 cacheRead 是会话总量（数倍于窗口），拿它当"已占用"会算成
+  ;; 100% 满红——ctx% 只信服务器 pressureTokens。
+  (setq dsh-emacs--footer-context-pressure nil
+        dsh-emacs--footer-context-window-server nil
+        dsh-emacs--footer-usage (dsh-emacs-make-usage 1000 500 8000000 0))
+  (let ((txt (dsh-emacs-footer-format)))
+    (when (string-empty-p txt)
+      (dsh-test-pass "ctx-hidden-without-server-snapshot")))
+  (setq dsh-emacs--footer-usage nil))
 
 ;; --- 测试 6: 面孔定义 ---
 (when (facep 'dsh-emacs-user-face)
@@ -1468,6 +1483,78 @@ so the code under test can read fields through the protocol accessors."
     (remhash "sess-ka" dsh-emacs--chat-buffers)
     (remhash "sess-kb" dsh-emacs--chat-buffers)))
 
+;; --- 测试 43d: 首次打开新会话（缓存缺失）→ 补拉列表以取得 ctx 快照 ---
+;; 新会话不在 `dsh-emacs--sessions' 缓存：`dsh-emacs--link-session-preset'
+;; 增强守卫（preset 或会话缺失都触发）应懒拉 session.list —— 回调里的
+;; `dsh-emacs--chat-buffers-sync-all'（含 context-sync）把 contextPressure
+;; 快照喂进 footer，ctx% 首次打开最终显示而非永久空缺。
+(let* ((old-sessions dsh-emacs--sessions)
+       (methods nil)
+       (buf (generate-new-buffer " *t43d-chat*")))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs--sessions nil) ; 模拟首次打开：缓存为空
+        (with-current-buffer buf
+          (setq-local dsh-emacs--buffer-session "sess-first"))
+        (puthash "sess-first" buf dsh-emacs--chat-buffers)
+        (setq dsh-emacs--footer-context-pressure nil)
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method _params cb)
+                     (push method methods)
+                     (funcall cb t
+                             (list (cons 'items
+                                         (list (list (cons 'sessionId "sess-first")
+                                                     (cons 'projections
+                                                           (list (cons 'values
+                                                                       (list (cons 'contextPressure
+                                                                                   (list (cons 'pressureTokens 129946)
+                                                                                         (cons 'contextWindow 262144)))))))))))))))
+          (dsh-emacs--link-session-preset "sess-first"))
+        (when (member "session.list" methods)
+          (dsh-test-pass "first-open-fetches-session-list")))
+    (setq dsh-emacs--sessions old-sessions)
+    (remhash "sess-first" dsh-emacs--chat-buffers)
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; --- 测试 43e: 缓存存在时 open-session 后 footer ctx 快照落地 ---
+;; 回归：`dsh-emacs--chat-buffer-context-sync' 曾在 `dsh-emacs-mode' 之前
+;; 调用，而 define-derived-mode 的 kill-all-local-variables 会把喂入的
+;; buffer-local 快照整个清掉 → ctx% 永远不显示。现在 sync 在 mode 与
+;; footer-setup 之后，缓存存在时应一次到位。
+(let* ((old-sessions dsh-emacs--sessions)
+       (item '((sessionId . "sess-ctxexist")
+               (projections
+                . ((values
+                    . ((contextPressure
+                        . ((pressureTokens . 129946)
+                           (contextWindow . 262144))))))))))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs--sessions
+              (list (dsh-protocol-session--from-alist item)))
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_method _params cb)
+                     ;; preset 链路缓存已有 → 不应 fetch，若 fetch 说明守卫失效
+                     (funcall cb t (list (cons 'items [])))))
+                  ((symbol-function 'dsh-emacs--load-history)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'dsh-emacs-events-connect)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'pop-to-buffer)
+                   (lambda (&rest _) nil)))
+          (dsh-emacs-open-session "sess-ctxexist"))
+        (let* ((buf (gethash "sess-ctxexist" dsh-emacs--chat-buffers))
+               (pressure (and buf (buffer-local-value
+                                    'dsh-emacs--footer-context-pressure buf)))
+               (window (and buf (buffer-local-value
+                                 'dsh-emacs--footer-context-window-server buf))))
+          (when (and (= 129946 pressure) (= 262144 window))
+            (dsh-test-pass "open-session-feeds-context-snapshot"))))
+    (setq dsh-emacs--sessions old-sessions)
+    (let ((b (gethash "sess-ctxexist" dsh-emacs--chat-buffers)))
+      (remhash "sess-ctxexist" dsh-emacs--chat-buffers)
+      (when (buffer-live-p b) (kill-buffer b)))))
+
 ;; --- 测试 43c: 发送时会话若完全没有流则先重连再轮询（自愈） ---
 (let* ((chat (get-buffer-create " *t43c-chat*"))
        (connects nil)
@@ -1839,7 +1926,11 @@ so the code under test can read fields through the protocol accessors."
         (setq dsh-emacs--current-session "sess-d")
         (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                    (lambda (method params cb)
-                     (push (list method params) calls)
+                     ;; 模型切换成功后产品会跟一次 session.list 刷新（拉取新
+                     ;; 模型的 contextPressure 快照）；它不进断言用的 calls，
+                     ;; 否则 (car calls) 不再指向 selectModel。
+                     (unless (string= method "session.list")
+                       (push (list method params) calls))
                      (cond
                       ((string= method "session.models")
                        (funcall
@@ -1884,7 +1975,8 @@ so the code under test can read fields through the protocol accessors."
         (setq dsh-emacs--current-session "sess-d2")
         (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                    (lambda (method params cb)
-                     (push (list method params) calls)
+                     (unless (string= method "session.list")
+                       (push (list method params) calls))
                      (cond
                       ((string= method "session.models")
                        (funcall
@@ -1950,7 +2042,8 @@ so the code under test can read fields through the protocol accessors."
         (setq dsh-emacs--current-session "sess-g")
         (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                    (lambda (method params cb)
-                     (push (list method params) calls)
+                     (unless (string= method "session.list")
+                       (push (list method params) calls))
                      (cond
                       ((string= method "session.models")
                        (funcall
@@ -2113,12 +2206,17 @@ so the code under test can read fields through the protocol accessors."
           (setq dsh-emacs--current-session "sess-t")
           (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                      (lambda (method params cb)
-                       (push (list method params) calls)
-                       (funcall cb t
-                                (if (string= method "session.models")
-                                    dir
-                                  '((selected . ((provider . "p1")
-                                                 (model . "m1")))))))))
+                       (unless (string= method "session.list")
+                         (push (list method params) calls)
+                         ;; 模型切换成功后会跟一次 session.list 刷新（拉新模型的
+                         ;; contextPressure 快照）：它不在本测试的断言范围内，
+                         ;; 既不进 calls 也不回调（回调会把 session 缓存清空，
+                         ;; 污染后续测试的全局状态）。
+                         (funcall cb t
+                                  (if (string= method "session.models")
+                                      dir
+                                    '((selected . ((provider . "p1")
+                                                   (model . "m1"))))))))))
             (cl-letf (((symbol-function 'completing-read)
                        (lambda (&rest _)
                          (setq cr-n (1+ cr-n))

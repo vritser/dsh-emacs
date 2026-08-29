@@ -537,10 +537,31 @@ A numeric suffix is appended when another buffer already holds the name."
 
 (defun dsh-emacs--chat-buffers-sync-all ()
   "Re-sync every live chat buffer after the session cache changed.
-Updates the mode-line name (list title) and the workspace directory."
-  (maphash (lambda (session-id _buf)
-             (dsh-emacs--chat-buffer-sync session-id))
+Updates the mode-line name (list title), the workspace directory, and
+feeds each buffer's footer the server `contextPressure' snapshot (ctx%
+segment) so it matches the freshly fetched list."
+  (maphash (lambda (session-id buf)
+             (dsh-emacs--chat-buffer-sync session-id)
+             (dsh-emacs--chat-buffer-context-sync session-id buf))
            dsh-emacs--chat-buffers))
+
+(defun dsh-emacs--chat-buffer-context-sync (session-id buf)
+  "Push SESSION-ID's server contextPressure snapshot into BUF's footer.
+Pulled from the cached session struct (protocol accessors), so the same
+projection pair (pressure, window) always lands together — the ctx% stays
+consistent across model switches.
+When the session is not in the cache yet (first open of a brand-new
+session, list not fetched), the snapshot is left untouched: clearing it
+here would only blink out a previously correct ctx% until
+`dsh-emacs--link-session-preset' brings the list back — the fetch there
+re-runs this sync and fills the snapshot in."
+  (when (buffer-live-p buf)
+    (let ((item (dsh-emacs--chat-session-item session-id)))
+      (when item
+        (with-current-buffer buf
+          (dsh-emacs-footer-set-context-snapshot
+           (dsh-protocol-session-context-pressure item)
+           (dsh-protocol-session-context-window item)))))))
 
 ;;;###autoload
 (defun dsh-emacs-list-sessions--fetch ()
@@ -924,6 +945,11 @@ realtime)."
       (dsh-emacs-mode)
       (dsh-emacs-footer-setup)
       (dsh-emacs-footer-set-model dsh-emacs-default-model)
+      ;; 打开即把服务器 contextPressure 快照喂给 footer。必须在
+      ;; `dsh-emacs-mode'（define-derived-mode 内部 kill-all-local-variables）
+      ;; 与 `dsh-emacs-footer-setup' 之后：此前喂入的 buffer-local 快照会
+      ;; 被 mode 切换整个清掉，ctx% 就永远不显示（首次打开的经典症状）。
+      (dsh-emacs--chat-buffer-context-sync session-id buf)
       ;; 思考预设（agentPreset）来自会话列表缓存；缺失时补拉一次 session.list。
       (dsh-emacs--link-session-preset session-id)
       ;; Reopening must re-render: `dsh-emacs--anchor-seq' gates the seq
@@ -1109,9 +1135,15 @@ buffer opens with the same workspace path."
   "Fill the footer agent preset for SESSION-ID into the mode line.
 Uses the cached session list when possible; otherwise refreshes
 `session.list' once and picks the preset from the response.  SAFE outside a
-chat buffer (the RPC callback runs in the buffer that called this)."
-  (let ((preset (dsh-emacs--session-preset session-id)))
-    (if preset
+chat buffer (the RPC callback runs in the buffer that called this).
+The lazy fetch also covers the ctx% snapshot on first open: a session
+missing from `dsh-emacs--sessions' has no `contextPressure' to feed the
+footer either (see `dsh-emacs--chat-buffer-context-sync'), so the same
+fetch — whose callback calls `dsh-emacs--chat-buffers-sync-all' — brings
+preset, context snapshot, title and workspace in one round trip."
+  (let ((preset (dsh-emacs--session-preset session-id))
+        (have-item (dsh-emacs--chat-session-item session-id)))
+    (if (and preset have-item)
         (dsh-emacs-footer-set-preset preset)
       (dsh-emacs--rpc-async "session.list" nil
                             (lambda (ok value)
@@ -2310,6 +2342,11 @@ the filter as \"error in process filter: Quit\"."
                     (progn
                       (dsh-emacs-footer-set-model model)
                       (dsh-emacs-footer-set-effort effort-id)
+                      ;; 模型切换后立即刷新会话列表：旧模型的
+                      ;; contextPressure 快照不再可信，需拉新模型的同一投影
+                      ;; 快照（footer ctx% 的 pressure+window 一并更新成对）。
+                      ;; 直接走内部 fetch（纯 RPC），不进 server-start/事件恢复。
+                      (dsh-emacs-list-sessions--fetch)
                       (message "Model switched to %s (%s)%s"
                                (nth 3 chosen) (nth 2 chosen)
                                (if effort-id
