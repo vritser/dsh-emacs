@@ -122,7 +122,7 @@ so the code under test can read fields through the protocol accessors."
                (string-match "CH92%" txt))
       (dsh-test-pass "footer-format renders accumulated tokens"))))
 
-;; --- 测试 5d: request/context 喂 model 与 context window ---
+;; --- 测试 5d: request/context 喂 model（窗口走 session/projection 帧） ---
 (let ((rc '(("type" . "request/context")
             ("seq" . 42)
             ("data" . (("provider" . "qwen-token-plan")
@@ -130,9 +130,8 @@ so the code under test can read fields through the protocol accessors."
                        ("contextWindow" . 1000000)))))
       (before (or (bound-and-true-p dsh-emacs--footer-model) "none")))
   (dsh-emacs-footer-note-request rc)
-  (when (and (equal "deepseek-v4-flash-0731" dsh-emacs--footer-model)
-             (= 1000000 dsh-emacs--footer-context-window))
-    (dsh-test-pass "note-request feeds model and context window")))
+  (when (equal "deepseek-v4-flash-0731" dsh-emacs--footer-model)
+    (dsh-test-pass "note-request feeds model")))
 
 ;; --- 测试 5e: model/effort/preset 三独立分段 + modeinline 括号 ---
 (let ((dsh-emacs-footer-format-spec '(:separator " " :segments (model effort preset)))
@@ -178,6 +177,54 @@ so the code under test can read fields through the protocol accessors."
   (when (= 1 fired)
     (dsh-test-pass "render-dispatches-request-header-to-footer")))
 
+;; --- 测试 5m: session/projection 帧实时更新 footer ctx%（推送模型） ---
+;; 对齐 dsh web 的 session-projection 推送：host 随事件流推 contextPressure
+;; 帧（{projectedTokens, pressureTokens, contextWindow}），客户端按会话
+;; 路由到 chat 缓冲并直接落地 footer。口径 projected ?? pressure。
+(let* ((buf (get-buffer-create " *t5m-chat*"))
+       (seen nil))
+  (unwind-protect
+      (progn
+        (with-current-buffer buf
+          (setq-local dsh-emacs--buffer-session "sess-proj"))
+        (puthash "sess-proj" buf dsh-emacs--chat-buffers)
+        (with-current-buffer buf
+          (setq-local dsh-emacs--footer-context-pressure nil
+                     dsh-emacs--footer-context-window-server nil))
+        ;; 真实帧 payload → 按会话路由到 chat 缓冲的 footer
+        ;; （投影帧处理器从 payload 取 key/value/sessionId）
+        (dsh-emacs--events-apply-context-projection
+         "sess-proj"
+         '((projectedTokens . 354257)
+           (pressureTokens . 350000)
+           (contextWindow . 1000000)))
+        (let ((p (buffer-local-value 'dsh-emacs--footer-context-pressure buf))
+              (w (buffer-local-value 'dsh-emacs--footer-context-window-server buf)))
+          (when (and (= 354257 p) (= 1000000 w))
+            (dsh-test-pass "session-projection-frame-updates-ctx-footer"))
+          (setq seen (list p w)))
+        ;; 无 projectedTokens 时回退 pressureTokens
+        (dsh-emacs--events-apply-context-projection
+         "sess-proj"
+         '((pressureTokens . 13067) (contextWindow . 1000000)))
+        (let ((p (buffer-local-value 'dsh-emacs--footer-context-pressure buf)))
+          (when (= 13067 p)
+            (dsh-test-pass "session-projection-falls-back-to-pressure")))
+        ;; dispatch 级：完整帧经 --dispatch-json 走到处理器
+        (with-current-buffer buf
+          (setq-local dsh-emacs--footer-context-pressure nil
+                     dsh-emacs--footer-context-window-server nil))
+        (cl-letf (((symbol-function 'dsh-emacs-events--chat)
+                   (lambda (_p) buf)))
+          (dsh-emacs-events--dispatch-json
+           'process
+           "{\"type\":\"server-frame\",\"payload\":{\"type\":\"session/projection\",\"sessionId\":\"sess-proj\",\"key\":\"contextPressure\",\"seq\":50,\"value\":{\"projectedTokens\":88345,\"contextWindow\":1000000}}}"))
+        (let ((p (buffer-local-value 'dsh-emacs--footer-context-pressure buf)))
+          (when (= 88345 p)
+            (dsh-test-pass "session-projection-frame-dispatch"))))
+    (remhash "sess-proj" dsh-emacs--chat-buffers)
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
 ;; --- 测试 5i: session 结构解析 contextPressure 投影（pressure+window 成对） ---
 (let* ((session (dsh-protocol-session--from-alist
                  (list (cons 'sessionId "ctx-1")
@@ -197,7 +244,6 @@ so the code under test can read fields through the protocol accessors."
 (let ((dsh-emacs-footer-format-spec '(:separator " " :segments (ctx))))
   (setq dsh-emacs--footer-context-pressure 129946
         dsh-emacs--footer-context-window-server 262144
-        dsh-emacs--footer-context-window nil
         dsh-emacs--footer-usage (dsh-emacs-make-usage 295045 90220 7020928 0))
   (let ((txt (dsh-emacs-footer-format)))
     (when (and (string-match "49.6%" txt)
@@ -205,19 +251,7 @@ so the code under test can read fields through the protocol accessors."
       (dsh-test-pass "ctx-segment-uses-server-snapshot")))
   (setq dsh-emacs--footer-context-pressure nil
         dsh-emacs--footer-context-window-server nil
-        dsh-emacs--footer-context-window nil
         dsh-emacs--footer-usage nil))
-
-;; --- 测试 5k: 模型切换清空事件窗口（防旧模型窗口残留） ---
-(let ((dsh-emacs-footer-context-window-alist '(("new-model" . 65536)))
-      (dsh-emacs-footer-context-window nil))
-  (setq dsh-emacs--footer-model "old-model"
-        dsh-emacs--footer-context-window 262144) ; 旧模型 request/context 残留
-  (dsh-emacs-footer-set-model "new-model")
-  (when (null dsh-emacs--footer-context-window)
-    (dsh-test-pass "model-switch-clears-event-window"))
-  (setq dsh-emacs--footer-model nil
-        dsh-emacs--footer-context-window nil))
 
 ;; --- 测试 5l: 无服务器快照时 ctx 段隐藏（累计 usage 不再兜底当 ctx% ---
 (let ((dsh-emacs-footer-format-spec '(:separator " " :segments (ctx))))

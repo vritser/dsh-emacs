@@ -20,7 +20,6 @@
 ;;   (dsh-emacs-footer-set-usage usage)     ;;  设置累计 token usage
 ;;   (dsh-emacs-footer-add-usage usage)     ;;  累加 usage 并刷新
 ;;   (dsh-emacs-footer-note-event event)    ;;  从 assistant/message 事件累计 usage
-;;   (dsh-emacs-footer-set-context-window n);; 设置 context window 大小
 ;;   (dsh-emacs-footer-set-model "claude-opus-4-5") ;; 设置模型名
 ;;   (dsh-emacs-footer-set-effort "max")   ;; 设置推理 effort
 ;;   (dsh-emacs-footer-set-preset "code")  ;; 设置 agent preset
@@ -95,36 +94,6 @@ last result — including a \"not a git repo\" nil — is reused."
   :type 'number
   :group 'dsh-emacs-footer)
 
-(defcustom dsh-emacs-footer-context-window nil
-  "Model context window size in tokens, used for the footer ctx% segment.
-Nil leaves the ctx segment hidden (unknown window); set it to your model's
-context size (e.g. 131072 for a 128k-token window) to enable the
-percentage.  The buffer-local `dsh-emacs--footer-context-window' takes
-precedence when set, then `dsh-emacs-footer-context-window-alist' by the
-current model, then this value."
-  :type '(choice (const :tag "unknown (hide ctx%)" nil)
-                 (integer :tag "tokens"))
-  :group 'dsh-emacs-footer)
-
-(defcustom dsh-emacs-footer-context-window-alist
-  '(("deepseek-v4-flash" . 1000000)
-    ("deepseek-v4-pro" . 1000000))
-  "Per-model context window sizes (tokens) for the footer ctx% segment.
-
-The dsh server never exposes a model's context window through its client
-APIs: the `session.models' catalog entries carry only id/name/reasoning,
-and the windowed `session.history' response drops `request/context' events
-outside the fetched window (they are appended once, at the first request,
-which is almost never inside it).  dsh-emacs therefore resolves the window
-from this table once the session's model is known — a live
-`request/header' (or `request/context') event or a model switch.  Keys are
-model ids; add entries for the models you use to enable the ctx% segment
-out of the box.  Precedence: a buffer-local window from a live
-`request/context' event, then this table, then
-`dsh-emacs-footer-context-window'."
-  :type '(alist :key-type string :value-type integer)
-  :group 'dsh-emacs-footer)
-
 ;;; ---------------------------------------------------------------------------
 ;;; 内部状态（buffer-local）
 ;;; ---------------------------------------------------------------------------
@@ -148,20 +117,18 @@ Nil (no repo) is cached too so non-git dirs never spawn git per redraw.")
 (defvar-local dsh-emacs--footer-preset nil
   "Agent preset (agentPreset id, e.g. \"standard\"/\"code\") shown in the footer.")
 
-(defvar-local dsh-emacs--footer-context-window nil
-  "Context window size in tokens for percentage calc.")
-
 (defvar-local dsh-emacs--footer-context-window-server nil
-  "Context window from the server's `contextPressure' snapshot (tokens).
+  "Context window from the server's `contextPressure' projection (tokens).
 Paired with `dsh-emacs--footer-context-pressure': both come from the same
-projection object, so the ctx% divisor always matches the pressure — even
-right after a model switch.  Nil falls back to the legacy window chain.")
+projection, so the ctx% divisor always matches the occupancy — even right
+after a model switch.")
 
 (defvar-local dsh-emacs--footer-context-pressure nil
-  "Server-reported current context occupancy (pressureTokens), or nil.
-Fed from the session struct's `contextPressure' snapshot when the list
-refreshes; pairs with `dsh-emacs--footer-context-window-server'.  Nil
-falls back to the legacy cumulative-usage formula.")
+  "Server-reported current context occupancy (tokens), or nil.
+Fed from the `contextPressure' projection (projectedTokens ?? pressureTokens,
+dsh web's ctx-meter口径) — live via `session/projection' frames, and seeded
+from the `session.list' snapshot when a chat buffer opens.  Pairs with
+`dsh-emacs--footer-context-window-server'.  Nil hides the ctx segment.")
 
 (defvar-local dsh-emacs--footer-usage nil
   "Latest usage struct (see `dsh-emacs-usage').")
@@ -381,17 +348,15 @@ the renderer.  Usage is read from `data.usage' (see
     (dsh-emacs-footer-add-usage (dsh-emacs-usage-from-event event))))
 
 (defun dsh-emacs-footer-note-request (event)
-  "Pick the model id and context window off a `request/context' EVENT.
+  "Pick the model id off a `request/context' EVENT.
 The model id refreshes whenever the agent issues a new model request, so
-the mode-line smoke segment always reflects the live model."
+the mode-line segment always reflects the live model.  Context-window
+data rides the `session/projection' frames, not this event."
   (let ((data (dsh-emacs--alist-state event "data")))
     (when data
-      (let ((model (dsh-emacs--alist-state data "model"))
-            (window (dsh-emacs--alist-state data "contextWindow")))
+      (let ((model (dsh-emacs--alist-state data "model")))
         (when (and model (not (string-empty-p model)))
-          (setq dsh-emacs--footer-model model))
-        (when (and (numberp window) (> window 0))
-          (setq dsh-emacs--footer-context-window window)))
+          (setq dsh-emacs--footer-model model)))
       (dsh-emacs-footer-update))))
 
 (defun dsh-emacs-footer-note-header (event)
@@ -400,8 +365,7 @@ dsh 0.1.1-rc.1 emits `request/header' (data.header.config) instead of (or
 before) the rc.2 `request/context', and — unlike `request/context' — the
 event survives the windowed `session.history' response, so this is what
 actually reaches the footer when a session is opened.  Consuming it makes
-the model and effort segments live on open (the rc.2 `request/context' is
-still handled by `dsh-emacs-footer-note-request' for the context window)."
+the model and effort segments live on open."
   (let* ((data (dsh-emacs--alist-state event "data"))
          (header (and data (dsh-emacs--alist-state data "header")))
          (config (and header (dsh-emacs--alist-state header "config"))))
@@ -414,31 +378,18 @@ still handled by `dsh-emacs-footer-note-request' for the context window)."
           (setq dsh-emacs--footer-effort effort)))
       (dsh-emacs-footer-update))))
 
-(defun dsh-emacs-footer-set-context-window (n)
-  "Set context window size to N tokens."
-  (setq dsh-emacs--footer-context-window (and n (integerp n) n))
-  (dsh-emacs-footer-update))
-
 (defun dsh-emacs-footer-set-context-snapshot (pressure window)
-  "Set the server `contextPressure' snapshot: PRESSURE used / WINDOW total.
-Both values must come from the same projection object: keeping them
-paired guarantees the ctx% numerator/divisor are never mixed across a
-model switch (a new model's window with an old model's occupancy would be
-garbage).  Nil clears the snapshot (falls back to legacy calculation)."
+  "Set the server `contextPressure' projection: PRESSURE used / WINDOW total.
+Both values come from the same projection, keeping the ctx% numerator and
+divisor paired across model switches.  Nil hides the ctx segment."
   (setq dsh-emacs--footer-context-pressure (and pressure (integerp pressure) pressure)
         dsh-emacs--footer-context-window-server (and window (integerp window) window))
   (dsh-emacs-footer-update))
 
 (defun dsh-emacs-footer-set-model (model)
-  "Set the displayed model name to MODEL (a string).
-When the model actually changes, the event-fed context window from the
-old model's `request/context' is invalidated, so the ctx% window resolution
-re-runs against the new model (server snapshot, then alist)."
-  (let ((changed (not (equal dsh-emacs--footer-model model))))
-    (setq dsh-emacs--footer-model model)
-    (when changed
-      (setq dsh-emacs--footer-context-window nil))
-    (dsh-emacs-footer-update)))
+  "Set the displayed model name to MODEL (a string)."
+  (setq dsh-emacs--footer-model model)
+  (dsh-emacs-footer-update))
 
 (defun dsh-emacs-footer-set-effort (effort)
   "Set the displayed reasoning effort to EFFORT (an effortId string, or nil)."

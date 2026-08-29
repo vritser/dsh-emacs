@@ -105,7 +105,17 @@
                                       (v (and p (cdr (assq 'values p))))
                                       (cp (and v
                                                (cdr (assq 'contextPressure v)))))
-                                 (and cp (cdr (assq 'contextWindow cp))))))))
+                                 (and cp (cdr (assq 'contextWindow cp)))))
+                              ;; contextPressure.projectedTokens —— 压力 + surface
+                              ;; 增量（回答"下一次请求会占多少"）。dsh web 的
+                              ;; ctx 指示器以此优先（StatsLine：projected ??
+                              ;; pressure），align 它的口径。
+                              (context-projected
+                               (let* ((p (cdr (assq 'projections alist)))
+                                      (v (and p (cdr (assq 'values p))))
+                                      (cp (and v
+                                               (cdr (assq 'contextPressure v)))))
+                                 (and cp (cdr (assq 'projectedTokens cp))))))))
   "One `session.list' item."
   session-id
   title
@@ -119,7 +129,8 @@
   title-value
   pending-interaction
   context-pressure
-  context-window)
+  context-window
+  context-projected)
 
 (cl-defstruct (dsh-protocol-workspace
                (:constructor dsh-protocol-workspace--from-alist

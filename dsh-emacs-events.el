@@ -95,6 +95,7 @@
 (declare-function dsh-emacs-render--json-bool "dsh-emacs-render" (value))
 (declare-function dsh-emacs-session--render "dsh-emacs-session" ())
 (declare-function dsh-emacs--normalize-archived "dsh-emacs" (archived))
+(declare-function dsh-emacs-footer-set-context-snapshot "dsh-emacs-footer" (pressure window))
 
 ;; Defined in dsh-emacs-footer.el, which loads after this module.  Referenced
 ;; at runtime from teardown only.
@@ -247,6 +248,28 @@ overrides it via the `dsh-emacs-event-path' process property."
                (gethash session-id dsh-emacs--chat-buffers))
       (dsh-emacs--chat-buffer-sync session-id))))
 
+(defun dsh-emacs--events-apply-context-projection (session-id value)
+  "Update the footer ctx% for SESSION-ID from a `contextPressure' projection VALUE.
+VALUE is the projection's wire view: an alist with symbol/string keys for
+`projectedTokens', `pressureTokens' and `contextWindow' (the same shape
+`session.list' projections carry, aligned with dsh web's ctx meter which
+reads projectedTokens ?? pressureTokens).  Only the session's live chat
+buffer is touched; the footer's snapshot setter lands the pair in one go."
+  (when (and (listp value)
+             (hash-table-p dsh-emacs--chat-buffers))
+    (let* ((projected (dsh-emacs-render--aget "projectedTokens" value))
+           (pressure (dsh-emacs-render--aget "pressureTokens" value))
+           (window (dsh-emacs-render--aget "contextWindow" value))
+           ;; dsh web 口径：优先 projected（含 surface 增量），回退 pressure
+           (used (or (and (numberp projected) projected)
+                     (and (numberp pressure) pressure)))
+           (buf (gethash session-id dsh-emacs--chat-buffers)))
+      (when (and used window (> window 0)
+                 (buffer-live-p buf)
+                 (fboundp 'dsh-emacs-footer-set-context-snapshot))
+        (with-current-buffer buf
+          (dsh-emacs-footer-set-context-snapshot used window))))))
+
 (defun dsh-emacs-events--dispatch-event (chat event)
   "Dispatch EVENT received for CHAT, respecting seq and optimistic input."
   (when (and (buffer-live-p chat) (listp event))
@@ -304,6 +327,17 @@ through the normal path once loading completes."
                   (dsh-emacs--question-requested
                    chat rpc-id session-id
                    (dsh-emacs-render--aget "questions" payload))))
+               ;; host 推送的投影帧：会话上下文占用（contextPressure）随
+               ;; 事件流实时更新（对齐 dsh web 的 session-projection 推送
+               ;; 模型，免去全量 session.list 拉取）。value 是投影的 wire
+               ;; view：{projectedTokens, pressureTokens, contextWindow}。
+               ;; 投影是 per-session 实时状态，不依赖 history 加载门控。
+               ((equal type "session/projection")
+                (when (equal (dsh-emacs-render--aget "key" payload)
+                             "contextPressure")
+                  (dsh-emacs--events-apply-context-projection
+                   session-id
+                   (dsh-emacs-render--aget "value" payload))))
                ;; Server auto-renames a session after its first turns (summary
                ;; title) and `session.rename' also lands here: both surface as
                ;; a `session/title' event.  Titles are per-session metadata, not
