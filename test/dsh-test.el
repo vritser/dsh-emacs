@@ -39,8 +39,8 @@ so the code under test can read fields through the protocol accessors."
 (when (featurep 'dsh-emacs-render)
   (dsh-test-pass "dsh-emacs-render loaded"))
 
-(when (featurep 'dsh-emacs-footer)
-  (dsh-test-pass "dsh-emacs-footer loaded"))
+(when (featurep 'dsh-emacs-modeline)
+  (dsh-test-pass "dsh-emacs-modeline loaded"))
 
 (when (featurep 'dsh-emacs-session)
   (dsh-test-pass "dsh-emacs-session loaded"))
@@ -97,30 +97,30 @@ so the code under test can read fields through the protocol accessors."
   (when all-zero
     (dsh-test-pass "usage-from-event no-usage yields zero")))
 
-;; --- 测试 5c: footer 事件累计与渲染 ---
+;; --- 测试 5c: mode-line 事件累计与渲染 ---
 (let (txt)
-  (setq dsh-emacs--footer-usage nil)
-  (dsh-emacs-footer-note-event
+  (setq dsh-emacs--modeline-usage nil)
+  (dsh-emacs-modeline-note-event
    '(("type" . "assistant/message")
      ("data" . (("usage" . (("inputTokens" . 100) ("outputTokens" . 20)))))))
-  (dsh-emacs-footer-note-event
+  (dsh-emacs-modeline-note-event
    '(("type" . "assistant/message")
      ("data" . (("usage" . (("inputTokens" . 200)
                             ("outputTokens" . 40)
                             ("cacheReadTokens" . 3500)))))))
   ;; Non-message events must not touch the accumulator.
-  (dsh-emacs-footer-note-event
+  (dsh-emacs-modeline-note-event
    '(("type" . "user/message") ("data" . (("content" . "hi")))))
-  (when (and dsh-emacs--footer-usage
-             (= 300 (dsh-emacs-usage-input dsh-emacs--footer-usage))
-             (= 60 (dsh-emacs-usage-output dsh-emacs--footer-usage))
-             (= 3500 (dsh-emacs-usage-cache-read dsh-emacs--footer-usage)))
-    (dsh-test-pass "footer-note-event accumulates assistant/message usage"))
-  (let ((dsh-emacs-footer-format-spec '(:separator " " :segments (tokens))))
-    (setq txt (dsh-emacs-footer-format))
+  (when (and dsh-emacs--modeline-usage
+             (= 300 (dsh-emacs-usage-input dsh-emacs--modeline-usage))
+             (= 60 (dsh-emacs-usage-output dsh-emacs--modeline-usage))
+             (= 3500 (dsh-emacs-usage-cache-read dsh-emacs--modeline-usage)))
+    (dsh-test-pass "modeline-note-event accumulates assistant/message usage"))
+  (let ((dsh-emacs-modeline-format-spec '(:separator " " :segments (tokens))))
+    (setq txt (dsh-emacs-modeline-format))
     (when (and (string-match "↑300" txt) (string-match "↓60" txt)
                (string-match "CH92%" txt))
-      (dsh-test-pass "footer-format renders accumulated tokens"))))
+      (dsh-test-pass "modeline-format renders accumulated tokens"))))
 
 ;; --- 测试 5d: request/context 喂 model（窗口走 session/projection 帧） ---
 (let ((rc '(("type" . "request/context")
@@ -128,39 +128,39 @@ so the code under test can read fields through the protocol accessors."
             ("data" . (("provider" . "qwen-token-plan")
                        ("model" . "deepseek-v4-flash-0731")
                        ("contextWindow" . 1000000)))))
-      (before (or (bound-and-true-p dsh-emacs--footer-model) "none")))
-  (dsh-emacs-footer-note-request rc)
-  (when (equal "deepseek-v4-flash-0731" dsh-emacs--footer-model)
+      (before (or (bound-and-true-p dsh-emacs--modeline-model) "none")))
+  (dsh-emacs-modeline-note-request rc)
+  (when (equal "deepseek-v4-flash-0731" dsh-emacs--modeline-model)
     (dsh-test-pass "note-request feeds model")))
 
 ;; --- 测试 5e: model/effort/preset 三独立分段 + modeinline 括号 ---
-(let ((dsh-emacs-footer-format-spec '(:separator " " :segments (model effort preset)))
+(let ((dsh-emacs-modeline-format-spec '(:separator " " :segments (model effort preset)))
       (txt (progn
-             (setq dsh-emacs--footer-model "m1"
-                   dsh-emacs--footer-effort "max"
-                   dsh-emacs--footer-preset "standard")
-             (dsh-emacs-footer-format))))
+             (setq dsh-emacs--modeline-model "m1"
+                   dsh-emacs--modeline-effort "max"
+                   dsh-emacs--modeline-preset "standard")
+             (dsh-emacs-modeline-format))))
   (when (and (string-match "m1" txt)
              (string-match "max" txt)
              (string-match "standard" txt)
              (not (string-match "m1-standard" txt)))
     (dsh-test-pass "model effort preset render as separate segments")))
-(let* ((dsh-emacs-footer-format-spec '(:separator " " :segments (model tokens ctx)))
+(let* ((dsh-emacs-modeline-format-spec '(:separator " " :segments (model tokens ctx)))
        (txt (progn
-              (dsh-emacs-footer-set-effort nil)
-              (dsh-emacs-footer--modeinline))))
+              (dsh-emacs-modeline-set-effort nil)
+              (dsh-emacs-modeline--modeinline))))
   (when (and (string-prefix-p "(" txt) (string-match-p ") *$" txt)
              (string-match "CH92%%" txt))
     (dsh-test-pass "modeinline wraps stats in parens and escapes percent")))
 
-;; --- 测试 5e+1: footer 分段携带 help-echo tooltip，空值透传 ---
-(let ((dsh-emacs-footer-format-spec '(:separator " " :segments (model effort preset ctx))))
-  (setq dsh-emacs--footer-model "m1"
-        dsh-emacs--footer-effort "max"
-        dsh-emacs--footer-preset "standard"
-        dsh-emacs--footer-context-pressure 1234
-        dsh-emacs--footer-context-window-server 10000)
-  (let* ((txt (dsh-emacs-footer-format))
+;; --- 测试 5e+1: mode-line 分段携带 help-echo tooltip，空值透传 ---
+(let ((dsh-emacs-modeline-format-spec '(:separator " " :segments (model effort preset ctx))))
+  (setq dsh-emacs--modeline-model "m1"
+        dsh-emacs--modeline-effort "max"
+        dsh-emacs--modeline-preset "standard"
+        dsh-emacs--modeline-context-pressure 1234
+        dsh-emacs--modeline-context-window-server 10000)
+  (let* ((txt (dsh-emacs-modeline-format))
          (model-pos (string-match "m1" txt))
          (ctx-pos (string-match "12\\.3%" txt))
          (model-tip (and model-pos (get-text-property model-pos 'help-echo txt)))
@@ -173,11 +173,11 @@ so the code under test can read fields through the protocol accessors."
                (string-match-p "10k" ctx-tip)
                (eq 'mode-line-highlight
                    (get-text-property model-pos 'mouse-face txt)))
-      (dsh-test-pass "footer-segments-carry-help-echo")))
-  (setq dsh-emacs--footer-context-pressure nil
-        dsh-emacs--footer-context-window-server nil))
-(let ((nil-tip (dsh-emacs-footer--annotate nil "x"))
-      (empty-tip (dsh-emacs-footer--annotate "" "x")))
+      (dsh-test-pass "modeline-segments-carry-help-echo")))
+  (setq dsh-emacs--modeline-context-pressure nil
+        dsh-emacs--modeline-context-window-server nil))
+(let ((nil-tip (dsh-emacs-modeline--annotate nil "x"))
+      (empty-tip (dsh-emacs-modeline--annotate "" "x")))
   (when (and (null nil-tip) (equal "" empty-tip))
     (dsh-test-pass "annotate-passes-nil-and-empty-through")))
 
@@ -187,28 +187,28 @@ so the code under test can read fields through the protocol accessors."
              ("data" . (("header" . (("config" . (("provider" . "opencode-go")
                                                   ("model" . "deepseek-v4-flash")
                                                   ("reasoningEffort" . "high"))))))))))
-  (setq dsh-emacs--footer-model nil
-        dsh-emacs--footer-effort nil)
-  (dsh-emacs-footer-note-header hdr)
-  (when (and (equal "deepseek-v4-flash" dsh-emacs--footer-model)
-             (equal "high" dsh-emacs--footer-effort))
+  (setq dsh-emacs--modeline-model nil
+        dsh-emacs--modeline-effort nil)
+  (dsh-emacs-modeline-note-header hdr)
+  (when (and (equal "deepseek-v4-flash" dsh-emacs--modeline-model)
+             (equal "high" dsh-emacs--modeline-effort))
     (dsh-test-pass "note-header feeds model and reasoning effort"))
-  (setq dsh-emacs--footer-model nil
-        dsh-emacs--footer-effort nil))
+  (setq dsh-emacs--modeline-model nil
+        dsh-emacs--modeline-effort nil))
 
-;; --- 测试 5g: render 调度转发 request/header 到 footer feed ---
+;; --- 测试 5g: render 调度转发 request/header 到 mode-line feed ---
 (let ((fired 0))
-  (cl-letf (((symbol-function 'dsh-emacs-footer-note-header)
+  (cl-letf (((symbol-function 'dsh-emacs-modeline-note-header)
              (lambda (_event) (setq fired (1+ fired)))))
     (dsh-emacs-render-event '(("type" . "request/header") ("seq" . 5)))
     (dsh-emacs-render-event '(("type" . "request/context") ("seq" . 6))))
   (when (= 1 fired)
-    (dsh-test-pass "render-dispatches-request-header-to-footer")))
+    (dsh-test-pass "render-dispatches-request-header-to-mode-line")))
 
-;; --- 测试 5m: session/projection 帧实时更新 footer ctx%（推送模型） ---
+;; --- 测试 5m: session/projection 帧实时更新 mode-line ctx%（推送模型） ---
 ;; 对齐 dsh web 的 session-projection 推送：host 随事件流推 contextPressure
 ;; 帧（{projectedTokens, pressureTokens, contextWindow}），客户端按会话
-;; 路由到 chat 缓冲并直接落地 footer。口径 projected ?? pressure。
+;; 路由到 chat 缓冲并直接落地 mode-line。口径 projected ?? pressure。
 (let* ((buf (get-buffer-create " *t5m-chat*"))
        (seen nil))
   (unwind-protect
@@ -217,37 +217,37 @@ so the code under test can read fields through the protocol accessors."
           (setq-local dsh-emacs--buffer-session "sess-proj"))
         (puthash "sess-proj" buf dsh-emacs--chat-buffers)
         (with-current-buffer buf
-          (setq-local dsh-emacs--footer-context-pressure nil
-                     dsh-emacs--footer-context-window-server nil))
-        ;; 真实帧 payload → 按会话路由到 chat 缓冲的 footer
+          (setq-local dsh-emacs--modeline-context-pressure nil
+                     dsh-emacs--modeline-context-window-server nil))
+        ;; 真实帧 payload → 按会话路由到 chat 缓冲的 mode-line
         ;; （投影帧处理器从 payload 取 key/value/sessionId）
         (dsh-emacs--events-apply-context-projection
          "sess-proj"
          '((projectedTokens . 354257)
            (pressureTokens . 350000)
            (contextWindow . 1000000)))
-        (let ((p (buffer-local-value 'dsh-emacs--footer-context-pressure buf))
-              (w (buffer-local-value 'dsh-emacs--footer-context-window-server buf)))
+        (let ((p (buffer-local-value 'dsh-emacs--modeline-context-pressure buf))
+              (w (buffer-local-value 'dsh-emacs--modeline-context-window-server buf)))
           (when (and (= 354257 p) (= 1000000 w))
-            (dsh-test-pass "session-projection-frame-updates-ctx-footer"))
+            (dsh-test-pass "session-projection-frame-updates-ctx-mode-line"))
           (setq seen (list p w)))
         ;; 无 projectedTokens 时回退 pressureTokens
         (dsh-emacs--events-apply-context-projection
          "sess-proj"
          '((pressureTokens . 13067) (contextWindow . 1000000)))
-        (let ((p (buffer-local-value 'dsh-emacs--footer-context-pressure buf)))
+        (let ((p (buffer-local-value 'dsh-emacs--modeline-context-pressure buf)))
           (when (= 13067 p)
             (dsh-test-pass "session-projection-falls-back-to-pressure")))
         ;; dispatch 级：完整帧经 --dispatch-json 走到处理器
         (with-current-buffer buf
-          (setq-local dsh-emacs--footer-context-pressure nil
-                     dsh-emacs--footer-context-window-server nil))
+          (setq-local dsh-emacs--modeline-context-pressure nil
+                     dsh-emacs--modeline-context-window-server nil))
         (cl-letf (((symbol-function 'dsh-emacs-events--chat)
                    (lambda (_p) buf)))
           (dsh-emacs-events--dispatch-json
            'process
            "{\"type\":\"server-frame\",\"payload\":{\"type\":\"session/projection\",\"sessionId\":\"sess-proj\",\"key\":\"contextPressure\",\"seq\":50,\"value\":{\"projectedTokens\":88345,\"contextWindow\":1000000}}}"))
-        (let ((p (buffer-local-value 'dsh-emacs--footer-context-pressure buf)))
+        (let ((p (buffer-local-value 'dsh-emacs--modeline-context-pressure buf)))
           (when (= 88345 p)
             (dsh-test-pass "session-projection-frame-dispatch"))))
     (remhash "sess-proj" dsh-emacs--chat-buffers)
@@ -269,30 +269,30 @@ so the code under test can read fields through the protocol accessors."
 ;; --- 测试 5j: ctx 段优先服务器快照（pressure/window 同快照成对除） ---
 ;; 模拟真实会话：pressure 12.99 万 / window 26.2 万 ≈ 49.6%；旧公式会把
 ;; 累计 cacheRead（数百万）算成 100% 满红——服务器快照路径要给出 49.6%。
-(let ((dsh-emacs-footer-format-spec '(:separator " " :segments (ctx))))
-  (setq dsh-emacs--footer-context-pressure 129946
-        dsh-emacs--footer-context-window-server 262144
-        dsh-emacs--footer-usage (dsh-emacs-make-usage 295045 90220 7020928 0))
-  (let ((txt (dsh-emacs-footer-format)))
+(let ((dsh-emacs-modeline-format-spec '(:separator " " :segments (ctx))))
+  (setq dsh-emacs--modeline-context-pressure 129946
+        dsh-emacs--modeline-context-window-server 262144
+        dsh-emacs--modeline-usage (dsh-emacs-make-usage 295045 90220 7020928 0))
+  (let ((txt (dsh-emacs-modeline-format)))
     (when (and (string-match "49.6%" txt)
                (not (string-match "100.0%" txt)))
       (dsh-test-pass "ctx-segment-uses-server-snapshot")))
-  (setq dsh-emacs--footer-context-pressure nil
-        dsh-emacs--footer-context-window-server nil
-        dsh-emacs--footer-usage nil))
+  (setq dsh-emacs--modeline-context-pressure nil
+        dsh-emacs--modeline-context-window-server nil
+        dsh-emacs--modeline-usage nil))
 
 ;; --- 测试 5l: 无服务器快照时 ctx 段隐藏（累计 usage 不再兜底当 ctx% ---
-(let ((dsh-emacs-footer-format-spec '(:separator " " :segments (ctx))))
+(let ((dsh-emacs-modeline-format-spec '(:separator " " :segments (ctx))))
   ;; 只有累计 usage、没有服务器 pressure 快照 → ctx 段必须不渲染。
   ;; 累计 cacheRead 是会话总量（数倍于窗口），拿它当"已占用"会算成
   ;; 100% 满红——ctx% 只信服务器 pressureTokens。
-  (setq dsh-emacs--footer-context-pressure nil
-        dsh-emacs--footer-context-window-server nil
-        dsh-emacs--footer-usage (dsh-emacs-make-usage 1000 500 8000000 0))
-  (let ((txt (dsh-emacs-footer-format)))
+  (setq dsh-emacs--modeline-context-pressure nil
+        dsh-emacs--modeline-context-window-server nil
+        dsh-emacs--modeline-usage (dsh-emacs-make-usage 1000 500 8000000 0))
+  (let ((txt (dsh-emacs-modeline-format)))
     (when (string-empty-p txt)
       (dsh-test-pass "ctx-hidden-without-server-snapshot")))
-  (setq dsh-emacs--footer-usage nil))
+  (setq dsh-emacs--modeline-usage nil))
 
 ;; --- 测试 6: 面孔定义 ---
 (when (facep 'dsh-emacs-user-face)
@@ -310,8 +310,8 @@ so the code under test can read fields through the protocol accessors."
 (when (facep 'dsh-emacs-tool-error-face)
   (dsh-test-pass "tool-error-face exists"))
 
-(when (facep 'dsh-emacs-footer-face)
-  (dsh-test-pass "footer-face exists"))
+(when (facep 'dsh-emacs-modeline-face)
+  (dsh-test-pass "mode-line-face exists"))
 
 (when (facep 'dsh-emacs-session-title-face)
   (dsh-test-pass "session-title-face exists"))
@@ -376,18 +376,18 @@ so the code under test can read fields through the protocol accessors."
 (when (fboundp 'dsh-emacs-render-tool-result)
   (dsh-test-pass "render-tool-result function exists"))
 
-;; --- 测试 9: Footer 函数存在 ---
-(when (fboundp 'dsh-emacs-footer-format)
-  (dsh-test-pass "footer-format function exists"))
+;; --- 测试 9: Mode-line 函数存在 ---
+(when (fboundp 'dsh-emacs-modeline-format)
+  (dsh-test-pass "mode-line-format function exists"))
 
-(when (fboundp 'dsh-emacs-footer-setup)
-  (dsh-test-pass "footer-setup function exists"))
+(when (fboundp 'dsh-emacs-modeline-setup)
+  (dsh-test-pass "mode-line-setup function exists"))
 
-(when (fboundp 'dsh-emacs-footer-update)
-  (dsh-test-pass "footer-update function exists"))
+(when (fboundp 'dsh-emacs-modeline-update)
+  (dsh-test-pass "mode-line-update function exists"))
 
-(when (fboundp 'dsh-emacs-footer-set-usage)
-  (dsh-test-pass "footer-set-usage function exists"))
+(when (fboundp 'dsh-emacs-modeline-set-usage)
+  (dsh-test-pass "mode-line-set-usage function exists"))
 
 ;; --- 测试 10: 会话列表函数存在 ---
 (when (fboundp 'dsh-emacs-session--render)
@@ -519,9 +519,9 @@ so the code under test can read fields through the protocol accessors."
 ;; --- 测试 17: 输入区域可写 ---
 (with-temp-buffer
   (dsh-emacs-mode)
-  ;; New sessions install the footer after the input area.  Inserting at the
+  ;; New sessions install the structural end-of-buffer overlay after the input area.  Inserting at the
   ;; marker must still work even though the prompt itself is read-only.
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (goto-char dsh-emacs--input-marker)
   (condition-case err
       (progn
@@ -539,7 +539,7 @@ so the code under test can read fields through the protocol accessors."
 ;; --- 测试 17b: 输入区不继承 prompt 的 accent face ---
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (let* ((pos (marker-position dsh-emacs--input-marker))
          (prompt-face (get-text-property (1- pos) 'face)))
     ;; Precondition: the ❯ prompt itself carries the accent face.
@@ -570,7 +570,7 @@ so the code under test can read fields through the protocol accessors."
 ;; --- 测试 19: assistant replies remain in history order ---
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (let ((first (json-read-from-string
                 "{\"event\":{\"type\":\"assistant/message\",\"seq\":1,\"data\":{\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"reply-1\"}]}}}}"))
         (second (json-read-from-string
@@ -586,7 +586,7 @@ so the code under test can read fields through the protocol accessors."
 ;; --- 测试 20: chat prefix and rendered Markdown ---
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (let ((user (json-read-from-string
                "{\"type\":\"user/message\",\"seq\":1,\"data\":{\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}"))
         (assistant (json-read-from-string
@@ -608,7 +608,7 @@ so the code under test can read fields through the protocol accessors."
 ;; --- 测试 21: assistant 流式增量渲染 ---
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (let ((chunk-1 (json-read-from-string
                   "{\"type\":\"assistant/chunk\",\"seq\":1,\"data\":{\"turn\":1,\"step\":1,\"chunk\":{\"type\":\"text-delta\",\"index\":1,\"text\":\"hello **bold\"}}}"))
         (chunk-2 (json-read-from-string
@@ -640,7 +640,7 @@ so the code under test can read fields through the protocol accessors."
 
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (dsh-emacs-render-event
    (json-read-from-string
     "{\"type\":\"assistant/chunk\",\"seq\":1,\"data\":{\"turn\":1,\"step\":1,\"chunk\":{\"type\":\"block-start\",\"index\":0,\"blockType\":\"reasoning\"}}}"))
@@ -657,7 +657,7 @@ so the code under test can read fields through the protocol accessors."
 
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (dsh-emacs-render-event
    (json-read-from-string
     "{\"type\":\"assistant/chunk\",\"seq\":1,\"data\":{\"turn\":1,\"step\":1,\"chunk\":{\"type\":\"reasoning-delta\",\"index\":0,\"text\":\"step\"}}}"))
@@ -673,7 +673,7 @@ so the code under test can read fields through the protocol accessors."
 
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (dsh-emacs-render-event
    (json-read-from-string
     "{\"type\":\"assistant/message\",\"seq\":1,\"data\":{\"turn\":1,\"step\":1,\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"reasoning\",\"text\":\"history think\"},{\"type\":\"text\",\"text\":\"history body\"}]}}}"))
@@ -685,7 +685,7 @@ so the code under test can read fields through the protocol accessors."
 
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (let ((dsh-emacs-show-reasoning nil))
     (dsh-emacs-render-event
      (json-read-from-string
@@ -738,7 +738,7 @@ so the code under test can read fields through the protocol accessors."
 ;; --- 测试 22: 丢失输入 marker 后消息仍插入到输入框上方 ---
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   ;; Simulate the failure where the prompt marker is gone; message rendering
   ;; must relocate the anchor by face instead of appending below the input.
   (setq-local dsh-emacs--input-marker nil)
@@ -760,7 +760,7 @@ so the code under test can read fields through the protocol accessors."
 ;; --- 测试 23: 丢失 marker 时流式 chunk 也插入到输入框上方 ---
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (setq-local dsh-emacs--input-marker nil)
   (dsh-emacs-render-event
    (json-read-from-string
@@ -775,7 +775,7 @@ so the code under test can read fields through the protocol accessors."
 ;; --- 测试 25: 位于底部时新消息自动滚动跟随 ---
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (pop-to-buffer (current-buffer))
   (let ((win (get-buffer-window (current-buffer) t)))
     ;; Fill enough content to overflow a small window.
@@ -800,7 +800,7 @@ so the code under test can read fields through the protocol accessors."
 ;; --- 测试 26: 用户上翻时不被拉回底部 ---
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (pop-to-buffer (current-buffer))
   (let ((win (get-buffer-window (current-buffer) t)))
     (dotimes (i 40)
@@ -818,7 +818,7 @@ so the code under test can read fields through the protocol accessors."
 ;; --- 测试 27: 同 buffer 输入模式（agent-shell 风格） ---
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (dsh-emacs-render-event
    (json-read-from-string
     "{\"type\":\"assistant/message\",\"seq\":1,\"data\":{\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"inline reply\"}]}}}"))
@@ -846,7 +846,7 @@ so the code under test can read fields through the protocol accessors."
   (unwind-protect
       (with-current-buffer buf
         (dsh-emacs-mode)
-        (dsh-emacs-footer-setup)
+        (dsh-emacs-modeline-setup)
         (dsh-emacs-render-event
          (json-read-from-string
           "{\"type\":\"assistant/message\",\"seq\":1,\"data\":{\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"a1\"}]}}}"))
@@ -894,7 +894,7 @@ so the code under test can read fields through the protocol accessors."
 ;; --- 测试 28: WebSocket 握手后的帧仍被消费（实时修复） ---
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (setq dsh-emacs--current-session "s1")   ; match the test frame's sessionId
   (setq-local dsh-emacs--buffer-session "s1") ; 归属断言：真实 open-session 会设置
   (let ((fake-proc (start-process "dsh-test-proc" (current-buffer) "/usr/bin/true"))
@@ -927,15 +927,15 @@ so the code under test can read fields through the protocol accessors."
       (advice-remove 'dsh-emacs-events--dispatch-json
                      (lambda (&rest _) (setq dispatch-count (1+ dispatch-count)))))))
 
-;; --- 测试 24: 输入 anchor 独占一行（footer 之前） ---
+;; --- 测试 24: 输入 anchor 独占一行（底部结构行之前） ---
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   ;; The anchor prompt line always ends with a newline and sits right before
-  ;; the footer, so point-max never falls inside the editable input.
-  (let ((footer-start (overlay-start dsh-emacs--footer-overlay)))
-    (when (and (eq (char-before footer-start) ?\n)
-               ;; the anchor prompt is on its own line, before the footer
+  ;; the end-of-buffer newline, so point-max never falls inside the editable input.
+  (let ((mode-line-start (overlay-start dsh-emacs--modeline-overlay)))
+    (when (and (eq (char-before mode-line-start) ?\n)
+               ;; the anchor prompt is on its own line, before the end-of-buffer newline
                (save-excursion
                  (goto-char dsh-emacs--input-marker)
                  (eq (char-after (line-beginning-position)) ?❯)))
@@ -988,7 +988,7 @@ so the code under test can read fields through the protocol accessors."
 
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (setq-local dsh-emacs-tool-expand-by-default t)
   ;; 1) 工具调用（running）：保留 bash 变体 icon + 齿轮 loading
   (dsh-emacs-render-tool-call
@@ -997,7 +997,7 @@ so the code under test can read fields through the protocol accessors."
          (block (dsh-emacs-test--tool-block-text (format "%s-tool-c1" ns))))
     (when (and block
                (string-match-p (regexp-quote "💻 ") block)
-               ;; 运行中保留变体图标；动画 spinner 已移至 footer 进度条
+               ;; 运行中保留变体图标；动画 spinner 已移至 mode-line 进度条
                (string-match-p "Bash" block))
       (dsh-test-pass "tool-running-keeps-variant-icon")))
   ;; 2) 成功结果：body 含 IN / OUT 两段，成功态保留 icon 并显示输出
@@ -1026,7 +1026,7 @@ so the code under test can read fields through the protocol accessors."
 ;; --- 测试 30: 空白工具结果隐藏 OUT 区段 ---
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (setq-local dsh-emacs-tool-expand-by-default t)
   (dsh-emacs-render-tool-call
    (dsh-emacs-test--tool-call-event 1 "c3" "read" "{\"path\":\"/a/b.txt\"}"))
@@ -1042,7 +1042,7 @@ so the code under test can read fields through the protocol accessors."
 ;; --- 测试 31: 折叠工具行紧凑（无省略号/空白）+ 展开恢复 IN/OUT ---
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   ;; 保持默认折叠（未绑定 expand-by-default）
   (dsh-emacs-render-tool-call
    (dsh-emacs-test--tool-call-event 1 "x1" "bash" "{\"description\":\"list\",\"command\":\"ls\"}"))
@@ -1075,7 +1075,7 @@ so the code under test can read fields through the protocol accessors."
 ;; --- 测试 32: 工具名与图标解耦 —— 同图标不同名 ---
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (dsh-emacs-render-tool-call
    (dsh-emacs-test--tool-call-event 1 "g1" "grep" "{\"pattern\":\"foo\"}"))
   (let* ((ns (dsh-emacs-render--make-namespace))
@@ -1088,7 +1088,7 @@ so the code under test can read fields through the protocol accessors."
 
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (dsh-emacs-render-tool-call
    (dsh-emacs-test--tool-call-event 1 "w1" "web_search" "{\"query\":\"cats\"}"))
   (let* ((ns (dsh-emacs-render--make-namespace))
@@ -1110,7 +1110,7 @@ so the code under test can read fields through the protocol accessors."
 
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (dsh-emacs-render-tool-call
    (dsh-emacs-test--tool-call-event 1 "u1" "my_tool" "{\"x\":\"1\"}"))
   (let* ((ns (dsh-emacs-render--make-namespace))
@@ -1120,7 +1120,7 @@ so the code under test can read fields through the protocol accessors."
 
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (let ((dsh-emacs-tool-titles '(("my_tool" . "Curated")))) ; defcustom 覆写
     (dsh-emacs-render-tool-call
      (dsh-emacs-test--tool-call-event 1 "u2" "my_tool" "{\"x\":\"1\"}")))
@@ -1147,7 +1147,7 @@ so the code under test can read fields through the protocol accessors."
                                                                                (cons "text" text)))))))))))))
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (dsh-emacs-render-tool-call
    (dsh-emacs-test--t32-call 1 "y1" "search" "{\"query\":\"*.md\"}"))
   (dsh-emacs-render-tool-result (dsh-emacs-test--t32-result 2 "y1" "a"))
@@ -1203,7 +1203,7 @@ so the code under test can read fields through the protocol accessors."
       (progn
         (with-current-buffer chat
           (dsh-emacs-mode)
-          (dsh-emacs-footer-setup)
+          (dsh-emacs-modeline-setup)
           ;; 模拟多会话：全局 current-buffer 指向别的会话
           (setq dsh-emacs--current-buffer other))
         (with-current-buffer chat
@@ -1211,7 +1211,7 @@ so the code under test can read fields through the protocol accessors."
             (goto-char dsh-emacs--input-marker)
             (insert "line one\nline two\nline three"))
           (let ((input-end (dsh-emacs--input-end)))
-            ;; 越界（M-> / 点击 footer 区）→ 钳回输入区末端
+            ;; 越界（M-> / 点击底部区）→ 钳回输入区末端
             (goto-char (point-max))
             (dsh-emacs--lock-cursor-to-input)
             (when (= (point) input-end)
@@ -1262,7 +1262,7 @@ so the code under test can read fields through the protocol accessors."
   (unwind-protect
       (with-current-buffer buf
         (dsh-emacs-mode)
-        (dsh-emacs-footer-setup)
+        (dsh-emacs-modeline-setup)
         (setq-local dsh-emacs-tool-expand-by-default t)
         (dsh-emacs-render-event
          (json-read-from-string
@@ -1286,7 +1286,7 @@ so the code under test can read fields through the protocol accessors."
 ;; --- 测试 35: 历史真实 tool/result 使用 message.source.callId ---
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (let ((call (dsh-emacs-test--tool-call-event
                10 "history-call" "bash" "{\"command\":\"pwd\"}"))
         (result (dsh-emacs-test--tool-result-event-source
@@ -1420,19 +1420,19 @@ so the code under test can read fields through the protocol accessors."
 
 ;; --- 测试 42: format-spec 的 customize 类型可勾选编辑（值往返一致） ---
 (require 'cus-edit)
-(let* ((spec (custom-variable-type 'dsh-emacs-footer-format-spec))
+(let* ((spec (custom-variable-type 'dsh-emacs-modeline-format-spec))
        (buf (generate-new-buffer " *dsh-widget-test*")))
   (with-current-buffer buf
     (let ((w (widget-create spec)))
       (widget-value-set w '(:separator " • " :segments (model tokens)))
       (when (equal '(:separator " • " :segments (model tokens))
                    (widget-value w))
-        (dsh-test-pass "footer-format-spec-widget-roundtrip"))
+        (dsh-test-pass "mode-line-format-spec-widget-roundtrip"))
       ;; 用户取消勾选某个段（subset）同样往返一致
       (widget-value-set w '(:separator " " :segments (model)))
       (when (equal '(:separator " " :segments (model))
                    (widget-value w))
-        (dsh-test-pass "footer-format-spec-widget-subset"))))
+        (dsh-test-pass "mode-line-format-spec-widget-subset"))))
   (kill-buffer buf))
 
 ;; --- 测试 43: 首次打开会话即定位工作区（default-directory） ---
@@ -1549,7 +1549,7 @@ so the code under test can read fields through the protocol accessors."
 ;; 新会话不在 `dsh-emacs--sessions' 缓存：`dsh-emacs--link-session-preset'
 ;; 增强守卫（preset 或会话缺失都触发）应懒拉 session.list —— 回调里的
 ;; `dsh-emacs--chat-buffers-sync-all'（含 context-sync）把 contextPressure
-;; 快照喂进 footer，ctx% 首次打开最终显示而非永久空缺。
+;; 快照喂进 mode-line，ctx% 首次打开最终显示而非永久空缺。
 (let* ((old-sessions dsh-emacs--sessions)
        (methods nil)
        (buf (generate-new-buffer " *t43d-chat*")))
@@ -1559,7 +1559,7 @@ so the code under test can read fields through the protocol accessors."
         (with-current-buffer buf
           (setq-local dsh-emacs--buffer-session "sess-first"))
         (puthash "sess-first" buf dsh-emacs--chat-buffers)
-        (setq dsh-emacs--footer-context-pressure nil)
+        (setq dsh-emacs--modeline-context-pressure nil)
         (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                    (lambda (method _params cb)
                      (push method methods)
@@ -1578,11 +1578,11 @@ so the code under test can read fields through the protocol accessors."
     (remhash "sess-first" dsh-emacs--chat-buffers)
     (when (buffer-live-p buf) (kill-buffer buf))))
 
-;; --- 测试 43e: 缓存存在时 open-session 后 footer ctx 快照落地 ---
+;; --- 测试 43e: 缓存存在时 open-session 后 mode-line ctx 快照落地 ---
 ;; 回归：`dsh-emacs--chat-buffer-context-sync' 曾在 `dsh-emacs-mode' 之前
 ;; 调用，而 define-derived-mode 的 kill-all-local-variables 会把喂入的
 ;; buffer-local 快照整个清掉 → ctx% 永远不显示。现在 sync 在 mode 与
-;; footer-setup 之后，缓存存在时应一次到位。
+;; mode-line-setup 之后，缓存存在时应一次到位。
 (let* ((old-sessions dsh-emacs--sessions)
        (item '((sessionId . "sess-ctxexist")
                (projections
@@ -1607,9 +1607,9 @@ so the code under test can read fields through the protocol accessors."
           (dsh-emacs-open-session "sess-ctxexist"))
         (let* ((buf (gethash "sess-ctxexist" dsh-emacs--chat-buffers))
                (pressure (and buf (buffer-local-value
-                                    'dsh-emacs--footer-context-pressure buf)))
+                                    'dsh-emacs--modeline-context-pressure buf)))
                (window (and buf (buffer-local-value
-                                 'dsh-emacs--footer-context-window-server buf))))
+                                 'dsh-emacs--modeline-context-window-server buf))))
           (when (and (= 129946 pressure) (= 262144 window))
             (dsh-test-pass "open-session-feeds-context-snapshot"))))
     (setq dsh-emacs--sessions old-sessions)
@@ -1716,13 +1716,13 @@ so the code under test can read fields through the protocol accessors."
 
 ;; --- 测试 45: doom 段包含忙碌动画（回归：动画此前只存在于 vanilla splice，
 ;; doom-modeline 分支的段漏掉了它，导致动画从未显示） ---
-(let ((dsh-emacs--footer-usage (dsh-emacs-make-usage 100 50))
-      (dsh-emacs--footer-model "deepseek-v4-flash-0731")
-      (dsh-emacs--footer-effort "max")
-      (dsh-emacs--footer-preset "standard")
+(let ((dsh-emacs--modeline-usage (dsh-emacs-make-usage 100 50))
+      (dsh-emacs--modeline-model "deepseek-v4-flash-0731")
+      (dsh-emacs--modeline-effort "max")
+      (dsh-emacs--modeline-preset "standard")
       (dsh-emacs--ml-busy t)
       (dsh-emacs--ml-busy-index 4))
-  (let ((txt (dsh-emacs-footer--doom-segment)))
+  (let ((txt (dsh-emacs-modeline--doom-segment)))
     (when (and (string-match-p "deepseek-v4-flash-0731" txt)
                (string-match-p "max" txt)
                (string-match-p "standard" txt)
@@ -1733,9 +1733,9 @@ so the code under test can read fields through the protocol accessors."
       (dsh-test-pass "doom-segment-includes-busy-animation"))))
 
 (let ((dsh-emacs--ml-busy nil)
-      (dsh-emacs--footer-usage nil))
+      (dsh-emacs--modeline-usage nil))
   ;; 空闲时 doom segment 显示 model 段但不含进度条动画
-  (when (not (string-match-p "█" (dsh-emacs-footer--doom-segment)))
+  (when (not (string-match-p "█" (dsh-emacs-modeline--doom-segment)))
     (dsh-test-pass "doom-segment-idle-has-no-spinner")))
 
 ;; --- 测试 46: send-or-stop 忙碌时打断（session.cancel），空闲时发送 ---
@@ -3767,47 +3767,47 @@ so the code under test can read fields through the protocol accessors."
             (dsh-test-pass "parse-local-link-remote-nil"))))
     (delete-directory tmpdir t)))
 
-;; --- 测试 73: footer 系列纯逻辑补强（shorten-cwd / branch 缓存） ---
-;; footer--shorten-cwd 的 ~ 前缀、非 home 路径原样；cached-branch 的新鲜度
+;; --- 测试 73: mode-line 系列纯逻辑补强（shorten-cwd / branch 缓存） ---
+;; mode-line--shorten-cwd 的 ~ 前缀、非 home 路径原样；cached-branch 的新鲜度
 ;; 逻辑（缓存期内仍旧值、过期后重查）。detect-branch 走真实 git，
 ;; 此处 mock 它以锁定其余分支。
-(let ((old-cache dsh-emacs--footer-branch-cache))
+(let ((old-cache dsh-emacs--modeline-branch-cache))
   (unwind-protect
       (progn
         ;; shorten-cwd: home 前缀截为 ~ 前缀（截掉 home-dir 剩相对段）
         (when (equal (format "~%s" "proj")
-                     (dsh-emacs-footer--shorten-cwd
+                     (dsh-emacs-modeline--shorten-cwd
                       (format "%s/proj" (getenv "HOME"))))
-          (dsh-test-pass "footer-shorten-cwd-home-prefix"))
-        (when (equal "/opt/app" (dsh-emacs-footer--shorten-cwd "/opt/app"))
-          (dsh-test-pass "footer-shorten-cwd-non-home"))
+          (dsh-test-pass "mode-line-shorten-cwd-home-prefix"))
+        (when (equal "/opt/app" (dsh-emacs-modeline--shorten-cwd "/opt/app"))
+          (dsh-test-pass "mode-line-shorten-cwd-non-home"))
         ;; cached-branch: 缓存新鲜时保持旧值（即使 mock 已换）
-        (setq dsh-emacs--footer-branch-cache nil)
-        (cl-letf (((symbol-function 'dsh-emacs-footer--detect-branch)
+        (setq dsh-emacs--modeline-branch-cache nil)
+        (cl-letf (((symbol-function 'dsh-emacs-modeline--detect-branch)
                    (lambda () "feature/x"))
-                  (dsh-emacs-footer-branch-refresh-interval 60))
-          (let ((b1 (dsh-emacs-footer--cached-branch)))
-            (cl-letf (((symbol-function 'dsh-emacs-footer--detect-branch)
+                  (dsh-emacs-modeline-branch-refresh-interval 60))
+          (let ((b1 (dsh-emacs-modeline--cached-branch)))
+            (cl-letf (((symbol-function 'dsh-emacs-modeline--detect-branch)
                        (lambda () "other")))
-              (let ((b2 (dsh-emacs-footer--cached-branch)))
+              (let ((b2 (dsh-emacs-modeline--cached-branch)))
                 (when (and (equal "feature/x" b1)
                            (equal "feature/x" b2))
-                  (dsh-test-pass "footer-cached-branch-fresh-keeps-value"))
+                  (dsh-test-pass "mode-line-cached-branch-fresh-keeps-value"))
                 ;; 缓存过期 → 重查新值
-                (setf (cdr dsh-emacs--footer-branch-cache)
+                (setf (cdr dsh-emacs--modeline-branch-cache)
                       (- (float-time) 999))
-                (when (equal "other" (dsh-emacs-footer--cached-branch))
-                  (dsh-test-pass "footer-cached-branch-stale-refetches"))))))
+                (when (equal "other" (dsh-emacs-modeline--cached-branch))
+                  (dsh-test-pass "mode-line-cached-branch-stale-refetches"))))))
         ;; segment-branch: 有分支渲染括号包裹
-        (let ((dsh-emacs--footer-branch "main"))
-          (let ((seg (dsh-emacs-footer--segment-branch)))
+        (let ((dsh-emacs--modeline-branch "main"))
+          (let ((seg (dsh-emacs-modeline--segment-branch)))
             (when (string-match-p "main" seg)
-              (dsh-test-pass "footer-segment-branch-renders"))))
+              (dsh-test-pass "mode-line-segment-branch-renders"))))
         ;; segment-cwd: propertize face
-        (let ((seg (dsh-emacs-footer--segment-cwd)))
+        (let ((seg (dsh-emacs-modeline--segment-cwd)))
           (when (get-text-property 0 'face seg)
-            (dsh-test-pass "footer-segment-cwd-face"))))
-    (setq dsh-emacs--footer-branch-cache old-cache)))
+            (dsh-test-pass "mode-line-segment-cwd-face"))))
+    (setq dsh-emacs--modeline-branch-cache old-cache)))
 
 
 ;; --- 测试 74: agentPreset.list 协议结构（新建会话的 thinking preset 候选） ---
@@ -5998,7 +5998,7 @@ so the code under test can read fields through the protocol accessors."
 ;; 101b: 首次 todo_write 渲染**一行** todo 行（含进度/待办 glyph），不生成普通工具卡
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (setq-local dsh-emacs-todo-expand-by-default t)
   (dsh-emacs-render-tool-call
    (dsh-emacs-test--tool-call-event 1 "t1" "todo_write"
@@ -6019,7 +6019,7 @@ so the code under test can read fields through the protocol accessors."
 ;; 101c: 每次 todo_write 都渲染新一行（像 tool 卡），随对话积累，不覆盖
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (setq-local dsh-emacs-todo-expand-by-default t)
   (dsh-emacs-render-tool-call
    (dsh-emacs-test--tool-call-event 1 "t1" "todo_write"
@@ -6038,7 +6038,7 @@ so the code under test can read fields through the protocol accessors."
 ;; 101d: 会话重置清空最新 todo 快照状态
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (dsh-emacs-render-tool-call
    (dsh-emacs-test--tool-call-event 1 "t1" "todo_write"
     "{\"todos\":[{\"content\":\"A\",\"status\":\"pending\"}]}"))
@@ -6049,7 +6049,7 @@ so the code under test can read fields through the protocol accessors."
 ;; 101e: todo 行可折叠/展开（默认折叠：仅 header，checklist 隐藏）
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (setq-local dsh-emacs-todo-expand-by-default nil)
   (dsh-emacs-render-tool-call
    (dsh-emacs-test--tool-call-event 1 "t1" "todo_write"
@@ -6075,7 +6075,7 @@ so the code under test can read fields through the protocol accessors."
 ;; 101f: summary-only 模式：只显示计数/进度，隐藏 checklist 详情与折叠切换
 (with-temp-buffer
   (dsh-emacs-mode)
-  (dsh-emacs-footer-setup)
+  (dsh-emacs-modeline-setup)
   (setq-local dsh-emacs-todo-summary-only t)
   (dsh-emacs-render-tool-call
    (dsh-emacs-test--tool-call-event 1 "t1" "todo_write"

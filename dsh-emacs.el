@@ -17,7 +17,7 @@
 ;; 主要功能：
 ;; - 会话列表（卡片视图）
 ;; - 对话缓冲（带工具调用折叠、思考折叠）
-;; - Footer 状态栏（显示 cwd、git branch、model、tokens、cost）
+;; - mode-line 统计段（显示 cwd、git branch、model、tokens、ctx%、cost）
 ;; - Markdown 渲染
 ;;
 ;; 快速开始：
@@ -57,7 +57,7 @@
 (require 'dsh-emacs-markdown)
 (require 'dsh-emacs-render)
 (require 'dsh-emacs-events)
-(require 'dsh-emacs-footer)
+(require 'dsh-emacs-modeline)
 (require 'dsh-emacs-server)
 (require 'dsh-emacs-command)
 (require 'dsh-emacs-session)
@@ -538,7 +538,7 @@ A numeric suffix is appended when another buffer already holds the name."
 (defun dsh-emacs--chat-buffers-sync-all ()
   "Re-sync every live chat buffer after the session cache changed.
 Updates the mode-line name (list title), the workspace directory, and
-feeds each buffer's footer the server `contextPressure' snapshot (ctx%
+feeds each buffer's mode-line stats the server `contextPressure' snapshot (ctx%
 segment) so it matches the freshly fetched list."
   (maphash (lambda (session-id buf)
              (dsh-emacs--chat-buffer-sync session-id)
@@ -546,7 +546,7 @@ segment) so it matches the freshly fetched list."
            dsh-emacs--chat-buffers))
 
 (defun dsh-emacs--chat-buffer-context-sync (session-id buf)
-  "Push SESSION-ID's server contextPressure snapshot into BUF's footer.
+  "Push SESSION-ID's server contextPressure snapshot into BUF's mode line.
 Pulled from the cached session struct (protocol accessors), so the same
 projection pair (pressure, window) always lands together — the ctx% stays
 consistent across model switches.
@@ -559,7 +559,7 @@ re-runs this sync and fills the snapshot in."
     (let ((item (dsh-emacs--chat-session-item session-id)))
       (when item
         (with-current-buffer buf
-          (dsh-emacs-footer-set-context-snapshot
+          (dsh-emacs-modeline-set-context-snapshot
            (dsh-protocol-session-context-pressure item)
            (dsh-protocol-session-context-window item)))))))
 
@@ -955,11 +955,11 @@ realtime)."
       ;; 首次打开的缓冲此前还没有这个局部变量（否则会静默跳过）。
       (dsh-emacs--chat-buffer-sync session-id)
       (dsh-emacs-mode)
-      (dsh-emacs-footer-setup)
-      (dsh-emacs-footer-set-model dsh-emacs-default-model)
-      ;; 打开即把服务器 contextPressure 快照喂给 footer。必须在
+      (dsh-emacs-modeline-setup)
+      (dsh-emacs-modeline-set-model dsh-emacs-default-model)
+      ;; 打开即把服务器 contextPressure 快照喂给 mode-line 段。必须在
       ;; `dsh-emacs-mode'（define-derived-mode 内部 kill-all-local-variables）
-      ;; 与 `dsh-emacs-footer-setup' 之后：此前喂入的 buffer-local 快照会
+      ;; 与 `dsh-emacs-modeline-setup' 之后：此前喂入的 buffer-local 快照会
       ;; 被 mode 切换整个清掉，ctx% 就永远不显示（首次打开的经典症状）。
       (dsh-emacs--chat-buffer-context-sync session-id buf)
       ;; 思考预设（agentPreset）来自会话列表缓存；缺失时补拉一次 session.list。
@@ -972,7 +972,7 @@ realtime)."
       ;; 空闲预取 slash 命令目录（commands.list）：首次 "/" / TAB 不再同步
       ;; 往返阻塞。目录按会话缓存，打开即有 session-id 才拉得了。
       (dsh-emacs-command-catalog-prefetch session-id)
-      ;; Footer setup appends its anchor newline at point-max.  Return point
+      ;; Mode-line setup appends its anchor newline at point-max.  Return point
       ;; to the editable prompt so the cursor stays on the `❯' line.
       (goto-char dsh-emacs--input-marker)
       ;; Connect before loading history.  While the history page loads, mux
@@ -1145,19 +1145,19 @@ buffer opens with the same workspace path."
         (throw 'found (dsh-protocol-session-agent-preset item))))))
 
 (defun dsh-emacs--link-session-preset (session-id)
-  "Fill the footer agent preset for SESSION-ID into the mode line.
+  "Fill the mode-line agent preset for SESSION-ID.
 Uses the cached session list when possible; otherwise refreshes
 `session.list' once and picks the preset from the response.  SAFE outside a
 chat buffer (the RPC callback runs in the buffer that called this).
 The lazy fetch also covers the ctx% snapshot on first open: a session
 missing from `dsh-emacs--sessions' has no `contextPressure' to feed the
-footer either (see `dsh-emacs--chat-buffer-context-sync'), so the same
+mode-line either (see `dsh-emacs--chat-buffer-context-sync'), so the same
 fetch — whose callback calls `dsh-emacs--chat-buffers-sync-all' — brings
 preset, context snapshot, title and workspace in one round trip."
   (let ((preset (dsh-emacs--session-preset session-id))
         (have-item (dsh-emacs--chat-session-item session-id)))
     (if (and preset have-item)
-        (dsh-emacs-footer-set-preset preset)
+        (dsh-emacs-modeline-set-preset preset)
       (dsh-emacs--rpc-async "session.list" nil
                             (lambda (ok value)
                               (when ok
@@ -1175,7 +1175,7 @@ preset, context snapshot, title and workspace in one round trip."
                                       (when (equal session-id
                                                    (dsh-protocol-session-session-id
                                                     item))
-                                        (dsh-emacs-footer-set-preset
+                                        (dsh-emacs-modeline-set-preset
                                          (dsh-protocol-session-agent-preset
                                           item))
                                         (throw 'found t)))))))))))
@@ -1430,7 +1430,7 @@ the session list regroups immediately (the host stream also repaints)."
     (define-key map (kbd "C-c C-l") #'dsh-emacs-list-sessions-display)
     (define-key map (kbd "C-c C-s") #'dsh-emacs-switch-session)
     (define-key map (kbd "C-c C-w") #'dsh-emacs-copy-transcript)
-    (define-key map (kbd "C-c C-f") #'dsh-emacs-footer-toggle)
+    (define-key map (kbd "C-c C-f") #'dsh-emacs-modeline-toggle)
     (define-key map (kbd "C-c C-k") #'dsh-emacs-copy-code-block)
     (define-key map (kbd "C-c C-a") #'dsh-emacs-attach-file)
     (define-key map (kbd "C-c C-m") #'dsh-emacs-select-model)
@@ -1518,7 +1518,7 @@ vertico, etc.)."
   ;; imenu: 按 user message 索引，M-x imenu 可跳转到任意历史输入
   (setq-local imenu-create-index-function #'dsh-emacs-imenu-create-user-index)
 
-  ;; Footer/mode-line 拼接由 `dsh-emacs-footer-setup' 完成（会话创建时调用），
+  ;; Mode-line 拼接由 `dsh-emacs-modeline-setup' 完成（会话创建时调用），
   ;; 这里不再覆盖 mode-line-format，保留用户的默认 modeline。
 
   ;; 重置渲染状态
@@ -1662,24 +1662,24 @@ the text after the `❯ ' prompt is submitted."
         (dsh-emacs--submit-prompt input)))))
 
 (defun dsh-emacs--input-end ()
-  "Return the end of editable input, before the footer separator newline."
-  (let ((footer-start (and (boundp 'dsh-emacs--footer-overlay)
-                           dsh-emacs--footer-overlay
-                           (overlay-start dsh-emacs--footer-overlay))))
-    (if (and footer-start
-             (> footer-start (point-min))
-             (eq (char-before footer-start) ?\n))
-        (1- footer-start)
+  "Return the end of editable input, before the mode-line separator newline."
+  (let ((modeline-start (and (boundp 'dsh-emacs--modeline-overlay)
+                           dsh-emacs--modeline-overlay
+                           (overlay-start dsh-emacs--modeline-overlay))))
+    (if (and modeline-start
+             (> modeline-start (point-min))
+             (eq (char-before modeline-start) ?\n))
+        (1- modeline-start)
       (point-max))))
 
 (defun dsh-emacs--get-input ()
-  "Get the text in the input area, excluding the footer newline."
+  "Get the text in the input area, excluding the mode-line newline."
   (when (and dsh-emacs--input-marker (marker-buffer dsh-emacs--input-marker))
     (buffer-substring-no-properties dsh-emacs--input-marker
                                     (dsh-emacs--input-end))))
 
 (defun dsh-emacs--clear-input ()
-  "Clear the input area, keeping the footer newline."
+  "Clear the input area, keeping the mode-line newline."
   (when (and dsh-emacs--input-marker (marker-buffer dsh-emacs--input-marker))
     (let ((inhibit-read-only t))
       (delete-region dsh-emacs--input-marker (dsh-emacs--input-end))
@@ -2103,7 +2103,7 @@ or nil when KEY is not a model row."
   "Entries for completion UIs WITHOUT grouping support: provider shown
 once as a bare header row, its models following, indented, each
 showing the model id (the payload keeps the display NAME for
-messages/footer) with payload = the candidate tuple
+messages/the mode line) with payload = the candidate tuple
 (ID PROVIDER PROVIDER-NAME NAME REASONING), where REASONING is the
 host's `reasoning' alist (efforts + defaultEffort) or nil.  Rows are
 (DISPLAY . PAYLOAD) conses, so a picked header is rejected by the
@@ -2229,7 +2229,7 @@ Modern vertico draws sticky provider group headers from the table's
 `group-function' metadata (an Emacs 27+ *Completions* buffer does the
 same), kept while any row of the group matches the query; without a
 group-aware UI, header rows plus a per-row provider suffix on
-colliding ids are shown.  The footer model segment updates
+colliding ids are shown.  The mode-line model segment updates
 immediately."
   (interactive)
   (dsh-emacs-server-ensure)
@@ -2353,11 +2353,11 @@ the filter as \"error in process filter: Quit\"."
               (lambda (ok2 value2)
                 (if ok2
                     (progn
-                      (dsh-emacs-footer-set-model model)
-                      (dsh-emacs-footer-set-effort effort-id)
+                      (dsh-emacs-modeline-set-model model)
+                      (dsh-emacs-modeline-set-effort effort-id)
                       ;; 模型切换后立即刷新会话列表：旧模型的
                       ;; contextPressure 快照不再可信，需拉新模型的同一投影
-                      ;; 快照（footer ctx% 的 pressure+window 一并更新成对）。
+                      ;; 快照（mode-line ctx% 的 pressure+window 一并更新成对）。
                       ;; 直接走内部 fetch（纯 RPC），不进 server-start/事件恢复。
                       (dsh-emacs-list-sessions--fetch)
                       (message "Model switched to %s (%s)%s"
@@ -2566,14 +2566,14 @@ copy into another buffer (e.g. an image viewport)."
           (kill-new transcript)
           (message "Transcript copied to clipboard"))))))
 
-(defun dsh-emacs-footer-toggle ()
-  "Toggle footer display."
+(defun dsh-emacs-modeline-toggle ()
+  "Toggle the mode-line stats display."
   (interactive)
   (let ((chat (current-buffer)))
     (when (buffer-live-p chat)
       (with-current-buffer chat
-        (setq dsh-emacs-footer-enabled (not dsh-emacs-footer-enabled))
-        (dsh-emacs-footer-update)))))
+        (setq dsh-emacs-modeline-enabled (not dsh-emacs-modeline-enabled))
+        (dsh-emacs-modeline-update)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;;  主入口

@@ -28,12 +28,12 @@
 (require 'dsh-emacs-tokens)
 (require 'dsh-emacs-markdown)
 
-;; Defined in dsh-emacs-footer.el, which loads via dsh-emacs.el after this
+;; Defined in dsh-emacs-modeline.el, which loads via dsh-emacs.el after this
 ;; module.  Called at runtime from turn/end handling and event dispatch.
-(declare-function dsh-emacs--ml-busy-set "dsh-emacs-footer" (flag))
-(declare-function dsh-emacs-footer-note-event "dsh-emacs-footer" (event))
-(declare-function dsh-emacs-footer-note-request "dsh-emacs-footer" (event))
-(declare-function dsh-emacs-footer-note-header "dsh-emacs-footer" (event))
+(declare-function dsh-emacs--ml-busy-set "dsh-emacs-modeline" (flag))
+(declare-function dsh-emacs-modeline-note-event "dsh-emacs-modeline" (event))
+(declare-function dsh-emacs-modeline-note-request "dsh-emacs-modeline" (event))
+(declare-function dsh-emacs-modeline-note-header "dsh-emacs-modeline" (event))
 
 ;;; ---------------------------------------------------------------------------
 ;;; 定制
@@ -1861,14 +1861,14 @@ Returns the event seq."
       ("user/message" (setq seq (dsh-emacs-render-user-message event)))
       ("assistant/chunk" (setq seq (dsh-emacs-render-assistant-chunk event)))
       ("assistant/message" (setq seq (dsh-emacs-render-assistant-message event))
-                           (when (fboundp 'dsh-emacs-footer-note-event)
-                             (dsh-emacs-footer-note-event event)))
+                           (when (fboundp 'dsh-emacs-modeline-note-event)
+                             (dsh-emacs-modeline-note-event event)))
       ("request/context" (setq seq (dsh-emacs-render--event-seq event))
-                         (when (fboundp 'dsh-emacs-footer-note-request)
-                           (dsh-emacs-footer-note-request event)))
+                         (when (fboundp 'dsh-emacs-modeline-note-request)
+                           (dsh-emacs-modeline-note-request event)))
       ("request/header" (setq seq (dsh-emacs-render--event-seq event))
-                        (when (fboundp 'dsh-emacs-footer-note-header)
-                          (dsh-emacs-footer-note-header event)))
+                        (when (fboundp 'dsh-emacs-modeline-note-header)
+                          (dsh-emacs-modeline-note-header event)))
       ("tool/call" (setq seq (dsh-emacs-render-tool-call event)))
       ("tool/result" (setq seq (dsh-emacs-render-tool-result event)))
       ("command/run" (setq seq (dsh-emacs-render-command event)))

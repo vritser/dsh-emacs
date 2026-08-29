@@ -27,7 +27,7 @@
 ;; 当服务端上报时才有）。同时兼容早期短键名 input/output/cacheRead。
 ;;
 ;; 用法：render 层每收到一个 assistant/message 事件调用
-;; `dsh-emacs-footer-note-event' 累计，footer 用 `dsh-emacs-format-tokens' /
+;; `dsh-emacs-modeline-note-event' 累计，mode-line 用 `dsh-emacs-format-tokens' /
 ;; `dsh-emacs-format-cost' 显示。
 
 ;;; Code:
@@ -181,12 +181,12 @@ one yields a zero struct."
     "usage")))
 
 (defun dsh-emacs-ctx-face (pct)
-  "Return the appropriate footer-context face for PCT."
+  "Return the appropriate mode-line context face for PCT."
   (cond
-   ((or (null pct) (not (numberp pct))) 'dsh-emacs-footer-face)
-   ((< pct 50.0) 'dsh-emacs-footer-ctx-ok-face)
-   ((< pct 80.0) 'dsh-emacs-footer-ctx-warn-face)
-   (t 'dsh-emacs-footer-ctx-crit-face)))
+   ((or (null pct) (not (numberp pct))) 'dsh-emacs-modeline-face)
+   ((< pct 50.0) 'dsh-emacs-modeline-ctx-ok-face)
+   ((< pct 80.0) 'dsh-emacs-modeline-ctx-warn-face)
+   (t 'dsh-emacs-modeline-ctx-crit-face)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; alist helpers（不依赖 dsh-emacs.el 内部的 dsh-emacs--alist-get）

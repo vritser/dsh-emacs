@@ -32,7 +32,7 @@
 ;;   - Activity groups (`dsh-emacs-group-*')
 ;;   - UI borders (`dsh-emacs-border-*')
 ;;   - Dividers / meta (`dsh-emacs-divider-face', 'dsh-emacs-meta-face')
-;;   - Input prompt / footer / tokens
+;;   - Input prompt / mode-line / tokens
 
 ;;; Code:
 
@@ -437,55 +437,74 @@ Bold, no italic — matching dsh web's thinkingToggle style."
 	:group 'dsh-emacs-faces)
 
 ;;; ---------------------------------------------------------------------------
-;;;  footer / token / cost
+;;;  mode-line / token / cost
 ;;; ---------------------------------------------------------------------------
 
-(defface dsh-emacs-footer-face
+(defface dsh-emacs-modeline-face
 	`((((background light)) :foreground "#555555")
 		(((background dark))  :foreground "#999999")
 		(t :inherit shadow))
-	"Footer text."
+	"Mode-line stats text."
 	:group 'dsh-emacs-faces)
 
-(defface dsh-emacs-footer-separator-face
-	'((t :inherit dsh-emacs-footer-face))
-	"The “•” separator between footer segments."
+(defface dsh-emacs-modeline-separator-face
+	'((t :inherit dsh-emacs-modeline-face))
+	"The “•” separator between mode-line segments."
 	:group 'dsh-emacs-faces)
 
-(defface dsh-emacs-footer-token-face
+(defface dsh-emacs-modeline-token-face
 	`((((background light)) :foreground "#888888")
 		(((background dark))  :foreground "#777777")
 		(t :inherit shadow))
-	"Token count in the footer."
+	"Token count in the mode line."
 	:group 'dsh-emacs-faces)
 
-(defface dsh-emacs-footer-cost-face
+(defface dsh-emacs-modeline-cost-face
 	`((((background light)) :foreground "#1a7f37")
 		(((background dark))  :foreground "#5dd879")
 		(t :inherit success))
-	"Cost in the footer."
+	"Cost shown in the mode line."
 	:group 'dsh-emacs-faces)
 
-(defface dsh-emacs-footer-ctx-ok-face
+(defface dsh-emacs-modeline-ctx-ok-face
 	`((((background light)) :foreground "#1a7f37")
 		(((background dark))  :foreground "#5dd879")
 		(t :inherit success))
 	"Context usage < 50%."
 	:group 'dsh-emacs-faces)
 
-(defface dsh-emacs-footer-ctx-warn-face
+(defface dsh-emacs-modeline-ctx-warn-face
 	`((((background light)) :foreground "#b45f06")
 		(((background dark))  :foreground "#f0a63c")
 		(t :inherit warning))
 	"Context usage 50–80%."
 	:group 'dsh-emacs-faces)
 
-(defface dsh-emacs-footer-ctx-crit-face
+(defface dsh-emacs-modeline-ctx-crit-face
 	`((((background light)) :foreground "#c62828")
 		(((background dark))  :foreground "#ff6b6b")
 		(t :inherit error))
 	"Context usage > 80%."
 	:group 'dsh-emacs-faces)
+
+;;; ---------------------------------------------------------------------------
+;;;  兼容 face 别名（0.1.0 时代叫 footer）
+;;; ---------------------------------------------------------------------------
+
+(define-obsolete-face-alias 'dsh-emacs-footer-face
+  'dsh-emacs-modeline-face "0.2.0")
+(define-obsolete-face-alias 'dsh-emacs-footer-separator-face
+  'dsh-emacs-modeline-separator-face "0.2.0")
+(define-obsolete-face-alias 'dsh-emacs-footer-token-face
+  'dsh-emacs-modeline-token-face "0.2.0")
+(define-obsolete-face-alias 'dsh-emacs-footer-cost-face
+  'dsh-emacs-modeline-cost-face "0.2.0")
+(define-obsolete-face-alias 'dsh-emacs-footer-ctx-ok-face
+  'dsh-emacs-modeline-ctx-ok-face "0.2.0")
+(define-obsolete-face-alias 'dsh-emacs-footer-ctx-warn-face
+  'dsh-emacs-modeline-ctx-warn-face "0.2.0")
+(define-obsolete-face-alias 'dsh-emacs-footer-ctx-crit-face
+  'dsh-emacs-modeline-ctx-crit-face "0.2.0")
 
 ;;; ---------------------------------------------------------------------------
 ;;;  Session list faces

@@ -95,13 +95,13 @@
 (declare-function dsh-emacs-render--json-bool "dsh-emacs-render" (value))
 (declare-function dsh-emacs-session--render "dsh-emacs-session" ())
 (declare-function dsh-emacs--normalize-archived "dsh-emacs" (archived))
-(declare-function dsh-emacs-footer-set-context-snapshot "dsh-emacs-footer" (pressure window))
+(declare-function dsh-emacs-modeline-set-context-snapshot "dsh-emacs-modeline" (pressure window))
 (declare-function dsh-emacs-server--basic-auth-header "dsh-emacs-server" ())
 
-;; Defined in dsh-emacs-footer.el, which loads after this module.  Referenced
+;; Defined in dsh-emacs-modeline.el, which loads after this module.  Referenced
 ;; at runtime from teardown only.
-(declare-function dsh-emacs--ml-busy-clear "dsh-emacs-footer" ())
-(declare-function dsh-emacs--ml-busy-set "dsh-emacs-footer" (flag))
+(declare-function dsh-emacs--ml-busy-clear "dsh-emacs-modeline" ())
+(declare-function dsh-emacs--ml-busy-set "dsh-emacs-modeline" (flag))
 (declare-function dsh-emacs--command-spinner-clear-all "dsh-emacs-render" ())
 (declare-function dsh-emacs--command-spinner-revive "dsh-emacs-render" ())
 ;; Runtime dependencies defined in dsh-emacs.el / dsh-emacs-render.el; used
@@ -257,12 +257,12 @@ overrides it via the `dsh-emacs-event-path' process property."
       (dsh-emacs--chat-buffer-sync session-id))))
 
 (defun dsh-emacs--events-apply-context-projection (session-id value)
-  "Update the footer ctx% for SESSION-ID from a `contextPressure' projection VALUE.
+  "Update the mode-line ctx% for SESSION-ID from a `contextPressure' projection VALUE.
 VALUE is the projection's wire view: an alist with symbol/string keys for
 `projectedTokens', `pressureTokens' and `contextWindow' (the same shape
 `session.list' projections carry, aligned with dsh web's ctx meter which
 reads projectedTokens ?? pressureTokens).  Only the session's live chat
-buffer is touched; the footer's snapshot setter lands the pair in one go."
+buffer is touched; the mode-line snapshot setter lands the pair in one go."
   (when (and (listp value)
              (hash-table-p dsh-emacs--chat-buffers))
     (let* ((projected (dsh-emacs-render--aget "projectedTokens" value))
@@ -274,9 +274,9 @@ buffer is touched; the footer's snapshot setter lands the pair in one go."
            (buf (gethash session-id dsh-emacs--chat-buffers)))
       (when (and used window (> window 0)
                  (buffer-live-p buf)
-                 (fboundp 'dsh-emacs-footer-set-context-snapshot))
+                 (fboundp 'dsh-emacs-modeline-set-context-snapshot))
         (with-current-buffer buf
-          (dsh-emacs-footer-set-context-snapshot used window))))))
+          (dsh-emacs-modeline-set-context-snapshot used window))))))
 
 (defun dsh-emacs-events--dispatch-event (chat event)
   "Dispatch EVENT received for CHAT, respecting seq and optimistic input."
