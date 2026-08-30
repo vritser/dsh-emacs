@@ -563,6 +563,36 @@ re-runs this sync and fills the snapshot in."
            (dsh-protocol-session-context-pressure item)
            (dsh-protocol-session-context-window item)))))))
 
+(defun dsh-emacs--chat-buffer-model-sync (session-id buf)
+  "Feed BUF's mode-line model/effort/provider for SESSION-ID.
+The session list carries no model field, so the only authoritative source
+is `session.models': its `current' is the live (provider, model,
+reasoningEffort) triple.  Seeding the mode-line with
+`dsh-emacs-default-model' instead used to show the wrong model for every
+session not running that default (the guess stuck whenever the history
+window held no `request/header' to correct it).  Until the RPC lands the
+model segment keeps rendering whatever it has — `dsh-emacs-default-model'
+remains the segment-level fallback, which is genuinely right for a
+session just created with it."
+  (dsh-emacs--rpc-async "session.models"
+                        `((sessionId . ,session-id))
+                        (lambda (ok value)
+                          (when (and ok (buffer-live-p buf))
+                            (with-current-buffer buf
+                              (when (equal session-id dsh-emacs--buffer-session)
+                                (let ((current (and (listp value)
+                                                    (dsh-protocol-model-directory-current
+                                                     (dsh-protocol-model-directory--from-alist
+                                                      value)))))
+                                  (when current
+                                    (dsh-emacs-modeline-set-model
+                                     (dsh-protocol-model-selection-model current))
+                                    (dsh-emacs-modeline-set-provider
+                                     (dsh-protocol-model-selection-provider current))
+                                    (dsh-emacs-modeline-set-effort
+                                     (dsh-protocol-model-selection-reasoning-effort
+                                      current))))))))))
+
 ;;;###autoload
 (defun dsh-emacs-list-sessions--fetch ()
   "Fetch the session list via RPC and populate `dsh-emacs--sessions'."
@@ -956,7 +986,11 @@ realtime)."
       (dsh-emacs--chat-buffer-sync session-id)
       (dsh-emacs-mode)
       (dsh-emacs-modeline-setup)
+      ;; 默认模型只作段级兜底立即显示；权威的 (provider, model, effort)
+      ;; 由 session.models 异步落地 —— 盲信默认值曾是 mode-line 显示错
+      ;; 模型的根因（见 `dsh-emacs--chat-buffer-model-sync'）。
       (dsh-emacs-modeline-set-model dsh-emacs-default-model)
+      (dsh-emacs--chat-buffer-model-sync session-id buf)
       ;; 打开即把服务器 contextPressure 快照喂给 mode-line 段。必须在
       ;; `dsh-emacs-mode'（define-derived-mode 内部 kill-all-local-variables）
       ;; 与 `dsh-emacs-modeline-setup' 之后：此前喂入的 buffer-local 快照会
@@ -2354,6 +2388,9 @@ the filter as \"error in process filter: Quit\"."
                 (if ok2
                     (progn
                       (dsh-emacs-modeline-set-model model)
+                      ;; 选中行自带所属 provider：同 id 跨 provider 时
+                      ;; mode-line 的 model 段靠它消歧（tooltip 显示）。
+                      (dsh-emacs-modeline-set-provider provider)
                       (dsh-emacs-modeline-set-effort effort-id)
                       ;; 模型切换后立即刷新会话列表：旧模型的
                       ;; contextPressure 快照不再可信，需拉新模型的同一投影

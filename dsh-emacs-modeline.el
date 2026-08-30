@@ -23,6 +23,7 @@
 ;;   (dsh-emacs-modeline-add-usage usage)     ;;  累加 usage 并刷新
 ;;   (dsh-emacs-modeline-note-event event)    ;;  从 assistant/message 事件累计 usage
 ;;   (dsh-emacs-modeline-set-model "claude-opus-4-5") ;; 设置模型名
+;;   (dsh-emacs-modeline-set-provider "deepseek")     ;; 设置模型所属 provider
 ;;   (dsh-emacs-modeline-set-effort "max")   ;; 设置推理 effort
 ;;   (dsh-emacs-modeline-set-preset "code")  ;; 设置 agent preset
 ;;
@@ -111,7 +112,13 @@ last result — including a \"not a git repo\" nil — is reused."
 Nil (no repo) is cached too so non-git dirs never spawn git per redraw.")
 
 (defvar-local dsh-emacs--modeline-model nil
-  "Model name displayed in the mode-line.")
+  "Model id displayed in the mode-line.")
+
+(defvar-local dsh-emacs--modeline-provider nil
+  "Provider id owning `dsh-emacs--modeline-model', or nil when unknown.
+The same model id can exist under several providers (the model selector
+already disambiguates rows by provider), so the model segment keeps the
+owning provider alongside the id — shown in the tooltip, never guessing.")
 
 (defvar-local dsh-emacs--modeline-effort nil
   "Reasoning effort (effortId, e.g. \"off\"/\"max\") shown in the mode-line.")
@@ -232,8 +239,12 @@ set (e.g. a session that predates request events)."
     (when (and model (not (string-empty-p model)))
       (dsh-emacs-modeline--annotate
        (propertize model 'face 'dsh-emacs-modeline-face)
-       (format "Model: %s — reasoning model of this session (switch with C-c C-m)"
-               model)))))
+       (format "Model: %s%s — reasoning model of this session (switch with C-c C-m)"
+               model
+               (if (and dsh-emacs--modeline-provider
+                        (not (string-empty-p dsh-emacs--modeline-provider)))
+                   (format " (provider %s)" dsh-emacs--modeline-provider)
+                 ""))))))
 
 (defun dsh-emacs-modeline--segment-effort ()
   "Render the reasoning-effort segment (effortId, e.g. \"max\")."
@@ -342,7 +353,8 @@ segments render."
       ""
     (let* ((spec dsh-emacs-modeline-format-spec)
            (separator (or (plist-get spec :separator) " • "))
-           (segments (or (plist-get spec :segments) '(cwd branch model tokens ctx cost)))
+           (segments (or (plist-get spec :segments)
+                         '(cwd branch model tokens ctx cost)))
            (separator-propertized (propertize separator 'face 'dsh-emacs-modeline-separator-face))
            parts)
       (dolist (sym segments)
@@ -401,9 +413,12 @@ the mode-line segment always reflects the live model.  Context-window
 data rides the `session/projection' frames, not this event."
   (let ((data (dsh-emacs--alist-state event "data")))
     (when data
-      (let ((model (dsh-emacs--alist-state data "model")))
+      (let ((model (dsh-emacs--alist-state data "model"))
+            (provider (dsh-emacs--alist-state data "provider")))
         (when (and model (not (string-empty-p model)))
-          (setq dsh-emacs--modeline-model model)))
+          (setq dsh-emacs--modeline-model model))
+        (when (and provider (not (string-empty-p provider)))
+          (setq dsh-emacs--modeline-provider provider)))
       (dsh-emacs-modeline-update))))
 
 (defun dsh-emacs-modeline-note-header (event)
@@ -418,11 +433,14 @@ the model and effort segments live on open."
          (config (and header (dsh-emacs--alist-state header "config"))))
     (when config
       (let ((model (dsh-emacs--alist-state config "model"))
-            (effort (dsh-emacs--alist-state config "reasoningEffort")))
+            (effort (dsh-emacs--alist-state config "reasoningEffort"))
+            (provider (dsh-emacs--alist-state config "provider")))
         (when (and model (not (string-empty-p model)))
           (setq dsh-emacs--modeline-model model))
         (when (and effort (not (string-empty-p effort)))
-          (setq dsh-emacs--modeline-effort effort)))
+          (setq dsh-emacs--modeline-effort effort))
+        (when (and provider (not (string-empty-p provider)))
+          (setq dsh-emacs--modeline-provider provider)))
       (dsh-emacs-modeline-update))))
 
 (defun dsh-emacs-modeline-set-context-snapshot (pressure window)
@@ -436,6 +454,11 @@ divisor paired across model switches.  Nil hides the ctx segment."
 (defun dsh-emacs-modeline-set-model (model)
   "Set the displayed model name to MODEL (a string)."
   (setq dsh-emacs--modeline-model model)
+  (dsh-emacs-modeline-update))
+
+(defun dsh-emacs-modeline-set-provider (provider)
+  "Set the provider owning the displayed model to PROVIDER (a string or nil)."
+  (setq dsh-emacs--modeline-provider provider)
   (dsh-emacs-modeline-update))
 
 (defun dsh-emacs-modeline-set-effort (effort)

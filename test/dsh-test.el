@@ -130,8 +130,16 @@ so the code under test can read fields through the protocol accessors."
                        ("contextWindow" . 1000000)))))
       (before (or (bound-and-true-p dsh-emacs--modeline-model) "none")))
   (dsh-emacs-modeline-note-request rc)
-  (when (equal "deepseek-v4-flash-0731" dsh-emacs--modeline-model)
+  (when (and (equal "deepseek-v4-flash-0731" dsh-emacs--modeline-model)
+             (equal "qwen-token-plan" dsh-emacs--modeline-provider))
     (dsh-test-pass "note-request feeds model")))
+(let ((rc '(("type" . "request/context") ("seq" . 43) ("data" . (("model" . "m9"))))))
+  ;; provider 缺失时不得残留上一个 provider（同 id 跨 provider 消歧靠它）
+  (setq dsh-emacs--modeline-provider "stale")
+  (dsh-emacs-modeline-note-request rc)
+  (when (equal "stale" dsh-emacs--modeline-provider)
+    (dsh-test-pass "note-request keeps provider when event omits it"))
+  (setq dsh-emacs--modeline-provider nil))
 
 ;; --- 测试 5e: model/effort/preset 三独立分段 + modeinline 括号 ---
 (let ((dsh-emacs-modeline-format-spec '(:separator " " :segments (model effort preset)))
@@ -191,10 +199,70 @@ so the code under test can read fields through the protocol accessors."
         dsh-emacs--modeline-effort nil)
   (dsh-emacs-modeline-note-header hdr)
   (when (and (equal "deepseek-v4-flash" dsh-emacs--modeline-model)
-             (equal "high" dsh-emacs--modeline-effort))
+             (equal "high" dsh-emacs--modeline-effort)
+             (equal "opencode-go" dsh-emacs--modeline-provider))
     (dsh-test-pass "note-header feeds model and reasoning effort"))
   (setq dsh-emacs--modeline-model nil
         dsh-emacs--modeline-effort nil))
+
+;; --- 测试 5f+1: 打开会话从 session.models 同步权威 (provider, model, effort) ---
+;; 默认模型只作段级兜底：同步回调必须用 `current' 三元组覆盖 buffer-local
+;; 值，且只路由回自己的会话缓冲（不串台）。
+(let* ((buf (get-buffer-create " *t5f1-chat*"))
+       (calls nil)
+       (payload '((current . ((provider . "zhipu")
+                              (model . "glm-5.3-flash")
+                              (reasoningEffort . "max"))))))
+  (unwind-protect
+      (progn
+        (with-current-buffer buf
+          (setq-local dsh-emacs--buffer-session "sess-modelsync")
+          (setq dsh-emacs--modeline-model "stale-model"
+                dsh-emacs--modeline-effort "stale-effort"
+                dsh-emacs--modeline-provider "stale-provider"))
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method params cb)
+                     (push (list method params) calls)
+                     (funcall cb t payload))))
+          (dsh-emacs--chat-buffer-model-sync "sess-modelsync" buf)
+          (with-current-buffer buf
+            (when (and (equal "glm-5.3-flash" dsh-emacs--modeline-model)
+                       (equal "max" dsh-emacs--modeline-effort)
+                       (equal "zhipu" dsh-emacs--modeline-provider)
+                       (equal "session.models" (caar calls))
+                       (equal "sess-modelsync"
+                              (cdr (assq 'sessionId (cadr (car calls))))))
+              (dsh-test-pass
+               "chat-buffer-model-sync-lands-provider-model-effort")))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+(let* ((buf (get-buffer-create " *t5f2-chat*"))
+       (payload '((current . ((provider . "p9") (model . "m9"))))))
+  ;; 会话不匹配的回调不得落入别的会话缓冲（防串台）
+  (unwind-protect
+      (progn
+        (with-current-buffer buf
+          (setq-local dsh-emacs--buffer-session "sess-other")
+          (setq dsh-emacs--modeline-model nil
+                dsh-emacs--modeline-provider nil))
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_method _params cb) (funcall cb t payload))))
+          (dsh-emacs--chat-buffer-model-sync "sess-modelsync" buf)
+          (with-current-buffer buf
+            (when (and (null dsh-emacs--modeline-model)
+                       (null dsh-emacs--modeline-provider))
+              (dsh-test-pass
+               "chat-buffer-model-sync-ignores-foreign-session")))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+;; tooltip 携带 provider（同 id 跨 provider 时 model 段消歧）
+(let ((dsh-emacs-modeline-format-spec '(:separator " " :segments (model))))
+  (setq dsh-emacs--modeline-model "m1"
+        dsh-emacs--modeline-provider "zhipu")
+  (let* ((txt (dsh-emacs-modeline-format))
+         (tip (get-text-property 0 'help-echo txt)))
+    (when (and (string-match-p "Model: m1 (provider zhipu)" tip)
+               (string-match-p "switch with C-c C-m" tip))
+      (dsh-test-pass "model-tooltip-carries-provider")))
+  (setq dsh-emacs--modeline-provider nil))
 
 ;; --- 测试 5g: render 调度转发 request/header 到 mode-line feed ---
 (let ((fired 0))
