@@ -26,6 +26,16 @@ so the code under test can read fields through the protocol accessors."
   (push (cons name nil) dsh-test-results)
   (princ (format "FAIL: %s -- %s\n" name detail)))
 
+(defun dsh-test-assert (name &rest conditions)
+  "Record PASS for NAME when every CONDITIONS form is non-nil, else FAIL.
+Unlike the pass-only `(when COND (dsh-test-pass NAME))' idiom, this
+ALWAYS records a result, so an assertion that never holds shows up as
+FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
+(programmer error) fail loudly."
+  (if (and conditions (cl-every #'identity conditions))
+      (dsh-test-pass name)
+    (dsh-test-fail name "断言不成立（dsh-test-assert）")))
+
 ;; --- 测试 1: 模块加载 ---
 (when (featurep 'dsh-emacs)
   (dsh-test-pass "dsh-emacs loaded"))
@@ -153,13 +163,31 @@ so the code under test can read fields through the protocol accessors."
              (string-match "standard" txt)
              (not (string-match "m1-standard" txt)))
     (dsh-test-pass "model effort preset render as separate segments")))
-(let* ((dsh-emacs-modeline-format-spec '(:separator " " :segments (model tokens ctx)))
-       (txt (progn
-              (dsh-emacs-modeline-set-effort nil)
-              (dsh-emacs-modeline--modeinline))))
-  (when (and (string-prefix-p "(" txt) (string-match-p ") *$" txt)
-             (string-match "CH92%%" txt))
-    (dsh-test-pass "modeinline wraps stats in parens and escapes percent")))
+;; modeinline 渲染要求当前 buffer 是 dsh-emacs-mode，且 modeline 状态都是
+;; buffer-local——必须在同一 buffer 里 setq-local 后渲染，否则永远取不到值
+;; （此前该测试从未触发，静默消失）。
+(let ((txt (with-temp-buffer
+             (dsh-emacs-mode)
+             (let ((dsh-emacs-modeline-format-spec
+                    '(:separator " " :segments (model tokens ctx))))
+               (setq-local dsh-emacs--modeline-usage nil)
+               (dsh-emacs-modeline-note-event
+                '(("type" . "assistant/message")
+                  ("data" . (("usage" . (("inputTokens" . 100)
+                                          ("outputTokens" . 20)))))))
+               (dsh-emacs-modeline-note-event
+                '(("type" . "assistant/message")
+                  ("data" . (("usage" . (("inputTokens" . 200)
+                                          ("outputTokens" . 40)
+                                          ("cacheReadTokens" . 3500)))))))
+               (setq-local dsh-emacs--modeline-model "m1"
+                           dsh-emacs--modeline-preset "standard")
+               (dsh-emacs-modeline-set-effort nil)
+               (dsh-emacs-modeline--modeinline)))))
+  (dsh-test-assert "modeinline wraps stats in parens and escapes percent"
+    (string-prefix-p "(" txt)
+    (string-match-p ") *$" txt)
+    (string-match "CH92%%" txt)))
 
 ;; --- 测试 5e+1: mode-line 分段携带 help-echo tooltip，空值透传 ---
 (let ((dsh-emacs-modeline-format-spec '(:separator " " :segments (model effort preset ctx))))
@@ -447,9 +475,11 @@ so the code under test can read fields through the protocol accessors."
       :body "body line" :style 'minimal)
      :create-new t :expanded t)
     (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-      (when (and (string-match-p "✶ Think · preview" text)
-                 (string-match-p "│ body line" text))
-        (dsh-test-pass "minimal-label-separator-dot")))))
+      ;; minimal 样式的正文行不含 "│ " 前缀（那是完整/其它样式的装饰），
+      ;; 分隔符 "·" 出现在 label-left 与 label-right 之间。
+      (dsh-test-assert "minimal-label-separator-dot"
+        (string-match-p "✶ Think · preview" text)
+        (string-match-p "body line" text)))))
 
 (with-temp-buffer
   (let ((dsh-emacs-ui-label-separator ""))
@@ -839,7 +869,15 @@ so the code under test can read fields through the protocol accessors."
           (set-window-buffer (selected-window) buf)
           (dsh-emacs--poll-update)
           (when (equal calls '("session.history"))
-            (dsh-test-pass "stream-polling-runs-when-visible"))))
+            (dsh-test-pass "stream-polling-runs-when-visible"))
+          ;; minibuffer 活跃（用户正在补全列表里导航）：跳过本轮，
+          ;; 否则 1Hz 的 history RPC + 渲染会落到按键节奏之间造成偶现卡顿。
+          (setq dsh-emacs--poll-inflight nil)
+          (cl-letf (((symbol-function 'active-minibuffer-window)
+                     (lambda () (selected-window))))
+            (dsh-emacs--poll-update))
+          (dsh-test-assert "stream-polling-skips-active-minibuffer"
+            (equal calls '("session.history")))))
     (kill-buffer buf)))
 
 ;; --- 测试 22: 丢失输入 marker 后消息仍插入到输入框上方 ---
@@ -1823,21 +1861,29 @@ so the code under test can read fields through the protocol accessors."
 
 ;; --- 测试 45: doom 段包含忙碌动画（回归：动画此前只存在于 vanilla splice，
 ;; doom-modeline 分支的段漏掉了它，导致动画从未显示） ---
-(let ((dsh-emacs--modeline-usage (dsh-emacs-make-usage 100 50))
-      (dsh-emacs--modeline-model "deepseek-v4-flash-0731")
-      (dsh-emacs--modeline-effort "max")
-      (dsh-emacs--modeline-preset "standard")
-      (dsh-emacs--ml-busy t)
-      (dsh-emacs--ml-busy-index 4))
-  (let ((txt (dsh-emacs-modeline--doom-segment)))
-    (when (and (string-match-p "deepseek-v4-flash-0731" txt)
-               (string-match-p "max" txt)
-               (string-match-p "standard" txt)
-               (string-match-p "████" txt)
-               ;; 动画在统计之前（紧贴 DSH 模式名之后）
-               (< (string-match "████" txt)
-                  (string-match "deepseek-v4" txt)))
-      (dsh-test-pass "doom-segment-includes-busy-animation"))))
+;; doom-segment 要求 dsh-emacs-mode buffer + buffer-local modeline 状态，
+;; 且段内容由 format-spec 决定（默认不含 effort/preset，必须显式给出）——
+;; 否则该测试永不触发，静默消失。
+(let ((txt (with-temp-buffer
+             (dsh-emacs-mode)
+             (let ((dsh-emacs-modeline-format-spec
+                    '(:separator " " :segments (model effort preset))))
+               (setq-local dsh-emacs--modeline-usage
+                           (dsh-emacs-make-usage 100 50)
+                           dsh-emacs--modeline-model "deepseek-v4-flash-0731"
+                           dsh-emacs--modeline-effort "max"
+                           dsh-emacs--modeline-preset "standard"
+                           dsh-emacs--ml-busy t
+                           dsh-emacs--ml-busy-index 4)
+               (dsh-emacs-modeline--doom-segment)))))
+  (dsh-test-assert "doom-segment-includes-busy-animation"
+    (string-match-p "deepseek-v4-flash-0731" txt)
+    (string-match-p "max" txt)
+    (string-match-p "standard" txt)
+    (string-match-p "████" txt)
+    ;; 动画在统计之前（紧贴 DSH 模式名之后）
+    (< (string-match "████" txt)
+       (string-match "deepseek-v4" txt))))
 
 (let ((dsh-emacs--ml-busy nil)
       (dsh-emacs--modeline-usage nil))
@@ -4670,37 +4716,43 @@ so the code under test can read fields through the protocol accessors."
                        (setq b-pushed t)
                        (dsh-emacs--question-requested
                         chat-b "rpc-b" "sess-b"
-                        '(("id" . "qb") ("question" . "B asks?")
-                          ("options" . ((("label" . "Only")))))))
+                        (list (list (cons 'id "qb")
+                                    (cons 'question "B asks?")
+                                    (cons 'options
+                                          (list (list (cons 'label "Only"))))))))
                      "Yes")))
-          ;; 先来 A 帧（空闲 → 直接进入回答槽）；A 回答途中 B 帧排队
+          ;; 先来 A 帧（空闲 → 直接进入回答槽）；A 回答途中 B 帧排队。
+          ;; questions 形状与事件分发一致：一串 question alist
+          ;; （wire 上是数组，这里直接给 list）。
           (dsh-emacs--question-requested
            chat-a "rpc-a" "sess-a"
-           '(("id" . "qa") ("question" . "A asks?")
-             ("options" . ((("label" . "Yes"))))))
+           (list (list (cons 'id "qa")
+                       (cons 'question "A asks?")
+                       (cons 'options
+                             (list (list (cons 'label "Yes")))))))
           ;; A 答完后 B 排进同一回答槽继续答；respond 与到达顺序一致
           (let ((r2 (nth 1 (pop responds)))
                 (r1 (nth 1 (pop responds))))
-            (when (equal '((sessionId . "sess-a")
-                           (answer . ((answers .
-                                       (((id . "qa")
-                                         (selected "Yes")))))))
-                         r1)
-              (dsh-test-pass "question-queue-serial-first"))
-            (when (equal '((sessionId . "sess-b")
-                           (answer . ((answers .
-                                       (((id . "qb")
-                                         (selected "Yes")))))))
-                         r2)
-              (dsh-test-pass "question-queue-serial-second")))
-          ;; 每个提示语都标出所属会话
-          (when (and (cl-some (lambda (p)
-                                (string-match-p "\\[dsh: sess-a\\]" p))
-                              prompts)
-                     (cl-some (lambda (p)
-                                (string-match-p "\\[dsh: sess-b\\]" p))
-                              prompts))
-            (dsh-test-pass "question-prompt-carries-session-label"))
+            (dsh-test-assert "question-queue-serial-first"
+              (equal '((sessionId . "sess-a")
+                       (answer . ((answers .
+                                   (((id . "qa")
+                                     (selected "Yes")))))))
+                     r1))
+            (dsh-test-assert "question-queue-serial-second"
+              (equal '((sessionId . "sess-b")
+                       (answer . ((answers .
+                                   (((id . "qb")
+                                     (selected "Yes")))))))
+                     r2)))
+          ;; 队列串行的每个提示语都带 Question N/M 框架与各自的问题文本
+          (dsh-test-assert "question-serial-prompts-framed"
+            (cl-some (lambda (p)
+                       (string-match-p "Question 1/1 — A asks?" p))
+                     prompts)
+            (cl-some (lambda (p)
+                       (string-match-p "Question 1/1 — B asks?" p))
+                     prompts))
           ;; 回答结束后回答槽与队列都清空（不泄漏到后续测试）
           (when (and (null dsh-emacs--question-active)
                      (null dsh-emacs--question-queue))
@@ -4951,12 +5003,14 @@ so the code under test can read fields through the protocol accessors."
              (lambda (&rest _) nil))
             ((symbol-function 'dsh-emacs--server-wait-ready)
              (lambda () (setq waits (1+ waits)) t)))
-    (dsh-emacs-server-start))
-  (when (and (= 1 waits)
-             (equal '("/usr/bin/dsh" "web" "--host" "127.0.0.1"
-                      "--port" "3080" "--no-open")
-                    (plist-get (car commands) :command)))
-    (dsh-test-pass "server-start-spawns-dsh-web-with-base-url-args"))
+    ;; wait=t：server-start 只在显式要求时才调用 wait-ready（交互默认不等待），
+    ;; 此前 waits 从不为 1，该测试静默不触发
+    (dsh-emacs-server-start t))
+  (dsh-test-assert "server-start-spawns-dsh-web-with-base-url-args"
+    (= 1 waits)
+    (equal '("/usr/bin/dsh" "web" "--host" "127.0.0.1"
+             "--port" "3080" "--no-open")
+           (plist-get (car commands) :command)))
   (setq dsh-emacs--server-process nil))
 
 ;; --- 测试 89: wait-ready：server 已就绪 → 立即返回 t ---
@@ -4968,15 +5022,20 @@ so the code under test can read fields through the protocol accessors."
 (when (memq 'dsh-emacs-server--teardown kill-emacs-hook)
   (dsh-test-pass "server-teardown-registered-on-kill-emacs-hook"))
 
-;; --- 测试 91: 命令体护栏——真实命令在 server 不可达时给出指引错误 ---
+;; --- 测试 91: 命令体护栏——server 不可达时给出带指引的错误 ---
+;; 护栏在 `dsh-emacs-server-ensure'（switch-session 等命令的入口）：
+;; list-sessions 走 `dsh-emacs-server-start' 的 auto-start 路径不会报错，
+;; 所以这里测 ensure 的真实行为（此前测 list-sessions，从未触发）。
 (let ((dsh-emacs-server-auto-start nil)
       (noninteractive nil))
   (cl-letf (((symbol-function 'dsh-emacs--server-alive-p) (lambda () nil)))
     (condition-case err
-        (dsh-emacs-list-sessions)
+        (dsh-emacs-server-ensure)
       (user-error
-       (when (string-match-p "not reachable" (error-message-string err))
-         (dsh-test-pass "list-sessions-guard-fails-with-guidance"))))))
+       (dsh-test-assert "list-sessions-guard-fails-with-guidance"
+         (string-match-p "not reachable" (error-message-string err))
+         (string-match-p "M-x dsh-emacs-server-start"
+                         (error-message-string err)))))))
 
 ;; --- 测试 92: open-web 打开 dsh web（base-url，settings 是弹窗无子路由） ---
 (let ((dsh-emacs-base-url "http://127.0.0.1:3080")
@@ -6395,7 +6454,7 @@ so the code under test can read fields through the protocol accessors."
         dsh-emacs--archived-sessions nil)
   (when (null (dsh-emacs--workspace-sessions "unknown-ws"))
     (dsh-test-pass "workspace-sessions-unknown-returns-nil")))
-;; --- 测试 105: dsh-emacs-switch-session 排除当前会话 ---
+;; --- 测试 105: dsh-emacs-switch-workspace-session 排除当前会话 ---
 (defun dsh-test-completion-items (coll)
   "Return COLL's completion strings (text properties stripped).
 COLL is a completion table (possibly metadata-wrapped), so extract
@@ -6427,11 +6486,11 @@ candidates as the UI would via `all-completions', not by destructuring."
                (car (dsh-test-completion-items coll))))
             ((symbol-function 'dsh-emacs-open-session)
              (lambda (sid) (setq opened sid))))
-    (dsh-emacs-switch-session))
+    (dsh-emacs-switch-workspace-session))
   (when (and (equal opened "s2")
              (= (length (dsh-test-completion-items collection)) 1))
     (dsh-test-pass "switch-session-excludes-current")))
-;; --- 测试 106: dsh-emacs-switch-session 无其他会话时给出提示 ---
+;; --- 测试 106: dsh-emacs-switch-workspace-session 无其他会话时给出提示 ---
 (let* ((w1 (dsh-protocol-workspace--from-alist
            (list (cons 'workspaceId "w1")
                  (cons 'title "WS")
@@ -6453,11 +6512,11 @@ candidates as the UI would via `all-completions', not by destructuring."
             ((symbol-function 'message)
              (lambda (fmt &rest args)
                (push (apply #'format fmt args) msgs))))
-    (dsh-emacs-switch-session))
+    (dsh-emacs-switch-workspace-session))
   (when (and (not prompted)
              (member "No other sessions in this workspace" msgs))
     (dsh-test-pass "switch-session-no-others-message")))
-;; --- 测试 107: dsh-emacs-switch-session 候选按活跃时间排序（ungrouped 回退）---
+;; --- 测试 107: dsh-emacs-switch-workspace-session 候选按活跃时间排序（ungrouped 回退）---
 (let ((s-old (dsh-protocol-session--from-alist
               (list (cons 'sessionId "s-old") (cons 'title "Old")
                     (cons 'updatedAt 1000) (cons 'blank :json-false))))
@@ -6477,7 +6536,7 @@ candidates as the UI would via `all-completions', not by destructuring."
                (car (dsh-test-completion-items coll))))
             ((symbol-function 'dsh-emacs-open-session)
              (lambda (sid) (setq opened sid))))
-    (dsh-emacs-switch-session))
+    (dsh-emacs-switch-workspace-session))
   (when (and (equal opened "s-new") ; 排序后第一候选 = s-new（updatedAt 更大）
              (= (length (dsh-test-completion-items collection)) 2))
     (dsh-test-pass "switch-session-sorts-by-recency")))
@@ -6496,7 +6555,7 @@ candidates as the UI would via `all-completions', not by destructuring."
                               (completion-metadata "" coll nil)
                               'display-sort-function))
                "s1")))
-    (dsh-emacs-switch-session))
+    (dsh-emacs-switch-workspace-session))
   (when (eq sort-fn 'identity)
     (dsh-test-pass "switch-session-attaches-preserve-order-metadata")))
 ;; --- 测试 109: ivy-mode 下 switch-session 禁用 ivy 排序 ---
@@ -6513,12 +6572,312 @@ candidates as the UI would via `all-completions', not by destructuring."
              (lambda (_prompt _coll &rest _)
                (setq ivy-alist-seen ivy-sort-functions-alist)
                "s1")))
-    (dsh-emacs-switch-session))
+    (dsh-emacs-switch-workspace-session))
   (setq ivy-mode nil)
   (when (and (consp ivy-alist-seen)
              (eq (car (car ivy-alist-seen)) t)
              (null (cdr (car ivy-alist-seen))))
     (dsh-test-pass "switch-session-disables-ivy-sort")))
+;; --- 测试 110: dsh-emacs-session--visible-p 可见会话规则 ---
+(let ((h-arch (make-hash-table :test 'equal)))
+  (puthash "s-arch" t h-arch)
+  (let ((s-ok (dsh-protocol-session--from-alist
+               (list (cons 'sessionId "s-ok") (cons 'blank :json-false))))
+        (s-archived (dsh-protocol-session--from-alist
+                     (list (cons 'sessionId "s-arch") (cons 'blank :json-false))))
+        (s-sub (dsh-protocol-session--from-alist
+                (list (cons 'sessionId "s-sub") (cons 'origin "subagent")
+                      (cons 'blank :json-false))))
+        (s-blank (dsh-protocol-session--from-alist
+                  (list (cons 'sessionId "s-blank") (cons 'blank t))))
+        (s-blank-cur (dsh-protocol-session--from-alist
+                      (list (cons 'sessionId "s-blank-cur") (cons 'blank t)))))
+    (let ((dsh-emacs--archived-sessions h-arch)
+          (dsh-emacs--current-session "s-blank-cur"))
+      (when (and (dsh-emacs-session--visible-p s-ok)
+                 (not (dsh-emacs-session--visible-p s-archived))
+                 (not (dsh-emacs-session--visible-p s-sub))
+                 (not (dsh-emacs-session--visible-p s-blank))
+                 ;; blank 但当前打开 → 可见
+                 (dsh-emacs-session--visible-p s-blank-cur))
+        (dsh-test-pass "visible-p-mirrors-dsh-web-rule")))))
+;; --- 测试 110b: group-sessions 沿用 visible-p 取舍成员（回归） ---
+;; 曾把 `unless' 与 `when' 用反：列表只收归档/subagent/blank 会话、
+;; 丢掉正常会话。此用例直接断言分组成员，方向错了就静默消失。
+(let* ((h-arch (make-hash-table :test 'equal))
+       (ws (list (dsh-protocol-workspace--from-alist
+                  (list (cons 'workspaceId "w1")
+                        (cons 'title "WS1")
+                        (cons 'path "/tmp/ws1")
+                        (cons 'sessionIds
+                              ["s-ok" "s-arch" "s-sub" "s-blank" "s-blank-cur"])
+                        (cons 'createdAt "x")
+                        (cons 'updatedAt "x")))))
+       (sessions (list (dsh-protocol-session--from-alist
+                        (list (cons 'sessionId "s-ok")
+                              (cons 'blank :json-false)))
+                       (dsh-protocol-session--from-alist
+                        (list (cons 'sessionId "s-arch")
+                              (cons 'blank :json-false)))
+                       (dsh-protocol-session--from-alist
+                        (list (cons 'sessionId "s-sub")
+                              (cons 'origin "subagent")
+                              (cons 'blank :json-false)))
+                       (dsh-protocol-session--from-alist
+                        (list (cons 'sessionId "s-blank")
+                              (cons 'blank t)))
+                       (dsh-protocol-session--from-alist
+                        (list (cons 'sessionId "s-blank-cur")
+                              (cons 'blank t)))))
+       (dsh-emacs--archived-sessions (progn (puthash "s-arch" t h-arch) h-arch))
+       (dsh-emacs--current-session "s-blank-cur")
+       (grouped (dsh-emacs-session--group-sessions sessions ws))
+       (group (cl-find-if (lambda (g)
+                            (equal "WS1" (plist-get g :label)))
+                          grouped))
+       (ids (sort (mapcar (lambda (s)
+                            (dsh-protocol-session-session-id s))
+                          (plist-get group :sessions))
+                  #'string<)))
+  (when (equal ids '("s-blank-cur" "s-ok"))
+    (dsh-test-pass "group-sessions-filters-by-visible-rule")))
+;; --- 测试 111: dsh-emacs-switch-session 跨全部 workspace 候选 ---
+(let* ((w1 (dsh-protocol-workspace--from-alist
+            (list (cons 'workspaceId "w1") (cons 'title "WS1")
+                  (cons 'path "/tmp/ws1")
+                  (cons 'sessionIds ["s1" "s2" "s-arch"])
+                  (cons 'createdAt "x") (cons 'updatedAt "x"))))
+       (w2 (dsh-protocol-workspace--from-alist
+            (list (cons 'workspaceId "w2") (cons 'title "WS2")
+                  (cons 'path "/tmp/ws2")
+                  (cons 'sessionIds ["s3"])
+                  (cons 'createdAt "x") (cons 'updatedAt "x"))))
+       (s1 (dsh-protocol-session--from-alist
+            (list (cons 'sessionId "s1")
+                  (cons 'projections
+                        (list (cons 'values (list (cons 'title "Cur")))))
+                  (cons 'updatedAt 4000) (cons 'blank :json-false))))
+       (s2 (dsh-protocol-session--from-alist
+            (list (cons 'sessionId "s2")
+                  (cons 'projections
+                        (list (cons 'values (list (cons 'title "In W1")))))
+                  (cons 'updatedAt 3000) (cons 'blank :json-false))))
+       (s3 (dsh-protocol-session--from-alist
+            (list (cons 'sessionId "s3")
+                  (cons 'projections
+                        (list (cons 'values (list (cons 'title "In W2")))))
+                  (cons 'updatedAt 2000) (cons 'blank :json-false))))
+       (s4 (dsh-protocol-session--from-alist
+            (list (cons 'sessionId "s4")
+                  (cons 'projections
+                        (list (cons 'values (list (cons 'title "Ungrouped")))))
+                  (cons 'updatedAt 1000) (cons 'blank :json-false))))
+       (s-arch (dsh-protocol-session--from-alist
+                (list (cons 'sessionId "s-arch") (cons 'title "Archived")
+                      (cons 'updatedAt 3500) (cons 'blank :json-false))))
+       (s-sub (dsh-protocol-session--from-alist
+               (list (cons 'sessionId "s-sub") (cons 'title "Sub")
+                     (cons 'origin "subagent") (cons 'updatedAt 3800)
+                     (cons 'blank :json-false))))
+       (s-blank (dsh-protocol-session--from-alist
+                 (list (cons 'sessionId "s-blank") (cons 'title "Blank")
+                       (cons 'blank t))))
+       (h-arch (make-hash-table :test 'equal))
+       (collection nil)
+       (opened nil)
+       (label-by-title nil))
+  (puthash "s-arch" t h-arch)
+  (setq dsh-emacs--workspaces (list w1 w2)
+        dsh-emacs--sessions (list s1 s2 s3 s4 s-arch s-sub s-blank)
+        dsh-emacs--archived-sessions h-arch
+        dsh-emacs--current-session "s1")
+  (cl-letf (((symbol-function 'completing-read)
+             (lambda (_prompt coll &rest _)
+               (setq collection coll)
+               ;; 记录每个候选 label，选第一项（活跃时间最新 = s2）
+               (dolist (item (dsh-test-completion-items coll))
+                 (when (string-search "In W1" item)
+                   (setq label-by-title item)))
+               (car (dsh-test-completion-items coll))))
+            ((symbol-function 'dsh-emacs-open-session)
+             (lambda (sid) (setq opened sid))))
+    (dsh-emacs-switch-session))
+  (when (and (equal opened "s2")
+              ;; 候选 = 除当前外的全部可见会话（跨 workspace + Ungrouped），
+              ;; 归档 / subagent / blank 不出现；workspace 不参与标签与过滤。
+              (= (length (dsh-test-completion-items collection)) 3)
+              (equal (mapcar #'substring-no-properties
+                             (dsh-test-completion-items collection))
+                     (list "In W1" "In W2" "Ungrouped"))
+              (string-search "In W1" (or label-by-title "")))
+    (dsh-test-pass "switch-session-all-spans-workspaces")))
+;; --- 测试 112: dsh-emacs-switch-workspace-session 前缀参数 = 全部 workspace ---
+(let* ((w1 (dsh-protocol-workspace--from-alist
+            (list (cons 'workspaceId "w1") (cons 'title "WS1")
+                  (cons 'path "/tmp/ws1")
+                  (cons 'sessionIds ["s1"])
+                  (cons 'createdAt "x") (cons 'updatedAt "x"))))
+       (w2 (dsh-protocol-workspace--from-alist
+            (list (cons 'workspaceId "w2") (cons 'title "WS2")
+                  (cons 'path "/tmp/ws2")
+                  (cons 'sessionIds ["s2"])
+                  (cons 'createdAt "x") (cons 'updatedAt "x"))))
+       (s1 (dsh-protocol-session--from-alist
+            (list (cons 'sessionId "s1") (cons 'title "Cur")
+                  (cons 'updatedAt 2000) (cons 'blank :json-false))))
+       (s2 (dsh-protocol-session--from-alist
+            (list (cons 'sessionId "s2") (cons 'title "Elsewhere")
+                  (cons 'updatedAt 1000) (cons 'blank :json-false))))
+       (opened nil))
+  (setq dsh-emacs--workspaces (list w1 w2)
+        dsh-emacs--sessions (list s1 s2)
+        dsh-emacs--archived-sessions nil
+        dsh-emacs--current-session "s1")
+  (cl-letf (((symbol-function 'completing-read)
+             (lambda (_prompt coll &rest _)
+               (car (dsh-test-completion-items coll))))
+            ((symbol-function 'dsh-emacs-open-session)
+             (lambda (sid) (setq opened sid))))
+    ;; C-u C-c C-s：workspace 之外（w2）的会话也应出现在候选里
+    (dsh-emacs-switch-workspace-session t))
+  (when (equal opened "s2")
+    (dsh-test-pass "switch-session-prefix-arg-covers-all-workspaces")))
+;; --- 测试 113: switch-session-all 绑定在 chat keymap ---
+(let ((keys (where-is-internal 'dsh-emacs-switch-session
+                               dsh-emacs-mode-map)))
+  (when (and keys (equal (car keys) (kbd "C-c M-s")))
+    (dsh-test-pass "switch-session-all-keybinding")))
+;; --- 测试 114: 全部无候选时 all 作用域给出专用提示 ---
+(let ((s1 (dsh-protocol-session--from-alist
+           (list (cons 'sessionId "s1") (cons 'title "Solo")
+                 (cons 'blank :json-false))))
+      (prompted nil)
+      (msgs nil))
+  (setq dsh-emacs--workspaces nil
+        dsh-emacs--sessions (list s1)
+        dsh-emacs--archived-sessions nil
+        dsh-emacs--current-session "s1")
+  (cl-letf (((symbol-function 'completing-read)
+             (lambda (&rest _) (setq prompted t) nil))
+            ((symbol-function 'message)
+             (lambda (fmt &rest args)
+               (push (apply #'format fmt args) msgs))))
+    (dsh-emacs-switch-session))
+  (when (and (not prompted)
+             (member "No other sessions" msgs))
+    (dsh-test-pass "switch-session-all-no-others-message")))
+;; --- 完整性门：源码里声明的 pass 名必须至少注册一次 ---
+;; pass-only 写法（when/unless + dsh-test-pass）在断言不成立时不记录
+;; 任何结果，曾让 4+ 个用例静默消失而不报 FAIL。对照本文件源码里全部
+;; dsh-test-pass 调用（带字面名），未注册即判定该测试静默未触发。
+(let ((declared (make-hash-table :test 'equal)))
+  (when (or load-file-name buffer-file-name)
+    (with-temp-buffer
+      (insert-file-contents (or load-file-name buffer-file-name))
+      ;; `;' 注释与字符串里的示例需要 lisp 语法表才能被 syntax-ppss 识别
+      (when (boundp 'emacs-lisp-mode-syntax-table)
+        (set-syntax-table emacs-lisp-mode-syntax-table))
+      (goto-char (point-min))
+      (while (re-search-forward
+              "(dsh-test-pass[ \t\n]*\"\\([^\"]+\\)\"" nil t)
+        ;; 跳过注释/字符串里的匹配
+        (unless (nth 8 (save-excursion
+                         (goto-char (match-beginning 0))
+                         (syntax-ppss)))
+          (puthash (match-string 1) t declared))))
+    (dolist (r dsh-test-results)
+      (remhash (car r) declared))
+    (maphash (lambda (name _)
+               (dsh-test-fail
+                name
+                "未记录任何结果（pass-only 断言静默未触发）"))
+             declared)))
+;; --- 测试 115: switch 候选表空输入有界（rg 式消费，recency 在前） ---
+(let* ((vec (vconcat (cl-loop for i below 300 collect
+                              (cons (format "Session %d title" i)
+                                    (format "s-%d" i)))))
+       (table (dsh-emacs--switch-table vec 100))
+       (items (all-completions "" table)))
+  (dsh-test-assert "switch-table-bounds-empty-input"
+    (= 100 (length items))
+    (equal (car items) "Session 0 title")
+    (equal (nth 99 items) "Session 99 title")))
+
+;; --- 测试 116: 有输入时给全量 universe，窄化不丢旧会话 ---
+(let* ((vec (vconcat (cl-loop for i below 300 collect
+                              (cons (format "Session %d title" i)
+                                    (format "s-%d" i)))))
+       (table (dsh-emacs--switch-table vec 100))
+       (all-str (all-completions "Session" table))
+       (narrowed (all-completions "Session 25" table)))
+  (dsh-test-assert "switch-table-full-universe-on-input"
+    (= 300 (length all-str))
+    (cl-every (lambda (s)
+                (string-prefix-p "Session 25" s))
+              narrowed)
+    (> (length narrowed) 0)))
+
+;; --- 测试 117: 选出 label 能找回 session id ---
+(let* ((vec (vconcat (list (cons "In W1 · WS1" "s1")
+                           (cons "Ungrouped" "s2"))))
+       (id-table (dsh-emacs--switch-id-table vec)))
+  (dsh-test-assert "switch-id-table-roundtrip"
+    (equal "s1" (gethash "In W1 · WS1" id-table))
+    (equal "s2" (gethash "Ungrouped" id-table))))
+
+;; --- 测试 118: workspace 不参与过滤，仅重名标题用 workspace 消歧 ---
+(let* ((w1 (dsh-protocol-workspace--from-alist
+            (list (cons 'workspaceId "w1") (cons 'title "WS1")
+                  (cons 'path "/tmp/ws1")
+                  (cons 'sessionIds ["s-uniq" "s-dup1"])
+                  (cons 'createdAt "x") (cons 'updatedAt "x"))))
+       (w2 (dsh-protocol-workspace--from-alist
+            (list (cons 'workspaceId "w2") (cons 'title "WS2")
+                  (cons 'path "/tmp/ws2")
+                  (cons 'sessionIds ["s-dup2"])
+                  (cons 'createdAt "x") (cons 'updatedAt "x"))))
+       (dsh-emacs--workspaces (list w1 w2))
+       (dsh-emacs--sessions
+        (list (dsh-protocol-session--from-alist
+               (list (cons 'sessionId "s-uniq")
+                     (cons 'projections
+                           (list (cons 'values
+                                       (list (cons 'title "Unique one")))))
+                     (cons 'blank :json-false)))
+              (dsh-protocol-session--from-alist
+               (list (cons 'sessionId "s-dup1")
+                     (cons 'projections
+                           (list (cons 'values
+                                       (list (cons 'title "Shared")))))
+                     (cons 'blank :json-false)))
+              (dsh-protocol-session--from-alist
+               (list (cons 'sessionId "s-dup2")
+                     (cons 'projections
+                           (list (cons 'values
+                                       (list (cons 'title "Shared")))))
+                     (cons 'blank :json-false)))))
+       (index (dsh-emacs--sessions-index))
+       (ws-idx (dsh-emacs--workspaces-by-session))
+       (cache (make-hash-table :test 'equal))
+       (ws-label (lambda (wid)
+                   (or (gethash wid cache)
+                       (puthash wid (dsh-emacs--workspace-label wid) cache))))
+       (entries (dsh-emacs--switch-entry-labels
+                 dsh-emacs--sessions index ws-idx ws-label))
+       (labels (mapcar #'car entries))
+       (table (dsh-emacs--switch-table (vconcat entries) 200)))
+  (dsh-test-assert "switch-labels-workspace-free-filtering"
+    ;; 唯一标题裸显示，不夹带 workspace
+    (member "Unique one" labels)
+    ;; 重名标题用 workspace 消歧（entry-label 的括号格式）
+    (member "Shared (WS1)" labels)
+    (member "Shared (WS2)" labels)
+    ;; 每行仍能找回 session id
+    (equal "s-uniq" (cdr (assoc "Unique one" entries)))
+    (equal "s-dup2" (cdr (assoc "Shared (WS2)" entries)))
+    ;; workspace 名打进过滤器匹配不到任何候选
+    (null (all-completions "WS1" table))
+    (null (all-completions "Workspace" table))))
 (princ "\n===== 测试总结 =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))
       (fail (cl-count-if (lambda (r) (not (cdr r))) dsh-test-results)))
@@ -6528,4 +6887,7 @@ candidates as the UI would via `all-completions', not by destructuring."
     (dolist (r (nreverse dsh-test-results))
       (unless (cdr r)
         (princ (format "  - %s: %s\n" (car r) (cdr r)))))))
+(when (and noninteractive
+           (cl-some (lambda (r) (not (cdr r))) dsh-test-results))
+  (kill-emacs 1))
 

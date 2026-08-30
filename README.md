@@ -41,6 +41,8 @@ and how a session lands in the right workspace:
 
 Common keys inside a chat: `C-c C-c` send — press again to interrupt —
 `C-c C-m` switch model, `C-c C-a` attach an image, `C-c C-r` refresh,
+`C-c C-s` switch session in this workspace (`C-c M-s` or `C-u C-c C-s`
+across all workspaces),
 `C-c C-f` toggle the mode-line stats, `TAB` complete `/name`. In the session list:
 `RET` open, `c` create, `w` workspace filter, `/` search, `g` refresh.
 Everything else is in the [manual](#documentation).

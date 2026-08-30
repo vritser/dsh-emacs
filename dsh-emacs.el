@@ -84,6 +84,19 @@ inside the picker."
   :type '(choice (const :tag "No group titles" nil) string)
   :group 'dsh-emacs)
 
+(defcustom dsh-emacs-switch-max-candidates 200
+  "Max candidates offered to the completion UI per keystroke by switch-session.
+The completion framework (vertico/ivy/corfu) rebuilds its candidate list
+on every keystroke, so an unbounded list of sessions would allocate a
+fresh N-entry structure per keypress — the same pain counsel-rg avoids by
+consuming its rg output in bounded increments.  This caps the offered set
+to the most-recently-active entries; older sessions remain reachable as
+soon as a filter is typed (and the workspace-scoped list is naturally
+below this cap).  Raise it for very large session counts, lower it for
+snappier keys."
+  :type 'integer
+  :group 'dsh-emacs)
+
 (defcustom dsh-emacs-base-url "http://127.0.0.1:3080"
   "Address of the running dsh web service."
   :type 'string
@@ -1027,37 +1040,39 @@ realtime)."
   "Return SESSIONS belonging to WORKSPACE-ID, excluding archived,
 subagent and blank rows.  Returns a list of session structs in recency
 order."
-  (let* ((archived dsh-emacs--archived-sessions)
-         (current dsh-emacs--current-session)
-         (ws-by-id
-          (catch 'found
-            (dolist (ws dsh-emacs--workspaces)
-              (when (equal workspace-id
-                             (dsh-protocol-workspace-workspace-id ws))
-                (throw 'found ws))))))
+  (let ((ws-by-id
+         (catch 'found
+           (dolist (ws dsh-emacs--workspaces)
+             (when (equal workspace-id
+                            (dsh-protocol-workspace-workspace-id ws))
+               (throw 'found ws))))))
     (if (null ws-by-id)
         nil
       (let ((session-ids (dsh-protocol-workspace-session-ids ws-by-id)))
         (dsh-emacs-session--sort-by-recency
          (cl-remove-if
           (lambda (s)
-            (let ((sid (dsh-protocol-session-session-id s)))
-              (or (and archived (gethash sid archived))
-                  (dsh-protocol-session-origin s)
-                  (not (member sid session-ids))
-                  (let ((blank (dsh-protocol-session-blank s)))
-                    (and blank (not (eq blank :json-false))
-                         (not (equal sid current)))))))
+            (or (not (dsh-emacs-session--visible-p s))
+                (not (member (dsh-protocol-session-session-id s)
+                             session-ids))))
           dsh-emacs--sessions))))))
 
-(defun dsh-emacs--switch-prompt (workspace-id)
-  "Return the completing-read prompt for switching sessions in WORKSPACE-ID."
-  (if workspace-id
-      (format "Switch session in %s: "
-              (or (dsh-emacs--workspace-title workspace-id)
-                  (dsh-emacs-session--workspace-basename
-                   (dsh-emacs--workspace-path workspace-id))))
-    "Switch session: "))
+(defun dsh-emacs--workspace-label (workspace-id)
+  "Human label of WORKSPACE-ID: title, else path basename, else the id."
+  (or (dsh-emacs--workspace-title workspace-id)
+      (dsh-emacs-session--workspace-basename
+       (dsh-emacs--workspace-path workspace-id))
+      workspace-id))
+
+(defun dsh-emacs--switch-prompt (workspace-id &optional all)
+  "Return the completing-read prompt for switching sessions.
+WORKSPACE-ID scopes the prompt to one workspace; non-nil ALL asks
+across all workspaces."
+  (cond
+   (all "Switch session (all workspaces): ")
+   (workspace-id (format "Switch session in %s: "
+                         (dsh-emacs--workspace-label workspace-id)))
+   (t "Switch session: ")))
 
 (defun dsh-emacs--workspace-title (workspace-id)
   "Return the title of the workspace with WORKSPACE-ID, or nil."
@@ -1104,47 +1119,221 @@ PROMPT/COLLECTION/ARGS 语义与 `completing-read' 完全一致。"
           (apply #'completing-read prompt ordered args))
       (apply #'completing-read prompt ordered args))))
 
+(defun dsh-emacs--sessions-index ()
+  "Hash table session-id → session struct for `dsh-emacs--sessions'.
+Indexing once keeps repeated per-candidate title lookups O(1) instead of
+the linear scan in `dsh-emacs--chat-session-item' (switching over
+hundreds of sessions makes the scan quadratic)."
+  (let ((index (make-hash-table :test 'equal
+                                :size (length dsh-emacs--sessions))))
+    (dolist (s dsh-emacs--sessions)
+      (puthash (dsh-protocol-session-session-id s) s index))
+    index))
+
+(defun dsh-emacs--workspaces-by-session ()
+  "Hash table session-id → owning workspace-id for `dsh-emacs--workspaces'."
+  (let ((index (make-hash-table :test 'equal
+                                :size (length dsh-emacs--sessions))))
+    (dolist (ws dsh-emacs--workspaces)
+      (let ((ws-id (dsh-protocol-workspace-workspace-id ws)))
+        (dolist (sid (dsh-protocol-workspace-session-ids ws))
+          (puthash sid ws-id index))))
+    index))
+
+(defun dsh-emacs--switch-entry-label (session &optional session-index ws-index ws-label-fn)
+  "Completion label for SESSION when switching across workspaces:
+display title followed by the owning workspace title, so same-titled
+sessions from different workspaces stay tellable apart.  SESSION-INDEX
+(session-id → struct) and WS-INDEX (session-id → workspace-id) make the
+lookups O(1) over many sessions; WS-LABEL-FN maps a workspace-id to its
+display label (default `dsh-emacs--workspace-label', which re-scans
+`dsh-emacs--workspaces' per call — pass a memoized resolver when the
+candidate list is large)."
+  (let* ((id (dsh-protocol-session-session-id session))
+         (item (if session-index
+                   (gethash id session-index)
+                 (dsh-emacs--chat-session-item id)))
+         (title (or (and item (dsh-emacs-session--display-title item)) id))
+         (ws-id (if ws-index
+                    (gethash id ws-index)
+                  (dsh-emacs--workspace-for-session id))))
+    (if ws-id
+        (format "%s (%s)" title
+                (if ws-label-fn
+                    (funcall ws-label-fn ws-id)
+                  (dsh-emacs--workspace-label ws-id)))
+      title)))
+
+(defun dsh-emacs--switch-candidates (vec string limit)
+  "Bound the candidate universe VEC delivers to the completion UI.
+VEC holds (LABEL . ID) pairs in recency order; STRING is the current
+minibuffer input; LIMIT caps the empty-input offer.  On empty input only
+the first LIMIT (most recently active) labels are handed over, so
+sustained navigation rebuilds a small list per keystroke instead of a
+multi-hundred one — the in-memory equivalent of counsel-rg consuming its
+subprocess output in bounded increments.  Once the user types a filter
+the full universe is returned and the user's `completion-styles' narrow
+it as usual, so older sessions stay reachable."
+  (let ((out nil)
+        (n 0))
+    (if (not (string-empty-p string))
+        (cl-loop for rec across vec collect (car rec))
+      (catch 'limit
+        (cl-loop for rec across vec
+                 do (push (car rec) out)
+                 (setq n (1+ n))
+                 when (>= n limit)
+                 do (throw 'limit (nreverse out)))
+        (nreverse out)))))
+
+(defun dsh-emacs--switch-table (vec limit)
+  "Function completion table over VEC of (LABEL . ID) pairs.
+Hands the completion framework a bounded candidate universe (see
+`dsh-emacs--switch-candidates') with standard programmed-completion
+semantics: trivial boundaries/metadata, and the entries the framework
+filters with the user's `completion-styles'."
+  (lambda (string _pred action)
+    (if (or (eq (car-safe action) 'boundaries) (eq action 'metadata))
+        nil
+      (let ((cands (dsh-emacs--switch-candidates vec string limit)))
+        (complete-with-action action cands string _pred)))))
+
+(defun dsh-emacs--switch-id-table (vec)
+  "Hash display label → session id for VEC; the most recent one wins.
+Labels are not guaranteed unique across sessions (same title in one
+workspace), so first-write wins to keep the recency-first pick."
+  (let ((table (make-hash-table :test 'equal :size (length vec))))
+    (cl-loop for rec across vec
+             unless (gethash (car rec) table)
+             do (puthash (car rec) (cdr rec) table))
+    table))
+
+(defun dsh-emacs--switch-title (session &optional session-index)
+  "Display title for SESSION: the list-row title, else the session id.
+SESSION-INDEX (session-id → struct) makes the lookup O(1) over many
+sessions; it defaults to building one from `dsh-emacs--sessions'."
+  (let* ((id (dsh-protocol-session-session-id session))
+         (index (or session-index (dsh-emacs--sessions-index)))
+         (item (gethash id index)))
+    (or (and item (dsh-emacs-session--display-title item)) id)))
+
+(defun dsh-emacs--switch-entry-labels (candidates session-index ws-index ws-label)
+  "Return the (LABEL . ID) completion entries for CANDIDATES.
+Labels are the bare display titles: workspace names never take part in
+filtering, so typing a workspace name does not narrow the list.  A
+workspace title is appended (via `dsh-emacs--switch-entry-label') only
+when several candidates share one display title — the disambiguator that
+keeps same-titled sessions from different workspaces selectable — and the
+session id if that still collides.  Preserves CANDIDATES' (recency)
+order."
+  (let ((counts (make-hash-table :test 'equal))
+        (seen (make-hash-table :test 'equal))
+        (entries nil))
+    ;; 第一遍：统计显示标题出现次数（重复标题需要 workspace 消歧）
+    (dolist (s candidates)
+      (let ((title (dsh-emacs--switch-title s session-index)))
+        (puthash title (1+ (gethash title counts 0)) counts)))
+    ;; 第二遍：构建 (label . id)，唯一标题裸显示
+    (dolist (s candidates)
+      (let* ((id (dsh-protocol-session-session-id s))
+             (title (dsh-emacs--switch-title s session-index))
+             (label (if (> (gethash title counts 0) 1)
+                        (dsh-emacs--switch-entry-label
+                         s session-index ws-index ws-label)
+                      title)))
+        (if (gethash label seen)
+            (let ((final (format "%s · %s" label id)))
+              (puthash final t seen)
+              (setq entries (cons (cons final id) entries)))
+          (progn
+            (puthash label t seen)
+            (setq entries (cons (cons label id) entries))))))
+    (nreverse entries)))
+
 ;;;###autoload
-(defun dsh-emacs-switch-session ()
+(defun dsh-emacs-switch-workspace-session (&optional all)
   "Switch to another session in the same workspace as the current one.
 Prompts for a session from the current workspace's session list; opens or
 focuses its chat buffer on selection.  The current session itself is
 never offered.  When all sessions are in the Ungrouped bucket (no known
-workspaces), falls back to switching any cached session."
-  (interactive)
+workspaces), falls back to switching any cached session.
+
+With prefix argument ALL, or via `dsh-emacs-switch-session', offer
+every visible session across all workspaces (the Ungrouped bucket
+included) instead; workspace names never take part in filtering — they
+disambiguate only same-titled sessions.
+
+The completion list is capped at `dsh-emacs-switch-max-candidates'
+entries while the input is empty (recency-first; type to narrow the full
+set), so navigating a large session list never churns a multi-hundred
+candidate rebuild per keystroke — mirroring how counsel-rg consumes its
+results in bounded increments."
+  (interactive "P")
   (dsh-emacs-server-ensure)
   (let* ((session-id (dsh-emacs--active-session-id))
-         (workspace-id (dsh-emacs--workspace-for-session session-id))
+         (workspace-id (unless all (dsh-emacs--workspace-for-session session-id)))
+         ;; 每次调用只建一次索引：逐候选的标题/工作区查询从线性扫描
+         ;; （O(n)/O(n·m)）降为哈希 O(1)，会话多时不再卡。
+         (session-index (dsh-emacs--sessions-index))
+         (ws-index (dsh-emacs--workspaces-by-session))
+         ;; 工作区显示名记忆化：每个 workspace 只算一次
+         ;; （`dsh-emacs--workspace-label' 每次调用都线性扫 workspace 列表）。
+         (ws-label-cache (make-hash-table :test 'equal))
+         (ws-label (lambda (ws-id)
+                     (or (gethash ws-id ws-label-cache)
+                         (puthash ws-id
+                                  (dsh-emacs--workspace-label ws-id)
+                                  ws-label-cache))))
          (candidates
-          (dsh-emacs-session--sort-by-recency
-           (cl-remove-if
-            (lambda (s)
-              (equal (dsh-protocol-session-session-id s) session-id))
-            (if workspace-id
-                (dsh-emacs--workspace-sessions workspace-id)
-              dsh-emacs--sessions)))))
+          (cl-remove-if
+           (lambda (s)
+             (equal (dsh-protocol-session-session-id s) session-id))
+           (if workspace-id
+               ;; 同 workspace 的成员已按可见规则（非归档/subagent/blank）
+               ;; 过滤并按活跃时间排序。
+               (dsh-emacs--workspace-sessions workspace-id)
+             (dsh-emacs-session--sort-by-recency
+              (cl-remove-if-not #'dsh-emacs-session--visible-p
+                                dsh-emacs--sessions))))))
     (if (null candidates)
-        (message "No other sessions in this workspace")
-      (let* ((entries (mapcar (lambda (s)
-                                (let ((id (dsh-protocol-session-session-id s)))
-                                  (cons (or (dsh-emacs--chat-title id) id) id)))
-                              candidates))
+        (message (if all
+                     "No other sessions"
+                   "No other sessions in this workspace"))
+      (let* ((entries (dsh-emacs--switch-entry-labels
+                         candidates session-index ws-index ws-label))
+             (vec (vconcat entries))
+             (id-table (dsh-emacs--switch-id-table vec))
+             (table (dsh-emacs--switch-table
+                     vec dsh-emacs-switch-max-candidates))
              (picked (dsh-emacs--completing-read-ordered
-                      (dsh-emacs--switch-prompt workspace-id)
-                      entries nil t)))
+                      (dsh-emacs--switch-prompt workspace-id all)
+                      table nil t)))
         (when picked
-          (let ((target-id (cdr (assoc picked entries))))
+          (let ((target-id (gethash picked id-table)))
             (when target-id
               (dsh-emacs-open-session target-id))))))))
+
+;;;###autoload
+(defun dsh-emacs-switch-session ()
+  "Switch to another session across ALL workspaces (Ungrouped included).
+The all-workspaces counterpart of `dsh-emacs-switch-workspace-session':
+every visible session is offered (workspace names only disambiguate
+same-titled sessions), and the current session itself is never offered."
+  (interactive)
+  (dsh-emacs-switch-workspace-session 'all))
 
 (defun dsh-emacs--completing-session-id (prompt)
   "Read a session id with completion against the cached session list.
 Choices show the display title (like the list); the returned value is
 always the session id."
-  (let* ((entries (mapcar (lambda (s)
-                            (let ((id (dsh-protocol-session-session-id s)))
+  (let* ((index (dsh-emacs--sessions-index))
+         (entries (mapcar (lambda (s)
+                            (let* ((id (dsh-protocol-session-session-id s))
+                                   (item (gethash id index)))
                               (cons (format "%-30s  %s"
-                                            (or (dsh-emacs--chat-title id) id)
+                                            (or (and item
+                                                     (dsh-emacs-session--display-title item))
+                                                id)
                                             id)
                                     id)))
                           dsh-emacs--sessions))
@@ -1462,7 +1651,8 @@ the session list regroups immediately (the host stream also repaints)."
     (define-key map (kbd "C-c C-c") #'dsh-emacs-send-or-stop)
     (define-key map (kbd "C-c C-r") #'dsh-emacs-refresh)
     (define-key map (kbd "C-c C-l") #'dsh-emacs-list-sessions-display)
-    (define-key map (kbd "C-c C-s") #'dsh-emacs-switch-session)
+    (define-key map (kbd "C-c C-s") #'dsh-emacs-switch-workspace-session)
+    (define-key map (kbd "C-c M-s") #'dsh-emacs-switch-session)
     (define-key map (kbd "C-c C-w") #'dsh-emacs-copy-transcript)
     (define-key map (kbd "C-c C-f") #'dsh-emacs-modeline-toggle)
     (define-key map (kbd "C-c C-k") #'dsh-emacs-copy-code-block)
@@ -2505,7 +2695,8 @@ seeing a historical `turn/end'."
   ;; HTTP 往返 + 渲染是全局卡顿的主要来源之一，而不可见缓冲的渲染没有
   ;; 意义。切回该缓冲后下一个 tick（≤1s）立即恢复，且 WS 恢复时 101 处理器
   ;; 仍会照常取消本定时器。
-  (when (get-buffer-window (current-buffer) 0)
+  (when (and (not (active-minibuffer-window))
+             (get-buffer-window (current-buffer) 0))
     ;; 只拉取最新的事件窗口（maxMessages 语义 = 最新 N 条消息的事件，
     ;; 服务端最少返回约 850 条原始事件，一分钟内的新内容必然在其中），
     ;; 由渲染层按 seq 锚点跳过已渲染部分。全量历史（可达数万条/数 MB JSON）

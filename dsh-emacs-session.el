@@ -185,6 +185,21 @@ active workspace filter)."
             (throw 'dsh-first-row t))
           (forward-line 1))))))
 
+(defun dsh-emacs-session--visible-p (session &optional current-session-id)
+  "Non-nil when SESSION passes dsh web's visible-session rule.
+Mirrors the dsh web browser tree: the session is not archived, not of
+subagent origin, and not blank — unless it is the currently-open
+session (CURRENT-SESSION-ID, defaulting to `dsh-emacs--current-session'),
+which stays visible even while blank."
+  (let* ((archived dsh-emacs--archived-sessions)
+         (session-id (or (dsh-protocol-session-session-id session) ""))
+         (current (or current-session-id dsh-emacs--current-session))
+         (blank (dsh-protocol-session-blank session)))
+    (not (or (and archived (gethash session-id archived))
+             (dsh-protocol-session-origin session)
+             (and blank (not (eq blank :json-false))
+                  (not (equal session-id current)))))))
+
 (defun dsh-emacs-session--group-sessions (sessions workspaces)
   "Group SESSIONS by WORKSPACES.
 Returns a list of plists: (:label LABEL :workspace-id WS-ID :sessions MEMBERS),
@@ -195,7 +210,6 @@ sessions are always excluded."
   ;; Build session-id → workspace-id map from each workspace's sessionIds.
   (let ((ws-by-id (make-hash-table :test 'equal))
         (ws-by-session (make-hash-table :test 'equal))
-        (archived dsh-emacs--archived-sessions)
         (filter dsh-emacs-session--filter-ws-id)
         (current dsh-emacs--current-session)
         (groups nil)
@@ -213,11 +227,7 @@ sessions are always excluded."
         ;; Skip archived sessions, subagent child sessions and blank
         ;; (never-messaged) rows — blank rows match dsh web's browser tree:
         ;; only the currently-open session stays visible among them.
-        (unless (or (and archived (gethash session-id archived))
-                    (dsh-protocol-session-origin session)
-                    (let ((blank (dsh-protocol-session-blank session)))
-                      (and blank (not (eq blank :json-false))
-                           (not (equal session-id current)))))
+        (when (dsh-emacs-session--visible-p session current)
           (if (and ws-id (or (null filter) (equal ws-id filter)))
               (let ((entry (assoc ws-id groups)))
                 (if entry
