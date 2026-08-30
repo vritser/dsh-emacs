@@ -2488,6 +2488,88 @@ so the code under test can read fields through the protocol accessors."
     (delete-file png-file)
     (kill-buffer buf)))
 
+;; --- 测试 48b: user/message 的 image 块渲染为 [image] 占位（内联 base64） ---
+(let ((png-b64 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+      (buf (generate-new-buffer " *dsh-image-inline*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-modeline-setup)
+        (dsh-emacs-render-event
+         (json-read-from-string
+          (concat "{\"type\":\"user/message\",\"seq\":1,\"data\":{\"content\":["
+                  "{\"type\":\"text\",\"text\":\"the pixel\"},"
+                  "{\"type\":\"image\",\"mediaType\":\"image/png\","
+                  "\"data\":\"" png-b64 "\",\"name\":\"pixel.png\"}]}}")))
+        (let* ((text (buffer-substring (point-min) (point-max)))
+               (pos (string-match "\\[image: pixel\\.png\\]" text))
+               (stash (and pos (get-text-property
+                                (1+ pos) 'dsh-emacs-image-data text)))
+               (img-id (and pos (get-text-property
+                                 (1+ pos) 'dsh-emacs-image-id text))))
+          ;; 批量模式下无图形显示：不设置 display，但字节必须已落在占位上，
+          ;; RET 打开才可用；正文与占位各占一行。
+          (when (and pos img-id
+                     (string-match "the pixel\n\\[image: pixel.png\\]" text)
+                     (equal stash (base64-decode-string png-b64)))
+            (dsh-test-pass "image-inline-renders-placeholder"))))
+    (kill-buffer buf)))
+
+;; --- 测试 48c: attachmentId 引用块走 session.attachment 回填占位 ---
+(let ((png-b64 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+      (buf (generate-new-buffer " *dsh-image-ref*"))
+      (calls nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-modeline-setup)
+        (setq dsh-emacs--buffer-session "sess-ref")
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method params cb)
+                     (push (list method params) calls)
+                     (funcall cb t `((data . ,png-b64))))))
+          (dsh-emacs-render-event
+           (json-read-from-string
+            (concat "{\"type\":\"user/message\",\"seq\":2,\"data\":{\"content\":["
+                    "{\"type\":\"text\",\"text\":\"look\"},"
+                    "{\"type\":\"image\",\"attachmentId\":\"att-1\","
+                    "\"mediaType\":\"image/png\",\"name\":\"remote.png\"}]}}"))))
+        (let* ((text (buffer-substring (point-min) (point-max)))
+               (pos (string-match "\\[image: remote\\.png\\]" text))
+               (call (car calls))
+               (params (cadr call))
+               (stash (and pos (get-text-property
+                                (1+ pos) 'dsh-emacs-image-data text))))
+          (when (and (equal (car call) "session.attachment")
+                     (equal (cdr (assq 'sessionId params)) "sess-ref")
+                     (equal (cdr (assq 'attachmentId params)) "att-1")
+                     (string-match "look\n\\[image: remote.png\\]" text)
+                     (equal stash (base64-decode-string png-b64)))
+            (dsh-test-pass "image-ref-fetched-via-session-attachment"))))
+    (kill-buffer buf)))
+
+;; --- 测试 48d: 乐观回显把本地附件内联为 image 块（立即显示，无需 RPC） ---
+(let ((png-b64 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+      (buf (generate-new-buffer " *dsh-image-optimistic*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-modeline-setup)
+        (setq dsh-emacs--buffer-session "sess-opt")
+        (dsh-emacs--render-user-message
+         "the pixel"
+         (list (list (cons 'mediaType "image/png")
+                     (cons 'data png-b64)
+                     (cons 'name "pixel.png"))))
+        (let* ((text (buffer-substring (point-min) (point-max)))
+               (pos (string-match "\\[image: pixel\\.png\\]" text))
+               (stash (and pos (get-text-property
+                                (1+ pos) 'dsh-emacs-image-data text))))
+          (when (and (string-match "the pixel\n\\[image: pixel.png\\]" text)
+                     (equal stash (base64-decode-string png-b64)))
+            (dsh-test-pass "image-optimistic-echo-inline"))))
+    (kill-buffer buf)))
+
 ;; --- 测试 49: 代码块复制 ---
 (let ((buf (generate-new-buffer " *dsh-copy-block*")))
   (unwind-protect

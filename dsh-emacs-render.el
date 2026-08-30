@@ -34,6 +34,10 @@
 (declare-function dsh-emacs-modeline-note-event "dsh-emacs-modeline" (event))
 (declare-function dsh-emacs-modeline-note-request "dsh-emacs-modeline" (event))
 (declare-function dsh-emacs-modeline-note-header "dsh-emacs-modeline" (event))
+;; Defined in dsh-emacs.el, which loads after this module.  Called at runtime
+;; from the inline-image attachment path (placeholder fill / RET open).
+(declare-function dsh-emacs--active-session-id "dsh-emacs" ())
+(declare-function dsh-emacs--rpc-async "dsh-emacs" (method params callback))
 
 ;;; ---------------------------------------------------------------------------
 ;;; 定制
@@ -1043,26 +1047,202 @@ used as a fallback when no deltas were received."
   (dsh-emacs-render--event-seq event))
 
 ;;; ---------------------------------------------------------------------------
+;;; 渲染器：内联图片附件（session.attachment）
+;;; ---------------------------------------------------------------------------
+
+(defvar dsh-emacs-render--image-keymap
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'dsh-emacs-render--image-open)
+    (define-key map [return] #'dsh-emacs-render--image-open)
+    (define-key map [mouse-1] #'dsh-emacs-render--image-open)
+    map)
+  "Keymap on `[image …]' placeholders: opens the picture in its own buffer.")
+
+(defun dsh-emacs-render--image-blocks (content)
+  "Return the image content blocks of CONTENT (alist/vector), in order."
+  (let ((blocks '()))
+    (dolist (block (append content nil))
+      (when (and (consp block)
+                 (equal (dsh-emacs-render--aget "type" block) "image"))
+        (push block blocks)))
+    (nreverse blocks)))
+
+(defun dsh-emacs-render--image-block-field (block field)
+  "Read FIELD from image BLOCK or its nested `attachment' ref.
+The wire may carry inline base64 (`{type:image, mediaType, data,
+name}') or a persistent ref (`ImageAttachmentRef' under `attachment',
+see rpc.md §4.1); read both placements so live events and history
+render identically."
+  (or (dsh-emacs-render--aget field block)
+      (dsh-emacs-render--aget field
+                              (dsh-emacs-render--aget "attachment" block))))
+
+(defun dsh-emacs-render--image-type-from-media (media-type)
+  "Map MEDIA-TYPE (e.g. \"image/png\") to an Emacs image type symbol, or nil."
+  (when (and (stringp media-type)
+             (string-prefix-p "image/" media-type))
+    (let ((type (intern (substring media-type (length "image/")))))
+      (and (memq type image-types) type))))
+
+(defun dsh-emacs-render--attachment-image (data media-type)
+  "Build an image spec from decoded image DATA for MEDIA-TYPE.
+Returns nil when DATA is empty, the type is unsupported, or the
+display cannot render images (terminal Emacs keeps the placeholder)."
+  (when (and (display-graphic-p)
+             (stringp data)
+             (> (length data) 0))
+    (let ((type (dsh-emacs-render--image-type-from-media media-type)))
+      (when type
+        (ignore-errors
+          (create-image data type t
+                        :max-width (dsh-emacs-markdown--image-max-width)))))))
+
+(defun dsh-emacs-render--open-image-data (data name)
+  "Show raw image DATA (unibyte string) in a dedicated image buffer."
+  (let ((buffer (get-buffer-create
+                 (format " *dsh image: %s*" (or name "image")))))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (set-buffer-multibyte nil)
+        (insert data))
+      (image-mode))
+    (pop-to-buffer buffer)))
+
+(defun dsh-emacs-render--image-open ()
+  "Open the image under point in its own buffer.
+Uses the bytes stashed on the placeholder when present, otherwise
+re-fetches them via `session.attachment'."
+  (interactive)
+  (let* ((data (get-text-property (point) 'dsh-emacs-image-data))
+         (attachment-id (get-text-property (point) 'dsh-emacs-attachment-id))
+         (name (get-text-property (point) 'dsh-emacs-image-name)))
+    (cond
+     (data (dsh-emacs-render--open-image-data data name))
+     (attachment-id
+      (message "Fetching image…")
+      (dsh-emacs-render--request-attachment
+       (dsh-emacs--active-session-id) attachment-id
+       (lambda (bytes)
+         (if bytes
+             (dsh-emacs-render--open-image-data bytes name)
+           (message "Image fetch failed")))))
+     (t (message "Image bytes unavailable")))))
+
+(defun dsh-emacs-render--request-attachment (session-id attachment-id on-bytes)
+  "Fetch image bytes for ATTACHMENT-ID from SESSION-ID via
+`session.attachment'.  ON-BYTES receives the decoded unibyte string,
+or nil when the RPC fails or the payload is malformed."
+  (when (and session-id attachment-id (fboundp 'dsh-emacs--rpc-async))
+    (dsh-emacs--rpc-async
+     "session.attachment"
+     `((sessionId . ,session-id)
+       (attachmentId . ,attachment-id))
+     (lambda (ok value)
+       ;; 回调可能运行在 process filter 里：吞掉 C-g 的 quit。
+       (condition-case nil
+           (funcall on-bytes
+                    (and ok value
+                         (ignore-errors
+                           (base64-decode-string
+                            (dsh-emacs-render--aget "data" value)))))
+         (quit nil))))))
+
+(defun dsh-emacs-render--apply-attachment (buffer id image data)
+  "Fill the `[image …]' placeholder tagged ID in BUFFER in place.
+IMAGE (when non-nil) goes on the `display' property; DATA (decoded
+bytes, when non-nil) is stashed so RET keeps working offline.  A
+missing placeholder (re-render, trimmed buffer) is a no-op."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (let ((pos (text-property-any (point-min) (point-max)
+                                    'dsh-emacs-image-id id)))
+        (when pos
+          (let ((end (next-single-property-change pos 'dsh-emacs-image-id
+                                                  nil (point-max)))
+                (inhibit-read-only t))
+            (when image
+              (put-text-property pos end 'display image))
+            (when data
+              (put-text-property pos end 'dsh-emacs-image-data data))))))))
+
+(defun dsh-emacs-render--show-attachment (id block)
+  "Fill the `[image …]' placeholder tagged ID with BLOCK's picture.
+Inline base64 applies immediately (no round-trip — the bytes are
+already in the event); an attachment ref is fetched via
+`session.attachment' and applied when the RPC settles."
+  (let* ((buffer (current-buffer))
+         (media-type (dsh-emacs-render--image-block-field block "mediaType"))
+         (data-b64 (dsh-emacs-render--image-block-field block "data"))
+         (attachment-id (dsh-emacs-render--image-block-field block "attachmentId"))
+         (data (and data-b64 (ignore-errors (base64-decode-string data-b64)))))
+    (if data
+        (dsh-emacs-render--apply-attachment
+         buffer id (dsh-emacs-render--attachment-image data media-type) data)
+      (when attachment-id
+        (dsh-emacs-render--request-attachment
+         (dsh-emacs--active-session-id) attachment-id
+         (lambda (bytes)
+           (dsh-emacs-render--apply-attachment
+            buffer id
+            (dsh-emacs-render--attachment-image bytes media-type)
+            bytes)))))))
+
+(defun dsh-emacs-render--image-placeholder (id block)
+  "Build the `[image …]' placeholder string tagged ID for image BLOCK."
+  (let ((name (dsh-emacs-render--image-block-field block "name"))
+        (attachment-id (dsh-emacs-render--image-block-field block "attachmentId")))
+    (propertize (if name (format "[image: %s]" name) "[image]")
+                'dsh-emacs-image-id id
+                'dsh-emacs-attachment-id attachment-id
+                'dsh-emacs-image-name name
+                'keymap dsh-emacs-render--image-keymap
+                'mouse-face 'highlight)))
+
+;;; ---------------------------------------------------------------------------
 ;;; 渲染器：用户消息
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-render-user-message (event)
   "Render a `user/message' event with a user-specific background color.
 The block gets one blank line before and after (see
-`dsh-emacs-render--insert-chat-message' and `dsh-emacs-ui--blank-above-preserve')."
+`dsh-emacs-render--insert-chat-message' and `dsh-emacs-ui--blank-above-preserve').
+Image content blocks render as `[image …]' placeholders on their own
+line below the text; inline base64 shows immediately, attachment refs
+fill in when `session.attachment' settles (see
+`dsh-emacs-render--show-attachment')."
   (let* ((seq (dsh-emacs-render--event-seq event))
          (data (dsh-emacs-render--event-data event))
          (kind (dsh-emacs-render--aget "kind" (dsh-emacs-render--aget "source" data)))
-         (text (dsh-emacs-render--text-from-content (dsh-emacs-render--aget "content" data)))
+         (content (dsh-emacs-render--aget "content" data))
+         (text (dsh-emacs-render--text-from-content content))
+         (images (dsh-emacs-render--image-blocks content))
          (insert-point (dsh-emacs-render--input-insert-point))
-         (block-id (dsh-emacs-render--make-block-id event)))
+         (block-id (dsh-emacs-render--make-block-id event))
+         (specs nil))
     (when (or (null kind) (equal kind "user"))
+      ;; 占位行跟随正文：每张图一行，唯一 id 供异步回填定位。
+      (let ((index 0))
+        (dolist (block images)
+          (setq index (1+ index)
+                specs (append specs
+                              (list (cons (format "%s-img-%d" block-id index)
+                                          block))))))
+      (when specs
+        (setq text (concat text
+                           (and (not (string-empty-p text)) "\n")
+                           (mapconcat (lambda (spec)
+                                        (dsh-emacs-render--image-placeholder
+                                         (car spec) (cdr spec)))
+                                      specs "\n"))))
       (dsh-emacs-render--insert-chat-message
        (concat (propertize "❯ " 'face 'dsh-emacs-input-prompt-face)
                text)
        'dsh-emacs-user-block-face insert-point
        (format "%s-%s" (dsh-emacs-render--make-namespace) block-id)
-       t))
+       t)
+      (dolist (spec specs)
+        (dsh-emacs-render--show-attachment (car spec) (cdr spec))))
     seq))
 
 ;;; ---------------------------------------------------------------------------

@@ -1924,7 +1924,8 @@ fallback after the line was already recorded at submit time."
                                       ;; while this turn runs.
                                       (dsh-emacs-events--watchdog-start)
                                       (unless (string-empty-p message)
-                                        (dsh-emacs--render-user-message message))
+                                        (dsh-emacs--render-user-message
+                                         message images))
                                       (dsh-emacs-render--follow-stream)
                                       (unless dsh-emacs--event-ready
                                         ;; 流不在线时自愈：连进程都不存在说明
@@ -2450,11 +2451,18 @@ the filter as \"error in process filter: Quit\"."
       (dsh-emacs--replace-input
        (nth dsh-emacs--input-history-pos dsh-emacs--input-history)))))
 
-(defun dsh-emacs--render-user-message (message)
-  "Render the user message."
+(defun dsh-emacs--render-user-message (message &optional images)
+  "Render the optimistic echo of MESSAGE, with IMAGES if any.
+IMAGES is a list of wire-ready attachment alists; they become
+`{type: \"image\"}' content blocks so the renderer displays them
+inline immediately — the bytes are already local, no
+`session.attachment' round-trip is needed."
   (let ((event `((type . "user/message")
-                 (data . ((content . [((type . "text")
-                                       (text . ,message))]))))))
+                 (data . ((content . ,(vconcat
+                                       `(((type . "text") (text . ,message)))
+                                       (mapcar (lambda (attachment)
+                                                 (cons '(type . "image") attachment))
+                                               images))))))))
     (dsh-emacs-render-event event)))
 
 (defun dsh-emacs--start-polling ()
