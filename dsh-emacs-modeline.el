@@ -10,7 +10,7 @@
 ;;; Commentary:
 
 ;; 统计段拼接进 mode-line-format（紧跟 DSH 模式名之后、行尾区），展示
-;; model • effort • preset • cwd • branch • tokens • ctx% • cost。
+;; provider • model • effort • preset • cwd • branch • tokens • ctx% • cost。
 ;; 布局参考 pi-mono 的 footer（终端底部状态条）设计；ctx 与 model/effort
 ;; 数据口径与 dsh web 对齐（服务器推送 contextPressure projection）。
 ;;
@@ -62,6 +62,8 @@
   "Plist describing the mode-line segments to render and the separator.
 The compact status line sits right next to the DSH mode name in the mode
 line, e.g.  DSH(deepseek-v4-flash·max·code CH95%).  Each segment is one of:
+  provider — provider id serving the model (e.g. deepseek; opt-in — the
+             provider also rides the model segment's tooltip)
   model   — model id (e.g. deepseek-v4-flash)
   effort  — reasoning effort (effortId, e.g. off/max)
   preset  — agent preset (agentPreset: standard/minimal/code/cordis)
@@ -78,6 +80,7 @@ mode line; the `:separator' is a separate string field."
           (string :format "%v\n")
           (const :format "Segments shown in the mode line: " :segments)
           (set :greedy t
+               (const :tag "provider — model's provider id" provider)
                (const :tag "model — model id" model)
                (const :tag "effort — reasoning effort" effort)
                (const :tag "preset — agent preset" preset)
@@ -229,6 +232,17 @@ keeping the existing hidden-segment semantics intact."
                (propertize ")" 'face 'dsh-emacs-modeline-face))
        (format "Git branch: %s" branch)))))
 
+(defun dsh-emacs-modeline--segment-provider ()
+  "Render the provider segment (provider id owning the session's model).
+Hidden while the provider is unknown — unlike the model segment there is
+no default-provider guess to fall back on."
+  (when (and dsh-emacs--modeline-provider
+             (not (string-empty-p dsh-emacs--modeline-provider)))
+    (dsh-emacs-modeline--annotate
+     (propertize dsh-emacs--modeline-provider 'face 'dsh-emacs-modeline-face)
+     (format "Provider: %s — provider serving this session's model"
+             dsh-emacs--modeline-provider))))
+
 (defun dsh-emacs-modeline--segment-model ()
   "Render the model segment.
 Falls back to `dsh-emacs-default-model' when the per-buffer model was never
@@ -333,6 +347,7 @@ segment renders nothing (nil hides it)."
   (pcase sym
     ('cwd (dsh-emacs-modeline--segment-cwd))
     ('branch (dsh-emacs-modeline--segment-branch))
+    ('provider (dsh-emacs-modeline--segment-provider))
     ('model (dsh-emacs-modeline--segment-model))
     ('effort (dsh-emacs-modeline--segment-effort))
     ('preset (dsh-emacs-modeline--segment-preset))

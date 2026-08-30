@@ -264,6 +264,45 @@ so the code under test can read fields through the protocol accessors."
       (dsh-test-pass "model-tooltip-carries-provider")))
   (setq dsh-emacs--modeline-provider nil))
 
+;; --- 测试 5f+2: provider 独立分段（段序 provider 在 model 前） ---
+(let ((dsh-emacs-modeline-format-spec '(:separator " " :segments (provider model))))
+  (setq dsh-emacs--modeline-provider "zhipu"
+        dsh-emacs--modeline-model "glm-5.3-flash")
+  (let* ((txt (dsh-emacs-modeline-format))
+         (ppos (string-match "zhipu" txt))
+         (tip (and ppos (get-text-property ppos 'help-echo txt))))
+    (when (and ppos
+               (string-match-p "glm-5.3-flash" txt)
+               (< ppos (string-match "glm-5.3-flash" txt))
+               (string-match-p "Provider: zhipu" tip)
+               (eq 'mode-line-highlight (get-text-property ppos 'mouse-face txt)))
+      (dsh-test-pass "provider-segment-renders-before-model")))
+  (setq dsh-emacs--modeline-provider nil
+        dsh-emacs--modeline-model "m1"))
+;; provider 未知 → 段整个消失（没有默认 provider 猜测可兜底）
+(let ((dsh-emacs-modeline-format-spec '(:separator " " :segments (provider model))))
+  (setq dsh-emacs--modeline-provider nil)
+  (let ((txt (dsh-emacs-modeline-format)))
+    (when (and (string-match-p "m1" txt)
+               (not (string-match-p "zhipu" txt)))
+      (dsh-test-pass "provider-segment-hidden-when-unknown"))))
+;; 默认 spec 不含 provider 段（默认不展示；opt-in 才显示，
+;; provider 仍随 model 段 tooltip 消歧）
+(let ((segs (plist-get (default-value 'dsh-emacs-modeline-format-spec)
+                       :segments)))
+  (when (and (not (memq 'provider segs))
+             (memq 'model segs))
+    (dsh-test-pass "default-format-spec-excludes-provider")))
+;; spec 缺 :segments 时的兜底段表同样不含 provider（provider 已置值也不显示）
+(let ((dsh-emacs-modeline-format-spec '(:separator " ")))
+  (setq dsh-emacs--modeline-provider "zhipu"
+        dsh-emacs--modeline-model "m1")
+  (let ((txt (dsh-emacs-modeline-format)))
+    (when (and (string-match-p "m1" txt)
+               (not (string-match-p "zhipu" txt)))
+      (dsh-test-pass "fallback-segments-exclude-provider")))
+  (setq dsh-emacs--modeline-provider nil))
+
 ;; --- 测试 5g: render 调度转发 request/header 到 mode-line feed ---
 (let ((fired 0))
   (cl-letf (((symbol-function 'dsh-emacs-modeline-note-header)
