@@ -563,18 +563,24 @@ segment) so it matches the freshly fetched list."
 Pulled from the cached session struct (protocol accessors), so the same
 projection pair (pressure, window) always lands together — the ctx% stays
 consistent across model switches.
-When the session is not in the cache yet (first open of a brand-new
-session, list not fetched), the snapshot is left untouched: clearing it
-here would only blink out a previously correct ctx% until
-`dsh-emacs--link-session-preset' brings the list back — the fetch there
-re-runs this sync and fills the snapshot in."
+The row is only trusted when it carries a COMPLETE pair: `session.list`'s
+projection column is explicitly partial (missing cells and
+not-yet-materialized rows are served without `contextPressure'), and a
+failed model run can leave the cell without `contextWindow'.  Wiping the
+mode-line from such a row would blink out a previously correct ctx% until
+the live `session/projection' frame lands the real pair; an incomplete row
+therefore leaves the buffer's snapshot untouched, exactly like a session
+missing from the cache (first open of a brand-new session, list not
+fetched — `dsh-emacs--link-session-preset' brings the list back and the
+fetch there re-runs this sync and fills the snapshot in)."
   (when (buffer-live-p buf)
     (let ((item (dsh-emacs--chat-session-item session-id)))
       (when item
-        (with-current-buffer buf
-          (dsh-emacs-modeline-set-context-snapshot
-           (dsh-protocol-session-context-pressure item)
-           (dsh-protocol-session-context-window item)))))))
+        (let ((pressure (dsh-protocol-session-context-pressure item))
+              (window (dsh-protocol-session-context-window item)))
+          (when (and (integerp pressure) (integerp window) (> window 0))
+            (with-current-buffer buf
+              (dsh-emacs-modeline-set-context-snapshot pressure window))))))))
 
 (defun dsh-emacs--chat-buffer-model-sync (session-id buf)
   "Feed BUF's mode-line model/effort/provider for SESSION-ID.

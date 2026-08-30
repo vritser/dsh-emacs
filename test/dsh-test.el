@@ -1762,6 +1762,62 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
       (remhash "sess-ctxexist" dsh-emacs--chat-buffers)
       (when (buffer-live-p b) (kill-buffer b)))))
 
+;; --- 测试 43f: 模型失败后 session.list 行缺 contextWindow 时不清空 ctx 快照 ---
+;; 回归：`dsh-emacs--chat-buffer-context-sync' 曾无条件把列表行的
+;; contextPressure 喂进 mode-line。列表投影列是部分填充的（缓存未物化的
+;; 单元格/失败模型运行后 contextWindow 缺失都会以残缺行返回），把
+;; (pressure . nil) / (nil . nil) 写进 buffer 会把已正确的 ctx% 整段清空。
+;; 修复：只有 (pressure, window) 成对完整时才落地；残缺行保持旧快照，
+;; 等实时 session/projection 帧纠正。
+(let* ((old-sessions dsh-emacs--sessions)
+       (ghost (get-buffer-create " *t43f-chat*"))
+       (good '((sessionId . "sess-ctxkeep")
+               (projections
+                . ((values
+                    . ((contextPressure
+                        . ((pressureTokens . 129946)
+                           (contextWindow . 262144))))))))))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs--sessions
+              (list (dsh-protocol-session--from-alist good)))
+        (with-current-buffer ghost
+          ;; 已有正确快照：模型失败前的 ctx%（约 49.6%）
+          (setq-local dsh-emacs--modeline-context-pressure 129946)
+          (setq-local dsh-emacs--modeline-context-window-server 262144))
+        ;; 列表刷新：模型失败后 contextWindow 缺失（projections 行残缺）
+        (setq dsh-emacs--sessions
+              (list (dsh-protocol-session--from-alist
+                     '((sessionId . "sess-ctxkeep")
+                       (projections
+                        . ((values
+                            . ((contextPressure
+                                . ((pressureTokens . 129946)))))))))))
+        (dsh-emacs--chat-buffer-context-sync "sess-ctxkeep" ghost)
+        (let ((p (buffer-local-value 'dsh-emacs--modeline-context-pressure ghost))
+              (w (buffer-local-value 'dsh-emacs--modeline-context-window-server ghost)))
+          (when (and (= 129946 p) (= 262144 w))
+            (dsh-test-pass "model-error-row-keeps-ctx-snapshot")))
+        ;; 列表行连 contextPressure 投影都没有 → 更不能清空
+        (setq dsh-emacs--sessions
+              (list (dsh-protocol-session--from-alist
+                     '((sessionId . "sess-ctxkeep")))))
+        (dsh-emacs--chat-buffer-context-sync "sess-ctxkeep" ghost)
+        (let ((p (buffer-local-value 'dsh-emacs--modeline-context-pressure ghost))
+              (w (buffer-local-value 'dsh-emacs--modeline-context-window-server ghost)))
+          (when (and (= 129946 p) (= 262144 w))
+            (dsh-test-pass "projectionless-row-keeps-ctx-snapshot")))
+        ;; 完整成对行仍然照常落地（模型正常时列表刷新继续纠正 ctx%）
+        (setq dsh-emacs--sessions
+              (list (dsh-protocol-session--from-alist good)))
+        (dsh-emacs--chat-buffer-context-sync "sess-ctxkeep" ghost)
+        (let ((p (buffer-local-value 'dsh-emacs--modeline-context-pressure ghost))
+              (w (buffer-local-value 'dsh-emacs--modeline-context-window-server ghost)))
+          (when (and (= 129946 p) (= 262144 w))
+            (dsh-test-pass "complete-row-still-updates-ctx-snapshot"))))
+    (setq dsh-emacs--sessions old-sessions)
+    (when (buffer-live-p ghost) (kill-buffer ghost))))
+
 ;; --- 测试 43c: 发送时会话若完全没有流则先重连再轮询（自愈） ---
 (let* ((chat (get-buffer-create " *t43c-chat*"))
        (connects nil)
