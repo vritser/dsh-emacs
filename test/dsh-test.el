@@ -2462,19 +2462,28 @@ so the code under test can read fields through the protocol accessors."
           (let* ((call (car calls))
                  (params (cadr call))
                  (images (cdr (assq 'images params)))
-                 (att (and images (car images)))
                  (content (cdr (assq 'content params)))
-                 (part (and content (aref content 0))))
+                 (part (and content (aref content 0)))
+                 (img (and content (> (length content) 1)
+                           (aref content 1))))
+            ;; 规范线上形状（rpc.md §4.1）：图片是 content 的
+            ;; `{type:'image', mediaType, data, name}' 块，不存在顶层 images
+            ;; 字段（会被 host schema 剥掉，图片到不了模型）。
             (when (and (string= "session.prompt" (car call))
+                       (null images)
                        (string= "the pixel" (cdr (assq 'text part))))
               (dsh-test-pass "attach-sends-caption"))
-            (when (and att (string= "image/png" (cdr (assq 'mediaType att)))
-                       (string-prefix-p "dsh-test-1px" (cdr (assq 'name att)))
-                       (string-suffix-p ".png" (cdr (assq 'name att))))
+            (when (and img
+                       (string= "image" (cdr (assq 'type img)))
+                       (string= "image/png" (cdr (assq 'mediaType img)))
+                       (string-prefix-p "dsh-test-1px" (cdr (assq 'name img)))
+                       (string-suffix-p ".png" (cdr (assq 'name img))))
               (dsh-test-pass "attach-sends-image-part"))
-            (when (and att (stringp (cdr (assq 'data att)))
+            (when (and img (stringp (cdr (assq 'data img)))
                        ;; 1x1 PNG 的 base64 远长于空字符串
-                       (> (length (cdr (assq 'data att))) 20))
+                       (> (length (cdr (assq 'data img))) 20)
+                       ;; 无换行：wire 的 base64 是连续串
+                       (not (string-match-p "\n" (cdr (assq 'data img)))))
               (dsh-test-pass "attach-base64-data")))))
     (delete-file png-file)
     (kill-buffer buf)))

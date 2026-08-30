@@ -1822,9 +1822,9 @@ registered commands, and an admission miss falls back to sending the
 line as an ordinary message (the same semantics as dsh web).  Other
 lines go through `dsh-emacs--submit-plain' unchanged.  IMAGES, when
 given, is a list of wire-ready attachment alists
-\((mediaType . M) (data . B64) (name . N)); they ride along as the
-`images' payload of `session.prompt' so the model sees them
-immediately."
+\((mediaType . M) (data . B64) (name . N)); they are appended to the
+`content' array of `session.prompt' as `{type: \"image\"}' parts so
+the model sees them immediately."
   (if (dsh-emacs-command-parse message)
       (let ((session-id (dsh-emacs--active-session-id))
             (input-buffer (current-buffer)))
@@ -1872,8 +1872,10 @@ immediately."
   "Submit MESSAGE (a plain string) to the current session.
 
 IMAGES, when given, is a list of wire-ready attachment alists
-\((mediaType . M) (data . B64) (name . N)); they ride along as the
-`images' payload of `session.prompt' so the model sees them immediately.
+\((mediaType . M) (data . B64) (name . N)); the canonical wire shape
+is part of `content' (each becomes a `{type: \"image\"}' part) — a
+top-level `images' field is stripped by the host schema and never
+reaches the model.
 On acceptance the message is echoed into the transcript (when non-empty),
 the running spinner lights up, and the watchdog starts.  Non-nil
 SKIP-HISTORY suppresses the input-history push: used by the slash-command
@@ -1883,12 +1885,14 @@ fallback after the line was already recorded at submit time."
                            dsh-emacs--buffer-session
                            (current-buffer)))
          (input-buffer (current-buffer))
+         (content (vconcat `(((type . "text") (text . ,message)))
+                           (mapcar (lambda (attachment)
+                                     (cons '(type . "image") attachment))
+                                   images)))
          (payload `((sessionId . ,session-id)
                     (mode . "queue")
-                    (content . [((type . "text") (text . ,message))])
+                    (content . ,content)
                     (clientTimeZone . ,(dsh-emacs--client-time-zone)))))
-    (when images
-      (setq payload (append payload (list (cons 'images images)))))
     ;; Track the optimistic echo BEFORE the RPC round-trip: the mux may
     ;; deliver the canonical `user/message' at any moment — even before the
     ;; HTTP response is processed — and `dsh-emacs-render--consume-pending-user-message'
@@ -1957,7 +1961,9 @@ fallback after the line was already recorded at submit time."
   "Read FILE into a wire-ready image attachment alist, or nil.
 
 The dsh host accepts base64 image uploads inline in `session.prompt'
-(media type, bytes and pixel limits are enforced server-side)."
+(media type, bytes and pixel limits are enforced server-side).  The
+base64 is emitted without line breaks: the wire field is validated as
+one continuous base64 run."
   (let* ((media (ignore-errors
                   (mailcap-file-name-to-mime-type
                    (file-name-nondirectory file))))
@@ -1968,7 +1974,7 @@ The dsh host accepts base64 image uploads inline in `session.prompt'
                      (insert-file-contents-literally file)
                      (buffer-string))))
         (list (cons 'mediaType media)
-              (cons 'data (base64-encode-string bytes))
+              (cons 'data (base64-encode-string bytes t))
               (cons 'name (file-name-nondirectory file)))))))
 
 ;;;###autoload

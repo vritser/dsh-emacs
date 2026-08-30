@@ -236,9 +236,6 @@ value    { accepted: true, command?: { kind: 'success', text?: string } }
 - `PromptContentPart`：`{ type: 'text', text }` 或 `{ type: 'image', mediaType,
   data: <base64>, name? }`。**图片是 content 的一部分**，不是独立 payload 字段
   （mediaType 限 png/jpeg/webp/gif）。host 在入队前把图片字节提升为持久引用。
-  > dsh-emacs 现状：`dsh-emacs--submit-plain` 把图片作为顶层 `images` 字段发送，
-  > 这**不是**规范线上形状；规范做法是放进 `content` 的 `{type:'image',...}` 块。
-  > 该字段会被 zod schema 剥掉，图片不会到达模型 —— 属于待修项。
 - `mode`：`queue` → 追加为下一轮；`steer` → 插入当前轮（见 §9）。
 - **slash 命令**：`sessions.ts` 契约注释声明"content 恰好一个 text 块且以 `/` 开头 =
   slash 命令，host 走命令注册表（mode 无关）执行、成功返回 `command` 槽、用法/状态
