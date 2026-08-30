@@ -1871,6 +1871,9 @@ transcript and `turn/end' arrives normally, which clears the spinner."
                           (lambda (ok value)
                             (if ok
                                 (progn
+                                  ;; User-initiated stop: suppress the
+                                  ;; finished-run notification.
+                                  (setq dsh-emacs--turn-awaiting nil)
                                   (dsh-emacs--ml-busy-set nil)
                                   (message "⏸ Turn interrupted"))
                               (message "Failed to interrupt: %S" value))))))
@@ -2097,6 +2100,9 @@ fallback after the line was already recorded at submit time."
     ;; would both render.
     (when (buffer-live-p chat-buffer)
       (with-current-buffer chat-buffer
+        ;; Register before the RPC round-trip: a fast run can end before its
+        ;; prompt callback is processed.
+        (setq dsh-emacs--turn-awaiting t)
         (unless (string-empty-p message)
           (setq dsh-emacs--pending-user-messages
                 (append dsh-emacs--pending-user-messages (list message))))))
@@ -2147,6 +2153,7 @@ fallback after the line was already recorded at submit time."
                               ;; sent again later swallow the real event.
                               (when (buffer-live-p chat-buffer)
                                 (with-current-buffer chat-buffer
+                                  (setq dsh-emacs--turn-awaiting nil)
                                   (setq dsh-emacs--pending-user-messages
                                         (delq message dsh-emacs--pending-user-messages)))))))))
 
