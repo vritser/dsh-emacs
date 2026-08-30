@@ -38,6 +38,11 @@
 ;; from the inline-image attachment path (placeholder fill / RET open).
 (declare-function dsh-emacs--active-session-id "dsh-emacs" ())
 (declare-function dsh-emacs--rpc-async "dsh-emacs" (method params callback))
+;; Notification backends are built into their respective Emacs ports.
+(declare-function dsh-emacs--chat-title "dsh-emacs" (session-id))
+(declare-function notifications-notify "notifications" (&rest params))
+(declare-function ns-do-applescript "ns-win" (script))
+(declare-function w32-notification-notify "w32fns.c" (&rest params))
 
 ;;; ---------------------------------------------------------------------------
 ;;; 定制
@@ -57,6 +62,11 @@ set to nil for a leaner transcript."
 
 (defcustom dsh-emacs-show-tool-calls t
   "Whether to show tool calls (bash / read / write etc.) in the transcript."
+  :type 'boolean
+  :group 'dsh-emacs-render)
+
+(defcustom dsh-emacs-enable-notifications t
+  "Notify when a submitted run finishes."
   :type 'boolean
   :group 'dsh-emacs-render)
 
@@ -723,6 +733,9 @@ collapsible Think fragment.")
 
 (defvar-local dsh-emacs--current-group-completed 0
   "Number of tool calls in current group that have completed.")
+
+(defvar-local dsh-emacs--turn-awaiting nil
+  "Non-nil while a run submitted by this buffer awaits `turn/end'.")
 
 (defvar-local dsh-emacs--command-blocks (make-hash-table :test 'equal)
   "Map from commandId -> (NS BLOCK-ID LABEL) of rendered slash-command nodes.
@@ -1678,6 +1691,47 @@ running spinner (idempotent — the send path already lit it, and a
     (dsh-emacs--ml-busy-set t))
   (dsh-emacs-render--event-seq event))
 
+;;; ---------------------------------------------------------------------------
+;;; 运行结束的原生桌面通知
+;;; ---------------------------------------------------------------------------
+
+(defun dsh-emacs-notify--visible-p ()
+  "Return non-nil when this buffer is visible on a focused frame."
+  (cl-some (lambda (window)
+             (eq t (frame-focus-state (window-frame window))))
+           (get-buffer-window-list (current-buffer) nil t)))
+
+(defun dsh-emacs-notify--post (session-id body)
+  "Post BODY for SESSION-ID unless its chat is already visible."
+  (when (and dsh-emacs-enable-notifications
+             (not (dsh-emacs-notify--visible-p)))
+    (let ((title (or (and (stringp session-id)
+                          (fboundp 'dsh-emacs--chat-title)
+                          (dsh-emacs--chat-title session-id))
+                     (buffer-name))))
+      (setq title (replace-regexp-in-string "[[:cntrl:]]" " " title)
+            body (replace-regexp-in-string "[[:cntrl:]]" " " body))
+      (condition-case err
+          (cond
+           ((fboundp 'w32-notification-notify)
+            (w32-notification-notify :title title :body body))
+           ((fboundp 'ns-do-applescript)
+            (ns-do-applescript
+             (format "display notification %S with title %S" body title)))
+           ((and (eq system-type 'darwin) (executable-find "osascript"))
+            (start-process "dsh-notification" nil "osascript" "-e"
+                           (format "display notification %S with title %S"
+                                   body title)))
+           ((and (ignore-errors (require 'notifications nil t))
+                 (fboundp 'notifications-notify))
+            (notifications-notify :title title :body body
+                                  :app-name "dsh-emacs"))
+           ((executable-find "notify-send")
+            (start-process "dsh-notification" nil "notify-send" title body))
+           (t (message "dsh: %s — %s" title body)))
+        (error (message "dsh: %s — %s (%s)" title body
+                        (error-message-string err)))))))
+
 (defun dsh-emacs-render-turn-end (event)
   "Record a `turn/end' event; surface a failed model run.
 A terminal `turn/end' whose DATA.REASON.KIND is \"error\" (dsh web's
@@ -1697,7 +1751,16 @@ spinner."
        (if (cdr failure)
            (format "✗ Model error (%s)" (cdr failure))
          "✗ Model error")
-       (car failure))))
+       (car failure)))
+    ;; The flag covers only runs submitted by this client: a replayed
+    ;; `turn/end' (reload, reconnect) or an interrupted run stays silent.
+    (when dsh-emacs--turn-awaiting
+      (setq dsh-emacs--turn-awaiting nil)
+      (dsh-emacs-notify--post
+       (and (boundp 'dsh-emacs--buffer-session)
+            dsh-emacs--buffer-session)
+       (if failure (format "✗ Run failed — %s" (car failure))
+         "✓ Run finished"))))
   (dsh-emacs-render--event-seq event))
 
 (defun dsh-emacs-render--turn-failure (event)
