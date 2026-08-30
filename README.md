@@ -70,6 +70,7 @@ it in the dsh web UI (`M-x dsh-emacs-open-web`) or the dsh home files
 ## Documentation
 
 - [Architecture](docs/architecture.md) — module layout, RPC API, event flow
+- [RPC protocol](docs/rpc.md) — complete dsh wire reference: methods, events, projections
 - [Slash commands](docs/slash-commands.md) — semantics, catalog, completion
 - [Model picker](docs/model-picker.md) — grouping, icons, reasoning effort
 - [Mode line](docs/modeline.md) — segments, context% source, spinner
