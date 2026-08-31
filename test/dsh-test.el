@@ -4000,6 +4000,49 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (kill-buffer buf-a)
     (kill-buffer buf-b)))
 
+;; --- 测试 70b: 非最后打开的 chat buffer 里 C-c C-r 刷新 → 历史渲染进当前缓冲 ---
+;; 回归：`dsh-emacs--load-history' 曾把渲染目标取成全局
+;; `dsh-emacs--current-buffer'（只有 open-session 更新它）。打开 A 再打开 B 后
+;; 全局指向 B；用户 switch-to-buffer 切回 A 按 C-c C-r，session-id 从 A 的
+;; buffer-local 解析（对），但历史被渲染进 B 的 chat buffer —— A 的文本
+;; 出现在别的会话里。渲染目标必须绑定当前缓冲，与 session-id 同源。
+(let* ((buf-a (generate-new-buffer " *t70b-a*"))
+       (buf-b (generate-new-buffer " *t70b-b*"))
+       (rendered nil)
+       (old-session dsh-emacs--current-session)
+       (old-buffer dsh-emacs--current-buffer))
+  (unwind-protect
+      (progn
+        (with-current-buffer buf-a
+          (setq-local dsh-emacs--buffer-session "sess-a")
+          (setq-local dsh-emacs--event-history-loading nil))
+        (with-current-buffer buf-b
+          (setq-local dsh-emacs--buffer-session "sess-b"))
+        ;; 最后打开的是 B（全局指向 B）
+        (setq dsh-emacs--current-session "sess-b")
+        (setq dsh-emacs--current-buffer buf-b)
+        (with-current-buffer buf-a
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (_method params cb)
+                       (funcall cb t
+                               `((events .
+                                  [((event . ((type . "user/message")
+                                              (seq . 5)
+                                              (data . ((content . "from A"))))))])))))
+                    ((symbol-function 'dsh-emacs-render-history-events)
+                     (lambda (_events _stream)
+                       (push (current-buffer) rendered)
+                       0)))
+            (dsh-emacs-refresh)))
+        (dsh-test-assert "refresh-from-inactive-chat-renders-into-own-buffer"
+          (and rendered (eq buf-a (car rendered)))
+          ;; 且绝不能渲染进最后打开的 B
+          (null (memq buf-b rendered))))
+    (setq dsh-emacs--current-session old-session)
+    (setq dsh-emacs--current-buffer old-buffer)
+    (kill-buffer buf-a)
+    (kill-buffer buf-b)))
+
 ;; --- 测试 71: 纯函数覆盖补强（markdown 表格 / render-trim / tokens / http 提示） ---
 ;; 覆盖报告 (scripts/check-coverage.el) 暴露的纯逻辑盲区：markdown 表格分配、
 ;; 显示宽度、最长词、render--trim 边界、format-cost 分支、usage-p、http-error-hint。

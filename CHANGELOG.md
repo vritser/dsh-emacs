@@ -73,6 +73,10 @@ minor) and stay undated until the release is cut.
   0-token projection; the mode-line now keeps the last genuine snapshot
   until the next successful run reports real usage, instead of dropping to
   0%.
+- **`C-c C-r` no longer mixes transcripts between sessions**: refreshing an
+  older chat buffer (one that is not the last-opened session) used to render
+  its history into the last-opened session's buffer; the history now renders
+  into the chat buffer the refresh was issued from.
 - **Mode-line model segment syncs with the live catalog**: provider, model
   and reasoning effort land asynchronously from `session.models`' `current`
   entry instead of trusting the client's default guess.

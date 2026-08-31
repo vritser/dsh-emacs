@@ -1410,7 +1410,12 @@ preset, context snapshot, title and workspace in one round trip."
                                         (throw 'found t)))))))))))
 
 (defun dsh-emacs--load-history (session-id)
-  "Load the session history and render it.
+  "Load the session history of SESSION-ID and render it.
+The transcript renders into the CURRENT buffer at call time (callers run
+this in the target chat buffer); the target is captured up front so a
+later `C-c C-r' issued from a chat buffer that is not the last-opened one
+still renders into ITS OWN buffer, never the global
+`dsh-emacs--current-buffer' of the last session opened.
 
 On the first open the mux replays globally (the current protocol has no
 baseline-sync parameter; large sessions can reach 500k+ raw events).  Events
@@ -1422,7 +1427,7 @@ large windows) has been rendered, `dsh-emacs--refetch-history' re-fetches the
 same window in a small loop, incrementally rendering by anchor until the
 window stops growing, covering the load gap; `dsh-emacs--event-history-loading'
 is then cleared and the event stream resumes normal delivery."
-  (let ((chat-buffer dsh-emacs--current-buffer))
+  (let ((chat-buffer (current-buffer)))
     (setq dsh-emacs--history-refetch-rounds 0)
     (dsh-emacs--rpc-async "session.history"
                           `((sessionId . ,session-id)
@@ -2750,12 +2755,24 @@ seeing a historical `turn/end'."
                             )))))
 
 (defun dsh-emacs-refresh ()
-  "Refresh the current session."
+  "Refresh the current chat buffer's session history.
+Only meaningful inside a chat buffer: the history must render into the
+buffer-local session's own buffer (`dsh-emacs--load-history' renders into
+the current buffer).  Outside one it refuses with a message, instead of
+injecting a transcript into an unrelated buffer (the old global
+`dsh-emacs--current-buffer' target hid this by always pointing at a chat
+buffer — the last-opened one, which mixed sessions)."
   (interactive)
   (dsh-emacs-server-ensure)
   (let ((session-id (dsh-emacs--active-session-id)))
-    (when session-id
-      (dsh-emacs--load-history session-id))))
+    (cond
+     ((and (boundp 'dsh-emacs--buffer-session) dsh-emacs--buffer-session)
+      (dsh-emacs--load-history session-id))
+     (session-id
+      (message "Refresh works inside a chat buffer (last session: %s)"
+               session-id))
+     (t
+      (message "No session to refresh")))))
 
 (defun dsh-emacs-list-sessions-display ()
   "Display the session list buffer."
