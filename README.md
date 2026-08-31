@@ -86,8 +86,8 @@ it in the dsh web UI (`M-x dsh-emacs-open-web`) or the dsh home files
 Changes come in via pull request; the `main` branch is protected, and each PR
 should be one topic. For non-trivial work, open an issue first to align the
 scope. Development workflow, verification commands and commit conventions are
-in [AGENTS.md](AGENTS.md) — run
-`emacs -Q --batch -l scripts/check-lisp.el` and the test suite before pushing.
+in [AGENTS.md](AGENTS.md) — run `scripts/verify.sh` (one-shot gate: syntax
+check, checker self-tests, full unit suite, clean load) before pushing.
 
 ## Acknowledgments
 
