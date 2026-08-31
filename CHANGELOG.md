@@ -91,6 +91,11 @@ minor) and stay undated until the release is cut.
   `no-conversion`, and a synchronous connect failure (unresolvable host,
   malformed base URL) restores HTTP polling and schedules the next retry
   instead of leaving the chat with no recovery channel.
+- **Opening a session stays lightweight on big/far sessions**: while the
+  initial history is loading, fallback polling ticks now stand down — the
+  load gap is covered by the bounded re-fetch, and a poll tick's
+  chunk-replay rendering would otherwise re-impose the "replay old deltas"
+  cost the snapshot-first page render was designed to avoid.
 
 ### Documentation
 

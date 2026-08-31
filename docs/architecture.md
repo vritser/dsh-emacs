@@ -107,7 +107,10 @@ not-yet-stable tail is re-rendered.
   (`maxMessages` semantics, about 850 raw events) and renders incrementally
   anchored on the seq — it no longer parses the whole history each time (full
   parsing of tens of thousands of events in large sessions was the main source
-  of stutter).
+  of stutter).  Poll ticks also stand down while a session's initial history is
+  loading: that window's gap is covered by the bounded re-fetch, and a poll's
+  `stream=t` render would re-impose the old-delta replay the snapshot-first
+  page render avoids.
 - **Poll timer lifetime**: the poll timer stops only when the WS recovers (101
   handshake) or disconnects; it never cancels itself just because it saw
   `turn/end` — the fetched window frequently ends with the *previous* turn's

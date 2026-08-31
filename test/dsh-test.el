@@ -6406,6 +6406,37 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (setq dsh-emacs--poll-timer nil))
       (kill-buffer buf))))
 
+;; --- 测试 98p: 历史加载期间轮询跳过 —— 打开窗口的 tick 不跟 load 抢跑 ---
+;; 回归：connect 在打开时即挂轮询（握手窗口兜底），而打开窗口
+;; `dsh-emacs--event-history-loading' 为真期间 mux 事件按设计丢弃、缺口由
+;; load-history + 有界补拉覆盖；此时轮询若照常拉取并以 stream=t 路径渲染，
+;; 会把首屏快照渲染刻意规避的「旧 chunk 增量重放」成本又抬回来（大会话/
+;; 慢链路尤其明显）。loading 为真时 tick 必须静默跳过。
+(let ((buf (generate-new-buffer " *dsh-poll-loading*"))
+      (fetches 0))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq dsh-emacs--current-session "sess-pload"
+              dsh-emacs--event-history-loading t
+              dsh-emacs--poll-inflight nil)
+        (cl-letf (((symbol-function 'get-buffer-window)
+                   (lambda (_buffer &optional _all) (selected-frame)))
+                  ((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (&rest _) (setq fetches (1+ fetches)))))
+          (dsh-emacs--poll-update)
+          (when (zerop fetches)
+            (dsh-test-pass "poll-skips-while-history-loading")))
+        (setq dsh-emacs--event-history-loading nil)
+        (cl-letf (((symbol-function 'get-buffer-window)
+                   (lambda (_buffer &optional _all) (selected-frame)))
+                  ((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (&rest _) (setq fetches (1+ fetches)))))
+          (dsh-emacs--poll-update)
+          (when (= fetches 1)
+            (dsh-test-pass "poll-runs-after-loading-clears"))))
+    (kill-buffer buf)))
+
 ;; --- 测试 98m: turn/end 带 reason.kind=error（429 等模型失败）渲染可见错误行 ---
 (let ((buf (generate-new-buffer " *dsh-turn-error*")))
   (unwind-protect

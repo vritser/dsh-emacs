@@ -2713,7 +2713,12 @@ seeing a historical `turn/end'."
   ;; HTTP 往返 + 渲染是全局卡顿的主要来源之一，而不可见缓冲的渲染没有
   ;; 意义。切回该缓冲后下一个 tick（≤1s）立即恢复，且 WS 恢复时 101 处理器
   ;; 仍会照常取消本定时器。
-  (when (and (not (active-minibuffer-window))
+  ;; 打开窗口（`dsh-emacs--event-history-loading' 为真）也不轮询：该窗口的
+  ;; 事件缺口由 load-history + 有界补拉专门覆盖，而轮询的 stream=t 渲染会
+  ;; 重放首屏刻意跳过的旧 chunk 增量（大会话/慢链路下打开开销被抬回去）；
+  ;; loading 一旦清除（≤ refetch 轮数），tick 立即恢复。
+  (when (and (not dsh-emacs--event-history-loading)
+             (not (active-minibuffer-window))
              (get-buffer-window (current-buffer) 0))
     ;; 只拉取最新的事件窗口（maxMessages 语义 = 最新 N 条消息的事件，
     ;; 服务端最少返回约 850 条原始事件，一分钟内的新内容必然在其中），
