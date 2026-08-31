@@ -6125,6 +6125,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                    (lambda (&rest _) (prog1 :fake-proc)))
                   ((symbol-function 'set-process-query-on-exit-flag)
                    (lambda (&rest _) nil))
+                  ((symbol-function 'set-process-coding-system)
+                   (lambda (&rest _) nil))
                   ((symbol-function 'process-put)
                    (lambda (&rest _) nil))
                   ((symbol-function 'set-process-filter)
@@ -6154,6 +6156,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                    (lambda (&rest _) (prog1 :fake-proc)))
                   ((symbol-function 'set-process-query-on-exit-flag)
                    (lambda (&rest _) nil))
+                  ((symbol-function 'set-process-coding-system)
+                   (lambda (&rest _) nil))
                   ((symbol-function 'process-put)
                    (lambda (&rest _) nil))
                   ((symbol-function 'set-process-filter)
@@ -6178,6 +6182,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (cl-letf (((symbol-function 'open-network-stream)
                    (lambda (&rest _) (prog1 :fake-proc)))
                   ((symbol-function 'set-process-query-on-exit-flag)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'set-process-coding-system)
                    (lambda (&rest _) nil))
                   ((symbol-function 'process-put)
                    (lambda (&rest _) nil))
@@ -6323,6 +6329,82 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (dsh-emacs--ml-busy-clear)
         (dsh-emacs-events--watchdog-stop))
     (kill-buffer buf)))
+
+;; --- 测试 98n: 重连时 socket 创建抛错不得让会话永久失聪 ---
+;; 回归：`dsh-emacs-events-connect' 先用 disconnect 拆掉旧流（轮询/重连
+;; timer 一并取消），然后才建新 socket；若 `open-network-stream' 同步抛错
+;; （DNS 解析失败、base-url 非法等），异常从 1s 重连 timer 里冒出，轮询与
+;; 重连都无人再排——该会话从此既无 socket 也无轮询，不再渲染任何回复。
+;; 多 session 时每会话各有一条流，其余会话照常渲染，症状就是「某个
+;; session 突然不渲染 server 回复」。connect 现在把建连包进 condition-case：
+;; 失败时保住轮询并再排一次重连（`dsh-emacs-events--schedule-reconnect'）。
+(let ((buf (generate-new-buffer " *dsh-connect-throw*")))
+  (unwind-protect
+      (progn
+        (with-current-buffer buf
+          (dsh-emacs-mode)
+          (setq dsh-emacs--current-session "sess-cthrow"
+                dsh-emacs-poll-fallback t
+                dsh-emacs--event-ready nil
+                dsh-emacs--poll-timer nil
+                dsh-emacs--event-reconnect-timer nil))
+        (cl-letf (((symbol-function 'open-network-stream)
+                   (lambda (&rest _) (error "sync dns failure"))))
+          (let ((threw (condition-case err
+                           (progn (dsh-emacs-events-connect buf) nil)
+                         (error err))))
+            (with-current-buffer buf
+              (when (null threw)
+                (dsh-test-pass "connect-throw-is-contained"))
+              (when (timerp dsh-emacs--poll-timer)
+                (dsh-test-pass "connect-throw-keeps-polling"))
+              (when (timerp dsh-emacs--event-reconnect-timer)
+                (dsh-test-pass "connect-throw-schedules-reconnect"))))))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (when (timerp dsh-emacs--poll-timer)
+          (cancel-timer dsh-emacs--poll-timer))
+        (when (timerp dsh-emacs--event-reconnect-timer)
+          (cancel-timer dsh-emacs--event-reconnect-timer))
+        (setq dsh-emacs--poll-timer nil
+              dsh-emacs--event-reconnect-timer nil))
+      (kill-buffer buf))))
+
+;; --- 测试 98o: 重连握手窗口里轮询继续保持（101 后才取消） ---
+;; 回归：connect 内部先 disconnect（取消轮询），新 socket 握手完成的
+;; 2s 空窗内没有轮询兜底——回复若恰好落在这个窗口就会丢。connect 现在
+;; 在 disconnect 之后立即重挂轮询；101 处理器照旧在流就绪时接管并取消。
+(let ((buf (generate-new-buffer " *dsh-connect-repoll*")))
+  (unwind-protect
+      (progn
+        (with-current-buffer buf
+          (dsh-emacs-mode)
+          (setq dsh-emacs--current-session "sess-crepoll"
+                dsh-emacs-poll-fallback t
+                dsh-emacs--poll-timer nil
+                dsh-emacs--event-ready nil))
+        (cl-letf (((symbol-function 'open-network-stream)
+                   (lambda (&rest _) (prog1 :fake-proc)))
+                  ((symbol-function 'set-process-query-on-exit-flag)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'set-process-coding-system)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'process-put)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'set-process-filter)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'set-process-sentinel)
+                   (lambda (&rest _) nil)))
+          (dsh-emacs-events-connect buf)
+          (dsh-emacs-events--health-stop)
+          (when (with-current-buffer buf (timerp dsh-emacs--poll-timer))
+            (dsh-test-pass "connect-keeps-polling-during-handshake"))))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (when (timerp dsh-emacs--poll-timer)
+          (cancel-timer dsh-emacs--poll-timer))
+        (setq dsh-emacs--poll-timer nil))
+      (kill-buffer buf))))
 
 ;; --- 测试 98m: turn/end 带 reason.kind=error（429 等模型失败）渲染可见错误行 ---
 (let ((buf (generate-new-buffer " *dsh-turn-error*")))

@@ -82,6 +82,15 @@ minor) and stay undated until the release is cut.
   entry instead of trusting the client's default guess.
 - **Prompt images reach the model** as message content parts rather than
   being dropped from the sent payload.
+- **A reconnected session keeps rendering replies**: after a chat's mux
+  socket drops, the reconnect handshake used to fail on a reused events
+  buffer (the re-inferred process coding system folded the 101 response's
+  CRLF terminator, so the handshake never completed and the health check
+  kept killing the socket — that session silently stopped showing replies
+  while other sessions' streams kept working); the socket now pins
+  `no-conversion`, and a synchronous connect failure (unresolvable host,
+  malformed base URL) restores HTTP polling and schedules the next retry
+  instead of leaving the chat with no recovery channel.
 
 ### Documentation
 

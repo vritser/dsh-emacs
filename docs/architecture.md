@@ -114,6 +114,17 @@ not-yet-stable tail is re-rendered.
   `turn/end` while the current turn is still in flight; if it canceled itself in
   that case, replies inside the WS-disconnect window would never be rendered (a
   0.4s sampling run caught exactly this bug).
+- **Reconnect is self-healing**: the reconnect socket pins `no-conversion` — on
+  a reused events buffer the re-inferred process coding system folds the 101
+  response's `\r\n\r\n` to `\n\n`, so the handshake never matched and the
+  health check killed the socket in a 2s reconnect loop, leaving that session
+  silently deaf while other sessions' sockets kept rendering (reproduced live
+  against a real server).  `connect` also re-arms HTTP polling immediately
+  after tearing down the old stream (the 101 handler cancels it on success),
+  and a synchronous connect error (unresolvable host, malformed
+  `dsh-emacs-base-url`) is contained: polling is restored and another reconnect
+  scheduled, instead of a timer-error leaving the chat with no recovery
+  channel.
 - **Stream health watchdog**: after sending a message, if the event stream
   delivers nothing for 3 consecutive seconds mid-turn, one windowed history
   probe is made; if the stream turns out to be stalled, the socket is killed and

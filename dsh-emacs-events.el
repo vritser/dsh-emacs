@@ -475,6 +475,21 @@ through the normal path once loading completes."
                     (dsh-emacs-events--consume-frames process))
                 (delete-process process)))))))))
 
+(defun dsh-emacs-events--schedule-reconnect ()
+  "Arm a one-shot reconnect for the current chat buffer, unless one is pending.
+Reconnects after 1s via `dsh-emacs-events-connect', which runs the full
+teardown + rebuild cycle.  Guarded so concurrent loss/connect-error paths
+never stack parallel reconnect timers."
+  (unless (timerp dsh-emacs--event-reconnect-timer)
+    (setq dsh-emacs--event-reconnect-timer
+          (run-at-time 1 nil
+                       (lambda (buffer)
+                         (when (buffer-live-p buffer)
+                           (with-current-buffer buffer
+                             (setq dsh-emacs--event-reconnect-timer nil)
+                             (dsh-emacs-events-connect buffer))))
+                       (current-buffer)))))
+
 (defun dsh-emacs-events--lost (process)
   "Handle a closed event stream PROCESS and arrange reconnect/fallback."
   (if (process-get process 'dsh-emacs-host-stream)
@@ -490,15 +505,7 @@ through the normal path once loading completes."
           ;; Keep the conversation usable while reconnecting.
           (when (fboundp 'dsh-emacs--start-polling)
             (dsh-emacs--start-polling))
-          (unless (timerp dsh-emacs--event-reconnect-timer)
-            (setq dsh-emacs--event-reconnect-timer
-                  (run-at-time 1 nil
-                               (lambda (buffer)
-                                 (when (buffer-live-p buffer)
-                                   (with-current-buffer buffer
-                                     (setq dsh-emacs--event-reconnect-timer nil)
-                                     (dsh-emacs-events-connect buffer))))
-                               chat))))))))
+          (dsh-emacs-events--schedule-reconnect))))))
 
 (defun dsh-emacs-events--sentinel (process _event)
   "Handle PROCESS lifecycle changes."
@@ -613,60 +620,107 @@ wedged with no recovery scheduled — the exact limbo observed on this build."
   (setq-local dsh-emacs--event-connect-timer nil))
 
 (defun dsh-emacs-events-connect (chat)
-  "Connect CHAT to dsh's `/api/events.mux' WebSocket stream."
+  "Connect CHAT to dsh's `/api/events.mux' WebSocket stream.
+
+Socket creation is failure-contained: `open-network-stream' can signal
+synchronously (unresolvable host, malformed `dsh-emacs-base-url'); the
+disconnect below has already torn down polling and the reconnect timer,
+so a throw from here used to leave the chat permanently deaf — no
+socket, no polling, no reconnect — while other sessions' sockets kept
+rendering.  On error the fallback channels are therefore restored:
+HTTP polling is re-armed and another reconnect scheduled."
   (when (buffer-live-p chat)
     (with-current-buffer chat
-      (let ((was-busy (bound-and-true-p dsh-emacs--ml-busy)))
+      (let ((was-busy (bound-and-true-p dsh-emacs--ml-busy))
+            (process nil))
         (dsh-emacs-events-disconnect chat)
-        (let* ((url (url-generic-parse-url dsh-emacs-base-url))
-               (host (url-host url))
-               (port (or (url-port url)
-                         (if (equal (url-type url) "https") 443 80)))
-               (buffer (get-buffer-create
-                        (format " *dsh-events:%s*"
-                                (or dsh-emacs--buffer-session
-                                    dsh-emacs--current-session))))
-               (process (let ((url-proxy-services nil))
-                          (open-network-stream
-                           (buffer-name buffer) buffer host port
-                           :type (if (equal (url-type url) "https") 'tls 'plain)
-                           :nowait t))))
-          (with-current-buffer buffer
-            (set-buffer-multibyte nil))
-          (set-process-query-on-exit-flag process nil)
-          (process-put process 'dsh-emacs-chat-buffer chat)
-          (process-put process 'dsh-emacs-event-input "")
-          (process-put process 'dsh-emacs-event-ready nil)
-          ;; Install the bytecode delegates, not the native subrs directly:
-          ;; `:nowait' sockets whose filter is a native-compiled subr stop being
-          ;; read on affected Emacs builds (see `dsh-emacs-events--filter-fn').
-          (set-process-filter process dsh-emacs-events--filter-fn)
-          (set-process-sentinel process dsh-emacs-events--sentinel-fn)
-          (setq dsh-emacs--event-process process
-                dsh-emacs--event-ready nil
-                dsh-emacs--ws-last-event-time (float-time)
-                dsh-emacs--ws-last-probe-time nil
-                dsh-emacs--ws-probe-inflight nil)
-          ;; Connect health (repeating): while the handshake is pending, every
-          ;; 2s check that the socket is really being read; a wedged socket is
-          ;; killed so `dsh-emacs-events--lost' starts HTTP polling and retries.
-          (dsh-emacs-events--health-start)
-          ;; A mid-command stream drop just ran `dsh-emacs-events-disconnect'
-          ;; (above), which cancels every row spinner so a detached conversation
-          ;; never keeps animating.  If this connect is a reconnect for the same
-          ;; chat buffer while a slash command is still running, re-arm its
-          ;; spinner (a no-op for fresh buffers and already-settled rows).
-          (when (fboundp 'dsh-emacs--command-spinner-revive)
-            (dsh-emacs--command-spinner-revive))
-          ;; The disconnect above also cleared the mode-line busy flag — and
-          ;; with it the C-c C-c interrupt gate, which keys on the same flag.
-          ;; The send path is the only other place that sets it, so a
-          ;; mid-turn reconnect would leave the turn uninterruptible until the
-          ;; next send.  If a turn was in flight when this connect ran,
-          ;; re-light the spinner; the real `turn/end' render still clears it
-          ;; when the turn ends (no-op for fresh buffers and settled turns).
-          (when (and was-busy (fboundp 'dsh-emacs--ml-busy-set))
-            (dsh-emacs--ml-busy-set t)))))))
+        ;; The disconnect tore down the fallback channel with the old stream.
+        ;; Re-arm polling NOW so the reconnect handshake window (up to the 2s
+        ;; health-check kill) is still covered; the 101 handler cancels the
+        ;; poll timer once realtime delivery resumes.
+        (when (fboundp 'dsh-emacs--start-polling)
+          (dsh-emacs--start-polling))
+        (condition-case err
+            (let* ((url (url-generic-parse-url dsh-emacs-base-url))
+                   (host (url-host url))
+                   (port (or (url-port url)
+                             (if (equal (url-type url) "https") 443 80)))
+                   (buffer (get-buffer-create
+                            (format " *dsh-events:%s*"
+                                    (or dsh-emacs--buffer-session
+                                        dsh-emacs--current-session)))))
+              (setq process (let ((url-proxy-services nil))
+                              (open-network-stream
+                               (buffer-name buffer) buffer host port
+                               :type (if (equal (url-type url) "https")
+                                         'tls 'plain)
+                               :nowait t)))
+              (with-current-buffer buffer
+                (set-buffer-multibyte nil))
+              (set-process-query-on-exit-flag process nil)
+              ;; Keep CRLF handshake bytes untouched.  On a REUSED events
+              ;; buffer (the reconnect case: this buffer already served a
+              ;; mux process), the process coding system is re-inferred with
+              ;; a decoder that folds the 101 response's `\r\n\r\n' to
+              ;; `\n\n', so the handshake never matches, the health check
+              ;; keeps killing the socket in a reconnect loop, and the
+              ;; session silently stops rendering replies while other
+              ;; sessions' sockets keep working.  `no-conversion' preserves
+              ;; the exact bytes (frames are decoded to UTF-8 explicitly in
+              ;; `dsh-emacs-events--consume-frames'); same fix and rationale
+              ;; as the host stream.
+              (set-process-coding-system process 'no-conversion
+                                         'no-conversion)
+              (process-put process 'dsh-emacs-chat-buffer chat)
+              (process-put process 'dsh-emacs-event-input "")
+              (process-put process 'dsh-emacs-event-ready nil)
+              ;; Install the bytecode delegates, not the native subrs directly:
+              ;; `:nowait' sockets whose filter is a native-compiled subr stop
+              ;; being read on affected Emacs builds (see
+              ;; `dsh-emacs-events--filter-fn').
+              (set-process-filter process dsh-emacs-events--filter-fn)
+              (set-process-sentinel process dsh-emacs-events--sentinel-fn)
+              (setq dsh-emacs--event-process process
+                    dsh-emacs--event-ready nil
+                    dsh-emacs--ws-last-event-time (float-time)
+                    dsh-emacs--ws-last-probe-time nil
+                    dsh-emacs--ws-probe-inflight nil)
+              ;; Connect health (repeating): while the handshake is pending,
+              ;; every 2s check that the socket is really being read; a wedged
+              ;; socket is killed so `dsh-emacs-events--lost' starts HTTP
+              ;; polling and retries.
+              (dsh-emacs-events--health-start)
+              ;; A mid-command stream drop just ran
+              ;; `dsh-emacs-events-disconnect' (above), which cancels every row
+              ;; spinner so a detached conversation never keeps animating.  If
+              ;; this connect is a reconnect for the same chat buffer while a
+              ;; slash command is still running, re-arm its spinner (a no-op
+              ;; for fresh buffers and already-settled rows).
+              (when (fboundp 'dsh-emacs--command-spinner-revive)
+                (dsh-emacs--command-spinner-revive))
+              ;; The disconnect above also cleared the mode-line busy flag —
+              ;; and with it the C-c C-c interrupt gate, which keys on the
+              ;; same flag.  The send path is the only other place that sets
+              ;; it, so a mid-turn reconnect would leave the turn
+              ;; uninterruptible until the next send.  If a turn was in flight
+              ;; when this connect ran, re-light the spinner; the real
+              ;; `turn/end' render still clears it when the turn ends (no-op
+              ;; for fresh buffers and settled turns).
+              (when (and was-busy (fboundp 'dsh-emacs--ml-busy-set))
+                (dsh-emacs--ml-busy-set t)))
+          (error
+           (when (and (processp process) (process-live-p process))
+             (delete-process process))
+           (message "dsh: event stream connect failed for %s: %S"
+                    (buffer-name chat) err)
+           ;; A synchronous connect failure ran inside this timer (or inside
+           ;; `dsh-emacs-open-session'): the disconnect above already canceled
+           ;; every recovery timer, so without this the chat would sit deaf —
+           ;; no socket, no polling, no reconnect — while other sessions'
+           ;; sockets keep rendering.  Restore both fallback channels.
+           (when (fboundp 'dsh-emacs--start-polling)
+             (dsh-emacs--start-polling))
+           (dsh-emacs-events--schedule-reconnect)))))))
 
 (defun dsh-emacs-events-disconnect (&optional chat)
   "Disconnect CHAT's dsh event stream."
