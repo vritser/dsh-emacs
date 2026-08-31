@@ -1818,6 +1818,57 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (setq dsh-emacs--sessions old-sessions)
     (when (buffer-live-p ghost) (kill-buffer ghost))))
 
+;; --- 测试 43g: 模型失败（QUOTA）的零 usage 样本不清空 ctx 快照 ---
+;; 回归：供应商拒绝（配额/限流）时报告 usage 0/0 的 assistant/chunk 样本，
+;; token-meter 的 last-wins 折叠把 contextPressure 压成 0 —— 实时
+;; session/projection 帧（以及随后的 session.list 行）携带
+;; {projectedTokens/pressureTokens 0, contextWindow}。此前 setter 会把
+;; (0, window) 原样落地，ctx% 从失败前的正确值（如 66617/1000000 ≈ 6.7%）
+;; 塌成 0%（实测所有 session 日志里零 usage 样本只出现在错误完成之前，是
+;; 退化样本而非真实占用）。修复：非正 pressure 保留上一次快照，等下一次
+;; 真实 usage 样本落地新对。
+(let* ((old-sessions dsh-emacs--sessions)
+       (buf (get-buffer-create " *t43g-chat*")))
+  (unwind-protect
+      (progn
+        (with-current-buffer buf
+          (setq-local dsh-emacs--buffer-session "sess-zero")
+          ;; 失败前服务器投影已给出正确快照：66617 / 1000000 ≈ 6.7%
+          (setq-local dsh-emacs--modeline-context-pressure 66617)
+          (setq-local dsh-emacs--modeline-context-window-server 1000000))
+        (puthash "sess-zero" buf dsh-emacs--chat-buffers)
+        ;; 实时投影帧：QUOTA 失败的零 usage 样本（真实事件形状）
+        (dsh-emacs--events-apply-context-projection
+         "sess-zero"
+         '((projectedTokens . 0) (pressureTokens . 0)
+           (contextWindow . 1000000)))
+        (dsh-test-assert "zero-projection-frame-keeps-ctx-snapshot"
+          (= 66617 (buffer-local-value 'dsh-emacs--modeline-context-pressure buf))
+          (= 1000000 (buffer-local-value 'dsh-emacs--modeline-context-window-server buf)))
+        ;; session.list 行同样携带零对（pressureTokens 0 + contextWindow 完整）
+        (setq dsh-emacs--sessions
+              (list (dsh-protocol-session--from-alist
+                     '((sessionId . "sess-zero")
+                       (projections
+                        . ((values
+                            . ((contextPressure
+                                . ((pressureTokens . 0)
+                                   (contextWindow . 1000000)))))))))))
+        (dsh-emacs--chat-buffer-context-sync "sess-zero" buf)
+        (dsh-test-assert "zero-pressure-list-row-keeps-ctx-snapshot"
+          (= 66617 (buffer-local-value 'dsh-emacs--modeline-context-pressure buf))
+          (= 1000000 (buffer-local-value 'dsh-emacs--modeline-context-window-server buf)))
+        ;; 下一次真实 usage 样本照常落地（成功运行后投影恢复）
+        (dsh-emacs--events-apply-context-projection
+         "sess-zero"
+         '((projectedTokens . 70123) (contextWindow . 1000000)))
+        (dsh-test-assert "positive-projection-still-updates-ctx-snapshot"
+          (= 70123 (buffer-local-value 'dsh-emacs--modeline-context-pressure buf))
+          (= 1000000 (buffer-local-value 'dsh-emacs--modeline-context-window-server buf))))
+    (remhash "sess-zero" dsh-emacs--chat-buffers)
+    (setq dsh-emacs--sessions old-sessions)
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
 ;; --- 测试 43c: 发送时会话若完全没有流则先重连再轮询（自愈） ---
 (let* ((chat (get-buffer-create " *t43c-chat*"))
        (connects nil)

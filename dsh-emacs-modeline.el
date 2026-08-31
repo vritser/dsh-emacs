@@ -461,10 +461,16 @@ the model and effort segments live on open."
 (defun dsh-emacs-modeline-set-context-snapshot (pressure window)
   "Set the server `contextPressure' projection: PRESSURE used / WINDOW total.
 Both values come from the same projection, keeping the ctx% numerator and
-divisor paired across model switches.  Nil hides the ctx segment."
-  (setq dsh-emacs--modeline-context-pressure (and pressure (integerp pressure) pressure)
-        dsh-emacs--modeline-context-window-server (and window (integerp window) window))
-  (dsh-emacs-modeline-update))
+divisor paired across model switches.  Nil hides the ctx segment.
+A non-positive PRESSURE is the degenerate sample of a provider-rejected run
+(quota/rate reports usage 0/0 and the fold's last-wins sample collapses to
+0), never a real occupancy reading: the previous snapshot is kept untouched
+until the next genuine usage sample lands the live pair."
+  (let ((p (and pressure (integerp pressure) pressure)))
+    (when (or (null p) (> p 0))
+      (setq dsh-emacs--modeline-context-pressure p
+            dsh-emacs--modeline-context-window-server (and window (integerp window) window))
+      (dsh-emacs-modeline-update))))
 
 (defun dsh-emacs-modeline-set-model (model)
   "Set the displayed model name to MODEL (a string)."

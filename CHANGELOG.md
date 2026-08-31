@@ -68,6 +68,11 @@ minor) and stay undated until the release is cut.
 - **ctx% survives incomplete session rows**: a `session.list` entry without
   context-window data no longer hides a usage percentage already known from
   projection frames.
+- **ctx% survives a failed model run**: a provider rejection (quota/rate)
+  reports usage 0/0, which the server's context-pressure fold turns into a
+  0-token projection; the mode-line now keeps the last genuine snapshot
+  until the next successful run reports real usage, instead of dropping to
+  0%.
 - **Mode-line model segment syncs with the live catalog**: provider, model
   and reasoning effort land asynchronously from `session.models`' `current`
   entry instead of trusting the client's default guess.
