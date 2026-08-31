@@ -4700,7 +4700,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (dsh-test-pass "question-frame-during-history-load-answered"))))
     (when (buffer-live-p chat) (kill-buffer chat))))
 
-;; 7) 非本会话问题、question/resolved、approval/requested → 忽略
+;; 7) 非本会话的问题/审批、question/resolved、approval/resolved → 忽略
 (let* ((chat (get-buffer-create " *dsh-test-question-other*"))
        (responds nil))
   (unwind-protect
@@ -4711,6 +4711,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                    (lambda (_p) chat))
                   ((symbol-function 'dsh-emacs--rpc-respond-async)
                    (lambda (&rest _) (push t responds)))
+                  ((symbol-function 'dsh-emacs--approval-prompt)
+                   (lambda (&rest _) t))
                   ((symbol-function 'completing-read)
                    (lambda (&rest _) "Yes")))
           ;; 另一会话的问题帧 → 忽略
@@ -4731,16 +4733,24 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                    "\"payload\":{\"type\":\"question/resolved\","
                    "\"sessionId\":\"mine\","
                    "\"questionRpcId\":\"rpc-q\",\"outcome\":\"answered\"}}"))
-          ;; approval/requested → 忽略
+          ;; 另一会话的审批帧 → 忽略（只应答本缓冲所属会话的审批）
           (dsh-emacs-events--dispatch-json
            'process
-           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-a\","
+           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-ao\","
                    "\"method\":\"approval/requested\","
                    "\"payload\":{\"type\":\"approval/requested\","
-                   "\"sessionId\":\"mine\",\"approvalId\":\"a1\","
+                   "\"sessionId\":\"other-session\",\"approvalId\":\"a-other\","
                    "\"toolName\":\"bash\"}}"))
+          ;; approval/resolved（纯推送）→ 不应答，只清队列
+          (dsh-emacs-events--dispatch-json
+           'process
+           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-ar\","
+                   "\"method\":\"approval/resolved\","
+                   "\"payload\":{\"type\":\"approval/resolved\","
+                   "\"sessionId\":\"mine\",\"approvalId\":\"a1\","
+                   "\"outcome\":\"cancelled\"}}"))
           (when (null responds)
-            (dsh-test-pass "question-other-session-and-pushes-ignored"))))
+            (dsh-test-pass "other-session-and-push-frames-ignored"))))
     (when (buffer-live-p chat) (kill-buffer chat))))
 
 ;; 8) 多会话并发提问：minibuffer 是全局唯一资源，回答一帧的途中到达的
@@ -4815,6 +4825,274 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (dsh-test-pass "question-queue-drained-clean"))))
     (when (buffer-live-p chat-a) (kill-buffer chat-a))
     (when (buffer-live-p chat-b) (kill-buffer chat-b))))
+
+;; --- 测试 78a: approval/requested 帧分发 → 审批 → 应答（含 history 加载中） ---
+;; 沙箱工具要访问 workspace 之外的文件时，宿主推送 answerable 的
+;; approval/requested 帧（server-request，rpcId 稳定）。客户端展示审批、
+;; 读取决定并以 client-response 回 POST /api/respond（ApprovalResponsePayload:
+;; sessionId + approvalId + outcome）。审批像提问一样不受 history 加载门控。
+(let* ((chat (get-buffer-create " *dsh-test-approval-dispatch*"))
+       (responds nil))
+  (unwind-protect
+      (progn
+        (with-current-buffer chat
+          (setq-local dsh-emacs--buffer-session "sess-ap"))
+        (cl-letf (((symbol-function 'dsh-emacs-events--chat)
+                   (lambda (_p) chat))
+                  ((symbol-function 'dsh-emacs--approval-prompt)
+                   (lambda (&rest _) t))
+                  ((symbol-function 'dsh-emacs--rpc-respond-async)
+                   (lambda (rpc-id payload cb)
+                     (push (list rpc-id payload) responds)
+                     (funcall cb t nil))))
+          (dsh-emacs-events--dispatch-json
+           'process
+           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-ap\","
+                   "\"method\":\"approval/requested\","
+                   "\"payload\":{\"type\":\"approval/requested\","
+                   "\"sessionId\":\"sess-ap\","
+                   "\"approvalId\":\"aid-x\","
+                   "\"toolName\":\"fs\","
+                   "\"reason\":\"read outside workspace\","
+                   "\"callId\":\"call-x\"}}"))
+          (let ((entry (car responds)))
+            (dsh-test-assert "approval-frame-answered"
+              (and (equal "rpc-ap" (nth 0 entry))
+                   (equal '((sessionId . "sess-ap")
+                            (approvalId . "aid-x")
+                            (outcome . "allowed-once"))
+                          (nth 1 entry)))))
+          ;; 审批在 history 加载中也必须应答（mux 打开时重放 pending 审批）
+          (with-current-buffer chat
+            (setq-local dsh-emacs--event-history-loading t))
+          (setq responds nil)
+          (dsh-emacs-events--dispatch-json
+           'process
+           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-ap2\","
+                   "\"method\":\"approval/requested\","
+                   "\"payload\":{\"type\":\"approval/requested\","
+                   "\"sessionId\":\"sess-ap\","
+                   "\"approvalId\":\"aid-y\","
+                   "\"toolName\":\"bash\"}}"))
+          (dsh-test-assert "approval-frame-during-history-load-answered"
+            (and responds (equal "rpc-ap2" (nth 0 (car responds)))))))
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
+;; --- 测试 78b: 审批 allow-once / reject 决定 → ApprovalResponsePayload ---
+(let* ((chat (get-buffer-create " *dsh-test-approval-decision*"))
+       (responds nil))
+  (unwind-protect
+      (progn
+        (with-current-buffer chat
+          (setq-local dsh-emacs--buffer-session "sess-ad"))
+        (cl-letf (((symbol-function 'dsh-emacs--approval-prompt)
+                   (lambda (&rest _) t))
+                  ((symbol-function 'dsh-emacs--rpc-respond-async)
+                   (lambda (rpc-id payload cb)
+                     (push (list rpc-id payload) responds)
+                     (funcall cb t nil))))
+          (dsh-emacs--approval-requested
+           chat "rpc-ad1" "sess-ad" "aid-1" "bash"
+           "needs /etc/passwd" "call-1")
+          (dsh-test-assert "approval-allow-once-payload"
+            (equal '((sessionId . "sess-ad")
+                     (approvalId . "aid-1")
+                     (outcome . "allowed-once"))
+                   (nth 1 (car responds)))))
+        (setq responds nil)
+        (cl-letf (((symbol-function 'dsh-emacs--approval-prompt)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'dsh-emacs--rpc-respond-async)
+                   (lambda (rpc-id payload cb)
+                     (push (list rpc-id payload) responds)
+                     (funcall cb t nil))))
+          (dsh-emacs--approval-requested
+           chat "rpc-ad2" "sess-ad" "aid-2" "fs"
+           "write outside workspace" "call-2")
+          (dsh-test-assert "approval-reject-payload"
+            (equal '((sessionId . "sess-ad")
+                     (approvalId . "aid-2")
+                     (outcome . "rejected"))
+                   (nth 1 (car responds))))))
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
+;; --- 测试 78h: 审批提示多行展示：完整 justification + 具体 bash 命令 ---
+;; 提示在 chat 缓冲上下文读取 `dsh-emacs--tool-states'（render 层按
+;; callId 跟踪的已渲染 tool/call），bash 显示真实命令行；justification
+;; 完整展示、不截断，与命令之间以空行分隔。两段分别着色：justification
+;; 淡橘（dsh-emacs-approval-justification-face）、命令灰色
+;; （dsh-emacs-approval-command-face）。
+(let* ((chat (get-buffer-create " *dsh-test-approval-command*"))
+       (captured nil)
+       (just "the command reads /etc/hostname outside the workspace so we can identify this machine"))
+  (unwind-protect
+      (let ((dsh-emacs--approval-queue nil)
+            (dsh-emacs--approval-active nil))
+        (with-current-buffer chat
+          (setq dsh-emacs--tool-states (make-hash-table :test 'equal))
+          (puthash "call-1"
+                   (list :state 'pending :variant "bash" :icon ">_"
+                         :title "Bash" :summary "cat /etc/os-release"
+                         :args "$ cat /etc/os-release" :call-time nil :ns nil)
+                   dsh-emacs--tool-states))
+        (cl-letf (((symbol-function 'y-or-n-p)
+                   (lambda (prompt) (setq captured prompt) t))
+                  ((symbol-function 'dsh-emacs--rpc-respond-async)
+                   (lambda (_rpc _payload cb) (funcall cb t nil))))
+          ;; 经 drain 在 chat 缓冲上下文读取 transcript 状态
+          (dsh-emacs--approval-requested
+           chat "rpc-h" "sess-h" "aid-h" "bash" just "call-1")
+          (dsh-test-assert "approval-prompt-full-justification-and-command"
+            (equal (concat just "\n\n$ cat /etc/os-release")
+                   (substring-no-properties captured)))
+          (dsh-test-assert "approval-prompt-justification-face"
+            (eq 'dsh-emacs-approval-justification-face
+                (get-text-property 0 'face captured)))
+          (dsh-test-assert "approval-prompt-command-face"
+            (eq 'dsh-emacs-approval-command-face
+                (get-text-property (+ 2 (length just)) 'face captured)))
+          ;; 查不到 callId（重放早于 tool/call 渲染）→ 只显示 justification
+          (setq captured nil)
+          (dsh-emacs--approval-requested
+           chat "rpc-h2" "sess-h" "aid-h2" "bash" just "call-unknown")
+          (dsh-test-assert "approval-prompt-falls-back-to-justification"
+            (equal just (substring-no-properties captured)))
+          (dsh-test-assert "approval-prompt-fallback-still-colored"
+            (eq 'dsh-emacs-approval-justification-face
+                (get-text-property 0 'face captured)))))
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
+;; --- 测试 78c: 审批 C-g 中止 → 默认拒绝应答（不回决定宿主会一直阻塞在
+;; pending 审批上）、槽与队列清空 ---
+(let* ((chat (get-buffer-create " *dsh-test-approval-cg*"))
+       (responds nil))
+  (unwind-protect
+      (progn
+        (with-current-buffer chat
+          (setq-local dsh-emacs--buffer-session "sess-cg"))
+        (cl-letf (((symbol-function 'dsh-emacs--approval-prompt)
+                   (lambda (&rest _) (signal 'quit nil)))
+                  ((symbol-function 'dsh-emacs--rpc-respond-async)
+                   (lambda (rpc-id payload cb)
+                     (push (list rpc-id payload) responds)
+                     (funcall cb t nil))))
+          (dsh-emacs--approval-requested
+           chat "rpc-cg" "sess-cg" "aid-cg" "bash" nil nil)
+          (when (and (equal responds
+                            (list (list "rpc-cg"
+                                        '((sessionId . "sess-cg")
+                                          (approvalId . "aid-cg")
+                                          (outcome . "rejected")))))
+                     (null dsh-emacs--approval-active)
+                     (null dsh-emacs--approval-queue))
+            (dsh-test-pass "approval-c-g-answers-rejected"))))
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
+;; --- 测试 78d: mux 重放同一审批（同 approvalId）→ 只问一次 ---
+(let* ((chat (get-buffer-create " *dsh-test-approval-dedup*")))
+  (unwind-protect
+      (let ((dsh-emacs--approval-queue
+             (list (list chat "rpc-d0" "sess-d" "aid-d" "bash" "reason" nil)))
+            (dsh-emacs--approval-active
+             (list chat "rpc-d1" "sess-d" "aid-other" "bash" "reason" nil)))
+        ;; 同一 approvalId 的 mux 重放：已在队列中 → 不再入队
+        (dsh-emacs--approval-requested
+         chat "rpc-d2" "sess-d" "aid-d" "bash" "reason" nil)
+        ;; 正在回答中的同一审批 → 也不入队
+        (dsh-emacs--approval-requested
+         chat "rpc-d3" "sess-d" "aid-d" "bash" "reason" nil)
+        (when (= 1 (length dsh-emacs--approval-queue))
+          (dsh-test-pass "approval-replay-dedup-single-prompt")))
+    (kill-buffer chat)))
+
+;; --- 测试 78e: approval/resolved 撤离排队中的同一审批帧 ---
+(let* ((chat (get-buffer-create " *dsh-test-approval-resolved*")))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs--approval-queue
+              (list (list chat "rpc-e1" "sess-e" "aid-e" "bash" "reason" nil)
+                    (list chat "rpc-e2" "sess-e" "aid-other" "fs" "r" nil)))
+        (dsh-emacs--approval-resolved "sess-e" "aid-e" "cancelled")
+        (when (and (= 1 (length dsh-emacs--approval-queue))
+                   (equal "aid-other" (nth 3 (car dsh-emacs--approval-queue))))
+          (dsh-test-pass "approval-resolved-drops-only-matching-frame")))
+    (setq dsh-emacs--approval-queue nil)
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
+;; --- 测试 78f: 审批与提问共享同一 minibuffer 槽（提问优先 → 审批排队接棒） ---
+;; 提问正占着回答槽时到达的审批帧必须排队（绝不嵌套 y-or-n-p 进正在运行
+;; 的 completing-read）；提问队列清空后 drain 才把审批帧接过来。
+(let* ((chat (get-buffer-create " *dsh-test-approval-slot-qfirst*"))
+       (trace nil))
+  (unwind-protect
+      (let ((dsh-emacs--question-queue nil)
+            (dsh-emacs--question-active t)      ; 模拟提问正在回答中
+            (dsh-emacs--approval-queue nil)
+            (dsh-emacs--approval-active nil))
+        (cl-letf (((symbol-function 'dsh-emacs--approval-prompt)
+                   (lambda (&rest _) (push :approval-prompt trace) t))
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _) (push :question-prompt trace) "Yes"))
+                  ((symbol-function 'dsh-emacs--rpc-respond-async)
+                   (lambda (rpc-id _payload cb)
+                     (push (list :respond rpc-id) trace)
+                     (funcall cb t nil))))
+          ;; 提问进行中到达的审批 → 只入队，不提示
+          (dsh-emacs--approval-requested
+           chat "rpc-ap" "sess-s" "aid-s" "bash" "outside" nil)
+          (when (and (null trace)
+                     (= 1 (length dsh-emacs--approval-queue)))
+            (dsh-test-pass "approval-queued-while-question-active"))
+          ;; 提问完成（队列清空）→ handoff 接手排队中的审批
+          (setq dsh-emacs--question-active nil)
+          (setq dsh-emacs--question-queue
+                (list (list chat "rpc-q" "sess-q"
+                            (list (list (cons 'id "q1")
+                                        (cons 'question "Proceed?")
+                                        (cons 'options
+                                              (list (list (cons 'label "Yes")))))))))
+          (dsh-emacs--question-drain)
+          (dsh-test-assert "approval-handoff-after-question-drain"
+            (equal '(:question-prompt
+                     (:respond "rpc-q")
+                     :approval-prompt
+                     (:respond "rpc-ap"))
+                   (nreverse trace)))))
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
+;; --- 测试 78g: 审批与提问共享同一 minibuffer 槽（审批优先 → 提问排队接棒） ---
+(let* ((chat (get-buffer-create " *dsh-test-approval-slot-afirst*"))
+       (trace nil))
+  (unwind-protect
+      (let ((dsh-emacs--question-queue nil)
+            (dsh-emacs--question-active nil)
+            (dsh-emacs--approval-queue nil)
+            (dsh-emacs--approval-active
+             (list chat "rpc-ax" "sess-x" "aid-x" "bash" nil nil))) ; 审批正在回答中
+        (cl-letf (((symbol-function 'dsh-emacs--approval-prompt)
+                   (lambda (&rest _) (push :approval-prompt trace) t))
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _) (push :question-prompt trace) "Yes"))
+                  ((symbol-function 'dsh-emacs--rpc-respond-async)
+                   (lambda (rpc-id _payload cb)
+                     (push (list :respond rpc-id) trace)
+                     (funcall cb t nil))))
+          ;; 审批进行中到达的提问 → 只入队，不提示
+          (dsh-emacs--question-requested
+           chat "rpc-qx" "sess-qx"
+           (list (list (cons 'id "q1")
+                       (cons 'question "Proceed?")
+                       (cons 'options (list (list (cons 'label "Yes")))))))
+          (when (and (null trace)
+                     (= 1 (length dsh-emacs--question-queue)))
+            (dsh-test-pass "question-queued-while-approval-active"))
+          ;; 审批回答完毕 → handoff 接手排队中的提问
+          (setq dsh-emacs--approval-active nil)
+          (dsh-emacs--approval-drain)
+          (dsh-test-assert "question-handoff-after-approval-drain"
+            (equal '(:question-prompt (:respond "rpc-qx"))
+                   (nreverse trace)))))
+    (when (buffer-live-p chat) (kill-buffer chat))))
 
 (when (featurep 'dsh-emacs-server)
   (dsh-test-pass "dsh-emacs-server loaded"))

@@ -6,11 +6,12 @@
 ;;; Commentary:
 ;;
 ;; dsh Web uses /api/events.mux as a long-lived WebSocket carrying
-;; server-request envelopes whose payload is session/event or an
-;; answerable ask-user interaction (question/requested — answered via
-;; POST /api/respond, see `dsh-emacs--question-requested').  Emacs does
-;; not ship a WebSocket client, so this module implements the small
-;; RFC 6455 client needed by that endpoint directly on top of
+;; server-request envelopes whose payload is session/event, an answerable
+;; ask-user interaction (question/requested), or an answerable sandbox
+;; approval (approval/requested — both answered via POST /api/respond,
+;; see `dsh-emacs--question-requested' / `dsh-emacs--approval-requested').
+;; Emacs does not ship a WebSocket client, so this module implements the
+;; small RFC 6455 client needed by that endpoint directly on top of
 ;; `open-network-stream'.  HTTP history remains the bootstrap and
 ;; reconnect fallback.
 
@@ -91,6 +92,8 @@
 (declare-function dsh-emacs--chat-session-item "dsh-emacs" (session-id))
 (declare-function dsh-emacs--chat-buffer-sync "dsh-emacs" (session-id))
 (declare-function dsh-emacs--question-requested "dsh-emacs" (chat rpc-id session-id questions))
+(declare-function dsh-emacs--approval-requested "dsh-emacs" (chat rpc-id session-id approval-id tool-name reason call-id))
+(declare-function dsh-emacs--approval-resolved "dsh-emacs" (session-id approval-id outcome))
 (declare-function dsh-emacs-render--aget "dsh-emacs-render" (key alist))
 (declare-function dsh-emacs-render--json-bool "dsh-emacs-render" (value))
 (declare-function dsh-emacs-session--render "dsh-emacs-session" ())
@@ -335,6 +338,32 @@ through the normal path once loading completes."
                   (dsh-emacs--question-requested
                    chat rpc-id session-id
                    (dsh-emacs-render--aget "questions" payload))))
+               ;; answerable sandbox/approval interaction: a tool (bash/fs…)
+               ;; that needs to step outside the workspace asks for the user's
+               ;; permission.  Answerable like question/requested (stable
+               ;; rpcId echoed on POST /api/respond), so it is never gated on
+               ;; history loading either — pending approvals REPLAY on mux open
+               ;; and must not be dropped with the backlog.
+               ((equal type "approval/requested")
+                (when (and rpc-id
+                           (equal session-id
+                                  (buffer-local-value
+                                   'dsh-emacs--buffer-session chat)))
+                  (dsh-emacs--approval-requested
+                   chat rpc-id session-id
+                   (dsh-emacs-render--aget "approvalId" payload)
+                   (dsh-emacs-render--aget "toolName" payload)
+                   (dsh-emacs-render--aget "reason" payload)
+                   (dsh-emacs-render--aget "callId" payload))))
+               ;; Pure push: the approval was decided (allowed-once/rejected)
+               ;; or withdrawn host-side (cancelled/unavailable).  No answer
+               ;; is expected — just retire any still-queued frame for the
+               ;; same approval so a replay never re-asks a finished one.
+               ((equal type "approval/resolved")
+                (dsh-emacs--approval-resolved
+                 session-id
+                 (dsh-emacs-render--aget "approvalId" payload)
+                 (dsh-emacs-render--aget "outcome" payload)))
                ;; host 推送的投影帧：会话上下文占用（contextPressure）随
                ;; 事件流实时更新（对齐 dsh web 的 session-projection 推送
                ;; 模型，免去全量 session.list 拉取）。value 是投影的 wire
@@ -374,8 +403,7 @@ through the normal path once loading completes."
                                     (buffer-local-value
                                      'dsh-emacs--buffer-session chat)))
                     (dsh-emacs-events--dispatch-event chat event))))
-               ;; 其余 mux 帧（approval/requested、session/subscribed 等）
-               ;; 当前不处理。
+               ;; 其余 mux 帧（session/subscribed 等）当前不处理。
                (t nil))))))
     (error (message "dsh event decode error: %S" err))))
 

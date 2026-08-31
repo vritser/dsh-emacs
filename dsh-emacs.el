@@ -2878,6 +2878,20 @@ answering slot; each entry is (CHAT RPC-ID SESSION-ID QUESTIONS).")
 (defvar dsh-emacs--question-active nil
   "Non-nil while a question frame occupies the interactive answering slot.")
 
+;; Declared here — before `dsh-emacs--question-drain' references them in
+;; the shared-slot handoff — because the byte-compiler reads the file
+;; top-down; the answering logic itself lives in the approval section.
+(defvar dsh-emacs--approval-queue nil
+  "Pending `approval/requested' frames awaiting the single interactive
+answering slot; each entry is (CHAT RPC-ID SESSION-ID APPROVAL-ID
+TOOL-NAME REASON CALL-ID).")
+
+(defvar dsh-emacs--approval-active nil
+  "The `approval/requested' frame currently occupying the interactive
+answering slot, or nil.  The slot is shared with the question flow
+(`dsh-emacs--question-active'): only one prompt may own the minibuffer
+at a time.")
+
 (defun dsh-emacs--question-session-label (session-id)
   "Label identifying SESSION-ID in question prompts.
 Prefers the live chat buffer's name (the title-based \"dsh-<title>\"
@@ -2899,12 +2913,15 @@ SESSION-ID (direct test calls) yields an empty label."
 (defun dsh-emacs--question-drain ()
   "Answer queued question frames one at a time, in arrival order.
 Minibuffer answering is a single global slot
-(`dsh-emacs--question-active'): each frame is answered — or aborted —
-before the next one is presented, so prompts from different sessions
-never nest inside the same minibuffer.  Runs from whatever filter
-context delivered the current frame; queued frames are collected in
-their own chat buffer regardless of which stream they arrived on."
+(`dsh-emacs--question-active', shared with the approval flow's
+`dsh-emacs--approval-active' — only one of the two may prompt at a
+time): each frame is answered — or aborted — before the next one is
+presented, so prompts from different sessions never nest inside the
+same minibuffer.  Runs from whatever filter context delivered the
+current frame; queued frames are collected in their own chat buffer
+regardless of which stream they arrived on."
   (while (and (null dsh-emacs--question-active)
+              (null dsh-emacs--approval-active)
               dsh-emacs--question-queue)
     (let* ((frame (pop dsh-emacs--question-queue))
            (chat (nth 0 frame))
@@ -2931,7 +2948,14 @@ their own chat buffer regardless of which stream they arrived on."
               (message "Question cancelled")))
         (quit (message "Question cancelled"))
         (error (message "dsh question error: %S" err)))
-      (setq dsh-emacs--question-active nil))))
+      (setq dsh-emacs--question-active nil)))
+  ;; The question answering slot just freed up: hand queued approvals over
+  ;; to their drain (which hands back when it is done, so the two never
+  ;; stack prompts inside the minibuffer).
+  (when (and (null dsh-emacs--question-active)
+             (null dsh-emacs--approval-active)
+             dsh-emacs--approval-queue)
+    (dsh-emacs--approval-drain)))
 
 (defun dsh-emacs--respond-envelope-json (rpc-id payload)
   "JSON body of the client-response answering server-request RPC-ID
@@ -3143,6 +3167,196 @@ the process filter as \"error in process filter: Quit\"."
         (nconc dsh-emacs--question-queue
                (list (list chat rpc-id session-id questions))))
   (dsh-emacs--question-drain))
+
+;; ---------------------------------------------------------------------------
+;;  用户审批（approval/requested）应答
+;; ---------------------------------------------------------------------------
+;; 沙箱工具的越界请求通过 mux 流推送 answerable 的 `approval/requested'
+;; 帧（server-request，rpcId 稳定）：bash/fs 等工具要访问 workspace 之外
+;; 的文件时，宿主先征询用户的许可（dsh web 的 ApprovalPanel 同一协议）。
+;; 客户端必须展示请求（toolName + justification reason）、读取用户的
+;; approve/reject 决定，并以 client-response 回 POST /api/respond（回声
+;; rpcId；payload 即 ApprovalResponsePayload：sessionId + approvalId +
+;; outcome，客户端只能给 "allowed-once" | "rejected"）。宿主随后广播
+;; `approval/resolved' 帧（纯推送）并继续（或被拒后放弃）被阻塞的调用。
+;;
+;; 交互方式：minibuffer y-or-n-p —— y/y 键 = 允许一次，n = 拒绝；C-g/ESC
+;; 同样按拒绝应答（客户端不回决定，宿主就会一直阻塞在 pending 审批上；
+;; 若宿主已先 resolved 则 receipt 报 not-pending，静默丢弃）。minibuffer 是
+;; 全局唯一资源：审批与提问共用同一把锁（`dsh-emacs--approval-active' /
+;; `dsh-emacs--question-active'，见上面的 defvar），任一活跃时新帧入队
+;; 串行，两个 drain 在各自队列清空时互相接棒，绝不嵌套两个 minibuffer
+;; 提示。
+
+(defun dsh-emacs--approval-command-line (call-id)
+  "One-line summary of the tool call CALL-ID from the live transcript.
+Reads the buffer-local `dsh-emacs--tool-states' map, so it must run in
+the chat buffer of the approving session.  For bash the rendered body is
+the real command (\"$ cat /etc/hostname\"); other tools fall back to
+\"Title — args\".  Returns nil when CALL-ID is unknown (e.g. the call
+predates this window, or the approval replayed right after open)."
+  (when (and call-id
+             (boundp 'dsh-emacs--tool-states)
+             (hash-table-p dsh-emacs--tool-states))
+    (let* ((state (dsh-emacs-render--tool-state call-id))
+           (title (and state (plist-get state :title)))
+           (args (and state (plist-get state :args))))
+      (cond
+       ((and (stringp args) (string-match-p "\\`\\$ " args)) args)
+       ((and (stringp args) (not (string-empty-p args)))
+        (if (and (stringp title) (not (string-empty-p title)))
+            (format "%s — %s" title args)
+          args))
+       ((and (stringp title) (not (string-empty-p title))) title)
+       (t nil)))))
+
+(defun dsh-emacs--approval-drain ()
+  "Answer queued approval frames one at a time, in arrival order.
+The approval prompt owns the same single minibuffer slot as question
+answering: while `dsh-emacs--question-active' or
+`dsh-emacs--approval-active' is set, queued approvals wait.  Each frame
+is decided before the next one is presented — a quit (C-g/ESC) counts
+as a rejection so the host never stays blocked on a pending frame.
+The decision goes out as a client-response echoing the frame's RPC-ID with
+the `ApprovalResponsePayload' (sessionId + approvalId + outcome).  The
+prompt runs in the frame's chat buffer so the tool-call lookup
+(`dsh-emacs--approval-command-line') can read the buffer-local
+transcript state.  When the slot frees up, queued questions are handed
+back to `dsh-emacs--question-drain'."
+  (while (and (null dsh-emacs--approval-active)
+              (null dsh-emacs--question-active)
+              dsh-emacs--approval-queue)
+    (let* ((frame (pop dsh-emacs--approval-queue))
+           (chat (nth 0 frame))
+           (rpc-id (nth 1 frame))
+           (session-id (nth 2 frame))
+           (approval-id (nth 3 frame))
+           (tool-name (nth 4 frame))
+           (reason (nth 5 frame))
+           (call-id (nth 6 frame)))
+      (setq dsh-emacs--approval-active frame)
+      (condition-case err
+          (let ((allow (condition-case nil
+                           (if (buffer-live-p chat)
+                               (with-current-buffer chat
+                                 (dsh-emacs--approval-prompt
+                                  session-id tool-name reason call-id))
+                             (dsh-emacs--approval-prompt
+                              session-id tool-name reason call-id))
+                         ;; C-g/ESC 折叠为拒绝：宿主阻塞在 pending 审批上，
+                         ;; 只有收到决定才能解除，留着不答只会永远卡住回合。
+                         (quit (message "Approval %s quit — rejecting"
+                                        approval-id)
+                               nil))))
+            (dsh-emacs--rpc-respond-async
+             rpc-id
+             `((sessionId . ,session-id)
+               (approvalId . ,approval-id)
+               (outcome . ,(if allow "allowed-once" "rejected")))
+             (lambda (accepted rsn)
+               (if accepted
+                   (message "%s %s for %s"
+                            (if allow "Approved" "Rejected")
+                            (or tool-name "tool") session-id)
+                 (message "Approval response not accepted (%s)" rsn)))))
+        ;; Safety net: a quit from anywhere but the prompt still aborts the
+        ;; frame without answering.
+        (quit (message "Approval %s cancelled" approval-id))
+        (error (message "dsh approval error: %S" err)))
+      (setq dsh-emacs--approval-active nil)))
+  ;; The approval answering slot just freed up: hand queued questions over
+  ;; to their drain (which hands back when it is done).
+  (when (and (null dsh-emacs--approval-active)
+             (null dsh-emacs--question-active)
+             dsh-emacs--question-queue)
+    (dsh-emacs--question-drain)))
+
+(defun dsh-emacs--approval-prompt (session-id tool-name reason call-id)
+  "Read the user's decision for one approval in the minibuffer.
+The prompt is multi-line, untruncated and colored: the asker's full
+justification REASON in `dsh-emacs-approval-justification-face' (light
+orange), then a blank line and the actual tool call (the bash command
+line, see `dsh-emacs--approval-command-line' — runs in the chat buffer,
+so CALL-ID must be that session's) in `dsh-emacs-approval-command-face'
+(gray).  The owning session, tool and call-id are logged to *Messages*.
+Without any detail the prompt falls back to \"Allow TOOL?\".  The prompt
+faces survive because `minibuffer-prompt-properties' is bound WITHOUT
+its `face' slot around the read — the minibuffer prompt insertion would
+otherwise replace every prompt face with `minibuffer-prompt'.  Returns t
+to allow once, nil to reject; C-g signals `quit' and the caller answers
+the same rejection (an unanswered frame would block the host forever)."
+  (let* ((where (concat
+                 (if (and session-id (not (string-empty-p session-id)))
+                     (format "[%s] " (dsh-emacs--question-session-label
+                                      session-id))
+                   "")
+                 (if (and call-id (not (string-empty-p call-id)))
+                     (format "call %s " call-id)
+                   "")))
+         (just-line (and reason (not (string-empty-p reason))
+                         (propertize reason
+                                     'face
+                                     'dsh-emacs-approval-justification-face)))
+         (cmd-line (let ((line (dsh-emacs--approval-command-line call-id)))
+                     (and line (propertize line
+                                           'face
+                                           'dsh-emacs-approval-command-face))))
+         (lines (delq nil (list just-line cmd-line)))
+         (prompt (if lines
+                     (mapconcat #'identity lines "\n\n")
+                   (format "Allow %s?" (or tool-name "tool")))))
+    (when (and where (not (string-empty-p where)))
+      (message "dsh approval, %s: %s%s"
+               (or tool-name "tool") where
+               (if (and reason (not (string-empty-p reason)))
+                   (format " — %s" reason)
+                 "")))
+    (let ((minibuffer-prompt-properties
+           ;; Keep the prompt non-editable and point-safe, but drop the
+           ;; `face' slot: `read-from-minibuffer' applies these properties
+           ;; over the prompt, and `add-text-properties' replaces an
+           ;; existing `face' — with it bound the justification/command
+           ;; colors above would be wiped by `minibuffer-prompt'.
+           (list 'read-only t
+                 'point-entered #'minibuffer-avoid-prompt)))
+      (y-or-n-p prompt))))
+
+(defun dsh-emacs--approval-requested (chat rpc-id session-id approval-id
+                                           tool-name reason call-id)
+  "Queue an `approval/requested' frame for SESSION-ID in CHAT and answer it.
+Mirrors `dsh-emacs--question-requested': the minibuffer is one global
+resource, so frames are queued (FIFO) and drained one at a time by
+`dsh-emacs--approval-drain', never nested inside another prompt.  A
+frame whose APPROVAL-ID is already pending (mux replay of the same
+request) is dropped instead of asked twice.  The decision — allow once
+or reject — is sent as a single client-response echoing RPC-ID on POST
+/api/respond with the `ApprovalResponsePayload'; C-g answers the
+rejection too (default deny).  The quit is caught here so it cannot
+leak out of the process filter as \"error in process filter: Quit\"."
+  (unless (or (and dsh-emacs--approval-active
+                   (equal approval-id (nth 3 dsh-emacs--approval-active)))
+              (cl-some (lambda (entry)
+                         (equal approval-id (nth 3 entry)))
+                       dsh-emacs--approval-queue))
+    (setq dsh-emacs--approval-queue
+          (nconc dsh-emacs--approval-queue
+                 (list (list chat rpc-id session-id approval-id
+                             tool-name reason call-id)))))
+  (dsh-emacs--approval-drain))
+
+(defun dsh-emacs--approval-resolved (session-id approval-id outcome)
+  "Handle an `approval/resolved' push for APPROVAL-ID of SESSION-ID.
+The outcome (allowed-once/rejected/cancelled/unavailable) is echoed in
+*Messages*, and any queued frame for the same approval is dropped so a
+mux replay of requested→resolved never re-asks a finished approval.  An
+approval currently being prompted cannot be aborted from here; its
+stale answer is then refused server-side as not-pending."
+  (message "dsh approval %s resolved: %s" approval-id (or outcome "…"))
+  (setq dsh-emacs--approval-queue
+        (cl-remove-if (lambda (entry)
+                        (and (equal approval-id (nth 3 entry))
+                             (equal session-id (nth 2 entry))))
+                      dsh-emacs--approval-queue)))
 
 (provide 'dsh-emacs)
 

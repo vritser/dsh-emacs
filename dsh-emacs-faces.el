@@ -565,6 +565,22 @@ Bold, no italic — matching dsh web's thinkingToggle style."
 	:group 'dsh-emacs-faces)
 
 ;;; ---------------------------------------------------------------------------
+;;;  Approval prompt faces
+;;; ---------------------------------------------------------------------------
+
+(defface dsh-emacs-approval-justification-face
+	`((((background light)) :foreground ,dsh-emacs-color-tool-pending-border)
+		(((background dark))  :foreground ,dsh-emacs-color-tool-pending-border-dark)
+		(t :inherit warning))
+	"Approval prompt justification (light orange)."
+	:group 'dsh-emacs-faces)
+
+(defface dsh-emacs-approval-command-face
+	'((t :inherit shadow))
+	"Approval prompt tool command (gray)."
+	:group 'dsh-emacs-faces)
+
+;;; ---------------------------------------------------------------------------
 ;;;  Markdown faces
 ;;; ---------------------------------------------------------------------------
 
