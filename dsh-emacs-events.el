@@ -12,8 +12,8 @@
 ;; see `dsh-emacs--question-requested' / `dsh-emacs--approval-requested').
 ;; Emacs does not ship a WebSocket client, so this module implements the
 ;; small RFC 6455 client needed by that endpoint directly on top of
-;; `open-network-stream'.  HTTP history remains the bootstrap and
-;; reconnect fallback.
+;; `open-network-stream'.  HTTP `session.history' remains the bootstrap for
+;; opening a session; the mux stream is the only automatic delivery channel.
 
 ;;; Code:
 
@@ -26,10 +26,6 @@
 (defvar-local dsh-emacs--event-history-loading nil)
 (defvar-local dsh-emacs--event-reconnect-timer nil)
 (defvar-local dsh-emacs--event-connect-timer nil)
-;; Owned by dsh-emacs.el (defined later in load order); reset here on
-;; handshake so a later disconnect can warn about fallback polling again.
-(defvar-local dsh-emacs--poll-warned nil)
-(defvar-local dsh-emacs--poll-timer nil)
 
 ;; Last wall-clock time (float-time) at which the stream delivered an event,
 ;; and watchdog bookkeeping for confirming the stream stays healthy mid-turn.
@@ -466,11 +462,7 @@ through the normal path once loading completes."
                         (when (buffer-live-p chat)
                           (with-current-buffer chat
                             (setq dsh-emacs--event-ready t)
-                            (setq dsh-emacs--poll-warned nil)
                             (setq dsh-emacs--ws-last-event-time (float-time))
-                            (when (timerp dsh-emacs--poll-timer)
-                              (cancel-timer dsh-emacs--poll-timer)
-                              (setq dsh-emacs--poll-timer nil))
                             (dsh-emacs-events--health-stop)))))
                     (dsh-emacs-events--consume-frames process))
                 (delete-process process)))))))))
@@ -491,7 +483,7 @@ never stack parallel reconnect timers."
                        (current-buffer)))))
 
 (defun dsh-emacs-events--lost (process)
-  "Handle a closed event stream PROCESS and arrange reconnect/fallback."
+  "Handle a closed event stream PROCESS and arrange a reconnect."
   (if (process-get process 'dsh-emacs-host-stream)
       (dsh-emacs-events--host-lost process)
     (let ((chat (dsh-emacs-events--chat process)))
@@ -502,9 +494,6 @@ never stack parallel reconnect timers."
                 dsh-emacs--event-ready nil)
           (dsh-emacs-events--health-stop)
           (dsh-emacs-events--watchdog-stop)
-          ;; Keep the conversation usable while reconnecting.
-          (when (fboundp 'dsh-emacs--start-polling)
-            (dsh-emacs--start-polling))
           (dsh-emacs-events--schedule-reconnect))))))
 
 (defun dsh-emacs-events--sentinel (process _event)
@@ -524,8 +513,8 @@ queue while Emacs never invokes the process filter), making the stream look
 alive although nothing renders.  A cheap `session.history' fetch both renders
 whatever the stream missed (anchor-diffed, so re-delivery is harmless) and
 reveals the stall: if the anchor advanced although the stream had been silent
-for > 3s, kill the socket so the sentinel reconnects and HTTP polling takes
-over.  Self-stops outside an active turn.  BUFFER is the chat buffer this
+for > 3s, kill the socket so the sentinel reconnects.  Self-stops outside an
+active turn.  BUFFER is the chat buffer this
 watchdog was armed for: the timer is buffer-local but timers fire with no
 buffer context, so the owning buffer is passed explicitly (with several
 session buffers open, the global `dsh-emacs--current-buffer' would point at
@@ -534,8 +523,7 @@ the last-opened one and the watchdog would probe the wrong stream)."
     (with-current-buffer buffer
       (if (and (bound-and-true-p dsh-emacs--ml-busy)
                dsh-emacs--event-ready
-               (process-live-p dsh-emacs--event-process)
-               (null dsh-emacs--poll-timer))
+               (process-live-p dsh-emacs--event-process))
           (let ((now (float-time)))
             (when (and (not dsh-emacs--ws-probe-inflight)
                        (or (null dsh-emacs--ws-last-event-time)
@@ -562,10 +550,10 @@ the last-opened one and the watchdog would probe the wrong stream)."
                            (when (> dsh-emacs--anchor-seq before)
                              ;; New content existed that the stream failed to
                              ;; deliver: it is stalled.  Kill it; the sentinel
-                             ;; will reconnect and start HTTP polling.
+                             ;; will reconnect and resume delivery.
                              (when (process-live-p dsh-emacs--event-process)
                                (delete-process dsh-emacs--event-process))))))))))))
-        ;; No turn in progress (or polling already covers us): stop.
+        ;; No turn in progress: stop.
         (dsh-emacs-events--watchdog-stop)))))
 
 (defun dsh-emacs-events--watchdog-start ()
@@ -574,7 +562,8 @@ the last-opened one and the watchdog would probe the wrong stream)."
   (unless (timerp dsh-emacs--ws-watchdog-timer)
     (setq-local dsh-emacs--ws-watchdog-timer
                 (let ((buffer (current-buffer)))
-                  (run-with-timer 2 dsh-emacs-poll-interval
+                  ;; 1s probe cadence: probes are anchor-diffed and cheap.
+                  (run-with-timer 2 1.0
                                   (lambda ()
                                     (when (buffer-live-p buffer)
                                       (dsh-emacs-events--watchdog-tick
@@ -590,8 +579,8 @@ the last-opened one and the watchdog would probe the wrong stream)."
   "Health-check the stream socket of BUFFER every repeat.
 A `:nowait' socket on affected builds can stay `open' while the kernel queue
 fills and the filter never runs (handshake never processed).  If BUFFER's
-handshake has not completed, delete the socket so the sentinel starts HTTP
-polling and schedules a fresh connect; stop once ready or the socket is gone.
+handshake has not completed, delete the socket so the sentinel schedules a
+fresh connect; stop once ready or the socket is gone.
 Errors are CONTAINED here on purpose: a repeating timer whose function
 signals is silently dropped from `timer-list' by Emacs (Lisp errors only
 message when the timer code path reports them), which would leave the socket
@@ -624,22 +613,15 @@ wedged with no recovery scheduled — the exact limbo observed on this build."
 
 Socket creation is failure-contained: `open-network-stream' can signal
 synchronously (unresolvable host, malformed `dsh-emacs-base-url'); the
-disconnect below has already torn down polling and the reconnect timer,
-so a throw from here used to leave the chat permanently deaf — no
-socket, no polling, no reconnect — while other sessions' sockets kept
-rendering.  On error the fallback channels are therefore restored:
-HTTP polling is re-armed and another reconnect scheduled."
+disconnect below has already torn down the reconnect timer, so a throw
+from here used to leave the chat permanently deaf — no socket, no
+reconnect — while other sessions' sockets kept rendering.  On error the
+reconnect is re-armed and another connect scheduled."
   (when (buffer-live-p chat)
     (with-current-buffer chat
       (let ((was-busy (bound-and-true-p dsh-emacs--ml-busy))
             (process nil))
         (dsh-emacs-events-disconnect chat)
-        ;; The disconnect tore down the fallback channel with the old stream.
-        ;; Re-arm polling NOW so the reconnect handshake window (up to the 2s
-        ;; health-check kill) is still covered; the 101 handler cancels the
-        ;; poll timer once realtime delivery resumes.
-        (when (fboundp 'dsh-emacs--start-polling)
-          (dsh-emacs--start-polling))
         (condition-case err
             (let* ((url (url-generic-parse-url dsh-emacs-base-url))
                    (host (url-host url))
@@ -687,8 +669,8 @@ HTTP polling is re-armed and another reconnect scheduled."
                     dsh-emacs--ws-probe-inflight nil)
               ;; Connect health (repeating): while the handshake is pending,
               ;; every 2s check that the socket is really being read; a wedged
-              ;; socket is killed so `dsh-emacs-events--lost' starts HTTP
-              ;; polling and retries.
+              ;; socket is killed so `dsh-emacs-events--lost' schedules a
+              ;; fresh connect and retries.
               (dsh-emacs-events--health-start)
               ;; A mid-command stream drop just ran
               ;; `dsh-emacs-events-disconnect' (above), which cancels every row
@@ -716,10 +698,8 @@ HTTP polling is re-armed and another reconnect scheduled."
            ;; A synchronous connect failure ran inside this timer (or inside
            ;; `dsh-emacs-open-session'): the disconnect above already canceled
            ;; every recovery timer, so without this the chat would sit deaf —
-           ;; no socket, no polling, no reconnect — while other sessions'
-           ;; sockets keep rendering.  Restore both fallback channels.
-           (when (fboundp 'dsh-emacs--start-polling)
-             (dsh-emacs--start-polling))
+           ;; no socket, no reconnect — while other sessions' sockets keep
+           ;; rendering.  Re-arm the reconnect so the stream recovers.
            (dsh-emacs-events--schedule-reconnect)))))))
 
 (defun dsh-emacs-events-disconnect (&optional chat)
@@ -732,11 +712,6 @@ HTTP polling is re-armed and another reconnect scheduled."
         (dsh-emacs-events--health-stop)
         (setq dsh-emacs--event-reconnect-timer nil)
         (dsh-emacs-events--watchdog-stop)
-        ;; Polling is tied to this conversation/stream: tear it down too, so
-        ;; a reused chat buffer never keeps polling a dead session.
-        (when (timerp dsh-emacs--poll-timer)
-          (cancel-timer dsh-emacs--poll-timer))
-        (setq dsh-emacs--poll-timer nil)
         (let ((process dsh-emacs--event-process))
           ;; Clear ownership before deleting: the sentinel must not schedule a
           ;; reconnect for an intentional session switch or buffer teardown.

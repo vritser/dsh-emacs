@@ -1783,7 +1783,7 @@ DATA.REASON.ERROR ({code, message, ...})."
        (t (cons "Model run failed" nil))))))
 
 (defun dsh-emacs-render-info (label text &optional block-id)
-  "Render a one-off informational fragment (interrupts, errors, polling errors)."
+  "Render a one-off informational fragment (interrupts, errors)."
   (let* ((ns (dsh-emacs-render--make-namespace))
          (bid (or block-id (format "info-%d" (random 999999))))
          (insert-point (dsh-emacs-render--input-insert-point)))
@@ -2159,8 +2159,9 @@ Deletes the earliest content while preserving the input prompt area."
 EVENTS is a vector/sequence of {\"event\": alist} entries.  Renders only
 entries with seq > `dsh-emacs--anchor-seq'.  During an initial history load,
 STREAM should be nil: completed `assistant/message' snapshots are sufficient
-and avoid replaying thousands of old deltas.  Polling passes STREAM non-nil
-to render new `assistant/chunk' events as they arrive.
+and avoid replaying thousands of old deltas.  The load-gap re-fetch and the
+watchdog probe pass STREAM non-nil to render new `assistant/chunk' events as
+they arrive.
 The loop yields to the input queue every 5 events so that user keystrokes
 interrupt the batch and keep the UI responsive."
   (let ((rendered 0)

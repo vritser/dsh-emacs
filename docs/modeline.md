@@ -60,9 +60,8 @@ preserved:
   renamed automatically with the list refresh after a title drifts or is
   renamed.
 
-The animation lights up when a message is sent and goes out at `turn/end` (or
-when polling detects that the turn ended); it is cleaned up automatically when
-the event stream disconnects.
+The animation lights up when a message is sent and goes out at `turn/end`; it
+is cleaned up automatically when the event stream disconnects.
 
 ### Why the branch segment is cached
 

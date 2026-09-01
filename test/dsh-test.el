@@ -836,50 +836,6 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                (string-match-p "shown" text))
       (dsh-test-pass "thinking-disabled-hides-block")))))
 
-(when (>= dsh-emacs-poll-interval 0.5)
-  (dsh-test-pass "stream-polling-fallback-is-throttled"))
-
-(with-temp-buffer
-  (dsh-emacs-mode)
-  (setq dsh-emacs--poll-inflight t)
-  ;; 把缓冲显示进窗口，让防重叠分支真正被走到（未显示的缓冲轮询会被跳过）
-  (set-window-buffer (selected-window) (current-buffer))
-  (condition-case nil
-      (progn
-        (dsh-emacs--poll-update)
-        (dsh-test-pass "stream-polling-avoids-overlap"))
-    (error nil)))
-
-;; 隐藏缓冲的轮询跳过（1Hz 全量 history RPC + 渲染是全局卡顿来源，
-;; 不可见的渲染没有意义）；显示进窗口后正常轮询。
-(let ((buf (generate-new-buffer " *dsh-poll-skip*"))
-      (calls nil))
-  (unwind-protect
-      (with-current-buffer buf
-        (dsh-emacs-mode)
-        (setq dsh-emacs--current-session "sess-poll")
-        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
-                   (lambda (method _params _cb)
-                     (push method calls))))
-          ;; 未显示（无窗口）：跳过轮询，不发 session.history
-          (dsh-emacs--poll-update)
-          (when (null calls)
-            (dsh-test-pass "stream-polling-skips-buried-buffers"))
-          ;; 显示进窗口：正常轮询
-          (set-window-buffer (selected-window) buf)
-          (dsh-emacs--poll-update)
-          (when (equal calls '("session.history"))
-            (dsh-test-pass "stream-polling-runs-when-visible"))
-          ;; minibuffer 活跃（用户正在补全列表里导航）：跳过本轮，
-          ;; 否则 1Hz 的 history RPC + 渲染会落到按键节奏之间造成偶现卡顿。
-          (setq dsh-emacs--poll-inflight nil)
-          (cl-letf (((symbol-function 'active-minibuffer-window)
-                     (lambda () (selected-window))))
-            (dsh-emacs--poll-update))
-          (dsh-test-assert "stream-polling-skips-active-minibuffer"
-            (equal calls '("session.history")))))
-    (kill-buffer buf)))
-
 ;; --- 测试 22: 丢失输入 marker 后消息仍插入到输入框上方 ---
 (with-temp-buffer
   (dsh-emacs-mode)
@@ -1869,10 +1825,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (setq dsh-emacs--sessions old-sessions)
     (when (buffer-live-p buf) (kill-buffer buf))))
 
-;; --- 测试 43c: 发送时会话若完全没有流则先重连再轮询（自愈） ---
+;; --- 测试 43c: 发送时会话若完全没有流则先重连（自愈）；握手进行中不重复建连 ---
 (let* ((chat (get-buffer-create " *t43c-chat*"))
        (connects nil)
-       (polled nil)
        (old-current-session dsh-emacs--current-session))
   (unwind-protect
       (progn
@@ -1881,7 +1836,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
           (setq-local dsh-emacs--buffer-session "sess-sh")
           (setq dsh-emacs--event-ready nil
                 dsh-emacs--event-process nil))
-        ;; 场景 1：完全无流（进程都不存在）→ 重连 + 轮询
+        ;; 场景 1：完全无流（进程都不存在）→ 重连自愈
         (with-current-buffer chat
           (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                      (lambda (_method _params cb)
@@ -1892,15 +1847,13 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                      (lambda (&rest _) nil))
                     ((symbol-function 'dsh-emacs-events-connect)
                      (lambda (c) (push c connects)))
-                    ((symbol-function 'dsh-emacs--start-polling)
-                     (lambda () (setq polled t)))
                     ((symbol-function 'dsh-emacs-events--watchdog-start)
                      (lambda () nil)))
             (dsh-emacs--submit-prompt "hi")))
-        (when (and (eq (car connects) chat) polled)
+        (when (eq (car connects) chat)
           (dsh-test-pass "submit-heals-streamless-buffer-with-reconnect"))
-        ;; 场景 2：握手进行中（进程在但没 ready）→ 不重复建连，只轮询
-        (setq connects nil polled nil)
+        ;; 场景 2：握手进行中（进程在但没 ready）→ 不重复建连
+        (setq connects nil)
         (let ((proc (make-pipe-process :name " *t43c-proc*"
                                        :buffer " *t43c-proc*")))
           (unwind-protect
@@ -1918,12 +1871,10 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                              (lambda (&rest _) nil))
                             ((symbol-function 'dsh-emacs-events-connect)
                              (lambda (c) (push c connects)))
-                            ((symbol-function 'dsh-emacs--start-polling)
-                             (lambda () (setq polled t)))
                             ((symbol-function 'dsh-emacs-events--watchdog-start)
                              (lambda () nil)))
                     (dsh-emacs--submit-prompt "hi")))
-                (when (and (null connects) polled)
+                (when (null connects)
                   (dsh-test-pass "submit-in-handshake-keeps-single-stream")))
             (delete-process proc))))
     (setq dsh-emacs--current-session old-current-session)
@@ -5575,8 +5526,6 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                    (lambda (&rest _) nil))
                   ((symbol-function 'dsh-emacs-events-connect)
                    (lambda (_c) nil))
-                  ((symbol-function 'dsh-emacs--start-polling)
-                   (lambda () nil))
                   ((symbol-function 'dsh-emacs-events--watchdog-start)
                    (lambda () nil)))
           ;; 普通消息 → session.prompt（原路径不变）
@@ -6197,33 +6146,6 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
           (dsh-test-pass "reconnect-idle-keeps-busy-off")))
     (kill-buffer buf)))
 
-;; --- 测试 98i: 轮询的历史窗口尾部是旧 turn/end 时，不得清掉在飞的 busy ---
-;; 回归：`dsh-emacs--poll-update' 曾用窗口尾部 turn/end 直接 ml-busy-set nil，
-;; 而窗口可以停在*上一个* turn 的 turn/end 上（当前 turn 仍在飞行）——切走
-;; 再回来时首个可见轮询就把 busy flag 灭掉，打断随之失效。
-(let ((buf (generate-new-buffer " *dsh-ml-poll-stale-tail*")))
-  (unwind-protect
-      (with-current-buffer buf
-        (dsh-emacs-mode)
-        (setq dsh-emacs--current-session "sess-poll-tail")
-        ;; 先渲染一个新 turn/end（seq 5），把 anchor 推到 5、busy 熄灭
-        (dsh-emacs-render-event '((type . "turn/end") (seq . 5)))
-        ;; 当前 turn 在飞：busy 重新点亮（send 路径或 turn/start 路由）
-        (dsh-emacs--ml-busy-set t)
-        ;; 轮询拉回的窗口尾部正好是那个已渲染过的旧 turn/end（seq 5 ≤ anchor）
-        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
-                   (lambda (_method _params cb)
-                     (funcall cb t '((events . [((event .
-                                                    ((type . "turn/end")
-                                                     (seq . 5))))])))))
-                  ((symbol-function 'get-buffer-window)
-                   (lambda (_buffer &optional _all) (selected-frame))))
-          (dsh-emacs--poll-update))
-        (when dsh-emacs--ml-busy
-          (dsh-test-pass "poll-stale-turn-end-keeps-busy"))
-        (dsh-emacs--ml-busy-clear))
-    (kill-buffer buf)))
-
 ;; --- 测试 98j: 事件流决定 busy —— turn/start 点亮、turn/end 熄灭 ---
 ;; 重开会话/重拉历史时，未闭合 turn（有 turn/start 无 turn/end）也要亮 spinner。
 (let ((buf (generate-new-buffer " *dsh-turn-open*")))
@@ -6331,22 +6253,20 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (kill-buffer buf)))
 
 ;; --- 测试 98n: 重连时 socket 创建抛错不得让会话永久失聪 ---
-;; 回归：`dsh-emacs-events-connect' 先用 disconnect 拆掉旧流（轮询/重连
-;; timer 一并取消），然后才建新 socket；若 `open-network-stream' 同步抛错
-;; （DNS 解析失败、base-url 非法等），异常从 1s 重连 timer 里冒出，轮询与
-;; 重连都无人再排——该会话从此既无 socket 也无轮询，不再渲染任何回复。
+;; 回归：`dsh-emacs-events-connect' 先用 disconnect 拆掉旧流（重连 timer
+;; 一并取消），然后才建新 socket；若 `open-network-stream' 同步抛错
+;; （DNS 解析失败、base-url 非法等），异常从 1s 重连 timer 里冒出，重连
+;; 无人再排——该会话从此既无 socket 也不再渲染任何回复。
 ;; 多 session 时每会话各有一条流，其余会话照常渲染，症状就是「某个
 ;; session 突然不渲染 server 回复」。connect 现在把建连包进 condition-case：
-;; 失败时保住轮询并再排一次重连（`dsh-emacs-events--schedule-reconnect'）。
+;; 失败时再排一次重连（`dsh-emacs-events--schedule-reconnect'）。
 (let ((buf (generate-new-buffer " *dsh-connect-throw*")))
   (unwind-protect
       (progn
         (with-current-buffer buf
           (dsh-emacs-mode)
           (setq dsh-emacs--current-session "sess-cthrow"
-                dsh-emacs-poll-fallback t
                 dsh-emacs--event-ready nil
-                dsh-emacs--poll-timer nil
                 dsh-emacs--event-reconnect-timer nil))
         (cl-letf (((symbol-function 'open-network-stream)
                    (lambda (&rest _) (error "sync dns failure"))))
@@ -6356,86 +6276,14 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (with-current-buffer buf
               (when (null threw)
                 (dsh-test-pass "connect-throw-is-contained"))
-              (when (timerp dsh-emacs--poll-timer)
-                (dsh-test-pass "connect-throw-keeps-polling"))
               (when (timerp dsh-emacs--event-reconnect-timer)
                 (dsh-test-pass "connect-throw-schedules-reconnect"))))))
     (when (buffer-live-p buf)
       (with-current-buffer buf
-        (when (timerp dsh-emacs--poll-timer)
-          (cancel-timer dsh-emacs--poll-timer))
         (when (timerp dsh-emacs--event-reconnect-timer)
           (cancel-timer dsh-emacs--event-reconnect-timer))
-        (setq dsh-emacs--poll-timer nil
-              dsh-emacs--event-reconnect-timer nil))
+        (setq dsh-emacs--event-reconnect-timer nil))
       (kill-buffer buf))))
-
-;; --- 测试 98o: 重连握手窗口里轮询继续保持（101 后才取消） ---
-;; 回归：connect 内部先 disconnect（取消轮询），新 socket 握手完成的
-;; 2s 空窗内没有轮询兜底——回复若恰好落在这个窗口就会丢。connect 现在
-;; 在 disconnect 之后立即重挂轮询；101 处理器照旧在流就绪时接管并取消。
-(let ((buf (generate-new-buffer " *dsh-connect-repoll*")))
-  (unwind-protect
-      (progn
-        (with-current-buffer buf
-          (dsh-emacs-mode)
-          (setq dsh-emacs--current-session "sess-crepoll"
-                dsh-emacs-poll-fallback t
-                dsh-emacs--poll-timer nil
-                dsh-emacs--event-ready nil))
-        (cl-letf (((symbol-function 'open-network-stream)
-                   (lambda (&rest _) (prog1 :fake-proc)))
-                  ((symbol-function 'set-process-query-on-exit-flag)
-                   (lambda (&rest _) nil))
-                  ((symbol-function 'set-process-coding-system)
-                   (lambda (&rest _) nil))
-                  ((symbol-function 'process-put)
-                   (lambda (&rest _) nil))
-                  ((symbol-function 'set-process-filter)
-                   (lambda (&rest _) nil))
-                  ((symbol-function 'set-process-sentinel)
-                   (lambda (&rest _) nil)))
-          (dsh-emacs-events-connect buf)
-          (dsh-emacs-events--health-stop)
-          (when (with-current-buffer buf (timerp dsh-emacs--poll-timer))
-            (dsh-test-pass "connect-keeps-polling-during-handshake"))))
-    (when (buffer-live-p buf)
-      (with-current-buffer buf
-        (when (timerp dsh-emacs--poll-timer)
-          (cancel-timer dsh-emacs--poll-timer))
-        (setq dsh-emacs--poll-timer nil))
-      (kill-buffer buf))))
-
-;; --- 测试 98p: 历史加载期间轮询跳过 —— 打开窗口的 tick 不跟 load 抢跑 ---
-;; 回归：connect 在打开时即挂轮询（握手窗口兜底），而打开窗口
-;; `dsh-emacs--event-history-loading' 为真期间 mux 事件按设计丢弃、缺口由
-;; load-history + 有界补拉覆盖；此时轮询若照常拉取并以 stream=t 路径渲染，
-;; 会把首屏快照渲染刻意规避的「旧 chunk 增量重放」成本又抬回来（大会话/
-;; 慢链路尤其明显）。loading 为真时 tick 必须静默跳过。
-(let ((buf (generate-new-buffer " *dsh-poll-loading*"))
-      (fetches 0))
-  (unwind-protect
-      (with-current-buffer buf
-        (dsh-emacs-mode)
-        (setq dsh-emacs--current-session "sess-pload"
-              dsh-emacs--event-history-loading t
-              dsh-emacs--poll-inflight nil)
-        (cl-letf (((symbol-function 'get-buffer-window)
-                   (lambda (_buffer &optional _all) (selected-frame)))
-                  ((symbol-function 'dsh-emacs--rpc-async)
-                   (lambda (&rest _) (setq fetches (1+ fetches)))))
-          (dsh-emacs--poll-update)
-          (when (zerop fetches)
-            (dsh-test-pass "poll-skips-while-history-loading")))
-        (setq dsh-emacs--event-history-loading nil)
-        (cl-letf (((symbol-function 'get-buffer-window)
-                   (lambda (_buffer &optional _all) (selected-frame)))
-                  ((symbol-function 'dsh-emacs--rpc-async)
-                   (lambda (&rest _) (setq fetches (1+ fetches)))))
-          (dsh-emacs--poll-update)
-          (when (= fetches 1)
-            (dsh-test-pass "poll-runs-after-loading-clears"))))
-    (kill-buffer buf)))
 
 ;; --- 测试 98m: turn/end 带 reason.kind=error（429 等模型失败）渲染可见错误行 ---
 (let ((buf (generate-new-buffer " *dsh-turn-error*")))

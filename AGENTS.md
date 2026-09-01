@@ -1,7 +1,7 @@
 # AGENTS.md — dsh-emacs development rules
 
 Emacs client for the dsh server: chat UI, session/workspace management, RPC
-over WebSocket with a polling fallback. Entry file `dsh-emacs.el`; module
+over HTTP with a WebSocket event stream. Entry file `dsh-emacs.el`; module
 ownership map in `docs/architecture.md`.
 
 - **Baseline: Emacs 27.1** (`;; Package-Requires: ((emacs "27.1"))` in every

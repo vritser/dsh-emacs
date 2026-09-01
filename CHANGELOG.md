@@ -18,6 +18,12 @@ minor) and stay undated until the release is cut.
   and `dsh-emacs-footer-context-window-alist` are gone.  The ctx% segment is
   driven exclusively by the context window the server reports; saved
   customizations of the old options are silently dropped on upgrade.
+- **HTTP polling fallback removed**: `dsh-emacs-poll-fallback`,
+  `dsh-emacs-poll-interval` and `dsh-emacs-poll-warn-delay` are gone.  The
+  WebSocket event stream is the only automatic reply channel: if it is down,
+  replies appear only once the stream recovers or via manual refresh
+  (`C-c C-r`).  Saved customizations of the removed options are silently
+  dropped on upgrade.
 
 ### Added
 

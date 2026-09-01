@@ -31,7 +31,7 @@
   上限的 base64 膨胀预留）。
 - 浏览器端的 mux/host 流是 **WebSocket**；非浏览器（Node、测试）用 **SSE**
   （`data: <json>\n\n` 分帧，打开时先发一行注释 `: connected\n\n`）。dsh-emacs
-  走 WebSocket，断线后按 mux 重连 + `session.history` 补页处理。
+  走 WebSocket，断线后按 mux 重连；打开会话时用 `session.history` 补页覆盖加载缺口。
 
 ---
 

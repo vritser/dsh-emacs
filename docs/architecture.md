@@ -11,7 +11,7 @@ dsh-emacs/
 ├── dsh-emacs-tokens.el       # Token tracking and formatting
 ├── dsh-emacs-markdown.el     # Markdown syntax highlighting
 ├── dsh-emacs-render.el       # Event renderer (user/assistant/tool/thinking)
-├── dsh-emacs-events.el       # Event stream: native WebSocket + fallback polling
+├── dsh-emacs-events.el       # Event stream: native WebSocket + reconnect
 ├── dsh-emacs-modeline.el       # Mode-line stats
 ├── dsh-emacs-server.el       # Server bootstrap: probe / auto-start / install
 └── dsh-emacs-session.el      # Session list card view
@@ -58,7 +58,7 @@ directly, with no server-side changes required:
 |---|---|
 | `session.list` | List sessions (including running status, title, cwd) |
 | `session.create` | Create a session |
-| `session.history` | Read event history (incremental polling rendering) |
+| `session.history` | Read event history (incremental, anchor-diffed rendering) |
 | `session.prompt` | Send a message (text and/or inline base64 image attachments) |
 | `session.cancel` | Interrupt the running turn (partial reply is kept) |
 | `session.fork` | Branch a session into a child inheriting its history |
@@ -71,8 +71,9 @@ directly, with no server-side changes required:
 
 Opening a session first reads `session.history`, then connects to the
 `/api/events.mux` WebSocket that dsh web uses, receiving new events in real
-time; only when the WebSocket disconnects or misbehaves does it fall back to
-`session.history` polling (`dsh-emacs-poll-fallback`, enabled by default):
+time; the mux stream is the only automatic reply channel — when it drops,
+the health-check / watchdog / reconnect machinery below restores it, and
+until then replies appear only via manual refresh (`C-c C-r`):
 
 1. **user/message** → `dsh-emacs-render-user-message`: rendered as a card background
 2. **assistant/chunk** → `dsh-emacs-render-assistant-chunk`: the text-delta is appended to the current reply and re-rendered as Markdown in place
@@ -98,40 +99,30 @@ not-yet-stable tail is re-rendered.
   installed via byte-compiled closures.
 - **Connection health check**: after connecting, a repeating timer checks every
   2 seconds whether the handshake has completed; if not, the socket is treated
-  as wedged and killed, and the sentinel reconnects and starts polling. Errors
+  as wedged and killed, and the sentinel reconnects.  Errors
   inside the check body are isolated with `condition-case` — if a timer function
   throws outward, Emacs silently removes the timer, leaving an unrecoverable
   deadlock where the process stays "open" but nothing ever kills it; this is a
   pitfall hit in real testing.
-- **Incremental polling**: fallback polling fetches only the latest event window
-  (`maxMessages` semantics, about 850 raw events) and renders incrementally
-  anchored on the seq — it no longer parses the whole history each time (full
-  parsing of tens of thousands of events in large sessions was the main source
-  of stutter).  Poll ticks also stand down while a session's initial history is
-  loading: that window's gap is covered by the bounded re-fetch, and a poll's
-  `stream=t` render would re-impose the old-delta replay the snapshot-first
-  page render avoids.
-- **Poll timer lifetime**: the poll timer stops only when the WS recovers (101
-  handshake) or disconnects; it never cancels itself just because it saw
-  `turn/end` — the fetched window frequently ends with the *previous* turn's
-  `turn/end` while the current turn is still in flight; if it canceled itself in
-  that case, replies inside the WS-disconnect window would never be rendered (a
-  0.4s sampling run caught exactly this bug).
+- **Incremental history rendering**: history is fetched with the
+  `maxMessages` semantics (about 850 raw events for the default window) and
+  rendered incrementally anchored on the seq — it never parses the whole
+  history each time (full parsing of tens of thousands of events in large
+  sessions was the main source of stutter).  The same anchored diff also makes
+  the watchdog's periodic `session.history` probe harmless to re-render.
 - **Reconnect is self-healing**: the reconnect socket pins `no-conversion` — on
   a reused events buffer the re-inferred process coding system folds the 101
   response's `\r\n\r\n` to `\n\n`, so the handshake never matched and the
   health check killed the socket in a 2s reconnect loop, leaving that session
   silently deaf while other sessions' sockets kept rendering (reproduced live
-  against a real server).  `connect` also re-arms HTTP polling immediately
-  after tearing down the old stream (the 101 handler cancels it on success),
-  and a synchronous connect error (unresolvable host, malformed
-  `dsh-emacs-base-url`) is contained: polling is restored and another reconnect
-  scheduled, instead of a timer-error leaving the chat with no recovery
-  channel.
+  against a real server).  A synchronous connect error (unresolvable host,
+  malformed `dsh-emacs-base-url`) is contained: the reconnect is re-armed and
+  another connect scheduled, instead of a timer-error leaving the chat with no
+  recovery channel.
 - **Stream health watchdog**: after sending a message, if the event stream
   delivers nothing for 3 consecutive seconds mid-turn, one windowed history
   probe is made; if the stream turns out to be stalled, the socket is killed and
-  the sentinel reconnects and takes over polling.
+  the sentinel reconnects.
 - **Opening a session does not swallow global replay**: the mux replays the
   entire global event stream to every new connection (the protocol has no
   baseline-sync parameter; large sessions can reach 500k+ raw events, still

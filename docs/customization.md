@@ -4,9 +4,6 @@ The most commonly used options, straight in your config:
 
 ```elisp
 (setq dsh-emacs-base-url "http://127.0.0.1:3080")  ; dsh service URL
-(setq dsh-emacs-poll-interval 1.0)                 ; WebSocket fallback poll interval (fetches only the latest window ≈850 events; don't set it too small)
-(setq dsh-emacs-poll-fallback t)                    ; nil = disable fallback polling entirely; refresh manually after a disconnect (C-c C-r)
-(setq dsh-emacs-poll-warn-delay 5.0)                ; poll warning delay: warns only once when fallback polling has not recovered for ≥5s (avoids false "not connected" alarms)
 (setq dsh-emacs-history-window 30)                  ; messages fetched when opening a session (maxMessages): larger = fuller history but slower opening (GC/parsing scale with it)
 (setq dsh-emacs-history-refetch-max-rounds 6)       ; max backfill rounds during load gaps: improves coverage when events are still arriving at high rate right after opening, at the cost of more small parse chunks
 (setq dsh-emacs-show-reasoning t)                  ; show reasoning content (on by default; nil = hide, unlike dsh web)

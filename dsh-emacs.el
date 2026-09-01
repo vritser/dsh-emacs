@@ -102,43 +102,6 @@ snappier keys."
   :type 'string
   :group 'dsh-emacs)
 
-(defcustom dsh-emacs-poll-interval 1.0
-  "Fallback polling interval (seconds).
-This polling starts only when the WebSocket event stream is unavailable.  It
-fetches just the newest event window per the `maxMessages' semantics (the
-server returns at least ~850 raw events) and renders it incrementally, not a
-full-history parse, so the main-thread cost stays small; a 1s interval
-balances fidelity against overhead.
-When the WebSocket works, polling does not participate at all and streaming
-updates stay realtime."
-  :type 'number
-  :group 'dsh-emacs)
-
-(defcustom dsh-emacs-poll-fallback t
-  "Whether to fall back to polling when the WebSocket event stream is unavailable.
-Enabled by default: when the event stream is disconnected or failing, replies
-still appear automatically through `session.history' polling, avoiding
-\"replies not shown automatically\".  Polling renders incrementally by the seq
-anchor and runs only while the event stream is unavailable; it stops
-automatically when the stream recovers (101 handshake).  Set to nil to disable
-fallback polling entirely (once the stream drops, replies appear only via
-WebSocket or manual refresh `C-c C-r')."
-  :type 'boolean
-  :group 'dsh-emacs)
-
-(defcustom dsh-emacs-poll-warn-delay 5.0
-  "Delay before the fallback-polling notice is shown (seconds).
-When opening a session or sending a message the WebSocket may still be
-handshaking (locally measured to usually recover to realtime in 1~2 seconds),
-so starting polling then is a normal transition and should not show a
-\"not connected\" notice.  Only when polling has lasted longer than this
-duration without the event stream being established is a one-time notice
-shown that fallback mode was entered; the notice clears naturally once the
-connection recovers.  Set to 0 to restore the old behavior (show the notice
-immediately when polling starts)."
-  :type 'number
-  :group 'dsh-emacs)
-
 (defcustom dsh-emacs-history-window 30
   "Size of the history window fetched when opening a session (`maxMessages'
 semantics, counted in messages).
@@ -263,19 +226,10 @@ NOT resolve their target from this variable alone — they read
 (defvar-local dsh-emacs--pending-user-messages nil
   "Text of messages the user sent but that are not yet confirmed in session.history.")
 
-(defvar-local dsh-emacs--poll-timer nil
-  "Polling timer (per chat buffer, like every other stream variable).")
-
-(defvar-local dsh-emacs--poll-inflight nil
-  "Whether the current buffer already has a history request in flight.")
-
 (defvar-local dsh-emacs--history-refetch-rounds 0
   "How many bounded re-fetches the open of this buffer has issued.
 The open closes the history/stream gap by repeatedly re-fetching the newest
 window until it stops advancing or the round budget is spent.")
-
-(defvar-local dsh-emacs--poll-warned nil
-  "Whether the fallback-polling warning was already shown for this buffer.")
 
 (defvar-local dsh-emacs--buffer-session nil
   "Session ID owned by this chat buffer (buffer-local).
@@ -981,7 +935,7 @@ When the input line is not visible because the window was scrolled up to\nread h
 Connects a per-session mux stream for the chat buffer WITHOUT touching
 other open sessions' streams: with several chats live, each buffer keeps
 its own realtime stream (tearing the previous one down here used to
-leave it stream-less — polling-only and unable to ever switch back to
+leave it stream-less — unable to ever switch back to
 realtime)."
   (interactive)
   (dsh-emacs-server-ensure)
@@ -1456,7 +1410,7 @@ is then cleared and the event stream resumes normal delivery."
 during loading.
 Each fetch pulls `dsh-emacs-history-window' latest messages and renders them
 incrementally by anchor; as long as the window keeps advancing (a running
-turn keeps producing events) polling continues, for at most
+turn keeps producing events) the refetch loop continues, for at most
 `dsh-emacs-history-refetch-max-rounds' rounds, after which
 `dsh-emacs--event-history-loading' is cleared so the event stream resumes
 realtime delivery (increments after that moment are covered by the async
@@ -1793,7 +1747,6 @@ vertico, etc.)."
   (setq dsh-emacs--tool-calls (make-hash-table :test 'equal))
   (setq dsh-emacs--activity-groups (make-hash-table :test 'equal))
   (setq dsh-emacs--pending-user-messages nil
-        dsh-emacs--poll-inflight nil
         dsh-emacs--event-ready nil
         dsh-emacs--event-history-loading nil)
   (dsh-emacs-events--watchdog-stop)
@@ -2139,15 +2092,13 @@ fallback after the line was already recorded at submit time."
                                         ;; 该会话的 mux 已断开且无人重连（旧版
                                         ;; 打开新会话会误拆上一个会话的流——
                                         ;; 见 `dsh-emacs-open-session'）——先
-                                        ;; 重连再轮询，让「switches back to
-                                        ;; realtime」的承诺成立；握手途中的
-                                        ;; 进程由 connect 的 health check 兜底，
-                                        ;; 这里不重复建连。
+                                        ;; 重连，让「switches back to realtime」
+                                        ;; 的承诺成立；握手途中的进程由 connect
+                                        ;; 的 health check 兜底，这里不重复建连。
                                         (when (not (process-live-p
                                                     dsh-emacs--event-process))
                                           (dsh-emacs-events-connect
-                                           (current-buffer)))
-                                        (dsh-emacs--start-polling))))
+                                           (current-buffer))))))
                                   (when (buffer-live-p input-buffer)
                                     (with-current-buffer input-buffer
                                       (dsh-emacs--clear-input))))
@@ -2672,92 +2623,6 @@ inline immediately — the bytes are already local, no
                                                  (cons '(type . "image") attachment))
                                                images))))))))
     (dsh-emacs-render-event event)))
-
-(defun dsh-emacs--start-polling ()
-  "Start polling for session updates (the fallback channel when the
-WebSocket is unavailable).
-Does nothing when `dsh-emacs-poll-fallback' is nil (fallback disabled by the
-user).
-Polling during the connection race (right after opening a session or sending
-a message the WS may still be handshaking and usually recovers within 1~2
-seconds) is a normal transition and is not reported; only when polling
-outlasts `dsh-emacs-poll-warn-delay' without recovery is a one-time notice
-shown, avoiding a false \"not connected\" report.
-The polling timer is stopped only by the 101 handshake (stream recovery) or
-`dsh-emacs-events-disconnect' (switching sessions); it is never cancelled by
-seeing a historical `turn/end'."
-  (let ((buffer (current-buffer)))
-    (when (and dsh-emacs-poll-fallback
-               (not dsh-emacs--event-ready)
-               (not (timerp dsh-emacs--poll-timer)))
-      (let ((warn-deadline (+ (float-time) (or dsh-emacs-poll-warn-delay 0.0))))
-        (let ((timer (run-with-timer 0 dsh-emacs-poll-interval
-                                     (lambda ()
-                                       (when (buffer-live-p buffer)
-                                         (with-current-buffer buffer
-                                           ;; 延迟一次性提示：轮询持续超过阈值
-                                           ;; 仍无 WS 时才提示；101 处理器会取消
-                                           ;; 本定时器，恢复后不再提示。
-                                           (unless dsh-emacs--poll-warned
-                                             (when (and (not dsh-emacs--event-ready)
-                                                        (> (float-time) warn-deadline))
-                                               (setq dsh-emacs--poll-warned t)
-                                               (message "dsh: event stream connecting, replies shown temporarily via polling (switches back to realtime when connected)")))
-                                           (dsh-emacs--poll-update)))))))
-          ;; 保存 timer 以便后续清理
-          (setq-local dsh-emacs--poll-timer timer))))))
-
-(defun dsh-emacs--poll-update ()
-  "Poll once for updates."
-  ;; 隐藏的聊天缓冲不轮询：1Hz 的全量 `session.history'（~850 条原始事件）
-  ;; HTTP 往返 + 渲染是全局卡顿的主要来源之一，而不可见缓冲的渲染没有
-  ;; 意义。切回该缓冲后下一个 tick（≤1s）立即恢复，且 WS 恢复时 101 处理器
-  ;; 仍会照常取消本定时器。
-  ;; 打开窗口（`dsh-emacs--event-history-loading' 为真）也不轮询：该窗口的
-  ;; 事件缺口由 load-history + 有界补拉专门覆盖，而轮询的 stream=t 渲染会
-  ;; 重放首屏刻意跳过的旧 chunk 增量（大会话/慢链路下打开开销被抬回去）；
-  ;; loading 一旦清除（≤ refetch 轮数），tick 立即恢复。
-  (when (and (not dsh-emacs--event-history-loading)
-             (not (active-minibuffer-window))
-             (get-buffer-window (current-buffer) 0))
-    ;; 只拉取最新的事件窗口（maxMessages 语义 = 最新 N 条消息的事件，
-    ;; 服务端最少返回约 850 条原始事件，一分钟内的新内容必然在其中），
-    ;; 由渲染层按 seq 锚点跳过已渲染部分。全量历史（可达数万条/数 MB JSON）
-    ;; 只在会话打开时加载一次；轮询每次都解析全量是本包卡顿的主要来源。
-    ;; The timer runs at a Web-like cadence, but HTTP responses can take
-    ;; longer than that cadence.  Never issue overlapping history requests:
-    ;; overlapping callbacks would race the seq anchor and make chunks appear
-    ;; out of order.
-    (unless dsh-emacs--poll-inflight
-    (setq dsh-emacs--poll-inflight t)
-    (dsh-emacs--rpc-async "session.history"
-                          `((sessionId . ,(dsh-emacs--active-session-id))
-                            (maxMessages . 50))
-                          (lambda (ok value)
-                            (setq dsh-emacs--poll-inflight nil)
-                            (if ok
-                                (let ((events (dsh-emacs--sequence-list
-                                               (cdr (assq 'events value)))))
-                                  ;; Use the render module's batch function which
-                                  ;; processes only newly arrived chunks.
-                                  (dsh-emacs-render-history-events events t))
-                              (message "Polling error: %S" value))
-                            ;; Do NOT stop the spinner from the raw window tail:
-                            ;; the fetched window (maxMessages => ~850 raw
-                            ;; events) can end at the *previous* turn's
-                            ;; turn/end even while the current turn is still
-                            ;; in flight, so a tail check would kill the busy
-                            ;; flag (and with it the C-c C-c interrupt gate)
-                            ;; mid-turn.  The spinner clears at render time
-                            ;; when a *new* `turn/end' (seq > anchor) is
-                            ;; processed; a stale, already-rendered tail is
-                            ;; skipped by the anchor diff and must change
-                            ;; nothing.  Also never cancel the poll timer here:
-                            ;; while the WebSocket is wedged this timer is the
-                            ;; ONLY channel that will ever show the reply (the
-                            ;; 101 handler / disconnect / watchdog own
-                            ;; stopping it instead).
-                            )))))
 
 (defun dsh-emacs-refresh ()
   "Refresh the current chat buffer's session history.
