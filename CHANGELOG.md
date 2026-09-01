@@ -135,6 +135,13 @@ minor) and stay undated until the release is cut.
   load gap is covered by the bounded re-fetch, and a poll tick's
   chunk-replay rendering would otherwise re-impose the "replay old deltas"
   cost the snapshot-first page render was designed to avoid.
+- **Cursor never rests on the input prompt**: the read-only stretch on the
+  input line before the `❯ ' prompt is now a no-park zone — `C-a` in the
+  input or a stray click lands the cursor at the edit start after the
+  prompt instead of on the icon.  A repaired input marker is likewise
+  anchored on the actual `❯ ' glyph (scanning the prompt line instead of
+  skipping a fixed two characters), so the edit start tracks the real
+  prompt even when the prompt's face run starts further left.
 
 ### Documentation
 

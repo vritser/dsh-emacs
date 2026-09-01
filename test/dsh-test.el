@@ -1332,6 +1332,53 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (kill-buffer chat)
     (kill-buffer other)))
 
+;; --- 测试 33c: 输入行禁停区（`❯ ' 图标及其左侧）光标被拉回编辑起点 ---
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let ((dsh-emacs--current-buffer (current-buffer)))
+    (let* ((mpos (marker-position dsh-emacs--input-marker))
+           (line-start (save-excursion
+                         (goto-char mpos)
+                         (line-beginning-position))))
+      ;; 行首（`C-a' 后的落点，图标左侧）→ 拉到编辑起点
+      (goto-char line-start)
+      (dsh-emacs--lock-cursor-to-input)
+      (dsh-test-assert "cursor-prompt-zone-line-start-clamped"
+        (= (point) mpos))
+      ;; 图标字符本身（编辑起点前两个字符）→ 拉到编辑起点
+      (goto-char (- mpos 2))
+      (dsh-emacs--lock-cursor-to-input)
+      (dsh-test-assert "cursor-prompt-glyph-clamped"
+        (= (point) mpos))
+      ;; 恰好停在编辑起点 → 不被误伤
+      (goto-char mpos)
+      (dsh-emacs--lock-cursor-to-input)
+      (dsh-test-assert "cursor-edit-start-not-moved"
+        (= (point) mpos))
+      ;; 转录区（禁停区之上）→ 不被误伤
+      (goto-char (point-min))
+      (let ((p (point)))
+        (dsh-emacs--lock-cursor-to-input)
+        (dsh-test-assert "cursor-transcript-above-untouched"
+          (= (point) p))))))
+
+;; --- 测试 33d: 输入 marker 修复按 `❯ ' 定位而非固定跳过 ---
+;; 队列前缀与提示符共享 prompt face 时，anchor 落在前缀开头；修复必须
+;; 落在 `❯ ' 之后，而不是固定前跳 2 字符钻入前缀内部。
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let ((inhibit-read-only t))
+    (goto-char (dsh-emacs-render--input-anchor-pos))
+    (insert (propertize "[next: fix] " 'face 'dsh-emacs-input-prompt-face
+                        'read-only t))
+    (let ((expect (marker-position dsh-emacs--input-marker)))
+      (dsh-test-assert "prompt-anchor-moves-to-prefix-start"
+        (= (dsh-emacs-render--input-anchor-pos) (- expect 14)))
+      (setq dsh-emacs--input-marker nil)
+      (dsh-emacs--ensure-input-marker)
+      (dsh-test-assert "marker-repaired-after-prompt-glyph"
+        (= (marker-position dsh-emacs--input-marker) expect)))))
+
 ;; --- 测试 34: 运行中工具无 spinner 动画（行首图标）+ 完成后行不消失 ---
 (with-temp-buffer
   (dsh-emacs-mode)

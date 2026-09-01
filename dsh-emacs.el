@@ -874,7 +874,13 @@ input is rejected).  C-g cancels the whole session creation."
 (defun dsh-emacs--ensure-input-marker ()
   "Repair the chat input marker when it was lost, without touching content.
 The prompt anchor is located by its face; the marker is re-created right
-after the `❯ ' prompt so input sync and transcript rendering keep working."
+after the `❯ ' prompt so input sync and transcript rendering keep working.
+The glyph is found by scanning forward on the anchor's line instead of a
+blind 2-char skip: the anchor sits at the start of the prompt-face run,
+which may start left of the prompt itself (e.g. a queue prefix sharing
+the prompt face), and the marker must land after the prompt, not at the
+run start.  When no `❯ ' is found ahead of the anchor, the fixed skip is
+kept as a fallback."
   (when (and (fboundp 'dsh-emacs-render--input-anchor-pos)
              (or (null dsh-emacs--input-marker)
                  (not (and (markerp dsh-emacs--input-marker)
@@ -885,26 +891,44 @@ after the `❯ ' prompt so input sync and transcript rendering keep working."
         (setq dsh-emacs--input-marker
               (save-excursion
                 (goto-char anchor)
-                (forward-char 2)      ; skip "❯ "
-                (point-marker)))))))
+                (if (search-forward "❯ " (line-end-position) t)
+                    (point-marker)
+                  (forward-char 2)      ; skip "❯ "
+                  (point-marker))))))))
 
 (defun dsh-emacs--lock-cursor-to-input ()
-  "Clamp the cursor to the end of the editable input area (post-command).
-Moving up into the read-only transcript to read history is allowed; only
-positions BELOW the input area are clamped back to its end.  The clamp is
-area-based (`dsh-emacs--input-end'), not line-based, so a multi-line input
-is unaffected — the cursor may roam anywhere inside the editable region.
-Runs in every dsh-emacs-mode buffer (buffer-local hook) independent of the
-global `dsh-emacs--current-buffer', so it also holds in an inactive chat
-buffer while another session is the last-opened one."
+  "Clamp the cursor around the editable input area (post-command).
+Two, complementary clamps:
+- BELOW: positions past the end of the input area are pulled back to its
+  end, so the cursor can never rest under the input line.
+- ABOVE, on the input line itself: the read-only stretch from the start
+  of the input line up to the `❯ ' prompt is a no-park zone — e.g. after
+  `C-a' in the input or a stray click — and point is pulled to the edit
+  start after the prompt; the prompt icon is strictly non-resting while
+  the transcript above the input line stays freely readable.
+The BELOW clamp is area-based (`dsh-emacs--input-end'), not line-based,
+and the ABOVE clamp touches only the input line's left margin, so a
+multi-line input is unaffected — the cursor may roam anywhere inside the
+editable region.  Runs in every dsh-emacs-mode buffer (buffer-local
+hook) independent of the global `dsh-emacs--current-buffer', so it also
+holds in an inactive chat buffer while another session is the
+last-opened one."
   (dsh-emacs--ensure-input-marker)
   (when (and dsh-emacs--input-marker
              (markerp dsh-emacs--input-marker)
              (eq (marker-buffer dsh-emacs--input-marker) (current-buffer)))
     (let* ((marker-pos (marker-position dsh-emacs--input-marker))
-           (input-end (max marker-pos (dsh-emacs--input-end))))
-      (when (> (point) input-end)
-        (goto-char input-end)))))
+           (input-end (max marker-pos (dsh-emacs--input-end)))
+           ;; 输入行行首（`❯ ' 所在行）：该行内、图标左侧属于禁停区。
+           (line-start (save-excursion
+                         (goto-char marker-pos)
+                         (line-beginning-position))))
+      (cond
+       ((> (point) input-end)
+        (goto-char input-end))
+       ((and (< (point) marker-pos)
+             (>= (point) line-start))
+        (goto-char marker-pos))))))
 
 (defun dsh-emacs--route-typing-to-input ()
   "When about to type or edit while point is in the read-only region, first\nmove the cursor back to the input area after `❯ '.\n
