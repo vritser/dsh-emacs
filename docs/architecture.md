@@ -13,6 +13,7 @@ dsh-emacs/
 ├── dsh-emacs-render.el       # Event renderer (user/assistant/tool/thinking)
 ├── dsh-emacs-events.el       # Event stream: native WebSocket + reconnect
 ├── dsh-emacs-modeline.el       # Mode-line stats
+├── dsh-emacs-queue.el        # Pending-input queue mirror (queue/steer)
 ├── dsh-emacs-server.el       # Server bootstrap: probe / auto-start / install
 └── dsh-emacs-session.el      # Session list card view
 ```
@@ -59,13 +60,46 @@ directly, with no server-side changes required:
 | `session.list` | List sessions (including running status, title, cwd) |
 | `session.create` | Create a session |
 | `session.history` | Read event history (incremental, anchor-diffed rendering) |
-| `session.prompt` | Send a message (text and/or inline base64 image attachments) |
-| `session.cancel` | Interrupt the running turn (partial reply is kept) |
+| `session.prompt` | Send a message (`mode: "queue"` = next turn, `"steer"` = wake the running agent; text and/or inline base64 image attachments) |
+| `session.updateQueue` | Manage pending inbox items (`edit` text / `remove` / `steer` by itemId) |
+| `session.cancel` | Interrupt the running turn (partial reply is kept, inbox preserved) |
 | `session.fork` | Branch a session into a child inheriting its history |
 | `session.models` | List the routable model catalog for a session |
 | `session.selectModel` | Switch the session's model |
 | `session.rename` | Rename a session |
 | `workspace.archiveSession` | Archive a session (remove from its workspace view) |
+
+## Pending-input queue (`session/queue` frames)
+
+Input sent while a turn runs is delivered through the agent inbox:
+`queue` lands in next-turn (the next turn), `steer` in next-step (before
+the running agent's next step).  The host pushes the authoritative
+snapshot as `session/queue` mux frames — once per connection for sessions
+with pending items, and on every inbox splice thereafter — so
+`dsh-emacs-queue.el` only mirrors frames (no fetch RPC, no local drift).
+The wire item shape (`id`, `placement` = `queued`/`steering`/`context`,
+`message.content`) is normalized to `dsh-protocol-queue-item` in
+`dsh-emacs-protocol.el`.  The mirror drives the mode-line `[Qn Sm]`
+indicator, the echo-area feedback (enqueue / steer / consumption,
+diffed against the previous mirror, with locally-deleted ids suppressed),
+the input-prompt prefix — a small clock icon (SVG `currentColor`
+mapped to the prompt face's foreground, `[next: …] ` brackets as
+fallback when Emacs lacks SVG support) followed by the next message
+the host will send: the preview follows the host's delivery order, so
+an item steered into the running turn (`steering`, next-step, injected
+at the agent's next step) leads it ahead of items queued for the next
+turn (`queued`, next-turn); our own steer/delete/edit RPCs update the
+mirror optimistically on
+success, so the hint and mode-line refresh immediately without waiting
+for the confirming frame; prefix repaints are coalesced per frame burst
+(one zero-delay timer paints the settled mirror), so an item the host
+splices and instantly claims never flashes the hint),
+and the `C-c C-q` manager (a
+minibuffer candidate list whose single keys `e`/`s`/`d`/`RET` act on the
+highlighted item; `x` deletes the whole queue).  `context`
+items (host-injected next-step content) are mirrored but never counted,
+previewed, or listed; `steering` items count and list, and — as the
+next thing the host injects — head the preview.
 
 ## Event rendering flow
 

@@ -38,6 +38,7 @@
 ;;                        └─ dsh-protocol-command-input (hint images)
 ;;   commands.execute → dsh-protocol-command-execution (command-id
 ;;                        result kind text)
+;;   session/queue    → dsh-protocol-queue-item (id placement text kind)
 ;;
 ;; 转换入口都接受 wire alist；注意 wire 中的数组（vector）在 struct 里
 ;; 一律归一为 list。业务代码写入缓存 struct 后，读取统一用 `dsh-protocol-*'
@@ -386,6 +387,54 @@ placeholder, IMAGES whether the command accepts inline images."
   result
   kind
   text)
+
+;; ---------------------------------------------------------------------------
+;; session/queue mux frame items
+;; ---------------------------------------------------------------------------
+
+;; The `session/queue' frame VALUE is `{items: [...]}' — one placement-tagged
+;; inbox entry per item.  Items map through
+;; `dsh-protocol-queue-item--from-alist' directly.
+
+(cl-defstruct (dsh-protocol-queue-item
+               (:constructor dsh-protocol-queue-item--from-alist
+                             (alist
+                              &aux
+                              (id (or (cdr (assq 'id alist))
+                                      (let ((m (cdr (assq 'message alist))))
+                                        (and m (cdr (assq 'id m))))))
+                              (placement
+                               (let ((p (cdr (assq 'placement alist))))
+                                 (and (stringp p) (intern p))))
+                              (text
+                               (let ((m (cdr (assq 'message alist))))
+                                 (mapconcat
+                                  (lambda (block)
+                                    (or (and (equal (cdr (assq 'type block))
+                                                    "text")
+                                             (cdr (assq 'text block)))
+                                        ""))
+                                  (dsh-protocol--list
+                                   (and m (cdr (assq 'content m))))
+                                  "")))
+                              (kind
+                               (let* ((m (cdr (assq 'message alist)))
+                                      (s (and m (cdr (assq 'source m)))))
+                                 (and s (cdr (assq 'kind s))))))))
+  "One `session/queue' frame item: PLACEMENT is `queued' (next turn),
+`steering' (next step) or `context' (host-injected next-step content);
+TEXT the message's text blocks concatenated, KIND the message's source
+kind (`user' for real user input)."
+  id
+  placement
+  text
+  kind)
+
+(defun dsh-protocol-queue-items-from-alist (value)
+  "Normalize a `session/queue' frame VALUE's items into structs."
+  (mapcar #'dsh-protocol-queue-item--from-alist
+          (dsh-protocol--list (and (listp value)
+                                   (cdr (assq 'items value))))))
 
 (defun dsh-protocol--struct (struct-alist-pred constructor value)
   "Return VALUE as a struct via CONSTRUCTOR if needed.

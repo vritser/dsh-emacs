@@ -42,6 +42,10 @@
 (declare-function doom-modeline-add-segment "doom-modeline-core" (segment anchor &optional position modeline))
 (declare-function doom-modeline-remove-segment "doom-modeline-core" (segment &optional modeline))
 
+;; 队列指示器（dsh-emacs 装配 dsh-emacs-queue，运行时反向读取）。
+(declare-function dsh-emacs-queue-counts "dsh-emacs-queue" ())
+(declare-function dsh-emacs-list-queue "dsh-emacs-queue" ())
+
 ;;; ---------------------------------------------------------------------------
 ;;; 定制
 ;;; ---------------------------------------------------------------------------
@@ -611,6 +615,30 @@ running (space on both sides, ready to sit right after the DSH mode name)."
                   'help-echo "dsh is running a request…"
                   'mouse-face 'mode-line-highlight))))
 
+(defun dsh-emacs-modeline--queue-indicator ()
+  "Return the pending-input queue indicator, e.g. \" [Q2 S1]\".
+Empty while nothing is pending, so the mode line is untouched; zero-count
+placements are omitted (\"[Q2]\", \"[S1]\").  Mouse-1 opens the queue
+manager.  `context' placement items (host-injected next-step content)
+are not counted, matching dsh web's QueueDock."
+  (if (derived-mode-p 'dsh-emacs-mode)
+      (let* ((counts (dsh-emacs-queue-counts))
+             (q (car counts))
+             (s (cdr counts))
+             (parts (append (unless (zerop q) (list (format "Q%d" q)))
+                            (unless (zerop s) (list (format "S%d" s))))))
+        (if parts
+            (propertize (format " [%s]" (string-join parts " "))
+                        'face 'dsh-emacs-modeline-queue-face
+                        'help-echo "Pending messages (queue/steer); mouse-1 to manage"
+                        'mouse-face 'mode-line-highlight
+                        'local-map (let ((map (make-sparse-keymap)))
+                                     (define-key map [mode-line mouse-1]
+                                                 #'dsh-emacs-list-queue)
+                                     map))
+          ""))
+    ""))
+
 (defun dsh-emacs-modeline--escape-percent (txt)
   "Escape `%' in TXT for mode-line display, keeping text properties.
 Mode-line strings undergo `%'-sequence expansion, so a literal `%' must be
@@ -658,8 +686,9 @@ visible at the left edge of the line instead of being clipped past the
 width-filling renderer.  BASE is the pre-existing mode-line-format list."
   (let* ((stats '(:eval (dsh-emacs-modeline--modeinline)))
          (anim '(:eval (dsh-emacs-modeline--ml-indicator)))
-         ;; 动画紧跟模式名（DSH 之后），统计段跟在动画后面。
-         (segments (list anim stats)))
+         (queue '(:eval (dsh-emacs-modeline--queue-indicator)))
+         ;; 动画与队列指示器紧跟模式名（DSH 之后），统计段跟在最后。
+         (segments (list anim queue stats)))
     (cond
      ((memq 'mode-line-modes base)
       ;; Insert directly after the mode names cluster.
@@ -682,6 +711,7 @@ outside a dsh-emacs buffer, so doom-modeline's layout stays untouched."
   (if (not (derived-mode-p 'dsh-emacs-mode))
       ""
     (concat (dsh-emacs-modeline--ml-indicator)
+            (dsh-emacs-modeline--queue-indicator)
             (dsh-emacs-modeline--modeinline))))
 
 (defun dsh-emacs-modeline--install-doom-segment ()

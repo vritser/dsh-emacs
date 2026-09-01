@@ -3986,7 +3986,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                        (funcall cb t nil)))
                     ((symbol-function 'dsh-emacs--ml-busy-set)
                      (lambda (&rest _) nil)))
-            (dsh-emacs--interrupt-turn))
+            (dsh-emacs-interrupt-turn))
           (when (and sent
                      (equal (list "session.cancel" "sess-a") (car sent)))
             (dsh-test-pass "interrupt-in-inactive-buffer-targets-own-session")))
@@ -7665,6 +7665,821 @@ candidates as the UI would via `all-completions', not by destructuring."
     ;; workspace 名打进过滤器匹配不到任何候选
     (null (all-completions "WS1" table))
     (null (all-completions "Workspace" table))))
+;;; ---------------------------------------------------------------------------
+;;; 队列/引导（session/queue）：协议转换、镜像 diff、管理辅助
+;;; ---------------------------------------------------------------------------
+
+(defun dsh-emacs-test--queue-item (id placement text &optional kind)
+  "Build one wire-shaped `session/queue' frame item for tests."
+  (list (cons 'id id)
+        (cons 'placement placement)
+        (cons 'message (list (cons 'id id)
+                             (cons 'role "user")
+                             (cons 'content
+                                   (if text
+                                       (vector (list (cons 'type "text")
+                                                     (cons 'text text)))
+                                     []))
+                             (cons 'source (list (cons 'kind
+                                                       (or kind "user"))))))))
+
+;; 协议层：wire alist → struct（字段名只在构造器里出现）
+(let ((item (dsh-protocol-queue-item--from-alist
+             (dsh-emacs-test--queue-item "m1" "steering" "fix the bug"))))
+  (dsh-test-assert "queue-protocol-item-extracts-fields"
+    (equal "m1" (dsh-protocol-queue-item-id item))
+    (eq 'steering (dsh-protocol-queue-item-placement item))
+    (equal "fix the bug" (dsh-protocol-queue-item-text item))
+    (equal "user" (dsh-protocol-queue-item-kind item))))
+
+;; 协议层：帧 value（items 为 vector）→ struct 列表；缺 items 时安全为空
+(let ((items (dsh-protocol-queue-items-from-alist
+              (list (cons 'items
+                          (vector (dsh-emacs-test--queue-item
+                                   "a" "queued" "first")
+                                  (dsh-emacs-test--queue-item
+                                   "b" "context" nil "system-summary")))))))
+  (dsh-test-assert "queue-protocol-frame-value-normalized"
+    (= 2 (length items))
+    (equal "first" (dsh-protocol-queue-item-text (nth 0 items)))
+    (eq 'context (dsh-protocol-queue-item-placement (nth 1 items))))
+  (dsh-test-assert "queue-protocol-frame-value-missing-items-empty"
+    (null (dsh-protocol-queue-items-from-alist nil))
+    (null (dsh-protocol-queue-items-from-alist '((other . 1))))))
+
+;; 计数：context placement 不进 Q/S 口径（对齐 dsh web QueueDock）
+(dsh-test-assert "queue-counts-ignores-context"
+  (equal '(2 . 1)
+         (dsh-emacs-queue--counts-of
+          (list (dsh-protocol-queue-item--from-alist
+                 (dsh-emacs-test--queue-item "1" "queued" "a"))
+                (dsh-protocol-queue-item--from-alist
+                 (dsh-emacs-test--queue-item "2" "queued" "b"))
+                (dsh-protocol-queue-item--from-alist
+                 (dsh-emacs-test--queue-item "3" "steering" "c"))
+                (dsh-protocol-queue-item--from-alist
+                 (dsh-emacs-test--queue-item "4" "context" "d"))))))
+
+;; 预览：取首行、超长截断
+(dsh-test-assert "queue-preview-first-line-and-truncation"
+  (equal "one" (dsh-emacs-queue-preview "one\ntwo"))
+  (equal "abcdefghij" (dsh-emacs-queue-preview "abcdefghij"))
+  (equal 40 (length (dsh-emacs-queue-preview
+                     (make-string 100 ?x))))
+  (string-suffix-p "..." (dsh-emacs-queue-preview (make-string 100 ?x))))
+
+;; diff：消费（消失）、新排队、新引导、提升
+(let* ((old (list (dsh-protocol-queue-item--from-alist
+                   (dsh-emacs-test--queue-item "keep" "queued" "kept"))
+                  (dsh-protocol-queue-item--from-alist
+                   (dsh-emacs-test--queue-item "gone" "queued" "consumed one")))
+                 )
+       (new (list (dsh-protocol-queue-item--from-alist
+                   (dsh-emacs-test--queue-item "keep" "queued" "kept"))
+                  (dsh-protocol-queue-item--from-alist
+                   (dsh-emacs-test--queue-item "newq" "queued" "lined up"))
+                  (dsh-protocol-queue-item--from-alist
+                   (dsh-emacs-test--queue-item "news" "steering" "steered in"))))
+       (events (dsh-emacs-queue--diff-events old new nil)))
+  (dsh-test-assert "queue-diff-events-consume-queue-steer"
+    (member (cons 'running "consumed one") events)
+    (member (cons 'queued "lined up") events)
+    (member (cons 'steering "steered in") events)
+    (= 3 (length events))))
+
+;; diff：本端删除的 id 不产生 running 反馈（删除被确认≠消费）
+(let* ((item (dsh-protocol-queue-item--from-alist
+              (dsh-emacs-test--queue-item "del" "queued" "deleted one")))
+       (events (dsh-emacs-queue--diff-events (list item) nil '("del"))))
+  (dsh-test-assert "queue-diff-events-suppresses-deleted"
+    (null events))
+  (dsh-test-assert "queue-diff-events-foreign-disappearance-is-consumption"
+    (equal '((running . "deleted one"))
+           (dsh-emacs-queue--diff-events (list item) nil nil))))
+
+;; diff：queued→steering 提升（另一端发起）报 steering
+(let* ((old (list (dsh-protocol-queue-item--from-alist
+                   (dsh-emacs-test--queue-item "p" "queued" "promoted"))))
+       (new (list (dsh-protocol-queue-item--from-alist
+                   (dsh-emacs-test--queue-item "p" "steering" "promoted"))))
+       (events (dsh-emacs-queue--diff-events old new nil)))
+  (dsh-test-assert "queue-diff-events-promotion-is-steering"
+    (equal '((steering . "promoted")) events)))
+
+;; 帧应用：连接首帧静默播种（不回放历史反馈），后续帧更新镜像
+(let ((buf (get-buffer-create " *t-queue-apply*")))
+  (unwind-protect
+      (progn
+        (with-current-buffer buf
+          (dsh-emacs-mode)
+          (dsh-emacs-queue-apply buf 'proc-1
+                                 (list (cons 'items
+                                             (vector (dsh-emacs-test--queue-item
+                                                      "s1" "queued" "seeded")))))
+          (dsh-test-assert "queue-apply-seeds-first-frame-silently"
+            (= 1 (length dsh-emacs--queue-items))
+            (equal "seeded" (dsh-protocol-queue-item-text
+                             (car dsh-emacs--queue-items))))
+          ;; 同一连接的第二帧：镜像全量替换
+          (dsh-emacs-queue-apply buf 'proc-1
+                                 (list (cons 'items
+                                             (vector (dsh-emacs-test--queue-item
+                                                      "s1" "queued" "seeded")
+                                                     (dsh-emacs-test--queue-item
+                                                      "s2" "steering" "added")))))
+          (dsh-test-assert "queue-apply-replaces-mirror"
+            (= 2 (length dsh-emacs--queue-items))
+            (eq 'steering (dsh-protocol-queue-item-placement
+                           (cadr dsh-emacs--queue-items))))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; 事件分发级：mux 的 session/queue 帧（payload 带 items 数组）按
+;; buffer-local 会话路由到本缓冲的 dsh-emacs-queue-apply——镜像与 [next]
+;; 前缀即时更新；其它会话的帧被网关过滤，不碰镜像。
+(let ((chat (get-buffer-create " *t-queue-dispatch*"))
+      (proc (make-pipe-process :name "t-queue-proc" :buffer nil))
+      (paints nil))
+  (unwind-protect
+      (progn
+        (process-put proc 'dsh-emacs-chat-buffer chat)
+        (with-current-buffer chat
+          (dsh-emacs-mode)
+          (setq-local dsh-emacs--buffer-session "sess-q")
+          (cl-letf (((symbol-function 'run-at-time)
+                     (lambda (_delay _repeat fn) (push fn paints) t)))
+            ;; 匹配会话的帧 → 路由到 queue-apply；突发结束重绘一次后前缀可见
+            (let ((item (dsh-emacs-test--queue-item "q1" "queued" "dispatched")))
+              (dsh-emacs-events--dispatch-json
+               proc
+               (json-encode
+                (list (cons 'payload
+                            (list (cons 'type "session/queue")
+                                  (cons 'sessionId "sess-q")
+                                  (cons 'items (vector item)))))))
+              (funcall (car paints))
+              (setq paints nil))
+            (dsh-test-assert "queue-frame-dispatch-routes-to-chat"
+              (= 1 (length dsh-emacs--queue-items))
+              (equal "dispatched"
+                     (dsh-protocol-queue-item-text (car dsh-emacs--queue-items)))
+              dsh-emacs--queue-prefix)
+            ;; 其它会话的帧 → 网关过滤，镜像与前缀原样
+            (dsh-emacs-events--dispatch-json
+             proc
+             (json-encode
+              '((payload . ((type . "session/queue")
+                            (sessionId . "sess-other")
+                            (items . []))))))
+            (dsh-test-assert "queue-frame-dispatch-filters-foreign-session"
+              (= 1 (length dsh-emacs--queue-items))
+              (equal "dispatched"
+                     (dsh-protocol-queue-item-text (car dsh-emacs--queue-items)))
+              dsh-emacs--queue-prefix))))
+    (when (buffer-live-p chat) (kill-buffer chat))
+    (when (process-live-p proc) (delete-process proc))))
+
+;; 模式行指示器：空队列隐藏，非空显示 [Qn Sm]，context 不计
+(let ((buf (get-buffer-create " *t-queue-indicator*")))
+  (unwind-protect
+      (progn
+        (with-current-buffer buf
+          (dsh-emacs-mode)
+          (dsh-test-assert "queue-indicator-hidden-when-empty"
+            (string-empty-p (dsh-emacs-modeline--queue-indicator)))
+          (setq dsh-emacs--queue-items
+                (list (dsh-protocol-queue-item--from-alist
+                       (dsh-emacs-test--queue-item "1" "queued" "a"))
+                      (dsh-protocol-queue-item--from-alist
+                       (dsh-emacs-test--queue-item "2" "queued" "b"))
+                      (dsh-protocol-queue-item--from-alist
+                       (dsh-emacs-test--queue-item "3" "steering" "c"))))
+          (let ((ind (dsh-emacs-modeline--queue-indicator)))
+            (dsh-test-assert "queue-indicator-shows-counts"
+              (string-match-p "\\[Q2 S1\\]" ind)
+              (eq 'dsh-emacs-modeline-queue-face
+                  (get-text-property 0 'face ind)))))
+        ;; 非 dsh 缓冲不碰 mode line
+        (with-temp-buffer
+          (dsh-test-assert "queue-indicator-outside-chat-empty"
+            (string-empty-p (dsh-emacs-modeline--queue-indicator)))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; next 预览 = 宿主实际发送顺序的下一条：在途 steering（next-step，注入到
+;; 正在跑的 agent 下一次 step）优先于 queued（next-turn）；context 是宿主
+;; 注入内容、永不预览。即"steer 哪条，next 就显示哪条（当它成为 next-step）"
+(let* ((steer-two (mapcar (lambda (x) (dsh-protocol-queue-item--from-alist x))
+                          (list (dsh-emacs-test--queue-item "a" "steering" "Alpha")
+                                (dsh-emacs-test--queue-item "c" "steering" "Charlie")
+                                (dsh-emacs-test--queue-item "b" "queued" "Beta"))))
+       (mixed (list (dsh-protocol-queue-item--from-alist
+                     (dsh-emacs-test--queue-item "a" "steering" "Alpha"))
+                    (dsh-protocol-queue-item--from-alist
+                     (dsh-emacs-test--queue-item "b" "queued" "Beta"))))
+       (queued-only (list (dsh-protocol-queue-item--from-alist
+                           (dsh-emacs-test--queue-item "b" "queued" "Beta"))))
+       (context-first (list (dsh-protocol-queue-item--from-alist
+                             (dsh-emacs-test--queue-item "x" "context" "X"))
+                            (dsh-protocol-queue-item--from-alist
+                             (dsh-emacs-test--queue-item "b" "queued" "Beta"))
+                            (dsh-protocol-queue-item--from-alist
+                             (dsh-emacs-test--queue-item "a" "steering" "Alpha")))))
+  (let ((dsh-emacs--queue-items steer-two))
+    (dsh-test-assert "queue-next-item-steering-led"
+      (equal "Alpha" (dsh-protocol-queue-item-text
+                      (dsh-emacs-queue--next-item)))))
+  (let ((dsh-emacs--queue-items mixed))
+    (dsh-test-assert "queue-next-item-steering-over-queued"
+      (equal "Alpha" (dsh-protocol-queue-item-text
+                      (dsh-emacs-queue--next-item)))))
+  (let ((dsh-emacs--queue-items queued-only))
+    (dsh-test-assert "queue-next-item-falls-back-to-queued"
+      (equal "Beta" (dsh-protocol-queue-item-text
+                     (dsh-emacs-queue--next-item)))))
+  (let ((dsh-emacs--queue-items context-first))
+    (dsh-test-assert "queue-next-item-skips-context"
+      (equal "Alpha" (dsh-protocol-queue-item-text
+                      (dsh-emacs-queue--next-item)))))
+  (let ((dsh-emacs--queue-items nil))
+    (dsh-test-assert "queue-next-item-empty-nil"
+      (null (dsh-emacs-queue--next-item)))))
+
+;; 前缀构建：SVG 图标路径（icon + 空格 + 文本，display 属性保留、整串带
+;; prompt face）与无 SVG 回退（[next: …]）；两者都保持"整串共享 prompt
+;; face"的合并 run 不变式（anchor 扫描 / 字节级删除依赖它）
+(let ((icon (propertize " " 'display '(image :type svg :data "x"))))
+  (cl-letf (((symbol-function 'dsh-emacs-queue--next-icon) (lambda () icon)))
+    (let ((prefix (dsh-emacs-queue--prefix "Alpha")))
+      (dsh-test-assert "queue-prefix-icon-shape"
+        (string= "  Alpha " (substring-no-properties prefix))
+        (equal '(image :type svg :data "x")
+               (get-text-property 0 'display prefix))
+        (eq 'dsh-emacs-input-prompt-face
+            (get-text-property 0 'face prefix))
+        (eq 'dsh-emacs-input-prompt-face
+            (get-text-property (- (length prefix) 2) 'face prefix)))))
+  (cl-letf (((symbol-function 'dsh-emacs-queue--next-icon) (lambda () nil)))
+    (let ((prefix (dsh-emacs-queue--prefix "Alpha")))
+      (dsh-test-assert "queue-prefix-bracket-fallback"
+        (string= "[next: Alpha] " (substring-no-properties prefix))
+        (eq 'dsh-emacs-input-prompt-face
+            (get-text-property 0 'face prefix))))))
+
+;; 集成回归：steer 一条后，服务器先推 remove 帧（镜像清空）、再推 next-step
+;; 帧（条目以 steering 回归）——按宿主发送顺序，在途 steering 就是下一条，
+;; 所以 reinsert 后 next 预览显示该条目。前缀重绘按帧突发合并（run-at-time
+;; 0）：remove+reinsert 打进同一突发时只画最终态，remove 造成的瞬时空窗不上屏。
+(let ((buf (get-buffer-create " *t-queue-prefix-clear*"))
+      (paints nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (cl-letf (((symbol-function 'run-at-time)
+                   (lambda (_delay _repeat fn) (push fn paints) t))
+                  ;; echo 自清除计时器走 run-with-timer（内部也经 run-at-time），
+                  ;; 一并接管，避免 flash 闭包混进 paints
+                  ((symbol-function 'run-with-timer)
+                   (lambda (&rest _) t)))
+          ;; 突发 1：播种帧 → 突发结束重绘一次
+          (dsh-emacs-queue-apply
+           buf 'proc
+           (list (cons 'items
+                       (vector (dsh-emacs-test--queue-item
+                                "a" "queued" "Alpha")))))
+          (funcall (car paints))
+          (setq paints nil)
+          (dsh-test-assert "queue-prefix-steer-before-shows-next"
+            (and dsh-emacs--queue-prefix
+                 (let ((plain (substring-no-properties
+                               dsh-emacs--queue-prefix)))
+                   (and (string-search "Alpha" plain)
+                        ;; SVG 可用：图标前缀以 icon(空格) 开头；否则回退括号形式
+                        (if (image-type-available-p 'svg)
+                            (string-prefix-p " " plain)
+                          (string-search "[next:" plain))))))
+          ;; 突发 2：remove 帧（镜像即时清空，前缀暂不重绘）+ steering 回归帧
+          (dsh-emacs-queue-apply buf 'proc (list (cons 'items [])))
+          (dsh-test-assert "queue-mirror-clears-on-steer-remove"
+            (null dsh-emacs--queue-items)
+            (null (dsh-emacs-queue--next-item)))
+          (dsh-emacs-queue-apply
+           buf 'proc
+           (list (cons 'items
+                       (vector (dsh-emacs-test--queue-item
+                                "a" "steering" "Alpha")))))
+          ;; 两帧合成一次重绘
+          (dsh-test-assert "queue-burst-remove-reinsert-single-paint"
+            (= 1 (length paints)))
+          (funcall (car paints))
+          (setq paints nil)
+          (dsh-test-assert "queue-prefix-steer-reinsert-shows-inflight"
+            (and dsh-emacs--queue-prefix
+                 (string-search "Alpha"
+                                (substring-no-properties
+                                 dsh-emacs--queue-prefix))))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; 闪现回归：宿主 splice 一条 item 后瞬间认领（item→空两帧打进同一突发）时，
+;; [next] 前缀不得上屏——合并重绘只看突发结束后的最终镜像（空 → 无前缀）。
+;; 对照：真正停驻的条目（突发后仍在）→ 重绘后正常显示。
+(let ((buf (get-buffer-create " *t-queue-burst*"))
+      (paints nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-burst")
+        (cl-letf (((symbol-function 'run-at-time)
+                   (lambda (_delay _repeat fn) (push fn paints) t))
+                  ((symbol-function 'run-with-timer)
+                   (lambda (&rest _) t)))
+          ;; 同一突发：入队帧 + 认领帧
+          (dsh-emacs-queue-apply
+           buf 'proc
+           (list (cons 'items
+                       (vector (dsh-emacs-test--queue-item
+                                "b1" "queued" "bursty")))))
+          (dsh-emacs-queue-apply buf 'proc (list (cons 'items [])))
+          (dsh-test-assert "queue-burst-transient-single-paint-scheduled"
+            (= 1 (length paints)))
+          (funcall (car paints))
+          (setq paints nil)
+          (dsh-test-assert "queue-burst-claimed-item-never-paints"
+            (null dsh-emacs--queue-prefix)
+            (null dsh-emacs--queue-items))
+          ;; 对照：条目真实停驻（突发后仍在）→ 重绘后前缀显示
+          (dsh-emacs-queue-apply
+           buf 'proc
+           (list (cons 'items
+                       (vector (dsh-emacs-test--queue-item
+                                "b2" "queued" "parked")))))
+          (funcall (car paints))
+          (setq paints nil)
+          (dsh-test-assert "queue-burst-parked-item-paints"
+            (and dsh-emacs--queue-prefix
+                 (string-search "parked"
+                                (substring-no-properties
+                                 dsh-emacs--queue-prefix))))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; 挂起提交：mode 解析（显式 / behavior 回退）与 payload mode 字段
+(let ((buf (get-buffer-create " *t-queue-deferred*"))
+      (calls nil))
+  (unwind-protect
+      (progn
+        (with-current-buffer buf
+          (setq-local dsh-emacs--buffer-session "sess-q")
+          (setq dsh-emacs--input-marker nil))
+        (let ((dsh-emacs-busy-enter-behavior 'queue))
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (method params _cb)
+                       (push (list method params) calls))))
+            ;; 显式 steer
+            (with-current-buffer buf
+              (dsh-emacs--submit-deferred "redirect now" nil 'steer))
+            ;; behavior=queue 回退
+            (with-current-buffer buf
+              (dsh-emacs--submit-deferred "line up" nil nil))
+            (let ((dsh-emacs-busy-enter-behavior 'steer))
+              (with-current-buffer buf
+                (dsh-emacs--submit-deferred "wake up" nil nil)))
+            (dsh-test-assert "queue-deferred-mode-resolution"
+              (= 3 (length calls))
+              (equal "session.prompt" (car (nth 2 calls)))
+              (equal "steer" (cdr (assq 'mode (cadr (nth 2 calls)))))
+              (equal "queue" (cdr (assq 'mode (cadr (nth 1 calls)))))
+              (equal "steer" (cdr (assq 'mode (cadr (nth 0 calls))))))
+            (dsh-test-assert "queue-deferred-payload-shape"
+              (equal "sess-q" (cdr (assq 'sessionId (cadr (nth 0 calls)))))
+              (equal "wake up"
+                     (cdr (assq 'text
+                                (aref (cdr (assq 'content (cadr (nth 0 calls)))) 0))))))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; C-c C-c 分派：busy + behavior 语义（stop=中断、空输入=中断、queue/steer=挂起提交）
+(let ((buf (get-buffer-create " *t-send-or-stop*"))
+      (interrupted nil)
+      (submitted nil))
+  (unwind-protect
+      (let ((dsh-emacs-busy-enter-behavior 'queue))
+        (cl-letf (((symbol-function 'dsh-emacs-server-ensure) #'ignore)
+                  ((symbol-function 'dsh-emacs--busy-p) (lambda (&rest _) t))
+                  ((symbol-function 'dsh-emacs--get-input)
+                   (lambda (&rest _) "the next thing"))
+                  ((symbol-function 'dsh-emacs-interrupt-turn)
+                   (lambda (&rest _) (setq interrupted t)))
+                  ((symbol-function 'dsh-emacs--submit-prompt)
+                   (lambda (message &optional images mode)
+                     (setq submitted (list message mode)))))
+          ;; busy + queue + 文本 → 挂起提交（mode queue）
+          (with-current-buffer buf
+            (dsh-emacs-send-or-stop))
+          (dsh-test-assert "send-or-stop-busy-queue-submits"
+            (null interrupted)
+            (equal '("the next thing" queue) submitted))
+          ;; C-u 翻转 queue → steer
+          (setq submitted nil current-prefix-arg '(4))
+          (with-current-buffer buf
+            (dsh-emacs-send-or-stop))
+          (dsh-test-assert "send-or-stop-prefix-flips-to-steer"
+            (equal '("the next thing" steer) submitted))
+          ;; busy + 空输入 → 中断
+          (setq submitted nil current-prefix-arg nil)
+          (cl-letf (((symbol-function 'dsh-emacs--get-input)
+                     (lambda (&rest _) "")))
+            (with-current-buffer buf
+              (dsh-emacs-send-or-stop)))
+          (dsh-test-assert "send-or-stop-busy-empty-interrupts"
+            interrupted
+            (null submitted))
+          ;; behavior=stop → 中断（字节级旧行为）
+          (setq interrupted nil submitted nil)
+          (let ((dsh-emacs-busy-enter-behavior 'stop))
+            (with-current-buffer buf
+              (dsh-emacs-send-or-stop)))
+          (dsh-test-assert "send-or-stop-stop-behavior-interrupts"
+            interrupted
+            (null submitted))
+          ;; idle → 普通提交（无 mode）
+          (setq interrupted nil submitted nil)
+          (cl-letf (((symbol-function 'dsh-emacs--busy-p) (lambda (&rest _) nil)))
+            (with-current-buffer buf
+              (dsh-emacs-send-or-stop)))
+          (dsh-test-assert "send-or-stop-idle-submits-plain"
+            (null interrupted)
+            (equal '("the next thing" nil) submitted))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; updateQueue 动作：remove/steer/edit 的 wire 形状
+(let ((buf (get-buffer-create " *t-queue-actions*"))
+      (calls nil))
+  (unwind-protect
+      (progn
+        (with-current-buffer buf
+          (setq-local dsh-emacs--buffer-session "sess-a")
+          (let ((item (dsh-protocol-queue-item--from-alist
+                       (dsh-emacs-test--queue-item "it1" "queued" "x"))))
+            (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                       (lambda (method params _cb)
+                         (push (list method params) calls))))
+              (dsh-emacs-queue--delete item)
+              (dsh-emacs-queue--steer item)
+              (dsh-emacs-queue--edit item "rewritten")
+              (let* ((ordered (nreverse (copy-sequence calls)))
+                     (actions (mapcar (lambda (call)
+                                        (cdr (assq 'action (cadr call))))
+                                      ordered)))
+                (dsh-test-assert "queue-update-wire-actions"
+                  (= 3 (length ordered))
+                  (equal "session.updateQueue" (car (car ordered)))
+                  (equal '((kind . "remove")) (nth 0 actions))
+                  (equal '((kind . "steer")) (nth 1 actions))
+                  (equal "it1" (cdr (assq 'itemId (cadr (car ordered)))))
+                  (equal "sess-a" (cdr (assq 'sessionId (cadr (car ordered)))))
+                  (equal "rewritten"
+                         (cdr (assq 'text
+                                    (aref (cdr (assq 'content (nth 2 actions))) 0)))))))))
+        ;; 删除失败的回滚：消费反馈不被吞
+        (with-current-buffer buf
+          (setq dsh-emacs--queue-deleted '("it1"))
+          (let ((item (dsh-protocol-queue-item--from-alist
+                       (dsh-emacs-test--queue-item "it1" "queued" "x"))))
+            (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                       (lambda (_method _params cb) (funcall cb nil '((code . "x"))))))
+              (dsh-emacs-queue--delete item))
+            (dsh-test-assert "queue-delete-rollback-on-error"
+              (null dsh-emacs--queue-deleted)))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; 本端操作成功即乐观更新镜像：steer 立即可见（placement → steering +
+;; deleted 抑制临时 remove 帧），不等 session/queue 帧往返
+(let ((buf (get-buffer-create " *t-queue-steer-opt*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-opt")
+        (setq dsh-emacs--queue-items
+              (list (dsh-protocol-queue-item--from-alist
+                     (dsh-emacs-test--queue-item "o1" "queued" "origin"))))
+        (let ((cb nil))
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (_method _params callback) (setq cb callback))))
+            (dsh-emacs-queue--steer (car dsh-emacs--queue-items))
+            (dsh-test-assert "queue-steer-before-success-unchanged"
+              (eq 'queued (dsh-protocol-queue-item-placement
+                           (car dsh-emacs--queue-items))))
+            (funcall cb t nil)
+            (dsh-test-assert "queue-steer-success-marks-steering-optimistically"
+              (eq 'steering (dsh-protocol-queue-item-placement
+                             (car dsh-emacs--queue-items)))
+              (member "o1" dsh-emacs--queue-deleted)))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; 编辑成功：镜像文本乐观替换，前缀预览立即反映新文本
+(let ((buf (get-buffer-create " *t-queue-edit-opt*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-opt")
+        (setq dsh-emacs--queue-items
+              (list (dsh-protocol-queue-item--from-alist
+                     (dsh-emacs-test--queue-item "o2" "queued" "old text"))))
+        (let ((cb nil))
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (_method _params callback) (setq cb callback))))
+            (dsh-emacs-queue--edit (car dsh-emacs--queue-items) "new text")
+            (funcall cb t nil)
+            (dsh-test-assert "queue-edit-success-updates-text-optimistically"
+              (equal "new text"
+                     (dsh-protocol-queue-item-text
+                      (car dsh-emacs--queue-items)))))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; 删除成功：镜像立即移除该条目
+(let ((buf (get-buffer-create " *t-queue-delete-opt*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-opt")
+        (setq dsh-emacs--queue-items
+              (list (dsh-protocol-queue-item--from-alist
+                     (dsh-emacs-test--queue-item "o3" "queued" "gone"))))
+        (let ((cb nil))
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (_method _params callback) (setq cb callback))))
+            (dsh-emacs-queue--delete (car dsh-emacs--queue-items))
+            (funcall cb t nil)
+            (dsh-test-assert "queue-delete-success-removes-optimistically"
+              (null dsh-emacs--queue-items)))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; 用户可见契约回归：steer/delete 成功即乐观刷新 [next] 前缀（不等
+;; session/queue 帧）——镜像只是必要不充分条件，直接断言输入行前缀文本变了。
+;; 按宿主发送顺序：steer 第二条 → next 立即显示被 steer 的那条（在途
+;; steering 领先 queued）；该条被消费后回落到排队首；delete 队首 → 翻到
+;; 下一项；删光 → 清空；steer 队首 → 文本保持队首（它就是下一条）。
+(let ((buf (get-buffer-create " *t-prefix-opt-steer*"))
+      (calls nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-pfx")
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_method _params callback) (push callback calls))))
+          (dsh-emacs-queue-apply
+           buf 'proc
+           (list (cons 'items
+                       (vector (dsh-emacs-test--queue-item "p1" "queued" "First")
+                               (dsh-emacs-test--queue-item "p2" "queued" "Second")))))
+          ;; steer 第二条（非队首）：next 立即翻到被 steer 的 Second
+          (let ((item (cl-find "p2" dsh-emacs--queue-items
+                               :key (lambda (i) (dsh-protocol-queue-item-id i))
+                               :test #'string=)))
+            (dsh-emacs-queue--steer item)
+            (let ((cb (car calls))) (setq calls (cdr calls)) (funcall cb t nil)))
+          (dsh-test-assert "queue-prefix-optimistic-steer-second-flips"
+            (and dsh-emacs--queue-prefix
+                 (string-search "Second"
+                                (substring-no-properties dsh-emacs--queue-prefix))
+                 (not (string-search "First"
+                                     (substring-no-properties
+                                      dsh-emacs--queue-prefix)))))
+          ;; 该在途项被消费（删除）：next 回落到排队首 First
+          (let ((item (cl-find "p2" dsh-emacs--queue-items
+                               :key (lambda (i) (dsh-protocol-queue-item-id i))
+                               :test #'string=)))
+            (dsh-emacs-queue--delete item)
+            (let ((cb (car calls))) (setq calls (cdr calls)) (funcall cb t nil)))
+          (dsh-test-assert "queue-prefix-optimistic-steered-consumed-falls-back"
+            (and dsh-emacs--queue-prefix
+                 (string-search "First"
+                                (substring-no-properties dsh-emacs--queue-prefix))
+                 (not (string-search "Second"
+                                     (substring-no-properties
+                                      dsh-emacs--queue-prefix)))))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+(let ((buf (get-buffer-create " *t-prefix-opt-delete*"))
+      (calls nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-pfx")
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_method _params callback) (push callback calls))))
+          (dsh-emacs-queue-apply
+           buf 'proc
+           (list (cons 'items
+                       (vector (dsh-emacs-test--queue-item "p3" "queued" "Third")
+                               (dsh-emacs-test--queue-item "p4" "queued" "Fourth")))))
+          (let ((item (cl-find "p3" dsh-emacs--queue-items
+                               :key (lambda (i) (dsh-protocol-queue-item-id i))
+                               :test #'string=)))
+            (dsh-emacs-queue--delete item)
+            (let ((cb (car calls))) (setq calls (cdr calls)) (funcall cb t nil)))
+          (dsh-test-assert "queue-prefix-optimistic-delete-first-flips"
+            (and dsh-emacs--queue-prefix
+                 (string-search "Fourth"
+                                (substring-no-properties dsh-emacs--queue-prefix))
+                 (not (string-search "Third"
+                                     (substring-no-properties
+                                      dsh-emacs--queue-prefix)))))
+          (let ((item (cl-find "p4" dsh-emacs--queue-items
+                               :key (lambda (i) (dsh-protocol-queue-item-id i))
+                               :test #'string=)))
+            (dsh-emacs-queue--delete item)
+            (let ((cb (car calls))) (setq calls (cdr calls)) (funcall cb t nil)))
+          (dsh-test-assert "queue-prefix-optimistic-delete-only-clears"
+            (null dsh-emacs--queue-prefix))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+(let ((buf (get-buffer-create " *t-prefix-opt-head*"))
+      (calls nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-pfx")
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_method _params callback) (push callback calls))))
+          (dsh-emacs-queue-apply
+           buf 'proc
+           (list (cons 'items
+                       (vector (dsh-emacs-test--queue-item "p5" "queued" "Fifth")
+                               (dsh-emacs-test--queue-item "p6" "queued" "Sixth")))))
+          (let ((item (cl-find "p5" dsh-emacs--queue-items
+                               :key (lambda (i) (dsh-protocol-queue-item-id i))
+                               :test #'string=)))
+            (dsh-emacs-queue--steer item)
+            (let ((cb (car calls))) (setq calls (cdr calls)) (funcall cb t nil)))
+          ;; steer 队首：next 保持队首（它就是宿主下一条，只是改为在途状态）
+          (dsh-test-assert "queue-prefix-optimistic-steer-head-keeps-head"
+            (and dsh-emacs--queue-prefix
+                 (string-search "Fifth"
+                                (substring-no-properties dsh-emacs--queue-prefix))
+                 (not (string-search "Sixth"
+                                     (substring-no-properties
+                                      dsh-emacs--queue-prefix)))))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; 队列管理器：任何一层 C-g 一次彻底退出（不残留、不抛错）
+(let ((buf (get-buffer-create " *t-queue-quit*"))
+      (completed nil))
+  (unwind-protect
+      (progn
+        (with-current-buffer buf
+          (dsh-emacs-mode)
+          (setq-local dsh-emacs--buffer-session "sess-q")
+          (setq dsh-emacs--queue-items
+                (list (dsh-protocol-queue-item--from-alist
+                       (dsh-emacs-test--queue-item "i1" "queued" "one")))))
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (&rest _) (signal 'quit nil))))
+          (with-current-buffer buf
+            (condition-case nil
+                (progn (dsh-emacs-list-queue) (setq completed t))
+              ((error quit) (setq completed nil)))))
+        (dsh-test-assert "queue-manager-one-c-g-cancels"
+          completed))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; 队列菜单：菜单键作用于入口解析（vertico 高亮 > 键入精确/前缀 > 队首兜底）
+(let* ((a (dsh-protocol-queue-item--from-alist
+           (dsh-emacs-test--queue-item "a" "queued" "fix the bug")))
+       (b (dsh-protocol-queue-item--from-alist
+           (dsh-emacs-test--queue-item "b" "steering" "steered now")))
+       (table (list (cons "[Q] fix the bug" a)
+                    (cons "[S] steered now" b)))
+       (dsh-emacs--queue-pick-table table))
+  (cl-letf (((symbol-function 'minibuffer-contents)
+             (lambda () "fix")))
+    (dsh-test-assert "queue-menu-item-resolves-first"
+      (equal a (dsh-emacs-queue--menu-item))))
+  (cl-letf (((symbol-function 'minibuffer-contents)
+             (lambda () "[S] steered now")))
+    (dsh-test-assert "queue-menu-item-resolves-typed"
+      (equal b (dsh-emacs-queue--menu-item))))
+  (cl-letf (((symbol-function 'minibuffer-contents)
+             (lambda () "")))
+    (dsh-test-assert "queue-menu-item-resolves-first-fallback"
+      (equal a (dsh-emacs-queue--menu-item)))))
+
+;; 队列菜单：vertico 高亮路径——直接读 vertico--index/vertico--candidates
+;;（老版本 accessor `vertico--current' 已不存在，按字符串 assoc 会失败、
+;; 掉回队首，旧实现必然翻车）。equal 忽略文本属性，候选上的 face 不影响匹配
+(let ((buf (get-buffer-create " *t-queue-vertico*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (defvar vertico-mode)                     ; batch 未加载 vertico
+        (defvar-local vertico--index -1)
+        (defvar-local vertico--candidates nil)
+        (setq vertico-mode t)
+        (setq vertico--index 1)
+        (setq vertico--candidates
+              (list (propertize "[Q] fix the bug" 'face 'completions-common-part)
+                    (propertize "[S] steered now" 'face 'vertico-current)))
+        (let* ((a (dsh-protocol-queue-item--from-alist
+                   (dsh-emacs-test--queue-item "a" "queued" "fix the bug")))
+               (b (dsh-protocol-queue-item--from-alist
+                   (dsh-emacs-test--queue-item "b" "steering" "steered now")))
+               (dsh-emacs--queue-pick-table
+                (list (cons "[Q] fix the bug" a)
+                      (cons "[S] steered now" b))))
+          (cl-letf (((symbol-function 'minibuffer-contents)
+                     (lambda () "")))
+            (dsh-test-assert "queue-menu-item-vertico-highlight-wins"
+              (equal b (dsh-emacs-queue--menu-item))))
+          (setq vertico--index 0)
+          (dsh-test-assert "queue-menu-item-vertico-index-0"
+            (equal a (dsh-emacs-queue--menu-item)))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; 队列菜单命令：动作经 run-at-time 延迟到 minibuffer 关闭后，在打开菜单的
+;; chat buffer 里执行。真实环境中 exit-minibuffer 是 (throw 'exit nil)，
+;; 命令里 exit 之后的代码永不执行——动作必须在 exit 之前安排成定时器。
+;; 测试模拟真实 throw（catch 'exit 包住命令），断言 RPC 未被内联执行、
+;; 只能经延迟的定时器触发。
+(let ((calls nil)
+      (deferred nil)
+      (chat (get-buffer-create " *t-queue-chat*"))
+      (table (list (cons "[Q] first"
+                         (dsh-protocol-queue-item--from-alist
+                          (dsh-emacs-test--queue-item "m1" "queued" "first")))
+                   (cons "[Q] second"
+                         (dsh-protocol-queue-item--from-alist
+                          (dsh-emacs-test--queue-item "m2" "queued" "second"))))))
+  (unwind-protect
+      (with-current-buffer chat
+        (setq-local dsh-emacs--buffer-session "sess-q")
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method params _cb)
+                     (let ((action (cdr (assq 'action params))))
+                       (push (list method
+                                   (cdr (assq 'itemId params))
+                                   (cdr (assq 'kind action)))
+                             calls))))
+                  ((symbol-function 'minibuffer-contents)
+                   (lambda () ""))
+                  ((symbol-function 'run-at-time)
+                   (lambda (_delay _repeat fn) (push fn deferred)))
+                  ((symbol-function 'minibuffer-selected-window)
+                   (lambda () (selected-window))))
+          (let ((dsh-emacs--queue-pick-table table))
+            (catch 'exit
+              (dsh-emacs-queue--menu-delete)))
+          ;; exit 已 throw：命令剩余代码被跳过，RPC 未内联执行
+          (dsh-test-assert "queue-menu-action-not-inline-after-exit"
+            (null calls))
+          ;; 动作只能经 exit 前注册的定时器触发
+          (dolist (fn (nreverse deferred)) (funcall fn))
+          (dsh-test-assert "queue-menu-delete-runs-in-chat-buffer"
+            (equal '("session.updateQueue" "m1" "remove")
+                   (car (nreverse calls))))))
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
+;; x 键整队删除：同样先注册定时器再 exit，确认后逐条 RPC
+(let ((calls nil)
+      (deferred nil)
+      (chat (get-buffer-create " *t-queue-chat*"))
+      (table (list (cons "[Q] first"
+                         (dsh-protocol-queue-item--from-alist
+                          (dsh-emacs-test--queue-item "x1" "queued" "first")))
+                   (cons "[Q] second"
+                         (dsh-protocol-queue-item--from-alist
+                          (dsh-emacs-test--queue-item "x2" "queued" "second"))))))
+  (unwind-protect
+      (with-current-buffer chat
+        (setq-local dsh-emacs--buffer-session "sess-q")
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method params _cb)
+                     (push (cdr (assq 'itemId params)) calls)))
+                  ((symbol-function 'y-or-n-p)
+                   (lambda (_prompt) t))
+                  ((symbol-function 'run-at-time)
+                   (lambda (_delay _repeat fn) (push fn deferred)))
+                  ((symbol-function 'minibuffer-selected-window)
+                   (lambda () (selected-window))))
+          (let ((dsh-emacs--queue-pick-table table))
+            (catch 'exit
+              (dsh-emacs-queue--menu-delete-all)))
+          (dsh-test-assert "queue-delete-all-schedules-before-exit"
+            (null calls))
+          (dolist (fn (nreverse deferred)) (funcall fn))
+          (dsh-test-assert "queue-delete-all-confirms-and-deletes-both"
+            (equal '("x1" "x2")
+                   (sort (copy-sequence calls) #'string<)))))
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
+;; 队列菜单键安装：question 同构 use-local-map（拷当前 local map + 单键）
+(let ((buf (get-buffer-create " *t-queue-keymap*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (use-local-map minibuffer-local-completion-map)
+        (dsh-emacs-queue--chooser-setup-hook)
+        (dsh-test-assert "queue-menu-keys-bound-via-local-map"
+          (eq (key-binding (kbd "e")) #'dsh-emacs-queue--menu-edit)
+          (eq (key-binding (kbd "s")) #'dsh-emacs-queue--menu-steer)
+          (eq (key-binding (kbd "d")) #'dsh-emacs-queue--menu-delete)
+          (eq (key-binding (kbd "x")) #'dsh-emacs-queue--menu-delete-all)
+          (eq (key-binding (kbd "RET")) #'dsh-emacs-queue--menu-send)))
+    (when (buffer-live-p buf) (kill-buffer buf))))
 (princ "\n===== 测试总结 =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))
       (fail (cl-count-if (lambda (r) (not (cdr r))) dsh-test-results)))

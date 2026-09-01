@@ -29,7 +29,8 @@
   '("dsh-emacs.el" "dsh-emacs-protocol.el" "dsh-emacs-session.el"
     "dsh-emacs-markdown.el" "dsh-emacs-render.el" "dsh-emacs-events.el"
     "dsh-emacs-ui.el" "dsh-emacs-faces.el" "dsh-emacs-tokens.el"
-    "dsh-emacs-modeline.el" "dsh-emacs-server.el" "dsh-emacs-command.el"
+    "dsh-emacs-modeline.el" "dsh-emacs-queue.el" "dsh-emacs-server.el"
+    "dsh-emacs-command.el"
     "test/dsh-test.el" "test/dsh-e2e.el" "test/check-lisp-test.el")
   "默认检查的 elisp 文件（相对仓库根目录）。")
 

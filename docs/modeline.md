@@ -63,6 +63,17 @@ preserved:
 The animation lights up when a message is sent and goes out at `turn/end`; it
 is cleaned up automatically when the event stream disconnects.
 
+### Pending-input queue indicator
+
+While messages are queued or steering, a `[Q2 S1]` indicator (queued /
+steering counts; zero-count placements are omitted) sits right after the
+running animation, colored with `dsh-emacs-modeline-queue-face` (amber) and
+clickable (`mouse-1` opens `dsh-emacs-list-queue`).  It is hidden when
+nothing is pending — including when the queue holds only host-injected
+`context` items, which are neither counted nor listed, matching dsh web's
+QueueDock.  The counts come from the `session/queue` mux frames mirrored by
+`dsh-emacs-queue.el`, so the segment is live without any polling.
+
 ### Why the branch segment is cached
 
 The branch segment has a 10-second TTL cache
