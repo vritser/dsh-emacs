@@ -13,12 +13,31 @@ The most commonly used options, straight in your config:
 (setq dsh-emacs-default-preset "standard")         ; default agent preset for new sessions (nil = host default; "standard"/"minimal"/"code"/"cordis" or a user preset id)
 (setq dsh-emacs-model-group-format #(" %s " 0 4 (face vertico-group-title))) ; provider group-header format inside the model picker (nil = hide group titles)
 (setq dsh-emacs-input-history-length 50)           ; prompts kept for M-p / M-n recall
+(setq dsh-emacs-question-skip-key "s")       ; key that skips the current ask question inside the minibuffer chooser (nil = no shortcut; option-less free-text questions still skip on empty input)
 (setq dsh-emacs-ui-label-separator "·")            ; separator between Think/Tool title and its right-side summary ("" = plain gap)
 (setq dsh-emacs-tool-titles '(("pwsh" . "PowerShell"))) ; tool name -> display title overrides (icons stay per variant; unnamed tools get a humanized name, e.g. grep -> "Grep")
 (setq dsh-emacs-attach-media-types '("image/png" "image/jpeg" "image/webp" "image/gif")) ; accepted upload types
 (setq dsh-emacs-session-auto-refresh-interval nil) ; seconds between automatic session-list refreshes (nil = off)
 (setq dsh-emacs-modeline-enabled t)                  ; whether the mode-line stats are enabled
 ```
+
+## `ask` question prompts
+
+Answering an `ask` prompt happens in a **static key menu**, not a typing
+prompt: the numbered option list never narrows as you press keys.
+
+- `1`–`9` pick that option immediately (`0` = the 10th option);
+- `t` switches to the `Type answer…` free-text path;
+- the `dsh-emacs-question-skip-key` binding (default `s`) answers the
+  question with an empty selection and moves on;
+- `RET` confirms the preselected first option, `C-g` abandons the whole
+  group.
+
+Multi-select questions keep plain comma-separated typing (digits are typed
+text there), and option-less questions read free text directly.  Without a
+list-rendering completion UI (vertico, icomplete, fido, ivy) the numbered
+options are embedded in the prompt itself, so the same keys work on a bare
+minibuffer.
 
 ## Server options
 

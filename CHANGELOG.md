@@ -27,6 +27,20 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Filter-free question chooser**: single-select `ask` prompts now behave
+  like a static key menu instead of a typing-narrowed completion prompt —
+  pressing `1`–`9` (`0` = the 10th option) picks that option immediately,
+  `t` switches to the `Type answer…` free-text path, and typing is inert,
+  so the numbered option list never narrows out from under you.  Without
+  a list-rendering completion UI (vertico, icomplete, fido, ivy) the
+  numbered options are embedded in the prompt itself, so the same keys
+  work on a bare minibuffer.  Multi-select questions keep plain
+  comma-separated typing.
+- **Per-question skip in `ask` prompts**: the `dsh-emacs-question-skip-key`
+  shortcut (a single `s` keypress by default, configurable, nil disables)
+  answers that single question with an empty selection — dsh web's
+  per-question Skip — and moves on to the next question; an option-less
+  free-text question is skipped by submitting an empty input.
 - **Session switching**: `M-x dsh-emacs-switch-workspace-session` (`C-c C-s`)
   switches among sessions in the current workspace, and
   `M-x dsh-emacs-switch-session` (`C-u C-c C-s`) switches across all

@@ -4498,11 +4498,12 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                               (((id . "q1") (selected "Yes")))))))))
   (dsh-test-pass "respond-envelope-json-client-response"))
 
-;; 2) 候选构建：选项带序号（输入数字跳选），Type answer… 恒垫底
+;; 2) 候选构建：选项带序号（按数字键选择），Type answer… 垫底；skip 不再
+;; 有可见候选（只走 dsh-emacs-question-skip-key 快捷键的哨兵路径）
 (when (equal '("1. Yes" "2. No" "Type answer…")
              (dsh-emacs--question-candidates
               '("Yes" "No") "Type answer…"))
-  (dsh-test-pass "question-candidates-numbered-type-answer-last"))
+  (dsh-test-pass "question-candidates-tail-type-answer"))
 
 (when (and (equal "Yes" (dsh-emacs--question-picked-label "1. Yes"))
            (equal "Type answer…"
@@ -4581,12 +4582,246 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                 '((id . "q3") (question . "Say?")))))
   (dsh-test-pass "question-choice-no-options-custom"))
 
-;; 无选项 + 空输入 → nil（无选项可回退，整体取消）
-(when (null (cl-letf (((symbol-function 'read-string)
-                       (lambda (&rest _) "")))
-              (dsh-emacs--question-choice
-               '((id . "q3") (question . "Say?")))))
-  (dsh-test-pass "question-choice-no-options-empty-aborts"))
+;; 无选项 + 空输入 → 跳过该题（{id, selected: []}，dsh web 的逐题 Skip；
+;; 要放弃整组用 C-g）
+(when (equal '((id . "q3") (selected . []))
+             (cl-letf (((symbol-function 'read-string)
+                        (lambda (&rest _) "")))
+               (dsh-emacs--question-choice
+                '((id . "q3") (question . "Say?")))))
+  (dsh-test-pass "question-choice-no-options-empty-skips"))
+
+;; 选项题走 Skip 哨兵（现在只由 dsh-emacs-question-skip-key 快捷键产生，
+;; 不再是可见候选）→ 该题空 selected，接着答下一题
+(when (equal '((id . "q1") (selected . []))
+             (cl-letf (((symbol-function 'completing-read)
+                        (lambda (&rest _) "Skip this question")))
+               (dsh-emacs--question-choice
+                '((id . "q1") (question . "Proceed?")
+                  (options . (((label . "Yes")) ((label . "No"))))))))
+  (dsh-test-pass "question-choice-single-skip"))
+
+;; 多选里按 s 键残留的 Skip 哨兵 → Skip 独占（丢弃其它选择与 custom）
+(when (equal '((id . "q2") (selected . []))
+             (cl-letf (((symbol-function 'completing-read-multiple)
+                        (lambda (&rest _) '("1. A" "2. B" "Skip this question"))))
+               (dsh-emacs--question-choice
+                '((id . "q2") (question . "Pick?")
+                  (multiSelect . t)
+                  (options . (((label . "A")) ((label . "B"))))))))
+  (dsh-test-pass "question-choice-multi-skip-exclusive"))
+
+;; 帧级：一题正常作答 + 一题跳过 → answers 覆盖整帧（跳过的题空 selected）
+(let ((picks '("1. Yes" "Skip this question")))
+  (when (equal '(((id . "qa") (selected "Yes"))
+                 ((id . "qb") (selected . [])))
+               (cl-letf (((symbol-function 'completing-read)
+                          (lambda (&rest _) (pop picks))))
+                 (dsh-emacs--collect-question-answers
+                  '(((id . "qa") (question . "A?")
+                     (options . (((label . "Yes")))))
+                    ((id . "qb") (question . "B?")
+                     (options . (((label . "Only")))))))))
+    (dsh-test-pass "question-skip-covers-frame-with-empty-selected")))
+
+;; 快捷键 dsh-emacs-question-skip-key：命令 = 插入 Skip 哨兵 + 退出
+;; minibuffer（与取回 completing-read 结果的路径一致）
+(let ((got nil))
+  (cl-letf (((symbol-function 'exit-minibuffer)
+             (lambda () (setq got (buffer-string)))))
+    (with-temp-buffer
+      (dsh-emacs--question-skip-command)))
+  (when (equal dsh-emacs--question-skip-label got)
+    (dsh-test-pass "question-skip-command-inserts-label-and-exits")))
+
+;; chooser 局部 keymap：dsh-emacs-question-skip-key（默认单键 s）→ skip 命令；
+;; C-c C-s 保持空闲（chat buffer 里它切换 workspace 会话）
+(with-temp-buffer
+  (use-local-map (make-sparse-keymap))
+  (use-local-map (dsh-emacs--question-chooser-keymap))
+  (when (eq (lookup-key (current-local-map) (kbd "s"))
+            'dsh-emacs--question-skip-command)
+    (dsh-test-pass "question-chooser-binds-default-skip-key"))
+  ;; C-c C-s 保持空闲（chat buffer 里它切换 workspace 会话）；
+  ;; lookup-key 对稀疏 keymap 可能返回前缀哨兵，断言「不是 skip 命令」即可
+  (when (not (eq (lookup-key (current-local-map) (kbd "C-c C-s"))
+                 'dsh-emacs--question-skip-command))
+    (dsh-test-pass "question-chooser-keeps-c-c-c-s-free")))
+;; 用户可改键（defcustom），改后按新键生效
+(let ((dsh-emacs-question-skip-key "C-c C-s"))
+  (with-temp-buffer
+    (use-local-map (make-sparse-keymap))
+    (use-local-map (dsh-emacs--question-chooser-keymap))
+    (when (eq (lookup-key (current-local-map) (kbd "C-c C-s"))
+              'dsh-emacs--question-skip-command)
+      (dsh-test-pass "question-skip-key-custom-value-bound"))))
+;; nil 关闭快捷键（候选仍可用）。lookup-key 对空 keymap 可能返回字符表
+;; 前缀哨兵而非 nil，故断言「解析不出 skip 命令」即可
+(let ((dsh-emacs-question-skip-key nil))
+  (with-temp-buffer
+    (use-local-map (make-sparse-keymap))
+    (use-local-map (dsh-emacs--question-chooser-keymap))
+    (when (not (eq (lookup-key (current-local-map) (kbd "s"))
+                   'dsh-emacs--question-skip-command))
+      (dsh-test-pass "question-skip-key-nil-disables-shortcut"))))
+(let ((before (copy-keymap minibuffer-local-completion-map)))
+  (with-temp-buffer
+    (use-local-map (make-sparse-keymap))
+    (use-local-map (dsh-emacs--question-chooser-keymap)))
+  (when (equal before (copy-keymap minibuffer-local-completion-map))
+    (dsh-test-pass "question-chooser-leaves-global-map-untouched")))
+
+;; 无过滤 keymenu：选项题把 chooser 变成静态按键菜单 —— 数字键立即选择，
+;; t 走 Type answer…，self-insert 重映射为提示（打字不会缩窄列表）
+(let ((dsh-emacs--question-pick-labels '("Yes" "No" "Maybe")))
+  (with-temp-buffer
+    (use-local-map (make-sparse-keymap))
+    (use-local-map (dsh-emacs--question-chooser-keymap))
+    (when (eq (lookup-key (current-local-map) (kbd "1"))
+              'dsh-emacs--question-pick-command)
+      (dsh-test-pass "question-keymenu-binds-digit-1"))
+    (when (eq (lookup-key (current-local-map) (kbd "3"))
+              'dsh-emacs--question-pick-command)
+      (dsh-test-pass "question-keymenu-binds-all-option-digits"))
+    (when (not (eq (lookup-key (current-local-map) (kbd "4"))
+                   'dsh-emacs--question-pick-command))
+      (dsh-test-pass "question-keymenu-leaves-out-of-range-digits-free"))
+    (when (not (eq (lookup-key (current-local-map) (kbd "0"))
+                   'dsh-emacs--question-pick-command))
+      (dsh-test-pass "question-keymenu-no-zero-below-ten-options"))
+    (when (eq (lookup-key (current-local-map) (kbd "t"))
+              'dsh-emacs--question-type-command)
+      (dsh-test-pass "question-keymenu-binds-type-key"))
+    (when (eq (lookup-key (current-local-map) [remap self-insert-command])
+              'dsh-emacs--question-inert-command)
+      (dsh-test-pass "question-keymenu-remaps-self-insert-inert"))))
+
+;; ≥10 个选项时 0 键 = 第 10 个选项
+(let ((dsh-emacs--question-pick-labels (make-list 10 "x")))
+  (with-temp-buffer
+    (use-local-map (make-sparse-keymap))
+    (use-local-map (dsh-emacs--question-chooser-keymap))
+    (when (eq (lookup-key (current-local-map) (kbd "0"))
+              'dsh-emacs--question-pick-command)
+      (dsh-test-pass "question-keymenu-binds-0-for-tenth-option"))))
+
+;; 多选 / 无 pick-labels：不绑数字与 t（要打字输入逗号分隔的多选），
+;; skip 键照常保留
+(let ((dsh-emacs--question-pick-labels nil))
+  (with-temp-buffer
+    (use-local-map (make-sparse-keymap))
+    (use-local-map (dsh-emacs--question-chooser-keymap))
+    (when (not (eq (lookup-key (current-local-map) (kbd "1"))
+                   'dsh-emacs--question-pick-command))
+      (dsh-test-pass "question-keymenu-absent-without-pick-labels"))
+    (when (not (eq (lookup-key (current-local-map) (kbd "t"))
+                   'dsh-emacs--question-type-command))
+      (dsh-test-pass "question-keymenu-type-key-absent-for-multi"))
+    (when (eq (lookup-key (current-local-map) (kbd "s"))
+              'dsh-emacs--question-skip-command)
+      (dsh-test-pass "question-keymenu-absent-still-keeps-skip-key"))))
+
+;; 数字键 → 立即选该项：插入编号候选并退出（与 RET 选候选完全同路径）
+(let ((got nil))
+  (cl-letf (((symbol-function 'exit-minibuffer)
+             (lambda () (setq got (buffer-string)))))
+    (with-temp-buffer
+      (let* ((last-command-event ?2)
+             (dsh-emacs--question-pick-labels '("Yes" "No" "Maybe")))
+        (dsh-emacs--question-pick-command))))
+  (when (equal "2. No" got)
+    (dsh-test-pass "question-pick-command-selects-by-digit")))
+
+;; 0 键 = 第 10 个选项
+(let ((got nil))
+  (cl-letf (((symbol-function 'exit-minibuffer)
+             (lambda () (setq got (buffer-string)))))
+    (with-temp-buffer
+      (let* ((last-command-event ?0)
+             (dsh-emacs--question-pick-labels (make-list 10 "x")))
+        (dsh-emacs--question-pick-command))))
+  (when (equal "10. x" got)
+    (dsh-test-pass "question-pick-command-0-picks-tenth")))
+
+;; 越界数字：只提示，不退出
+(let ((got nil) (exited nil))
+  (cl-letf (((symbol-function 'minibuffer-message)
+             (lambda (fmt &rest args) (setq got (apply #'format fmt args))))
+            ((symbol-function 'exit-minibuffer)
+             (lambda () (setq exited t))))
+    (with-temp-buffer
+      (let* ((last-command-event ?9)
+             (dsh-emacs--question-pick-labels '("Yes" "No")))
+        (dsh-emacs--question-pick-command))))
+  (when (and (equal "No option 9" got) (null exited))
+    (dsh-test-pass "question-pick-command-out-of-range-messages-only")))
+
+;; t 键 = 插入 Type answer… 哨兵并退出
+(let ((got nil))
+  (cl-letf (((symbol-function 'exit-minibuffer)
+             (lambda () (setq got (buffer-string)))))
+    (with-temp-buffer
+      (dsh-emacs--question-type-command)))
+  (when (equal "Type answer…" got)
+    (dsh-test-pass "question-type-command-inserts-sentinel")))
+
+;; 惰性打字：提示按键菜单（含当前绑定的 skip 键）
+(let ((got nil))
+  (cl-letf (((symbol-function 'minibuffer-message)
+             (lambda (fmt &rest args) (setq got (apply #'format fmt args)))))
+    (with-temp-buffer
+      (let ((dsh-emacs--question-pick-labels '("Yes" "No")))
+        (dsh-emacs--question-inert-command))))
+  (when (and (string-search "Press a number to pick" got)
+             (string-search "t = type an answer" got)
+             (string-search ", s = skip" got))
+    (dsh-test-pass "question-inert-command-shows-menu-keys")))
+
+;; skip 键被禁用（nil）时提示不再提到 skip
+(let ((got nil))
+  (cl-letf (((symbol-function 'minibuffer-message)
+             (lambda (fmt &rest args) (setq got (apply #'format fmt args)))))
+    (with-temp-buffer
+      (let ((dsh-emacs-question-skip-key nil))
+        (dsh-emacs--question-inert-command))))
+  (when (and (string-search "t = type an answer" got)
+             (not (string-search "skip" got)))
+    (dsh-test-pass "question-inert-command-omits-disabled-skip-key")))
+
+;; 无渲染型补全 UI（vertico/icomplete/fido/ivy 均未加载）：选项嵌进
+;; prompt（裸 minibuffer 也能看到编号选项按数字选）。-Q 里这些 mode 变量
+;; 不存在，defvar 桩让 let 变成动态绑定（与真实环境中各框架的 defvar
+;; 全局 minor mode 一致），bound-and-true-p 才看得到。
+(defvar vertico-mode nil "Stub: vertico global minor mode flag (test-only).")
+(defvar icomplete-mode nil "Stub: icomplete minor mode flag (test-only).")
+(let ((prompt nil))
+  (cl-letf (((symbol-function 'completing-read)
+             (lambda (p &rest _) (setq prompt p) "1. Yes")))
+    (dsh-emacs--question-choice
+     '((id . "q1") (question . "Proceed?")
+       (options . (((label . "Yes")) ((label . "No")))))))
+  (when (string-search "(1) Yes (2) No" prompt)
+    (dsh-test-pass "question-choice-embeds-options-in-prompt-without-vertico")))
+
+;; vertico 激活时列表由 minibuffer 渲染，prompt 保持干净
+(let ((prompt nil) (vertico-mode t))
+  (cl-letf (((symbol-function 'completing-read)
+             (lambda (p &rest _) (setq prompt p) "1. Yes")))
+    (dsh-emacs--question-choice
+     '((id . "q1") (question . "Proceed?")
+       (options . (((label . "Yes")) ((label . "No")))))))
+  (when (equal "Proceed?: " prompt)
+    (dsh-test-pass "question-choice-prompt-stays-clean-under-vertico")))
+
+;; icomplete 同类：自渲染列表 → 也不嵌入（一条验证 OR 判定覆盖整个家族）
+(let ((prompt nil) (icomplete-mode t))
+  (cl-letf (((symbol-function 'completing-read)
+             (lambda (p &rest _) (setq prompt p) "1. Yes")))
+    (dsh-emacs--question-choice
+     '((id . "q1") (question . "Proceed?")
+       (options . (((label . "Yes")) ((label . "No")))))))
+  (when (equal "Proceed?: " prompt)
+    (dsh-test-pass "question-choice-prompt-stays-clean-under-icomplete")))
 
 ;; Type answer… 空输入 → 回到选项（再轮选择）
 (let ((reads '("Type answer…" "1. Yes")))

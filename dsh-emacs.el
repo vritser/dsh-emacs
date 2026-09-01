@@ -173,6 +173,21 @@ of its own), so only files resolving to one of these types are sent."
   :type 'integer
   :group 'dsh-emacs)
 
+(defcustom dsh-emacs-question-skip-key "s"
+  "Key that skips the current ask question (answers it with an empty
+selection, dsh web's per-question Skip) and moves to the next one.
+A single letter by default (`s' = skip): the chooser is a one-shot
+numbered picker, so typing letters to filter is rare.  The nested
+`Type answer…' free-text minibuffer is separate and keeps normal
+editing keys.  Bound only inside the question chooser's minibuffer, on a
+copy of the local keymap, so nothing leaks into unrelated
+`completing-read' prompts; an option-less free-text question skips on an
+EMPTY input instead, so the key is only bound where there is a candidate
+list.  Set to nil to disable the shortcut."
+  :type '(choice (key-sequence :tag "Key sequence")
+                 (const :tag "No shortcut" nil))
+  :group 'dsh-emacs)
+
 ;;; ---------------------------------------------------------------------------
 ;;;  内部变量
 ;;; ---------------------------------------------------------------------------
@@ -2748,9 +2763,15 @@ This is the main entry command of dsh-emacs."
 ;; + 可选 custom，无选项问题只能给 custom，且 answers 必须覆盖整帧。
 ;;
 ;; 交互方式：逐题在 MINIBUFFER 中选择——选项作为 completion 候选（带
-;; 序号，输入数字即可跳选），单/多选，候选末尾附「Type answer…」以输入
-;; 自定义文本（空输入回到选项）；提示语带 Question N/M 序号，全部答完
-;; 一次性 respond。C-g 取消整个帧（问题留给 host 在打断回合时撤销）。
+;; 序号，按数字键即可选择），单/多选，候选末尾附「Type answer…」（空
+;; 输入回到选项）；提示语带 Question N/M 序号，全部答完一次性 respond。
+;; 跳过某题只走 `dsh-emacs-question-skip-key' 快捷键 = 该题以空 selected
+;; 覆盖（dsh web 的逐题 Skip），其余照答。C-g/ESC（或无选项问题的空输入）
+;; 放弃整组问题：以协议
+;; 保留的 cancelled 错误回执应答（ok:false + error.code=cancelled，与 dsh
+;; web 的 abandon 同一信号），宿主把该 ask 撤销为 cancelled 并广播
+;; `question/resolved'；ask 工具调用随之中止 —— 旧行为（完全不应答）会让
+;; 宿主永久 pending、回合卡死。
 ;;
 ;; minibuffer 是全局唯一资源：多个会话同时活跃时，回答一帧的途中其它
 ;; mux 流仍会继续到达 question/requested。帧进入全局 FIFO 队列，同一
@@ -2931,10 +2952,25 @@ accepted-p non-nil on an accepted receipt; otherwise REASON is
                 (dsh-emacs--sequence-list
                  (dsh-emacs-render--aget "options" question)))))
 
+(defconst dsh-emacs--question-skip-label "Skip this question"
+  "Internal sentinel signaling an empty-selection answer (dsh web's
+per-question Skip): `dsh-emacs--question-skip-command' inserts it and
+exits the minibuffer, and `dsh-emacs--question-choice' matches it to
+cover that question as {id, selected: []} while the rest of the frame is
+answered normally.  No longer a visible candidate — the skip key is the
+only way to choose it.  Distinct from abandoning the whole group (C-g →
+cancelled receipt).")
+
+(defconst dsh-emacs--question-type-label "Type answer…"
+  "Sentinel candidate switching an option question to free-text answering:
+picked (or included in a multi question's selection) it reads the answer
+as the `custom' field of the client-response instead of a `selected'
+label.")
+
 (defun dsh-emacs--question-candidates (labels type-option)
   "Completion candidates for one question: each LABEL prefixed with its
-1-based index (\"1. label\" — type the number to jump to it), then the
-raw TYPE-OPTION as the LAST entry.
+1-based index (\"1. label\" — press the number to pick it instantly),
+then the raw TYPE-OPTION sentinel pinned at the tail.
 The returned candidate keeps the number; the answer must go through
 `dsh-emacs--question-picked-label' to recover the bare label."
   (append (cl-loop for l in labels for n from 1
@@ -2948,34 +2984,144 @@ The returned candidate keeps the number; the answer must go through
       (match-string 1 picked)
     picked))
 
+(defvar dsh-emacs--question-pick-labels nil
+  "Option labels of the single-select question being asked right now.
+A DYNAMIC binding set by `dsh-emacs--question-choice' around each
+single-select chooser read.  Non-nil makes the chooser a STATIC key menu
+instead of a typing-narrowed prompt: digits pick by number, `t' switches
+to the `Type answer…' free-text path, and self-insertion is inert so the
+candidate list never narrows.  nil (multi-select and free-text cases)
+keeps plain completion behavior.")
+
+(defun dsh-emacs--question-pick-command ()
+  "Pick the option numbered by the digit key just pressed.
+`1'…`9' pick options 1–9, `0' the 10th.  The chosen option is inserted as
+its numbered candidate and the chooser exits — exactly the path of RET
+on the candidate.  Out-of-range digits (including `0' on a question with
+fewer than 10 options) only show a message.  Bound in the chooser's
+keymap while `dsh-emacs--question-pick-labels' is set (see
+`dsh-emacs--question-chooser-keymap')."
+  (interactive)
+  (let ((n (- (event-basic-type last-command-event) ?0)))
+    (when (= n 0) (setq n 10))
+    (let ((label (nth (1- n) dsh-emacs--question-pick-labels)))
+      (if (null label)
+          (minibuffer-message "No option %d" n)
+        (insert (format "%d. %s" n label))
+        (exit-minibuffer)))))
+
+(defun dsh-emacs--question-type-command ()
+  "Switch the current question to free-text answering.
+Inserts the `Type answer…' sentinel and exits the minibuffer, so the
+choice lands on the same path as RET on the candidate.  Bound to `t' in
+the chooser's keymenu (see `dsh-emacs--question-chooser-keymap')."
+  (interactive)
+  (insert dsh-emacs--question-type-label)
+  (exit-minibuffer))
+
+(defun dsh-emacs--question-inert-command ()
+  "Ignore typing in the question chooser and remind the user how to answer.
+The single-select chooser is a STATIC key menu — the option list never
+narrows, so printable characters are remapped here instead of
+self-inserting.  Briefly show the menu keys (digits, `t', the skip key)
+and leave the prompt alone; C-g still abandons the whole group."
+  (interactive)
+  (minibuffer-message
+   (concat "Press a number to pick, t = type an answer"
+           (when dsh-emacs-question-skip-key
+             (format ", %s = skip"
+                     (key-description
+                      (if (stringp dsh-emacs-question-skip-key)
+                          (kbd dsh-emacs-question-skip-key)
+                        dsh-emacs-question-skip-key)))))))
+
+(defun dsh-emacs--question-skip-command ()
+  "Answer the current question with an empty selection (skip).
+Inserts the `Skip this question' sentinel and exits the minibuffer, so
+`dsh-emacs--question-choice' matches it to an empty `selected' — the
+skip path.  Bound in the question chooser via
+`dsh-emacs-question-skip-key' (default `s'); an option-less free-text
+question skips on an EMPTY input instead, so the key is only bound where
+there is a candidate list."
+  (interactive)
+  (insert dsh-emacs--question-skip-label)
+  (exit-minibuffer))
+
+(defun dsh-emacs--question-chooser-keymap ()
+  "Keymap for the question chooser minibuffer: a copy of the current
+local keymap (vertico's when `vertico-mode' is on — the copy keeps its
+navigation and refresh alive — the minibuffer completion map otherwise)
+plus `dsh-emacs-question-skip-key' (default `s') bound to
+`dsh-emacs--question-skip-command'.  An option question
+(`dsh-emacs--question-pick-labels' set) additionally turns the chooser
+into a STATIC key menu: digits 1–9 (and `0' for the 10th option) pick
+that option via `dsh-emacs--question-pick-command', `t' switches to the
+`Type answer…' free-text path, and self-insertion is remapped to
+`dsh-emacs--question-inert-command' so typing never narrows the list.
+Mounted from the setup hook, so none of this leaks into unrelated
+`completing-read' prompts; the menu keys are absent for multi-select
+questions, which keep plain comma-separated typing."
+  (let ((map (copy-keymap (current-local-map))))
+    (when dsh-emacs-question-skip-key
+      (define-key map (if (stringp dsh-emacs-question-skip-key)
+                          (kbd dsh-emacs-question-skip-key)
+                        dsh-emacs-question-skip-key)
+        #'dsh-emacs--question-skip-command))
+    (when dsh-emacs--question-pick-labels
+      (cl-loop for n from 1 to (min 9 (length dsh-emacs--question-pick-labels))
+               do (define-key map (kbd (number-to-string n))
+                    #'dsh-emacs--question-pick-command))
+      (when (>= (length dsh-emacs--question-pick-labels) 10)
+        (define-key map (kbd "0") #'dsh-emacs--question-pick-command))
+      (define-key map (kbd "t") #'dsh-emacs--question-type-command)
+      (define-key map [remap self-insert-command]
+        #'dsh-emacs--question-inert-command))
+    map))
+
 (defun dsh-emacs--question-setup-hook ()
   "Tame completion sorting in the question chooser's minibuffer: the
-roster order stays put (numbered labels, `Type answer…' pinned last)
-and the first option is preselected.  Returns nil explicitly — the
-Emacs 31 `minibuffer-with-setup-hook' would funcall the setup value."
+roster order stays put (numbered labels with the `Type answer…'
+sentinel pinned last), the first option is preselected, and the
+local keymap gains `dsh-emacs-question-skip-key' (default `s';
+skip this question) plus, for option questions, the key menu bound in
+`dsh-emacs--question-chooser-keymap' (digits pick, `t' types, typing is
+inert — the list never narrows).  Returns nil explicitly — the Emacs 31
+`minibuffer-with-setup-hook' would funcall the setup value."
   (when (boundp 'vertico-sort-function)
     (setq-local vertico-sort-function nil))
   (when (boundp 'vertico-sort-override-function)
     (setq-local vertico-sort-override-function nil))
   (when (boundp 'vertico-preselect)
     (setq-local vertico-preselect 'first))
+  (use-local-map (dsh-emacs--question-chooser-keymap))
   nil)
 
 (defun dsh-emacs--question-choice (question &optional index total session-id)
   "Read ONE answer to QUESTION in the minibuffer and return it as an
 answer alist ((id . ID) (selected . LABELS) [custom . TEXT]).
-The options are the completion candidates, shown numbered (\"1. label\")
-with `Type answer…' pinned LAST (completion sorting is disabled); a
-single-select picks one option, multi-select uses
-`completing-read-multiple', and the trailing `Type answer…' candidate
-reads free text as the `custom' answer — an EMPTY free-text input goes
-BACK to the options instead (re-reads the whole choice).  Questions
-without options read free text directly, where an empty input returns
-nil (the caller aborts the frame — there is no option list to go back
-to).  INDEX/TOTAL (when given) prefix each prompt as \"Question INDEX/
-TOTAL\" so a multi-question frame stays oriented; SESSION-ID (when
-given) prefixes the owning session's label (\[dsh-<title>\]), so with
-several sessions open the user can tell which conversation is asking.
+The options are shown as numbered completion candidates (\"1. label\")
+followed by the pinned `Type answer…' sentinel.
+A single-select question reads as a STATIC key menu — the list never
+narrows because typing is inert: press the option's digit (1–9, 0 for
+the 10th) to pick it immediately, `t' to switch to the `Type answer…'
+free-text path, or the `dsh-emacs-question-skip-key' binding (default
+`s') to skip this question with an empty selection; RET confirms the
+preselected first option.  Without a list-rendering completion UI
+(vertico, icomplete, fido, ivy)
+the numbered options are embedded in the prompt itself, so the same keys
+work on a bare minibuffer.  A multi-select question instead uses
+`completing-read-multiple' with plain comma-separated typing (the menu
+keys are not bound there) and also accepts the `Type answer…' sentinel
+for the `custom' answer — an EMPTY free-text input goes BACK to the
+options instead (re-reads the whole choice).  The skip key answers
+that one question with an empty `selected' (dsh web's per-question Skip)
+and moves on to the next question of the frame; a question without
+options reads free text directly, where an EMPTY input likewise skips it.
+C-g still abandons the WHOLE frame (see `dsh-emacs--question-decline').
+INDEX/TOTAL (when given) prefix each prompt as \"Question INDEX/TOTAL\" so a
+multi-question frame stays oriented; SESSION-ID (when given) prefixes the
+owning session's label (\[dsh-<title>\]), so with several sessions open the
+user can tell which conversation is asking.
 `selected' is always present and JSON-encodes as an array (empty for
 custom-only answers — the host schema requires the field).  Labels are
 compared with `equal' (fresh strings are never `eq'); C-g aborts the
@@ -2997,14 +3143,21 @@ whole frame."
                  (if index (format "Question %d/%d — " index total) "")))
          (multi (eq t (dsh-emacs-render--aget "multiSelect" question)))
          (labels (dsh-emacs--question-option-labels question))
-         (type-option "Type answer…")
+         (skip-label dsh-emacs--question-skip-label)
          (free-prompt (format "%s%s (free text, empty input = back to options): "
                               where text)))
     (cond
      ((null labels)
-      (let ((custom (read-string (format "%s%s: " where text))))
-        (and (not (string-empty-p custom))
-             `((id . ,id) (selected . []) (custom . ,custom)))))
+      (let ((custom (read-string (format "%s%s (empty input = skip): "
+                                         where text))))
+        (if (string-empty-p custom)
+            ;; Empty input SKIPS this question (dsh web's per-question
+            ;; Skip — there is no option list to go back to): cover it as
+            ;; {id, selected: []}; C-g still abandons the whole GROUP.
+            (progn (and index total
+                        (message "Question %d/%d skipped" index total))
+                   `((id . ,id) (selected . [])))
+          `((id . ,id) (selected . []) (custom . ,custom)))))
      (multi
       (catch 'back
         (while t
@@ -3013,39 +3166,74 @@ whole frame."
                       (lambda () (dsh-emacs--question-setup-hook))
                     (completing-read-multiple
                      (format "%s%s (comma-separated choices): " where text)
-                     (dsh-emacs--question-candidates labels type-option)
+                     (dsh-emacs--question-candidates
+                      labels dsh-emacs--question-type-label)
                      nil t)))
-                 (custom-p (cl-member type-option picked :test #'equal))
+                 (custom-p (cl-member dsh-emacs--question-type-label picked
+                                      :test #'equal))
                  (custom (and custom-p (read-string free-prompt)))
                  (selected (mapcar #'dsh-emacs--question-picked-label
-                                   (cl-remove type-option picked :test #'equal))))
-            (if (and custom-p (string-empty-p custom))
-                (message "Empty answer — back to the options")   ; 循环返回选项
+                                   (cl-remove dsh-emacs--question-type-label
+                                              picked :test #'equal))))
+            (cond
+             ((cl-member skip-label picked :test #'equal)
+              ;; Skip wins over any selection/custom (web's Skip is
+              ;; exclusive per question).
+              (and index total
+                   (message "Question %d/%d skipped" index total))
+              (throw 'back `((id . ,id) (selected . []))))
+             ((and custom-p (string-empty-p custom))
+              (message "Empty answer — back to the options"))   ; 循环返回选项
+             (t
               (throw 'back
                 (append `((id . ,id) (selected . ,(or selected [])))
                         (and custom (not (string-empty-p custom))
-                             `((custom . ,custom))))))))))
+                             `((custom . ,custom)))))))))))
      (t
       (catch 'back
         (while t
-          (let ((picked
-                 (minibuffer-with-setup-hook
-                     (lambda () (dsh-emacs--question-setup-hook))
-                   (completing-read
-                    (format "%s%s: " where text)
-                    (dsh-emacs--question-candidates labels type-option)
-                    nil t nil nil nil))))
-            (if (equal picked type-option)
-                (let ((custom (read-string free-prompt)))
-                  (if (string-empty-p custom)
-                      (message "Empty answer — back to the options")
-                    (throw 'back
-                           `((id . ,id) (selected . [])
-                             (custom . ,custom)))))
+          (let* ((dsh-emacs--question-pick-labels labels)
+                 ;; Without a list-rendering completion UI (vertico,
+                 ;; icomplete, fido, ivy) the minibuffer never shows the
+                 ;; candidates, so embed the numbered options in the
+                 ;; prompt — the digit keys still pick them.
+                 (stock-list
+                  (unless (or (bound-and-true-p vertico-mode)
+                              (bound-and-true-p icomplete-mode)
+                              (bound-and-true-p fido-mode)
+                              (bound-and-true-p ivy-mode))
+                    (mapconcat #'identity
+                               (cl-loop for l in labels for n from 1
+                                        collect (format "(%d) %s" n l))
+                               " ")))
+                 (picked
+                  (minibuffer-with-setup-hook
+                      (lambda () (dsh-emacs--question-setup-hook))
+                    (completing-read
+                     (format "%s%s%s: " where text
+                             (if stock-list (format " (%s)" stock-list) ""))
+                     (dsh-emacs--question-candidates
+                      labels dsh-emacs--question-type-label)
+                     nil t nil nil nil))))
+            (cond
+             ((equal picked skip-label)
+              (and index total
+                   (message "Question %d/%d skipped" index total))
+              (throw 'back `((id . ,id) (selected . []))))
+             ((equal picked dsh-emacs--question-type-label)
+              (let ((custom (read-string free-prompt)))
+                (if (string-empty-p custom)
+                    (message "Empty answer — back to the options")
+                  (throw 'back
+                         `((id . ,id) (selected . [])
+                           (custom . ,custom))))))
+             (t
               (throw 'back
                      `((id . ,id)
                        (selected . (,(dsh-emacs--question-picked-label
-                                      picked)))))))))))))
+                                      picked))))))))))))))
+
+
 
 (defun dsh-emacs--collect-question-answers (questions &optional session-id)
   "Answer QUESTIONS one at a time from the minibuffer: each question's
