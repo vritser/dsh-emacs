@@ -13,6 +13,7 @@ The most commonly used options, straight in your config:
 (setq dsh-emacs-default-preset "standard")         ; default agent preset for new sessions (nil = host default; "standard"/"minimal"/"code"/"cordis" or a user preset id)
 (setq dsh-emacs-model-group-format #(" %s " 0 4 (face vertico-group-title))) ; provider group-header format inside the model picker (nil = hide group titles)
 (setq dsh-emacs-input-history-length 50)           ; prompts kept for M-p / M-n recall
+(setq dsh-emacs-busy-enter-behavior 'queue)          ; what C-c C-c does while a turn runs: `queue` lines input up as the next turn (default), `steer` wakes the running agent before its next step, `stop` interrupts like before; `C-u C-c C-c` flips queue/steer for one send, an empty input always interrupts, and `C-c C-b` interrupts explicitly (C-c C-q manages the queue)
 (setq dsh-emacs-question-skip-key "s")       ; key that skips the current ask question inside the minibuffer chooser (nil = no shortcut; option-less free-text questions still skip on empty input)
 (setq dsh-emacs-ui-label-separator "·")            ; separator between Think/Tool title and its right-side summary ("" = plain gap)
 (setq dsh-emacs-tool-titles '(("pwsh" . "PowerShell"))) ; tool name -> display title overrides (icons stay per variant; unnamed tools get a humanized name, e.g. grep -> "Grep")

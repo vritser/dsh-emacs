@@ -96,6 +96,7 @@
 (declare-function dsh-emacs-session--render "dsh-emacs-session" ())
 (declare-function dsh-emacs--normalize-archived "dsh-emacs" (archived))
 (declare-function dsh-emacs-modeline-set-context-snapshot "dsh-emacs-modeline" (pressure window))
+(declare-function dsh-emacs-queue-apply "dsh-emacs-queue" (chat process payload))
 (declare-function dsh-emacs-server--basic-auth-header "dsh-emacs-server" ())
 
 ;; Defined in dsh-emacs-modeline.el, which loads after this module.  Referenced
@@ -384,6 +385,16 @@ through the normal path once loading completes."
                ;; 模型，免去全量 session.list 拉取）。value 是投影的 wire
                ;; view：{projectedTokens, pressureTokens, contextWindow}。
                ;; 投影是 per-session 实时状态，不依赖 history 加载门控。
+               ;; host 推送的收件箱快照帧：会话排队/引导输入的权威镜像
+               ;; （每次 inbox splice 全量推送；连接建立时对有积压的会话
+               ;; 也推一次）。与投影一样是 per-session 实时状态，不依赖
+               ;; history 加载门控——首个连接快照正是打开会话时获取积压
+               ;; 队列的唯一途径。仅处理本会话的帧。
+               ((equal type "session/queue")
+                (when (equal session-id
+                             (buffer-local-value
+                              'dsh-emacs--buffer-session chat))
+                  (dsh-emacs-queue-apply chat process payload)))
                ((equal type "session/projection")
                 (when (equal (dsh-emacs-render--aget "key" payload)
                              "contextPressure")

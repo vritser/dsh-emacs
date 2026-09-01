@@ -73,6 +73,36 @@ minor) and stay undated until the release is cut.
   `mode-line-highlight` mouse-face affordance.
 - **Contributor tooling**: `scripts/verify.sh` aggregates every
   machine-checkable verification step into a single exit-code gate.
+- **Queue and steer while a turn runs**: `C-c C-c` no longer only
+  interrupts a running turn — input is delivered per the new
+  `dsh-emacs-busy-enter-behavior` option (`queue` default, `steer`, or
+  `stop` for the old interrupt-only behavior): queued input runs as the
+  next turn automatically, steering wakes the running agent before its
+  next step, `C-u C-c C-c` flips queue and steer for one send, and with
+  an empty input the turn is still interrupted.  Interrupting explicitly
+  is `C-c C-b` (`dsh-emacs-interrupt-turn`).  The pending inbox mirrors
+  the server's `session/queue` frames: a `[Q2 S1]` mode-line indicator
+  (hidden when empty, mouse-1 opens the manager), transient echo-area
+  feedback on enqueue (`queued: …`), steer (`steering: …`)
+  and consumption (`running: …`), an input-prompt preview — a small
+  clock icon (SVG, tinted with the prompt color) followed by the next
+  message the host will send: after a steer the steered item leads the
+  hint (in-flight `steering` items reach the running agent before any
+  item queued for the next turn, so `next` follows that delivery
+  order); our own steer/delete/edit
+  RPCs apply to the mirror optimistically on success, so the hint and
+  mode-line refresh the instant the call succeeds, without waiting for
+  the confirming `session/queue` frame; prefix repaints are coalesced
+  per frame burst, so an item the host splices and instantly claims
+  never flashes the hint),
+  and `C-c C-q` (`dsh-emacs-list-queue`) managing the queue from a
+  minibuffer candidate list — vertico up/down highlights an item and the
+  single keys act on it directly, with no numbered selection step (`e`
+  edit, `s` steer, `d` delete, `RET` send now, `x` delete the whole
+  queue after confirmation); one `C-g` cancels.  All wire names verified
+  against
+  the dsh 0.1.1-rc.2 RPC table (`session.prompt` `mode`, new
+  `session.updateQueue`).
 
 ### Changed
 

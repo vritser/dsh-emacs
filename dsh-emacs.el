@@ -26,7 +26,10 @@
 ;;   M-x dsh-emacs-new-session        ; 新建会话
 ;;
 ;; 对话缓冲键位：
-;;   C-c C-c   发送/中断
+;;   C-c C-c   发送（运行中按 `dsh-emacs-busy-enter-behavior' 入队/引导，
+;;             空输入或 `C-u' 反转时为中断/引导）
+;;   C-c C-b   中断当前轮
+;;   C-c C-q   管理待发队列（编辑/引导/删除/立即发送）
 ;;   C-c C-r   刷新
 ;;   C-c C-l   打开会话列表
 ;;   C-c C-w   复制转录
@@ -58,6 +61,7 @@
 (require 'dsh-emacs-render)
 (require 'dsh-emacs-events)
 (require 'dsh-emacs-modeline)
+(require 'dsh-emacs-queue)
 (require 'dsh-emacs-server)
 (require 'dsh-emacs-command)
 (require 'dsh-emacs-session)
@@ -171,6 +175,19 @@ of its own), so only files resolving to one of these types are sent."
 (defcustom dsh-emacs-input-history-length 50
   "Maximum number of submitted prompts kept for `M-p' / `M-n' recall."
   :type 'integer
+  :group 'dsh-emacs)
+
+(defcustom dsh-emacs-busy-enter-behavior 'queue
+  "What `\\[dsh-emacs-send-or-stop]' does with input while a turn is running.
+Mirrors dsh web's `busyEnter' setting: `queue' lines the input up as the
+next turn (delivered automatically when the current one finishes),
+`steer' wakes the running agent and redirects its current work, and
+`stop' keeps the old behavior of interrupting the turn.  With `queue' or
+`steer', an empty input still interrupts, and `\\[universal-argument]
+\\[dsh-emacs-send-or-stop]' flips queue and steer for one send."
+  :type '(choice (const :tag "Queue as the next turn" queue)
+                 (const :tag "Steer the running turn" steer)
+                 (const :tag "Interrupt the turn" stop))
   :group 'dsh-emacs)
 
 (defcustom dsh-emacs-question-skip-key "s"
@@ -1653,6 +1670,8 @@ the session list regroups immediately (the host stream also repaints)."
 (defvar dsh-emacs-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") #'dsh-emacs-send-or-stop)
+    (define-key map (kbd "C-c C-b") #'dsh-emacs-interrupt-turn)
+    (define-key map (kbd "C-c C-q") #'dsh-emacs-list-queue)
     (define-key map (kbd "C-c C-r") #'dsh-emacs-refresh)
     (define-key map (kbd "C-c C-l") #'dsh-emacs-list-sessions-display)
     (define-key map (kbd "C-c C-s") #'dsh-emacs-switch-workspace-session)
@@ -1808,7 +1827,7 @@ All welcome text is marked read-only; only the region after ❯ is writable."
     (let ((welcome-start (point)))
       (insert (propertize "dsh  " 'face 'dsh-emacs-accent-face))
       (insert (propertize "DeepSeek Harness\n" 'face 'dsh-emacs-header-face))
-      (insert (propertize "C-c C-c send   ·   C-c C-r refresh   ·   C-c C-l session list\n\n"
+      (insert (propertize "C-c C-c send   ·   C-c C-q queue   ·   C-c C-r refresh   ·   C-c C-l session list\n\n"
                           'face 'dsh-emacs-hint-face))
       ;; 输入提示符
       (insert (propertize "❯ " 'face 'dsh-emacs-input-prompt-face))
@@ -1855,11 +1874,13 @@ editing inside an earlier one."
 Consults the same buffer-local flag that drives the mode-line spinner."
   (and (boundp 'dsh-emacs--ml-busy) dsh-emacs--ml-busy))
 
-(defun dsh-emacs--interrupt-turn ()
+(defun dsh-emacs-interrupt-turn ()
   "Interrupt the running turn via `session.cancel'.
 
 The server stops the agent mid-flight; the partial reply stays in the
-transcript and `turn/end' arrives normally, which clears the spinner."
+transcript and `turn/end' arrives normally, which clears the spinner.
+The pending-input queue is kept host-side: parked items stay parked
+until the next wake (see `dsh-emacs-list-queue')."
   (let ((session-id (dsh-emacs--active-session-id)))
     (when (null session-id)
       (user-error "No session is open"))
@@ -1876,16 +1897,31 @@ transcript and `turn/end' arrives normally, which clears the spinner."
                               (message "Failed to interrupt: %S" value))))))
 
 (defun dsh-emacs-send-or-stop ()
-  "Send the input as a message, or interrupt the running turn.
+  "Send the input as a message, or act on the running turn.
 
-While a turn is executing (the mode-line spinner is lit) another
-`C-c C-c' issues `session.cancel' instead of queueing a second message:
-the agent stops, the partial reply is kept in the transcript.  When idle,
-the text after the `❯ ' prompt is submitted."
+When idle, the text after the `❯ ' prompt is submitted.  While a turn is
+executing (the mode-line spinner is lit) the input is delivered per
+`dsh-emacs-busy-enter-behavior': `queue' lines it up as the next turn,
+`steer' wakes the running agent, `stop' issues `session.cancel' (the old
+interrupt behavior).  With `queue'/`steer' and an EMPTY input the turn is
+interrupted, so stopping stays one key away, and `C-u' flips queue and
+steer for one send.  Success feedback (queued / steering reports) arrives
+via the `session/queue' stream; `\\[dsh-emacs-interrupt-turn]'
+(`C-c C-b') interrupts regardless of the behavior."
   (interactive)
   (dsh-emacs-server-ensure)
   (if (dsh-emacs--busy-p)
-      (dsh-emacs--interrupt-turn)
+      (let ((behavior (if (and (consp current-prefix-arg)
+                               (not (eq dsh-emacs-busy-enter-behavior 'stop)))
+                          (if (eq dsh-emacs-busy-enter-behavior 'steer)
+                              'queue 'steer)
+                        dsh-emacs-busy-enter-behavior)))
+        (if (eq behavior 'stop)
+            (dsh-emacs-interrupt-turn)
+          (let ((input (dsh-emacs--get-input)))
+            (if (string-empty-p (string-trim input))
+                (dsh-emacs-interrupt-turn)
+              (dsh-emacs--submit-prompt input nil behavior)))))
     (let ((input (dsh-emacs--get-input)))
       (if (string-empty-p (string-trim input))
           (message "Please enter a message")
@@ -2009,8 +2045,17 @@ ambiguous and are not accepted by the dsh API."
       (when (> (length dsh-emacs--input-history) len)
         (setcdr (nthcdr (1- len) dsh-emacs--input-history) nil)))))
 
-(defun dsh-emacs--submit-prompt (message &optional images)
+(defun dsh-emacs--submit-prompt (message &optional images mode)
   "Submit MESSAGE to the current session.
+
+Non-nil MODE (\"queue\" or \"steer\") submits the message into a
+RUNNING turn's inbox instead of starting one — the deferred path of
+`dsh-emacs--submit-deferred', which neither renders a transcript card
+nor touches the spinner.  With MODE nil while the session is already
+busy (e.g. `C-c C-a' during a run), the configured
+`dsh-emacs-busy-enter-behavior' picks the mode; with `stop' the deferred
+path is never taken (`C-c C-c' interrupts then, attach-file keeps
+sending a plain queue-mode prompt as before).
 
 Slash-command lines (leading \"/name\") are routed to
 `commands.execute' instead of the model: the host admits only
@@ -2021,48 +2066,106 @@ given, is a list of wire-ready attachment alists
 \((mediaType . M) (data . B64) (name . N)); they are appended to the
 `content' array of `session.prompt' as `{type: \"image\"}' parts so
 the model sees them immediately."
-  (if (dsh-emacs-command-parse message)
-      (let ((session-id (dsh-emacs--active-session-id))
-            (input-buffer (current-buffer)))
-        ;; 提交即清空输入区、记入输入历史——不等 RPC 往返（网页同款手感）：
-        ;; 命令是否被 host 受理由 `commands.execute' 的响应决定，结果由
-        ;; command/run + command/done 会话事件渲染。
-        (dsh-emacs--push-input-history message)
-        (setq dsh-emacs--input-history-pos nil
-              dsh-emacs--input-history-pending nil)
-        (when (buffer-live-p input-buffer)
-          (with-current-buffer input-buffer
-            (dsh-emacs--clear-input)))
-        ;; 立即渲染命令行（乐观路径）——不等 RPC 往返。
-        (when (buffer-live-p input-buffer)
-          (with-current-buffer input-buffer
-            (dsh-emacs-render-command-optimistic message)))
-        (dsh-emacs-command-execute
-         session-id (string-trim message) images
-         (lambda (ok execution err)
-           ;; 回调可能运行在 process filter 里：吞掉 C-g 的 quit。
-           (condition-case nil
-               (cond
-                ((null ok)
-                 ;; 传输失败（HTTP/解析错误）：清除乐观行，恢复原文。
-                 (when (buffer-live-p input-buffer)
-                   (with-current-buffer input-buffer
-                     (dsh-emacs-render-command-cleanup-optimistic)
-                     (when (string-empty-p
-                            (or (dsh-emacs--get-input) ""))
-                       (dsh-emacs--replace-input message))))
-                 (message "Command failed to run: %S"
-                          (or err "transport error")))
-                ((null execution)
-                 ;; 未命中注册表 → 清除乐观行，按普通消息发送（浏览器同款语义）；
-                 ;; 历史已在提交时记录，不再重复记入。
-                 (when (buffer-live-p input-buffer)
-                   (with-current-buffer input-buffer
-                     (dsh-emacs-render-command-cleanup-optimistic)))
-                 (dsh-emacs--submit-plain message images t))
-                (t nil))       ; 受理：乐观行由 command/run 事件替换
-             (quit nil)))))
-    (dsh-emacs--submit-plain message images)))
+  (if (or mode
+          (and (dsh-emacs--busy-p)
+               (not (eq dsh-emacs-busy-enter-behavior 'stop))))
+      (dsh-emacs--submit-deferred message images mode)
+    (if (dsh-emacs-command-parse message)
+        (let ((session-id (dsh-emacs--active-session-id))
+              (input-buffer (current-buffer)))
+          ;; 提交即清空输入区、记入输入历史——不等 RPC 往返（网页同款手感）：
+          ;; 命令是否被 host 受理由 `commands.execute' 的响应决定，结果由
+          ;; command/run + command/done 会话事件渲染。
+          (dsh-emacs--push-input-history message)
+          (setq dsh-emacs--input-history-pos nil
+                dsh-emacs--input-history-pending nil)
+          (when (buffer-live-p input-buffer)
+            (with-current-buffer input-buffer
+              (dsh-emacs--clear-input)))
+          ;; 立即渲染命令行（乐观路径）——不等 RPC 往返。
+          (when (buffer-live-p input-buffer)
+            (with-current-buffer input-buffer
+              (dsh-emacs-render-command-optimistic message)))
+          (dsh-emacs-command-execute
+           session-id (string-trim message) images
+           (lambda (ok execution err)
+             ;; 回调可能运行在 process filter 里：吞掉 C-g 的 quit。
+             (condition-case nil
+                 (cond
+                  ((null ok)
+                   ;; 传输失败（HTTP/解析错误）：清除乐观行，恢复原文。
+                   (when (buffer-live-p input-buffer)
+                     (with-current-buffer input-buffer
+                       (dsh-emacs-render-command-cleanup-optimistic)
+                       (when (string-empty-p
+                              (or (dsh-emacs--get-input) ""))
+                         (dsh-emacs--replace-input message))))
+                   (message "Command failed to run: %S"
+                            (or err "transport error")))
+                  ((null execution)
+                   ;; 未命中注册表 → 清除乐观行，按普通消息发送（浏览器同款语义）；
+                   ;; 历史已在提交时记录，不再重复记入。
+                   (when (buffer-live-p input-buffer)
+                     (with-current-buffer input-buffer
+                       (dsh-emacs-render-command-cleanup-optimistic)))
+                   (dsh-emacs--submit-plain message images t))
+                  (t nil))       ; 受理：乐观行由 command/run 事件替换
+               (quit nil)))))
+      (dsh-emacs--submit-plain message images))))
+
+(defun dsh-emacs--submit-deferred (message images mode)
+  "Submit MESSAGE into the running turn's inbox as MODE.
+MODE is `queue' (line up as the next turn) or `steer' (wake the running
+agent before its next step); nil means resolve from
+`dsh-emacs-busy-enter-behavior'.  The wire call is `session.prompt' with
+the mode field.  Unlike `dsh-emacs--submit-plain' this renders NO
+optimistic transcript card and does not touch the spinner: the item is
+not part of the conversation until the host claims it (the durable
+`user/message' event renders then), and the queue/steer feedback rides
+the `session/queue' frame the host pushes on the splice.  IMAGES is the
+same wire-ready attachment list `dsh-emacs--submit-prompt' takes; the
+host admits images by the session's current model at claim time.  Slash
+lines are NOT routed to `commands.execute' here — busy input is queued
+as literal text, the same semantics as dsh web's busyEnter."
+  (let* ((mode (pcase mode
+                 ((or 'queue 'steer) (symbol-name mode))
+                 ('stop "queue")
+                 (_ (symbol-name dsh-emacs-busy-enter-behavior))))
+         (session-id (dsh-emacs--active-session-id))
+         (input-buffer (current-buffer))
+         (content (vconcat `(((type . "text") (text . ,message)))
+                           (mapcar (lambda (attachment)
+                                     (cons '(type . "image") attachment))
+                                   images)))
+         (payload `((sessionId . ,session-id)
+                    (mode . ,mode)
+                    (content . ,content)
+                    (clientTimeZone . ,(dsh-emacs--client-time-zone)))))
+    ;; Same web-style feel as the immediate path: the draft leaves the
+    ;; input area and lands in history right away, before the RPC settles.
+    (dsh-emacs--push-input-history message)
+    (setq dsh-emacs--input-history-pos nil
+          dsh-emacs--input-history-pending nil)
+    (when (buffer-live-p input-buffer)
+      (with-current-buffer input-buffer
+        (dsh-emacs--clear-input)))
+    (dsh-emacs--rpc-async "session.prompt" payload
+                          (lambda (ok value)
+                            (if ok
+                                ;; Enqueue/steer feedback arrives via the
+                                ;; `session/queue' frame diff — and the
+                                ;; transcript shows the message when the
+                                ;; host claims it (user/message).  Nothing
+                                ;; to render here.
+                                nil
+                              (message "Failed to submit: %S" value)
+                              ;; Nothing will consume the text, put it back
+                              ;; (same restore as the command path).
+                              (when (buffer-live-p input-buffer)
+                                (with-current-buffer input-buffer
+                                  (when (string-empty-p
+                                         (or (dsh-emacs--get-input) ""))
+                                    (dsh-emacs--replace-input message)))))))))
 
 (defun dsh-emacs--submit-plain (message &optional images skip-history)
   "Submit MESSAGE (a plain string) to the current session.

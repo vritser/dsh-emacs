@@ -487,6 +487,13 @@ Bold, no italic — matching dsh web's thinkingToggle style."
 	"Context usage > 80%."
 	:group 'dsh-emacs-faces)
 
+(defface dsh-emacs-modeline-queue-face
+	`((((background light)) :foreground "#b45f06")
+		(((background dark))  :foreground "#f0a63c")
+		(t :inherit warning))
+	"Pending-input queue indicator (`[Q2 S1]') in the mode line."
+	:group 'dsh-emacs-faces)
+
 ;;; ---------------------------------------------------------------------------
 ;;;  兼容 face 别名（0.1.0 时代叫 footer）
 ;;; ---------------------------------------------------------------------------
