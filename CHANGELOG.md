@@ -79,6 +79,12 @@ minor) and stay undated until the release is cut.
   0-token projection; the mode-line now keeps the last genuine snapshot
   until the next successful run reports real usage, instead of dropping to
   0%.
+- **ctx% survives re-submitting after a model error**: the failed run's
+  zero usage sample also corrupts the projection's derived
+  `projectedTokens` (it recovers to a small lying value as the session
+  surface grows); every projection whose raw usage sample is zero is now
+  ignored, so submitting a new prompt no longer resets the shown
+  percentage to ~0%.
 - **`C-c C-r` no longer mixes transcripts between sessions**: refreshing an
   older chat buffer (one that is not the last-opened session) used to render
   its history into the last-opened session's buffer; the history now renders

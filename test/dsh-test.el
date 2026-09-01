@@ -381,7 +381,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                    (lambda (_p) buf)))
           (dsh-emacs-events--dispatch-json
            'process
-           "{\"type\":\"server-frame\",\"payload\":{\"type\":\"session/projection\",\"sessionId\":\"sess-proj\",\"key\":\"contextPressure\",\"seq\":50,\"value\":{\"projectedTokens\":88345,\"contextWindow\":1000000}}}"))
+           "{\"type\":\"server-frame\",\"payload\":{\"type\":\"session/projection\",\"sessionId\":\"sess-proj\",\"key\":\"contextPressure\",\"seq\":50,\"value\":{\"projectedTokens\":88345,\"pressureTokens\":88000,\"contextWindow\":1000000}}}"))
         (let ((p (buffer-local-value 'dsh-emacs--modeline-context-pressure buf)))
           (when (= 88345 p)
             (dsh-test-pass "session-projection-frame-dispatch"))))
@@ -1801,6 +1801,18 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (dsh-test-assert "zero-projection-frame-keeps-ctx-snapshot"
           (= 66617 (buffer-local-value 'dsh-emacs--modeline-context-pressure buf))
           (= 1000000 (buffer-local-value 'dsh-emacs--modeline-context-window-server buf)))
+        ;; 用户再提交输入后，失败零样本仍在折叠里（压力 0），surface 增长让
+        ;; projectedTokens 恢复成小正值 —— 这不是真实占用，是整个对
+        ;; {pressureTokens 0} 的推导旁支。此前 `projected ?? pressure' 会取到
+        ;; 这个小正值写进去，ctx% 从 6.7% 塌成 ≈0.1%（用户实测：model error
+        ;; 后再提交一个 user input，ctx usage 又归 0）。
+        (dsh-emacs--events-apply-context-projection
+         "sess-zero"
+         '((projectedTokens . 1234) (pressureTokens . 0)
+           (contextWindow . 1000000)))
+        (dsh-test-assert "submit-after-error-keeps-ctx-snapshot"
+          (= 66617 (buffer-local-value 'dsh-emacs--modeline-context-pressure buf))
+          (= 1000000 (buffer-local-value 'dsh-emacs--modeline-context-window-server buf)))
         ;; session.list 行同样携带零对（pressureTokens 0 + contextWindow 完整）
         (setq dsh-emacs--sessions
               (list (dsh-protocol-session--from-alist
@@ -1817,7 +1829,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         ;; 下一次真实 usage 样本照常落地（成功运行后投影恢复）
         (dsh-emacs--events-apply-context-projection
          "sess-zero"
-         '((projectedTokens . 70123) (contextWindow . 1000000)))
+         '((projectedTokens . 70123) (pressureTokens . 70000)
+           (contextWindow . 1000000)))
         (dsh-test-assert "positive-projection-still-updates-ctx-snapshot"
           (= 70123 (buffer-local-value 'dsh-emacs--modeline-context-pressure buf))
           (= 1000000 (buffer-local-value 'dsh-emacs--modeline-context-window-server buf))))

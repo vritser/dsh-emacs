@@ -261,15 +261,24 @@ VALUE is the projection's wire view: an alist with symbol/string keys for
 `projectedTokens', `pressureTokens' and `contextWindow' (the same shape
 `session.list' projections carry, aligned with dsh web's ctx meter which
 reads projectedTokens ?? pressureTokens).  Only the session's live chat
-buffer is touched; the mode-line snapshot setter lands the pair in one go."
+buffer is touched; the mode-line snapshot setter lands the pair in one go.
+
+The whole pair is trusted only while the RAW usage sample is positive: a
+provider-rejected run (quota/rate) reports usage 0/0 and the last-wins
+sample collapses to 0; `projectedTokens' — derived as
+pressureTokens + surface movement — then just tracks the surface's later
+growth (a small lying value after the user submits again).  While the
+sample stays 0 the previous snapshot is kept; the next real usage sample
+lands the genuine pair."
   (when (and (listp value)
              (hash-table-p dsh-emacs--chat-buffers))
     (let* ((projected (dsh-emacs-render--aget "projectedTokens" value))
            (pressure (dsh-emacs-render--aget "pressureTokens" value))
            (window (dsh-emacs-render--aget "contextWindow" value))
-           ;; dsh web 口径：优先 projected（含 surface 增量），回退 pressure
-           (used (or (and (numberp projected) projected)
-                     (and (numberp pressure) pressure)))
+           (used (and (numberp pressure) (> pressure 0)
+                      (or (and (numberp projected) (> projected 0)
+                               projected)
+                          pressure)))
            (buf (gethash session-id dsh-emacs--chat-buffers)))
       (when (and used window (> window 0)
                  (buffer-live-p buf)
