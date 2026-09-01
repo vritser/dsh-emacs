@@ -68,6 +68,19 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **C-g on a question abandons the whole group like dsh web**: pressing
+  `C-g` (or entering an empty no-option answer) now answers the frame
+  with the protocol's reserved `cancelled` receipt — `result.ok: false`
+  with `error.code: "cancelled"`, the exact signal dsh web's "abandon
+  questions" sends — so the host withdraws the ask and broadcasts
+  `question/resolved` (`cancelled`), and the agent's turn is never left
+  blocked; previously nothing was sent and the run stayed stuck until
+  interrupted.
+- **Replayed questions no longer re-ask**: a `question/requested` whose
+  rpcId is already pending (queued or being answered — the mux replays the
+  same request on reconnect) is dropped, and the host's `question/resolved`
+  push retires any still-queued copy, so the user is never asked the same
+  question twice after a stream replay.
 - **Context usage reflects the server**: the footer ctx% is seeded when a
   session opens and updated live from `session/projection` frames, instead
   of only showing manually configured values.

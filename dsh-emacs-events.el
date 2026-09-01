@@ -88,6 +88,7 @@
 (declare-function dsh-emacs--chat-session-item "dsh-emacs" (session-id))
 (declare-function dsh-emacs--chat-buffer-sync "dsh-emacs" (session-id))
 (declare-function dsh-emacs--question-requested "dsh-emacs" (chat rpc-id session-id questions))
+(declare-function dsh-emacs--question-resolved "dsh-emacs" (session-id rpc-id outcome))
 (declare-function dsh-emacs--approval-requested "dsh-emacs" (chat rpc-id session-id approval-id tool-name reason call-id))
 (declare-function dsh-emacs--approval-resolved "dsh-emacs" (session-id approval-id outcome))
 (declare-function dsh-emacs-render--aget "dsh-emacs-render" (key alist))
@@ -360,6 +361,15 @@ through the normal path once loading completes."
                    (dsh-emacs-render--aget "toolName" payload)
                    (dsh-emacs-render--aget "reason" payload)
                    (dsh-emacs-render--aget "callId" payload))))
+               ;; Pure push: the question was resolved (answered/withdrawn)
+               ;; host-side.  No answer is expected — just retire any
+               ;; still-queued frame for the same rpcId so a replay never
+               ;; re-asks a finished question.
+               ((equal type "question/resolved")
+                (dsh-emacs--question-resolved
+                 session-id
+                 (dsh-emacs-render--aget "questionRpcId" payload)
+                 (dsh-emacs-render--aget "outcome" payload)))
                ;; Pure push: the approval was decided (allowed-once/rejected)
                ;; or withdrawn host-side (cancelled/unavailable).  No answer
                ;; is expected — just retire any still-queued frame for the

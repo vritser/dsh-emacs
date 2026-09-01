@@ -4703,17 +4703,24 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
               (dsh-test-pass "question-multi-inserts-no-card")))))
     (when (buffer-live-p chat) (kill-buffer chat))))
 
-;; 5) 帧分发：C-g 取消 → 不应答（问题留给 host）
+;; 5) 帧分发：C-g/ESC → 放弃整组问题：以协议保留的 cancelled 错误回执应答
+;; （ok:false + error.code=cancelled —— dsh web 的 abandon 同一信号），
+;; 宿主把该 ask 撤销为 cancelled 并广播 question/resolved(cancelled)
+;; 回归：旧实现完全不应答，宿主保持 pending，agent 回合永久卡死。
 (let* ((chat (get-buffer-create " *dsh-test-question-cg*"))
-       (responds nil))
+       (responds nil)
+       (expected (dsh-emacs--respond-cancel-envelope-json
+                  "rpc-qc" "User abandoned the questions")))
   (unwind-protect
       (progn
         (with-current-buffer chat
           (setq-local dsh-emacs--buffer-session "sess-qc"))
         (cl-letf (((symbol-function 'dsh-emacs-events--chat)
                    (lambda (_p) chat))
-                  ((symbol-function 'dsh-emacs--rpc-respond-async)
-                   (lambda (&rest _) (push t responds)))
+                  ((symbol-function 'dsh-emacs--respond-post)
+                   (lambda (json-data cb)
+                     (push json-data responds)
+                     (funcall cb t nil)))
                   ((symbol-function 'completing-read)
                    (lambda (&rest _) (signal 'quit nil))))
           (dsh-emacs-events--dispatch-json
@@ -4725,8 +4732,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                    "\"questions\":[{\"id\":\"q1\","
                    "\"question\":\"Proceed?\","
                    "\"options\":[{\"label\":\"Yes\"}]}]}}"))
-          (when (null responds)
-            (dsh-test-pass "question-frame-c-g-aborts-without-respond"))))
+          (dsh-test-assert "question-frame-c-g-cancels-with-receipt"
+            (equal (list expected) responds))))
     (when (buffer-live-p chat) (kill-buffer chat))))
 
 ;; 6) 帧分发：history 加载中也要应答（mux 重放的 pending 问题在打开时到达）
@@ -4783,7 +4790,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                    "\"questions\":[{\"id\":\"q1\","
                    "\"question\":\"Proceed?\","
                    "\"options\":[{\"label\":\"Yes\"}]}]}}"))
-          ;; question/resolved（纯推送）→ 忽略
+          ;; question/resolved（纯推送）→ 不应答；只退役同 rpcId 的队列帧
+          ;;（这里没有排队中的帧，仅验证不 respond；退役语义见测试 10）
           (dsh-emacs-events--dispatch-json
            'process
            (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-r\","
@@ -4883,6 +4891,101 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (dsh-test-pass "question-queue-drained-clean"))))
     (when (buffer-live-p chat-a) (kill-buffer chat-a))
     (when (buffer-live-p chat-b) (kill-buffer chat-b))))
+
+;; 9) 同一 rpc-id 的重复帧（mux 重放）不得再次提问：第一帧正在回答时
+;; 重复到达的副本必须被丢弃，不排队不重问
+;; 回归：曾对同一问题问两次（第一帧答完后副本又进队列再弹一次）。
+(let* ((chat (get-buffer-create " *dsh-test-question-dup*"))
+       (responds nil)
+       (prompts 0)
+       (dup-sent nil))
+  (unwind-protect
+      (let ((dsh-emacs--sessions nil)
+            (dsh-emacs--chat-buffers (make-hash-table :test 'equal)))
+        (setq dsh-emacs--question-queue nil
+              dsh-emacs--question-active nil)
+        (with-current-buffer chat
+          (setq-local dsh-emacs--buffer-session "sess-dup"))
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-respond-async)
+                   (lambda (rpc-id payload cb)
+                     (push (list rpc-id payload) responds)
+                     (funcall cb t nil)))
+                  ((symbol-function 'completing-read)
+                   (lambda (prompt &rest _)
+                     (setq prompts (1+ prompts))
+                     ;; 回答第一帧的途中，同一 rpc-id 的重放副本到达 → 必须丢弃。
+                     ;; 只注入一次副本（修复前的代码会把它再答一遍并再次触发本
+                     ;; 桩，形成复问循环——正是本回归要消灭的症状）。
+                     (unless dup-sent
+                       (setq dup-sent t)
+                       (dsh-emacs--question-requested
+                        chat "rpc-dup" "sess-dup"
+                        (list (list (cons 'id "qd")
+                                    (cons 'question "Dup?")
+                                    (cons 'options
+                                          (list (list (cons 'label "Yes"))))))))
+                     "Yes")))
+          (dsh-emacs--question-requested
+           chat "rpc-dup" "sess-dup"
+           (list (list (cons 'id "qd")
+                       (cons 'question "Dup?")
+                       (cons 'options
+                             (list (list (cons 'label "Yes")))))))
+          (dsh-test-assert "question-replay-duplicate-asked-once"
+            (= 1 prompts)
+            (= 1 (length responds))
+            (equal '("rpc-dup") (mapcar #'car responds)))
+          (when (and (null dsh-emacs--question-active)
+                     (null dsh-emacs--question-queue))
+            (dsh-test-pass "question-replay-duplicate-drained-clean"))))
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
+;; 10) question/resolved（纯推送）→ 队列里同 rpcId 的待答帧退役，
+;; 重放的 requested→resolved 对不再复问已了结的问题
+;; 回归：resolved 被忽略，排队中的副本继续弹给用户选。
+(let* ((chat (get-buffer-create " *dsh-test-question-resolved*"))
+       (responds nil)
+       (prompted nil))
+  (unwind-protect
+      (let ((dsh-emacs--sessions nil)
+            (dsh-emacs--chat-buffers (make-hash-table :test 'equal)))
+        (setq dsh-emacs--question-queue nil
+              dsh-emacs--question-active t)  ; 模拟另一帧正占用回答槽
+        (with-current-buffer chat
+          (setq-local dsh-emacs--buffer-session "sess-res"))
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-respond-async)
+                   (lambda (&rest _) (push t responds)))
+                  ((symbol-function 'dsh-emacs-events--chat)
+                   (lambda (_p) chat))
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _) (setq prompted t) "Yes")))
+          ;; 副本先到（排队），宿主已了结的 resolved 后到（重放同序）
+          (dsh-emacs-events--dispatch-json
+           'process
+           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-rs\","
+                   "\"method\":\"question/requested\","
+                   "\"payload\":{\"type\":\"question/requested\","
+                   "\"sessionId\":\"sess-res\","
+                   "\"questions\":[{\"id\":\"q1\","
+                   "\"question\":\"Proceed?\","
+                   "\"options\":[{\"label\":\"Yes\"}]}]}}"))
+          (dsh-emacs-events--dispatch-json
+           'process
+           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-rs2\","
+                   "\"method\":\"question/resolved\","
+                   "\"payload\":{\"type\":\"question/resolved\","
+                   "\"sessionId\":\"sess-res\","
+                   "\"questionRpcId\":\"rpc-rs\",\"outcome\":\"answered\"}}"))
+          (dsh-test-assert "question-resolved-retires-queued-frame"
+            (null dsh-emacs--question-queue))
+          ;; 回答槽清空后队列里也没有残留 → 不再弹不再答
+          (setq dsh-emacs--question-active nil)
+          (dsh-emacs--question-drain)
+          (dsh-test-assert "question-resolved-never-prompts"
+            (null prompted)
+            (null responds)
+            (null dsh-emacs--question-queue))))
+    (when (buffer-live-p chat) (kill-buffer chat))))
 
 ;; --- 测试 78a: approval/requested 帧分发 → 审批 → 应答（含 history 加载中） ---
 ;; 沙箱工具要访问 workspace 之外的文件时，宿主推送 answerable 的

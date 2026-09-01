@@ -2763,7 +2763,10 @@ This is the main entry command of dsh-emacs."
 answering slot; each entry is (CHAT RPC-ID SESSION-ID QUESTIONS).")
 
 (defvar dsh-emacs--question-active nil
-  "Non-nil while a question frame occupies the interactive answering slot.")
+  "The `question/requested' frame currently occupying the interactive
+answering slot, or nil.  The slot is shared with the approval flow
+(`dsh-emacs--approval-active'): only one prompt may own the minibuffer
+at a time.")
 
 ;; Declared here — before `dsh-emacs--question-drain' references them in
 ;; the shared-slot handoff — because the byte-compiler reads the file
@@ -2815,7 +2818,7 @@ regardless of which stream they arrived on."
            (rpc-id (nth 1 frame))
            (session-id (nth 2 frame))
            (questions (dsh-emacs--sequence-list (nth 3 frame))))
-      (setq dsh-emacs--question-active t)
+      (setq dsh-emacs--question-active frame)
       (condition-case err
           (let ((answers
                  (when (buffer-live-p chat)
@@ -2832,8 +2835,13 @@ regardless of which stream they arrived on."
                        (message "Answered %d question(s)" (length answers))
                      (message "Question response not accepted (%s)"
                               reason))))
-              (message "Question cancelled")))
-        (quit (message "Question cancelled"))
+              ;; No choices collected (aborted via an empty no-option
+              ;; input, or the chat buffer died): cancel the whole frame
+              ;; with the protocol's `cancelled' receipt (dsh web's
+              ;; "abandon questions") so the ask aborts host-side and the
+              ;; run is never left blocked on an unanswered question.
+              (dsh-emacs--question-decline rpc-id)))
+        (quit (dsh-emacs--question-decline rpc-id))
         (error (message "dsh question error: %S" err)))
       (setq dsh-emacs--question-active nil)))
   ;; The question answering slot just freed up: hand queued approvals over
@@ -2852,13 +2860,26 @@ POST /api/respond; rpcId echoes the requested frame."
                  (rpcId . ,rpc-id)
                  (result . ((ok . t) (value . ,payload))))))
 
-(defun dsh-emacs--rpc-respond-async (rpc-id payload callback)
-  "Answer a server-request on POST /api/respond: client-response for
-RPC-ID with domain answer PAYLOAD.  CALLBACK receives (accepted-p . reason):
-accepted-p non-nil on an accepted receipt; otherwise REASON is
-`not-pending' or `bad-response' (a transport failure calls it with nil)."
+(defun dsh-emacs--respond-cancel-envelope-json (rpc-id message)
+  "JSON body of the client-response that CANCELS server-request RPC-ID.
+The protocol's answer receipt carries an ok:false result whose error code
+is reserved `cancelled' (detail-less) — the same wire signal dsh web's
+\"abandon questions\" produces; the host resolves the pending question as
+cancelled and broadcasts `question/resolved'(\"cancelled\")."
+  (json-encode
+   `((type . "client-response")
+     (rpcId . ,rpc-id)
+     (result . ((ok . :json-false)
+                (error . ((code . "cancelled")
+                          (message . ,message)
+                          (details . ,(make-hash-table)))))))))
+
+(defun dsh-emacs--respond-post (json-data callback)
+  "POST the client-response envelope JSON-DATA to /api/respond.
+CALLBACK receives (accepted-p . reason): accepted-p non-nil on an
+accepted receipt; otherwise REASON is `not-pending' or `bad-response'
+(a transport failure calls it with nil)."
   (let* ((url (format "%s/api/respond" dsh-emacs-base-url))
-         (json-data (dsh-emacs--respond-envelope-json rpc-id payload))
          (url-request-method "POST")
          (url-request-extra-headers '(("Content-Type" . "application/json")))
          (url-request-data (encode-coding-string json-data 'utf-8))
@@ -2893,6 +2914,15 @@ accepted-p non-nil on an accepted receipt; otherwise REASON is
                               reason)
                    (quit nil))))))))
      nil t)))
+
+(defun dsh-emacs--rpc-respond-async (rpc-id payload callback)
+  "Answer a server-request on POST /api/respond: client-response for
+RPC-ID with domain answer PAYLOAD.  CALLBACK receives (accepted-p . reason):
+accepted-p non-nil on an accepted receipt; otherwise REASON is
+`not-pending' or `bad-response' (a transport failure calls it with nil)."
+  (dsh-emacs--respond-post
+   (dsh-emacs--respond-envelope-json rpc-id payload)
+   callback))
 
 (defun dsh-emacs--question-option-labels (question)
   "Option labels of QUESTION (a decoded alist), in roster order."
@@ -3046,14 +3076,55 @@ frames are queued (FIFO) and drained one at a time by
 label (see `dsh-emacs--question-session-label').  All questions of the
 frame are then read one after another (options as completion candidates
 plus a \"Type answer…\" free-text choice) and answered with a single
-client-response echoing RPC-ID on POST /api/respond.  C-g aborts the
-frame without responding (the host keeps the question pending until the
-turn is interrupted); the quit is caught here, so it cannot leak out of
-the process filter as \"error in process filter: Quit\"."
-  (setq dsh-emacs--question-queue
-        (nconc dsh-emacs--question-queue
-               (list (list chat rpc-id session-id questions))))
+client-response echoing RPC-ID on POST /api/respond.  C-g (or an empty
+no-option input) cancels the whole frame with the protocol's reserved
+`cancelled' receipt — dsh web's \"abandon questions\" — so the host
+withdraws the ask and the run is never left blocked; the quit is caught
+here, so it cannot leak out of the process filter as \"error in process
+filter: Quit\".
+A frame whose RPC-ID is already pending (queued or active — the mux
+replays the same request) is dropped instead of asked twice, mirroring
+the approval flow."
+  (unless (or (and (consp dsh-emacs--question-active)
+                   (equal rpc-id (nth 1 dsh-emacs--question-active)))
+              (cl-some (lambda (entry)
+                         (equal rpc-id (nth 1 entry)))
+                       dsh-emacs--question-queue))
+    (setq dsh-emacs--question-queue
+          (nconc dsh-emacs--question-queue
+                 (list (list chat rpc-id session-id questions)))))
   (dsh-emacs--question-drain))
+
+(defun dsh-emacs--question-decline (rpc-id)
+  "Cancel a whole `question/requested' frame and unblock its run.
+Answers the server-request with the protocol's reserved `cancelled'
+receipt (ok:false + error.code=cancelled) — the same wire signal dsh web's
+\"abandon questions\" produces: the host resolves the pending question as
+cancelled and broadcasts `question/resolved'(\"cancelled\"), and the ask
+tool call aborts, so the agent's turn is never left blocked on an
+unanswered question.  The quit is contained here so it cannot leak out of
+the process filter as \"error in process filter: Quit\"."
+  (dsh-emacs--respond-post
+   (dsh-emacs--respond-cancel-envelope-json
+    rpc-id "User abandoned the questions")
+   (lambda (accepted reason)
+     (if accepted
+         (message "Question cancelled")
+       (message "Question response not accepted (%s)" reason)))))
+
+(defun dsh-emacs--question-resolved (session-id rpc-id outcome)
+  "Handle a `question/resolved' push for RPC-ID of SESSION-ID.
+The OUTCOME (answered/cancelled/…) is echoed in *Messages*, and any queued
+frame for the same question is dropped, so a mux replay of
+requested→resolved never re-asks a finished question.  A question currently
+being prompted cannot be aborted from here; its stale answer is then refused
+server-side as not-pending."
+  (message "dsh question %s resolved: %s" rpc-id (or outcome "…"))
+  (setq dsh-emacs--question-queue
+        (cl-remove-if (lambda (entry)
+                        (and (equal rpc-id (nth 1 entry))
+                             (equal session-id (nth 2 entry))))
+                      dsh-emacs--question-queue)))
 
 ;; ---------------------------------------------------------------------------
 ;;  用户审批（approval/requested）应答
