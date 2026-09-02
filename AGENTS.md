@@ -199,8 +199,8 @@ whole report blindly.
 - `user-error` for user-caused problems, `error` for programmer bugs; error
   text describes the current problem, not a lecture about what to do next.
 - Flag compensating code (silent fallbacks, re-reading data a caller already
-  has, timing hacks) as design debt in the final summary or a docs note —
-  do not let debt discovery delay the current change.
+  has, timing hacks) as design debt in a postmortem (see §Postmortems below)
+  — do not let debt discovery delay the current change.
 
 ## Testing
 
@@ -246,6 +246,27 @@ whole report blindly.
 - If code and docs diverge, treat code as source of truth and fix the docs
   immediately; never invent commands, capabilities, or behaviors in docs —
   verify them from code or tests.
+
+## Postmortems (decision records)
+
+The `postmortem/` directory is the historical layer: numbered, one-page
+records of decisions and lessons (template: `postmortem/000-template.md`).
+Docs describe the current state; postmortems keep the "why" that survives
+refactors and renames.
+
+- **Read the relevant records before significant changes** — they are
+  constraints and rationale, not proof the code still matches them.
+- Write a postmortem when: adding or changing a user-visible workflow;
+  choosing between non-obvious architectural approaches; abandoning or
+  reverting an approach; removing a public option or command; deliberately
+  deferring a known limitation. Bug-fix-only changes do not need one.
+- Postmortems explain **why**, not the code: `Background` / `Decision` /
+  `Why` / `Consequence` / `Known limitations`, with commits as evidence.
+- They are historical records — do not rewrite old ones to match current
+  behavior; when a later change supersedes one, write a new entry and add a
+  short "Superseded by NNN" note at the top of the old file.
+- Link both ways: CHANGELOG entries for user-visible changes carry
+  `(rationale: postmortem/NNN)`; the postmortem cites the commits it records.
 
 ## Commit
 

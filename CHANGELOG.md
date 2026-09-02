@@ -13,17 +13,21 @@ minor) and stay undated until the release is cut.
 - **Status bar renamed from "footer" to "mode-line"**: the customize group
   `dsh-emacs-footer` is now `dsh-emacs-modeline`, and its options
   `dsh-emacs-footer-enabled` / `-format-spec` / `-branch-refresh-interval`
-  became `dsh-emacs-modeline-*`.  No compatibility aliases are retained.
+  became `dsh-emacs-modeline-*`.  The old option, command and face names
+  remain as obsolete aliases (deprecated since 0.2.0), so existing configs
+  keep loading with deprecation warnings
+  (rationale: postmortem/002).
 - **Manual context-window options removed**: `dsh-emacs-footer-context-window`
   and `dsh-emacs-footer-context-window-alist` are gone.  The ctx% segment is
   driven exclusively by the context window the server reports; saved
-  customizations of the old options are silently dropped on upgrade.
+  customizations of the old options are silently dropped on upgrade
+  (rationale: postmortem/005).
 - **HTTP polling fallback removed**: `dsh-emacs-poll-fallback`,
   `dsh-emacs-poll-interval` and `dsh-emacs-poll-warn-delay` are gone.  The
   WebSocket event stream is the only automatic reply channel: if it is down,
   replies appear only once the stream recovers or via manual refresh
   (`C-c C-r`).  Saved customizations of the removed options are silently
-  dropped on upgrade.
+  dropped on upgrade (rationale: postmortem/001).
 
 ### Added
 
@@ -102,7 +106,7 @@ minor) and stay undated until the release is cut.
   queue after confirmation); one `C-g` cancels.  All wire names verified
   against
   the dsh 0.1.1-rc.2 RPC table (`session.prompt` `mode`, new
-  `session.updateQueue`).
+  `session.updateQueue`) (rationale: postmortem/003).
 
 ### Changed
 
@@ -189,7 +193,7 @@ minor) and stay undated until the release is cut.
   gate history and watchdog re-fetches already used).  Previously a
   reconnect repainted every already-rendered event: the user message and
   the agent reply each appeared twice with the layout interleaved and
-  garbled until the session was reopened.
+  garbled until the session was reopened (rationale: postmortem/004).
 - **A fast second submit can no longer double-send**: the plain send path
   (`C-c C-c` while idle) now clears the input at submit time, exactly like
   the queue/steer and slash-command paths, so pressing the key again
