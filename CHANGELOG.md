@@ -158,13 +158,13 @@ minor) and stay undated until the release is cut.
   kept killing the socket — that session silently stopped showing replies
   while other sessions' streams kept working); the socket now pins
   `no-conversion`, and a synchronous connect failure (unresolvable host,
-  malformed base URL) restores HTTP polling and schedules the next retry
-  instead of leaving the chat with no recovery channel.
+  malformed base URL) is contained — the reconnect is re-armed and another
+  connect scheduled instead of leaving the chat with no recovery channel.
 - **Opening a session stays lightweight on big/far sessions**: while the
-  initial history is loading, fallback polling ticks now stand down — the
-  load gap is covered by the bounded re-fetch, and a poll tick's
-  chunk-replay rendering would otherwise re-impose the "replay old deltas"
-  cost the snapshot-first page render was designed to avoid.
+  initial history is loading, the mux replay is dropped outright — the
+  load gap is covered by the bounded re-fetch, and replaying old delta
+  chunks would otherwise re-impose the "replay old deltas" cost the
+  snapshot-first page render was designed to avoid.
 - **Cursor never rests on the input prompt**: the read-only stretch on the
   input line before the `❯ ' prompt is now a no-park zone — `C-a` in the
   input or a stray click lands the cursor at the edit start after the
