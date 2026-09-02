@@ -592,22 +592,28 @@ selected, or the window's point already sits in the input area).  Windows
 the user scrolled up or clicked into are left alone.  For the selected
 window (inline input mode) the buffer point is never moved: the view is
 re-pinned via `set-window-start' while the user keeps typing."
-  (let ((anchor (or (dsh-emacs-render--input-anchor-pos) (point-max))))
-    (dolist (window (get-buffer-window-list (current-buffer) nil t))
-      (when (window-live-p window)
-        (ignore-errors
-          (when (and (dsh-emacs-render--window-at-bottom-p window anchor)
-                     (or (not (eq window (selected-window)))
-                         (>= (window-point window) anchor)))
-            (save-excursion
-              (goto-char anchor)
-              (forward-line (- (1- (max 1 (window-text-height window)))))
-              (set-window-start window (max (point-min) (point)) t))
-            ;; Keep the pinned viewer's cursor at the input anchor; never move
-            ;; the buffer point of the selected inline-input window while
-            ;; typing.
-            (unless (eq window (selected-window))
-              (set-window-point window anchor))))))))
+  (let ((anchor (dsh-emacs-render--input-anchor-pos)))
+    ;; No input prompt face run (e.g. mid re-render).  Falling back to
+    ;; point-max would park followed windows' point on the phantom display
+    ;; line beneath the input, and re-apply it on every stream redraw — the
+    ;; "cursor stuck under the input line" symptom in a split.  Without an
+    ;; anchor there is no input line to keep visible, so skip following.
+    (when anchor
+      (dolist (window (get-buffer-window-list (current-buffer) nil t))
+        (when (window-live-p window)
+          (ignore-errors
+            (when (and (dsh-emacs-render--window-at-bottom-p window anchor)
+                       (or (not (eq window (selected-window)))
+                           (>= (window-point window) anchor)))
+              (save-excursion
+                (goto-char anchor)
+                (forward-line (- (1- (max 1 (window-text-height window)))))
+                (set-window-start window (max (point-min) (point)) t))
+              ;; Keep the pinned viewer's cursor at the input anchor; never move
+              ;; the buffer point of the selected inline-input window while
+              ;; typing.
+              (unless (eq window (selected-window))
+                (set-window-point window anchor)))))))))
 
 (defun dsh-emacs-render--input-insert-point ()
   "Return the start of the editable prompt line, or nil.

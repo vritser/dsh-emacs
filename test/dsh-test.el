@@ -1379,6 +1379,40 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
       (dsh-test-assert "marker-repaired-after-prompt-glyph"
         (= (marker-position dsh-emacs--input-marker) expect)))))
 
+;; --- 测试 33e: 输入区光标不落在输入行之下的幻影行（torn modeline overlay） ---
+;; 用户报告（分屏窗口）：光标跑到输入行下方、无法移回；根因是 modeline 结构
+;; overlay 被撕裂时 `dsh-emacs--input-end' 回退到 point-max —— 而 point-max 正是
+;; 输入行下方那条幻影行（分隔换行之后），于是 below-clamp 变成 no-op，光标被
+;; 永久卡在输入行之下，直到 reopen / 刷新重建 overlay。
+;; 不变量：即使 overlay 消失而分隔换行仍在，`dsh-emacs--input-end' 也不得等于
+;; point-max；光标停在 point-max（幻影行）时 lock 必须把它拉回输入行。
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (goto-char dsh-emacs--input-marker)
+  (insert "uuu123")
+  ;; 撕裂 overlay，但保留其后的分隔换行（模拟分屏跟随/overlay 搅动）。
+  (when dsh-emacs--modeline-overlay
+    (delete-overlay dsh-emacs--modeline-overlay)
+    (setq dsh-emacs--modeline-overlay nil))
+  ;; 分隔换行仍在 → 输入末端不得回退成幻影行 point-max。
+  (let* ((end (dsh-emacs--input-end))
+         (pmax (point-max))
+         (input-line (save-excursion
+                       (goto-char (marker-position dsh-emacs--input-marker))
+                       (line-number-at-pos))))
+    (dsh-test-assert "input-end-torn-overlay-not-phantom"
+      (and (< end pmax)
+           (eq (char-after end) ?\n)))
+    ;; 光标停在 point-max（幻影行）→ lock 必须拉回输入行。
+    (goto-char pmax)
+    (let ((below (line-number-at-pos (point))))
+      (dsh-emacs--lock-cursor-to-input)
+      (dsh-test-assert "cursor-torn-overlay-clamped-to-input-line"
+        (and (= (point) end)
+             (< (line-number-at-pos (point)) below)
+             (= (line-number-at-pos (point)) input-line))))))
+
 ;; --- 测试 34: 运行中工具无 spinner 动画（行首图标）+ 完成后行不消失 ---
 (with-temp-buffer
   (dsh-emacs-mode)

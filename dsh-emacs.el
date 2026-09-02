@@ -1930,13 +1930,26 @@ via the `session/queue' stream; `\\[dsh-emacs-interrupt-turn]'
 (defun dsh-emacs--input-end ()
   "Return the end of editable input, before the mode-line separator newline."
   (let ((modeline-start (and (boundp 'dsh-emacs--modeline-overlay)
-                           dsh-emacs--modeline-overlay
-                           (overlay-start dsh-emacs--modeline-overlay))))
-    (if (and modeline-start
-             (> modeline-start (point-min))
-             (eq (char-before modeline-start) ?\n))
-        (1- modeline-start)
-      (point-max))))
+                             dsh-emacs--modeline-overlay
+                             (overlay-start dsh-emacs--modeline-overlay))))
+    (cond
+     ;; Structural separator the input-area geometry relies on: the editable
+     ;; input ends right at the `\n' the mode-line overlay follows.
+     ((and modeline-start
+           (> modeline-start (point-min))
+           (eq (char-before modeline-start) ?\n))
+      (1- modeline-start))
+     ;; The mode-line overlay can be torn while its separator newline survives
+     ;; (window follow / overlay churn around a split).  Falling back to
+     ;; point-max here would treat the phantom display line BENEATH the input
+     ;; as editable end, so `dsh-emacs--lock-cursor-to-input' could never pull
+     ;; a cursor parked there back onto the input line — the "cursor stuck
+     ;; under the input line until reopen" symptom.  Mirror the separator
+     ;; case instead so below-positions still clamp onto the input line.
+     ((and (not (bobp))
+           (eq (char-before (point-max)) ?\n))
+      (1- (point-max)))
+     (t (point-max)))))
 
 (defun dsh-emacs--get-input ()
   "Get the text in the input area, excluding the mode-line newline."

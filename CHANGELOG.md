@@ -112,6 +112,16 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Cursor no longer gets stuck under the input line**: the cursor could
+  drift below the `❯` input line (often after a split window or a stream
+  redraw), refuse to move back, while the typed text stayed on the input
+  line — only a session refresh/reopen cleared it.  `dsh-emacs--input-end`
+  used to fall back to `point-max` when the structural mode-line overlay
+  was torn, treating the phantom display line *beneath* the input as the
+  end of the editable region, which made the cursor clamp a no-op.  It now
+  mirrors the separator-newline case so the clamp still pulls the cursor
+  up onto the input line, and the stream-following window logic no longer
+  parks a followed window's point on that phantom line.
 - **C-g on a question abandons the whole group like dsh web**: pressing
   `C-g` (or entering an empty no-option answer) now answers the frame
   with the protocol's reserved `cancelled` receipt — `result.ok: false`
