@@ -70,6 +70,11 @@ minor) and stay undated until the release is cut.
 - **Run-finished notifications**: when a submitted run ends while its chat
   buffer is not visible on the focused frame, a notification is posted
   (echo-area fallback); toggle with `dsh-emacs-enable-notifications`.
+- **Interaction notifications**: an ask-question or approval request that
+  arrives while its chat is not visible posts the same desktop
+  notification (gated by `dsh-emacs-enable-notifications`), previewing
+  the question or the tool call needing approval; replayed frames never
+  re-notify.
 - **Interactive approval prompts**: `approval/requested` frames are answered
   in the minibuffer and the response goes out through the same `/api/respond`
   path as `ask` questions; prompts are serialized so only one owns the

@@ -5283,7 +5283,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
 (let* ((chat (get-buffer-create " *dsh-test-question*"))
        (responds nil))
   (unwind-protect
-      (progn
+      (let ((dsh-emacs-enable-notifications nil))
         (with-current-buffer chat
           (setq-local dsh-emacs--buffer-session "sess-q"))
         (cl-letf (((symbol-function 'dsh-emacs-events--chat)
@@ -5323,7 +5323,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
        (responds nil)
        (queue '("Yes" "X")))
   (unwind-protect
-      (progn
+      (let ((dsh-emacs-enable-notifications nil))
         (with-current-buffer chat
           (setq-local dsh-emacs--buffer-session "sess-m"))
         (cl-letf (((symbol-function 'dsh-emacs-events--chat)
@@ -5376,7 +5376,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
        (expected (dsh-emacs--respond-cancel-envelope-json
                   "rpc-qc" "User abandoned the questions")))
   (unwind-protect
-      (progn
+      (let ((dsh-emacs-enable-notifications nil))
         (with-current-buffer chat
           (setq-local dsh-emacs--buffer-session "sess-qc"))
         (cl-letf (((symbol-function 'dsh-emacs-events--chat)
@@ -5404,7 +5404,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
 (let* ((chat (get-buffer-create " *dsh-test-question-load*"))
        (responds nil))
   (unwind-protect
-      (progn
+      (let ((dsh-emacs-enable-notifications nil))
         (with-current-buffer chat
           (setq-local dsh-emacs--buffer-session "sess-ql")
           (setq-local dsh-emacs--event-history-loading t))
@@ -5492,7 +5492,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
        (b-pushed nil))
   (unwind-protect
       (let ((dsh-emacs--sessions nil)
-            (dsh-emacs--chat-buffers (make-hash-table :test 'equal)))
+            (dsh-emacs--chat-buffers (make-hash-table :test 'equal))
+            (dsh-emacs-enable-notifications nil))
         (setq dsh-emacs--question-queue nil
               dsh-emacs--question-active nil)
         (with-current-buffer chat-a
@@ -5565,7 +5566,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
        (dup-sent nil))
   (unwind-protect
       (let ((dsh-emacs--sessions nil)
-            (dsh-emacs--chat-buffers (make-hash-table :test 'equal)))
+            (dsh-emacs--chat-buffers (make-hash-table :test 'equal))
+            (dsh-emacs-enable-notifications nil))
         (setq dsh-emacs--question-queue nil
               dsh-emacs--question-active nil)
         (with-current-buffer chat
@@ -5612,7 +5614,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
        (prompted nil))
   (unwind-protect
       (let ((dsh-emacs--sessions nil)
-            (dsh-emacs--chat-buffers (make-hash-table :test 'equal)))
+            (dsh-emacs--chat-buffers (make-hash-table :test 'equal))
+            (dsh-emacs-enable-notifications nil))
         (setq dsh-emacs--question-queue nil
               dsh-emacs--question-active t)  ; 模拟另一帧正占用回答槽
         (with-current-buffer chat
@@ -5659,7 +5662,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
 (let* ((chat (get-buffer-create " *dsh-test-approval-dispatch*"))
        (responds nil))
   (unwind-protect
-      (progn
+      (let ((dsh-emacs-enable-notifications nil))
         (with-current-buffer chat
           (setq-local dsh-emacs--buffer-session "sess-ap"))
         (cl-letf (((symbol-function 'dsh-emacs-events--chat)
@@ -5707,7 +5710,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
 (let* ((chat (get-buffer-create " *dsh-test-approval-decision*"))
        (responds nil))
   (unwind-protect
-      (progn
+      (let ((dsh-emacs-enable-notifications nil))
         (with-current-buffer chat
           (setq-local dsh-emacs--buffer-session "sess-ad"))
         (cl-letf (((symbol-function 'dsh-emacs--approval-prompt)
@@ -5752,7 +5755,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
        (just "the command reads /etc/hostname outside the workspace so we can identify this machine"))
   (unwind-protect
       (let ((dsh-emacs--approval-queue nil)
-            (dsh-emacs--approval-active nil))
+            (dsh-emacs--approval-active nil)
+            (dsh-emacs-enable-notifications nil))
         (with-current-buffer chat
           (setq dsh-emacs--tool-states (make-hash-table :test 'equal))
           (puthash "call-1"
@@ -5792,7 +5796,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
 (let* ((chat (get-buffer-create " *dsh-test-approval-cg*"))
        (responds nil))
   (unwind-protect
-      (progn
+      (let ((dsh-emacs-enable-notifications nil))
         (with-current-buffer chat
           (setq-local dsh-emacs--buffer-session "sess-cg"))
         (cl-letf (((symbol-function 'dsh-emacs--approval-prompt)
@@ -5853,7 +5857,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
       (let ((dsh-emacs--question-queue nil)
             (dsh-emacs--question-active t)      ; 模拟提问正在回答中
             (dsh-emacs--approval-queue nil)
-            (dsh-emacs--approval-active nil))
+            (dsh-emacs--approval-active nil)
+            (dsh-emacs-enable-notifications nil))
         (cl-letf (((symbol-function 'dsh-emacs--approval-prompt)
                    (lambda (&rest _) (push :approval-prompt trace) t))
                   ((symbol-function 'completing-read)
@@ -5893,7 +5898,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (dsh-emacs--question-active nil)
             (dsh-emacs--approval-queue nil)
             (dsh-emacs--approval-active
-             (list chat "rpc-ax" "sess-x" "aid-x" "bash" nil nil))) ; 审批正在回答中
+             (list chat "rpc-ax" "sess-x" "aid-x" "bash" nil nil)) ; 审批正在回答中
+            (dsh-emacs-enable-notifications nil))
         (cl-letf (((symbol-function 'dsh-emacs--approval-prompt)
                    (lambda (&rest _) (push :approval-prompt trace) t))
                   ((symbol-function 'completing-read)
@@ -5917,6 +5923,70 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
           (dsh-test-assert "question-handoff-after-approval-drain"
             (equal '(:question-prompt (:respond "rpc-qx"))
                    (nreverse trace)))))
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
+;; --- 测试 78i: 提问/审批桌面通知（turn-finish 同款）---
+;; 帧被接受进队列时才通知一次；重放副本（去重丢弃）不重复通知。通知
+;; body 带问题文本 / 发起调用的命令行，便于离开 minibuffer 时决定。
+(let* ((chat (get-buffer-create " *dsh-test-interaction-notify*"))
+       (posted nil))
+  (unwind-protect
+      (let ((dsh-emacs--sessions nil)
+            (dsh-emacs--chat-buffers (make-hash-table :test 'equal)))
+        (setq dsh-emacs--question-queue nil
+              dsh-emacs--question-active nil
+              dsh-emacs--approval-queue nil
+              dsh-emacs--approval-active nil)
+        (with-current-buffer chat
+          (setq-local dsh-emacs--buffer-session "sess-nt"))
+        (cl-letf (((symbol-function 'dsh-emacs-notify--post)
+                   (lambda (_session body _buffer) (push body posted)))
+                  ((symbol-function 'dsh-emacs--rpc-respond-async)
+                   (lambda (_rpc _payload cb) (funcall cb t nil)))
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _) "Yes"))
+                  ((symbol-function 'dsh-emacs--approval-prompt)
+                   (lambda (&rest _) t)))
+          ;; 提问帧被接受进队列 → 通知一次，body 带问题文本
+          (dsh-emacs--question-requested
+           chat "rpc-n1" "sess-nt"
+           (list (list (cons 'id "q1")
+                       (cons 'question "Which dir?")
+                       (cons 'options (list (list (cons 'label "a")))))))
+          (dsh-test-assert "question-notify-on-accept"
+            (equal '("Question: Which dir?") posted))
+          ;; 同 rpc-id 副本仍在队列中（mux 重放）→ 丢弃，不重复通知
+          (setq posted nil)
+          (setq dsh-emacs--question-queue
+                (list (list chat "rpc-n1" "sess-nt"
+                            (list (list (cons 'id "q1")
+                                        (cons 'question "Which dir?"))))))
+          (dsh-emacs--question-requested
+           chat "rpc-n1" "sess-nt"
+           (list (list (cons 'id "q1") (cons 'question "Which dir?"))))
+          (dsh-test-assert "question-notify-replay-dropped"
+            (null posted))
+          ;; 审批帧 → 通知 body 带发起调用的命令行（chat 缓冲的 transcript）
+          (setq posted nil)
+          (with-current-buffer chat
+            (setq dsh-emacs--tool-states (make-hash-table :test 'equal))
+            (puthash "call-n"
+                     (list :state 'pending :variant "bash" :icon ">_"
+                           :title "Bash" :summary "cat x"
+                           :args "$ cat /etc/hostname" :call-time nil :ns nil)
+                     dsh-emacs--tool-states))
+          (dsh-emacs--approval-requested
+           chat "rpc-n2" "sess-nt" "aid-n" "bash" "needs outside" "call-n")
+          (dsh-test-assert "approval-notify-body-carries-command"
+            (equal '("Approval: $ cat /etc/hostname") posted))
+          ;; 同 approvalId 副本仍在队列中 → 丢弃，不重复通知
+          (setq posted nil)
+          (setq dsh-emacs--approval-queue
+                (list (list chat "rpc-zz" "sess-nt" "aid-n" "bash" "x" nil)))
+          (dsh-emacs--approval-requested
+           chat "rpc-n3" "sess-nt" "aid-n" "bash" "needs outside" "call-n")
+          (dsh-test-assert "approval-notify-replay-dropped"
+            (null posted))))
     (when (buffer-live-p chat) (kill-buffer chat))))
 
 (when (featurep 'dsh-emacs-server)

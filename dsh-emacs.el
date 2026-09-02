@@ -3592,7 +3592,24 @@ the approval flow."
                        dsh-emacs--question-queue))
     (setq dsh-emacs--question-queue
           (nconc dsh-emacs--question-queue
-                 (list (list chat rpc-id session-id questions)))))
+                 (list (list chat rpc-id session-id questions))))
+    ;; Desktop notice, turn-finish style (`dsh-emacs-enable-notifications'):
+    ;; the answering prompt may wait behind another session's prompt, so
+    ;; announce a pending question even when the user is away from the
+    ;; chat.  Acceptance-gated: a replayed duplicate frame is dropped
+    ;; above and must never re-notify.
+    (when (buffer-live-p chat)
+      (let* ((qs (dsh-emacs--sequence-list questions))
+             (first-text (dsh-emacs-render--aget "question" (car qs)))
+             (count (length qs))
+             (body (format "Question%s%s"
+                           (if (stringp first-text)
+                               (format ": %s" first-text)
+                             "")
+                           (if (> count 1)
+                               (format " (+%d more)" (1- count))
+                             ""))))
+        (dsh-emacs-notify--post session-id body chat))))
   (dsh-emacs--question-drain))
 
 (defun dsh-emacs--question-decline (rpc-id)
@@ -3799,7 +3816,24 @@ leak out of the process filter as \"error in process filter: Quit\"."
     (setq dsh-emacs--approval-queue
           (nconc dsh-emacs--approval-queue
                  (list (list chat rpc-id session-id approval-id
-                             tool-name reason call-id)))))
+                             tool-name reason call-id))))
+    ;; Desktop notice, turn-finish style: the approval prompt may wait in
+    ;; the queue while the user is in another buffer or app; the body
+    ;; carries the tool call (else justification, else tool name) so the
+    ;; decision can be made away from the minibuffer.  Acceptance-gated:
+    ;; a replayed duplicate never re-notifies.  The command-line lookup
+    ;; needs the chat buffer's transcript state, so it runs there.
+    (when (buffer-live-p chat)
+      (let* ((command (with-current-buffer chat
+                        (dsh-emacs--approval-command-line call-id)))
+             (detail (or command
+                         (and (stringp reason)
+                              (not (string-empty-p reason)) reason)
+                         (and (stringp tool-name)
+                              (not (string-empty-p tool-name)) tool-name)))
+             (body (format "Approval%s"
+                           (if detail (format ": %s" detail) ""))))
+        (dsh-emacs-notify--post session-id body chat))))
   (dsh-emacs--approval-drain))
 
 (defun dsh-emacs--approval-resolved (session-id approval-id outcome)

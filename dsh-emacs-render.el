@@ -66,7 +66,9 @@ set to nil for a leaner transcript."
   :group 'dsh-emacs-render)
 
 (defcustom dsh-emacs-enable-notifications t
-  "Notify when a submitted run finishes."
+  "Notify when a submitted run finishes or an interaction needs attention.
+Posts a desktop notification when a run ends, and when an ask-question or
+approval request arrives while its chat is not visible."
   :type 'boolean
   :group 'dsh-emacs-render)
 
@@ -1701,20 +1703,23 @@ running spinner (idempotent — the send path already lit it, and a
 ;;; 运行结束的原生桌面通知
 ;;; ---------------------------------------------------------------------------
 
-(defun dsh-emacs-notify--visible-p ()
-  "Return non-nil when this buffer is visible on a focused frame."
+(defun dsh-emacs-notify--visible-p (&optional buffer)
+  "Return non-nil when BUFFER (default: current) is visible on a focused frame."
   (cl-some (lambda (window)
              (eq t (frame-focus-state (window-frame window))))
-           (get-buffer-window-list (current-buffer) nil t)))
+           (get-buffer-window-list (or buffer (current-buffer)) nil t)))
 
-(defun dsh-emacs-notify--post (session-id body)
-  "Post BODY for SESSION-ID unless its chat is already visible."
+(defun dsh-emacs-notify--post (session-id body &optional buffer)
+  "Post BODY for SESSION-ID unless its chat is already visible.
+The visibility gate applies to BUFFER (default: the current buffer, which
+is the chat buffer when called from the render dispatch); SESSION-ID only
+identifies the chat for the notification title."
   (when (and dsh-emacs-enable-notifications
-             (not (dsh-emacs-notify--visible-p)))
+             (not (dsh-emacs-notify--visible-p buffer)))
     (let ((title (or (and (stringp session-id)
                           (fboundp 'dsh-emacs--chat-title)
                           (dsh-emacs--chat-title session-id))
-                     (buffer-name))))
+                     (buffer-name (or buffer (current-buffer))))))
       (setq title (replace-regexp-in-string "[[:cntrl:]]" " " title)
             body (replace-regexp-in-string "[[:cntrl:]]" " " body))
       (condition-case err
