@@ -125,6 +125,16 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **New sessions follow the directory you invoke them from**: the session's
+  working directory now comes from the current buffer's `default-directory`
+  (a dired buffer's browsed directory, magit's repo root, a file's
+  directory) instead of the fixed `dsh-emacs-default-cwd`, so the project
+  auto-detection sees the very project you are in — starting a session from
+  a dired buffer at a git repo now lands it in that repo's workspace,
+  created on first use, rather than in the Ungrouped bucket under the
+  startup directory.  `dsh-emacs-default-cwd` remains the fallback when no
+  buffer directory context exists
+  (rationale: postmortem/006).
 - **Cursor no longer gets stuck under the input line**: the cursor could
   drift below the `❯` input line (often after a split window or a stream
   redraw), refuse to move back, while the typed text stayed on the input

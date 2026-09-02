@@ -4824,6 +4824,87 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (delete-directory root t)
     (when (buffer-live-p buf) (kill-buffer buf))))
 
+;; --- 测试 80c: 新会话 CWD 跟随当前缓冲的 default-directory ---
+;; 从 dired/magit 等缓冲调用 `dsh-emacs-new-session' 时，会话新建所在的
+;; 工作目录必须是当前缓冲的 default-directory（dired 的浏览目录、magit
+;; 的仓库根、文件所在目录）——项目检测与 workspace.create 都基于它。
+;; 回归：曾恒取 `dsh-emacs-default-cwd'（加载时的固定值，典型用户不设置），
+;; 会话落到启动目录，浏览中的 project 从未进入检测，workspace 自然没有。
+;; （project-root mock 只做 dir 透传 + 归一化：锁"dir 投递自缓冲目录"
+;; 这一环，检测链本身由测试 80b 与真实探测覆盖。）
+(let* ((proj (directory-file-name (make-temp-file "dsh-dired-proj-" t)))
+       (flat (directory-file-name (make-temp-file "dsh-dired-flat-" t)))
+       (old-ws dsh-emacs--workspaces)
+       (old-sessions dsh-emacs--sessions)
+       (calls nil)
+       (created nil)
+       (buf (generate-new-buffer " *dsh-dired-create*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (insert "dired listing\n")
+        (goto-char (point-min))
+        (setq-local default-directory (file-name-as-directory proj))
+        (let ((dsh-emacs--workspaces nil)     ; 缓存无 proj → 走创建路径
+              (dsh-emacs-default-cwd flat))   ; 旧实现会错取这里（无 project）
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (method params cb)
+                       (push (list method params) calls)
+                       (funcall cb t '((sessionId . "s-dired")))))
+                    ((symbol-function 'dsh-emacs-open-session)
+                     (lambda (_sid) nil))
+                    ((symbol-function 'dsh-emacs--server-local-host-p)
+                     (lambda () t))
+                    ((symbol-function 'dsh-emacs--project-root)
+                     (lambda (dir)
+                       ;; 真实实现会归一化（directory-file-name），dired 的
+                       ;; default-directory 带尾斜杠；mock 保持同契约。
+                       (directory-file-name (expand-file-name dir))))
+                    ((symbol-function 'dsh-emacs--rpc-request)
+                     (lambda (_method params)
+                       (setq created params)
+                       (cons t (list (cons 'workspace
+                                           (list (cons 'workspaceId "w-dired")
+                                                 (cons 'path proj)
+                                                 (cons 'sessionIds []))))))))
+            (call-interactively #'dsh-emacs-new-session)
+            (let* ((create (cl-find-if
+                            (lambda (c) (string= "session.create" (car c)))
+                            calls))
+                   (params (and create (cadr create))))
+              (dsh-test-assert
+               "new-session-cwd-follows-buffer-default-directory"
+               (and created
+                    (equal (cdr (assq 'path created)) proj)))
+              (dsh-test-assert
+               "new-session-buffer-dir-workspace-used"
+               (and create
+                    (string= "w-dired" (cdr (assq 'workspaceId params)))
+                    (null (assq 'cwd params))))))))
+    (setq dsh-emacs--sessions old-sessions)
+    (setq dsh-emacs--workspaces old-ws)
+    (delete-directory proj t)
+    (delete-directory flat t)
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; --- 测试 80d: absolute-cwd 优先级 ---
+;; cwd 实参 > 当前缓冲 default-directory > `dsh-emacs-default-cwd'。
+(let ((flat (directory-file-name (make-temp-file "dsh-cwd-flat-" t))))
+  (unwind-protect
+      (dsh-test-assert
+       "absolute-cwd-precedence"
+       (let ((default-directory (concat flat "/buf/"))
+             (dsh-emacs-default-cwd (concat flat "/cfg/")))
+         (equal (expand-file-name (concat flat "/x/"))
+                (dsh-emacs--absolute-cwd (concat flat "/x/")))
+         (equal (expand-file-name (concat flat "/buf/"))
+                (dsh-emacs--absolute-cwd nil)))
+       (let ((default-directory nil)
+             (dsh-emacs-default-cwd (concat flat "/cfg/")))
+         (equal (expand-file-name (concat flat "/cfg/"))
+                (dsh-emacs--absolute-cwd nil))))
+    (delete-directory flat t)))
+
+
 ;; --- 测试 81: 用户提问（question/requested）minibuffer 选择与应答 ---
 ;; dsh 的 `ask' 工具经 mux 流推 question/requested（server-request，稳定
 ;; rpcId）：每帧逐题在 minibuffer 选择 — 选项为 completion 候选（单选
@@ -8922,7 +9003,11 @@ candidates as the UI would via `all-completions', not by destructuring."
   (princ (format "通过 %d 项，失败 %d 项\n" pass fail))
   (when (> fail 0)
     (princ "失败的测试:\n")
-    (dolist (r (nreverse dsh-test-results))
+    ;; `reverse'（拷贝）而非 `nreverse'（原地反转）：nreverse 会把
+    ;; dsh-test-results 的 cdr 结构就地改写，打印环结束后该变量只剩
+    ;; 反向前最后一个 cons（单元素列表），下面的退出码检查因此永远
+    ;; 看不到失败项——红测会以 exit 0 蒙混过 verify.sh 的套件步。
+    (dolist (r (reverse dsh-test-results))
       (unless (cdr r)
         (princ (format "  - %s: %s\n" (car r) (cdr r)))))))
 (when (and noninteractive

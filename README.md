@@ -24,11 +24,12 @@ Then `M-x dsh-emacs` to open the session list. That's it.
 
 This shows a typical setup — server auto-start, defaults, custom keybindings —
 and how a session lands in the right workspace: `dsh-emacs-new-session` outside
-any workspace context auto-detects the Emacs project of the working directory
-(project.el on Emacs 28+, falling back to the VC root / `.git` walk) and
-creates the session in that project's workspace, resolving it via idempotent
-`workspace.create` on first use — disable with
-`dsh-emacs-new-session-auto-project`.
+any workspace context takes the current buffer's `default-directory` (a dired
+buffer's browsed dir, magit's repo root, a file's directory) as the session's
+working directory, auto-detects its Emacs project (project.el on Emacs 28+,
+falling back to the VC root / `.git` walk) and creates the session in that
+project's workspace, resolving it via idempotent `workspace.create` on first
+use — disable with `dsh-emacs-new-session-auto-project`.
 
 ```emacs-lisp
 (use-package dsh-emacs

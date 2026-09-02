@@ -142,7 +142,11 @@ open."
   :group 'dsh-emacs)
 
 (defcustom dsh-emacs-default-cwd default-directory
-  "Default working directory for new sessions."
+  "Fallback working directory for new sessions.
+Interactive new sessions take the current buffer's `default-directory'
+first (a dired buffer's browsed dir, magit's repo root, a file's
+directory); this option applies only when the command is called without
+a CWD and the current buffer has no directory context."
   :type 'directory
   :group 'dsh-emacs)
 
@@ -473,8 +477,13 @@ helpers expect lists."
    (t nil)))
 
 (defun dsh-emacs--absolute-cwd (cwd)
-  "Return CWD as an absolute path, falling back to the configured default."
-  (expand-file-name (or cwd dsh-emacs-default-cwd)))
+  "Return CWD as an absolute path.
+Without CWD, the current buffer's `default-directory' is the working
+directory — a dired buffer's browsed dir, magit's repo root, a file's
+directory — which is the directory the project auto-detection
+(`dsh-emacs-new-session-auto-project') must see.  Only when even that
+is unavailable does `dsh-emacs-default-cwd' apply."
+  (expand-file-name (or cwd default-directory dsh-emacs-default-cwd)))
 
 ;; ---------------------------------------------------------------------------
 ;;  会话缓冲同步：命名与列表一致 + 工作区路径（default-directory）
@@ -777,10 +786,12 @@ host pick its default preset.
 Interactively, when point sits on a workspace header or its empty
 New Session row (in the session list), the session is created in that
 workspace; inside a chat buffer, it is created in the current session's
-workspace.  Otherwise the session is created in CWD — unless that
-directory belongs to a detected Emacs project, in which case the session
-goes into the workspace registered for the project root (created on
-first use; disable with `dsh-emacs-new-session-auto-project').  With a
+workspace.  Otherwise the session is created in CWD — the current
+buffer's `default-directory' (e.g. the directory a dired buffer is
+browsing) when CWD is nil — unless that directory belongs to a detected
+Emacs project, in which case the session goes into the workspace
+registered for the project root (created on first use; disable with
+`dsh-emacs-new-session-auto-project').  With a
 prefix argument, first choose the agent preset from the live
 `agentPreset.list' roster (falling back to the built-in presets before
 the first roster arrives); without one the session uses

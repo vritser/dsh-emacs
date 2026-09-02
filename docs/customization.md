@@ -8,7 +8,7 @@ The most commonly used options, straight in your config:
 (setq dsh-emacs-history-refetch-max-rounds 6)       ; max backfill rounds during load gaps: improves coverage when events are still arriving at high rate right after opening, at the cost of more small parse chunks
 (setq dsh-emacs-show-reasoning t)                  ; show reasoning content (on by default; nil = hide, unlike dsh web)
 (setq dsh-emacs-show-tool-calls t)                 ; show tool calls
-(setq dsh-emacs-default-cwd default-directory)     ; working directory for new sessions
+(setq dsh-emacs-default-cwd default-directory)     ; fallback working directory for new sessions (interactive ones use the current buffer's default-directory first)
 (setq dsh-emacs-new-session-auto-project t)        ; auto-detect the Emacs project of the working directory and place new sessions in its workspace (nil = always start in CWD)
 (setq dsh-emacs-default-model "claude-opus-4-5")   ; default model name
 (setq dsh-emacs-default-preset "standard")         ; default agent preset for new sessions (nil = host default; "standard"/"minimal"/"code"/"cordis" or a user preset id)
