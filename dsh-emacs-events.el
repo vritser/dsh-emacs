@@ -85,6 +85,9 @@
 (defvar dsh-emacs-sessions-buffer)
 (defvar dsh-emacs--workspaces)
 (defvar dsh-emacs--archived-sessions)
+;; Owned by dsh-emacs-render.el (`defvar-local', default 0); the dispatch
+;; seq gate reads it without loading order guarantees.
+(defvar dsh-emacs--anchor-seq)
 (declare-function dsh-emacs--chat-session-item "dsh-emacs" (session-id))
 (declare-function dsh-emacs--chat-buffer-sync "dsh-emacs" (session-id))
 (declare-function dsh-emacs--question-requested "dsh-emacs" (chat rpc-id session-id questions))
@@ -289,20 +292,34 @@ lands the genuine pair."
           (dsh-emacs-modeline-set-context-snapshot used window))))))
 
 (defun dsh-emacs-events--dispatch-event (chat event)
-  "Dispatch EVENT received for CHAT, respecting seq and optimistic input."
+  "Dispatch EVENT received for CHAT, respecting seq and optimistic input.
+The seq gate is the dedup line: the mux replays the ENTIRE global event
+stream to every new connection (the protocol has no baseline-sync
+parameter — see `dsh-emacs-events--dispatch-json'), and that includes
+MID-SESSION reconnects, not just the initial open.  `dsh-emacs--anchor-seq'
+tracks the newest event this buffer has rendered or consumed, so a
+replayed frame — which carries its ORIGINAL seq — is already on screen
+and must be dropped: without the gate a reconnect painted the whole
+transcript a second time (doubled user messages and assistant replies,
+interleaved by the second pass).  Events that arrived while the socket
+was down carry seq > anchor and render here as the catch-up, exactly like
+`dsh-emacs-render-history-events' gates its re-fetch windows."
   (when (and (buffer-live-p chat) (listp event))
     (with-current-buffer chat
-      (if (dsh-emacs-render--consume-pending-user-message event)
-          (let ((seq (dsh-emacs-render--event-seq event)))
-            (when (integerp seq)
-              (setq dsh-emacs--anchor-seq
-                    (max dsh-emacs--anchor-seq seq))))
-        (dsh-emacs-render-event event))
-      ;; The stream just delivered: note it for the stall watchdog.
-      (setq dsh-emacs--ws-last-event-time (float-time))
-      ;; Keep windows that already show the bottom pinned to the newest
-      ;; content; never touch windows the user scrolled away.
-      (dsh-emacs-render--follow-stream))))
+      (let ((seq (dsh-emacs-render--event-seq event)))
+        (when (or (not (integerp seq))
+                  (> seq (or dsh-emacs--anchor-seq 0)))
+          (if (dsh-emacs-render--consume-pending-user-message event)
+              (when (integerp seq)
+                (setq dsh-emacs--anchor-seq
+                      (max dsh-emacs--anchor-seq seq)))
+            (dsh-emacs-render-event event))
+          ;; Keep windows that already show the bottom pinned to the newest
+          ;; content; never touch windows the user scrolled away.
+          (dsh-emacs-render--follow-stream))))
+      ;; The stream just delivered (even a replayed frame): note it for
+      ;; the stall watchdog.
+      (setq dsh-emacs--ws-last-event-time (float-time))))
 
 (defun dsh-emacs-events--dispatch-json (process json)
   "Handle one decoded WebSocket JSON envelope from PROCESS.

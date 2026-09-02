@@ -172,6 +172,14 @@ minor) and stay undated until the release is cut.
   anchored on the actual `❯ ' glyph (scanning the prompt line instead of
   skipping a fixed two characters), so the edit start tracks the real
   prompt even when the prompt's face run starts further left.
+- **A stream reconnect no longer doubles the transcript**: the mux replays
+  the whole global event stream to every new connection — including
+  mid-session reconnects — and the live dispatch path now drops replayed
+  frames whose seq is already within `dsh-emacs--anchor-seq` (the same
+  gate history and watchdog re-fetches already used).  Previously a
+  reconnect repainted every already-rendered event: the user message and
+  the agent reply each appeared twice with the layout interleaved and
+  garbled until the session was reopened.
 
 ### Documentation
 

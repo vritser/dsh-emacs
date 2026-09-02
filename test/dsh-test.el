@@ -6650,6 +6650,86 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (dsh-emacs-events--watchdog-stop))
     (kill-buffer buf)))
 
+(defun dsh-emacs-test--buffer-copies (needle)
+  "Count non-overlapping occurrences of NEEDLE in the current buffer."
+  (let ((n 0) (text (buffer-substring-no-properties (point-min) (point-max))))
+    (while (string-search needle text)
+      (setq n (1+ n)
+            text (substring text (+ (string-search needle text)
+                                    (length needle)))))
+    n))
+
+;; --- 测试 98o: mux 重连重放完整 backlog 不得重复渲染 ---
+;; 回归：协议没有 baseline-sync，mux 对每条新连接（含会话中途重连）都重放
+;; 整个全局事件流；打开会话期间的丢弃由 `dsh-emacs--event-history-loading'
+;; 兜住，但**中途重连**时该标志已清，重放的旧 seq 事件全部涌入直播派发
+;; 路径——`dsh-emacs-events--dispatch-event' 原本没有 seq 门（历史/探针路径
+;; 有，见 `dsh-emacs-render-history-events'），于是 user/message、
+;; assistant/message 整体再渲染一遍。用户症状：C-c C-c 后 user message 出现
+;; 两次、agent 回复渲染两次、排版混乱，重开 session 恢复正常。修复：派发按
+;; `dsh-emacs--anchor-seq' 丢弃 seq <= anchor 的重放帧；断线期间的新事件
+;; （seq > anchor）仍照常渲染作为补齐。
+(let ((chat (get-buffer-create " *dsh-replay-dedup*")))
+  (unwind-protect
+      (with-current-buffer chat
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-replay")
+        (setq dsh-emacs--anchor-seq 0)
+        ;; 第一轮：正常直播，各渲染一次
+        (dsh-emacs-events--dispatch-event
+         chat '((type . "user/message") (seq . 1)
+                (data . ((content . [((type . "text")
+                                      (text . "replay-msg"))])))))
+        (dsh-emacs-events--dispatch-event
+         chat '((type . "assistant/message") (seq . 2)
+                (data . ((turn . 1) (step . 1)
+                         (message . ((content . [((type . "text")
+                                                  (text . "replay-reply"))])))))))
+        (dsh-test-assert "replay-live-pass-renders-once"
+          (= 1 (dsh-emacs-test--buffer-copies "replay-msg"))
+          (= 1 (dsh-emacs-test--buffer-copies "replay-reply"))
+          (= 2 dsh-emacs--anchor-seq))
+        ;; 第二轮：重连后的 mux 全量重放（同样的 seq）——不得再渲染
+        (dsh-emacs-events--dispatch-event
+         chat '((type . "user/message") (seq . 1)
+                (data . ((content . [((type . "text")
+                                      (text . "replay-msg"))])))))
+        (dsh-emacs-events--dispatch-event
+         chat '((type . "assistant/message") (seq . 2)
+                (data . ((turn . 1) (step . 1)
+                         (message . ((content . [((type . "text")
+                                                  (text . "replay-reply"))])))))))
+        (dsh-test-assert "reconnect-replay-does-not-duplicate"
+          (= 1 (dsh-emacs-test--buffer-copies "replay-msg"))
+          (= 1 (dsh-emacs-test--buffer-copies "replay-reply"))
+          (= 2 dsh-emacs--anchor-seq))
+        ;; 流式路径同门：重放的 assistant/chunk 不得再开第二条流
+        (dsh-emacs-events--dispatch-event
+         chat '((type . "assistant/chunk") (seq . 3)
+                (data . ((turn . 2) (step . 1)
+                         (chunk . ((type . "text-delta") (index . 1)
+                                   (text . "replay-chunk")))))))
+        (dsh-test-assert "replay-chunk-live-renders-once"
+          (= 1 (dsh-emacs-test--buffer-copies "replay-chunk"))
+          (= 3 dsh-emacs--anchor-seq))
+        (dsh-emacs-events--dispatch-event
+         chat '((type . "assistant/chunk") (seq . 3)
+                (data . ((turn . 2) (step . 1)
+                         (chunk . ((type . "text-delta") (index . 1)
+                                   (text . "replay-chunk")))))))
+        (dsh-test-assert "replay-chunk-replay-does-not-duplicate"
+          (= 1 (dsh-emacs-test--buffer-copies "replay-chunk"))
+          (= 3 dsh-emacs--anchor-seq))
+        ;; 补齐：断线期间产生的事件（seq > anchor）渲染一次
+        (dsh-emacs-events--dispatch-event
+         chat '((type . "user/message") (seq . 4)
+                (data . ((content . [((type . "text")
+                                      (text . "during-outage"))])))))
+        (dsh-test-assert "reconnect-catchup-renders-new-events"
+          (= 1 (dsh-emacs-test--buffer-copies "during-outage"))
+          (= 4 dsh-emacs--anchor-seq)))
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
 ;; --- 测试 98n: 重连时 socket 创建抛错不得让会话永久失聪 ---
 ;; 回归：`dsh-emacs-events-connect' 先用 disconnect 拆掉旧流（重连 timer
 ;; 一并取消），然后才建新 socket；若 `open-network-stream' 同步抛错

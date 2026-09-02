@@ -167,6 +167,17 @@ not-yet-stable tail is re-rendered.
   renders, a small-window **loop backfill** (`dsh-emacs-history-refetch-max-rounds`
   rounds, anchored incremental rendering until the window stops advancing)
   covers the load gap, and then real-time resumes.
+- **Replayed frames never render twice**: the same full replay arrives on
+  MID-SESSION reconnects (stream drop, health-check kill, watchdog kill),
+  when `dsh-emacs--event-history-loading` is already clear.  The live
+  dispatch path (`dsh-emacs-events--dispatch-event`) gates every transcript
+  frame on `dsh-emacs--anchor-seq` — the newest seq this buffer rendered or
+  consumed — and drops frames whose seq is not newer, the identical gate
+  `dsh-emacs-render-history-events` applies to re-fetch windows; events
+  generated during the outage carry seq > anchor and render once as the
+  catch-up.  Without the gate a reconnect repainted the whole transcript a
+  second time (doubled user messages and assistant replies, interleaved
+  layout, only fixed by reopening the session).
 - **The open window is bounded**: the history page is fetched per
   `dsh-emacs-history-window` (default 30 messages), and the GC threshold is
   raised dynamically (cpu-profiler measurements showed Automatic GC consuming
