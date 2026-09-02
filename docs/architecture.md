@@ -107,12 +107,21 @@ idle, or queued behind a running turn with nothing else pending — is
 appended to the inbox and claimed when the turn starts, two
 `session/queue` frames within milliseconds.  With an empty mirror those
 frames carry no ordering information, so the transient splice/claim
-gets no `queued:` / `running:` echo (`dsh-emacs-queue--mark-submit-suppress`
+gets no `queued:` / `running:` echo and no `[next: …]` preview paint
+(the preview would otherwise flash the input line: inserted on the
+splice-in frame, removed on the claim) — `dsh-emacs-queue--mark-submit-suppress`
 arms `dsh-emacs--queue-submit-suppress` when the mirror is empty at
 submit time, on both the plain and the deferred path; it clears when
-the mirror settles back to empty, in the submit failure branch, or
-after a 2s defensive timeout).  Genuine queueing — items already
-parked — keeps its feedback.
+the mirror settles back to empty, in the submit failure branch, or by
+a transport-hygiene timer (a dead transport would otherwise leave the
+echo gate stuck until the next submit — the timer paces no preview).
+The `[next: …]` preview is gated by the same flag, with one
+event-driven escape: while a turn is running (`dsh-emacs--busy-p`,
+buffer-local) the preview shows regardless, because an item mirrored
+then can only be claimed at the turn end and is genuinely parked —
+this is what reveals a queued message immediately, with no timing
+window.  Genuine queueing — items already parked — keeps its feedback,
+its preview, and its mode-line count.
 This is the queue-frame complement of the anchor-gated replay dedup
 (rationale: postmortem/004): transcript frames are idempotent by seq,
 queue frames by submit context.

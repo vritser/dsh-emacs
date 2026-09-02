@@ -8387,6 +8387,79 @@ candidates as the UI would via `all-completions', not by destructuring."
     (when (buffer-live-p chat) (kill-buffer chat))
     (delete-process proc)))
 
+;; Prefix gating: while the self-submit transient lives (mirror holds only
+;; our own message, suppress armed) the `[next: …]' prefix must not paint —
+;; a preview would flash the input line on every submit (the literal
+;; "flash next message" symptom); once disarmed it paints from the mirror
+;; normally.  The mode-line Q/S counts are not gated and still reflect
+;; the queue.
+(let ((buf (get-buffer-create " *t-queue-prefix-gate*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-pfx")
+        (setq-local dsh-emacs--queue-submit-suppress t)
+        (setq dsh-emacs--queue-items
+              (list (dsh-protocol-queue-item--from-alist
+                     (dsh-emacs-test--queue-item "g1" "queued" "gated"))))
+        (dsh-emacs-queue--update-prefix)
+        (dsh-test-assert "queue-submit-suppress-gates-prefix"
+          (null dsh-emacs--queue-prefix))
+        (dsh-emacs-queue--submit-suppress-clear)
+        (dsh-emacs-queue--update-prefix)
+        (dsh-test-assert "queue-submit-suppress-ungates-prefix"
+          dsh-emacs--queue-prefix))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; Disarming triggers a repaint: when the timeout lifts the flag while the
+;; message is STILL queued (a long busy turn), the `[next: …]' preview must
+;; come back — frames are the only repaint trigger, the flag change alone
+;; is not, so without this the prefix would stay gone until the next frame
+;; arrives.
+(let ((buf (get-buffer-create " *t-queue-prefix-restore*"))
+      (paints nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-pfx2")
+        (cl-letf (((symbol-function 'run-at-time)
+                   (lambda (_delay _repeat fn) (push fn paints) t)))
+          (setq-local dsh-emacs--queue-submit-suppress t)
+          (setq dsh-emacs--queue-items
+                (list (dsh-protocol-queue-item--from-alist
+                       (dsh-emacs-test--queue-item "g2" "queued" "still queued"))))
+          (dsh-emacs-queue--update-prefix)
+          (dsh-test-assert "queue-submit-suppress-holds-prefix-hidden"
+            (null dsh-emacs--queue-prefix))
+          (dsh-emacs-queue--submit-suppress-clear)
+          (dsh-test-assert "queue-submit-suppress-clear-schedules-repaint"
+            (consp paints))
+          (dolist (fn paints) (funcall fn))
+          (dsh-test-assert "queue-submit-suppress-timeout-restores-prefix"
+            dsh-emacs--queue-prefix)))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; The parked case is revealed by STATE, not by a timer: while a turn is
+;; running (`dsh-emacs--ml-busy') an item in the mirror can only be
+;; claimed at the turn end, so the `[next: …]' preview must show it even
+;; though the submit-suppression is still armed — the old timer-only
+;; reveal is what made a queued message appear ~2s late.
+(let ((buf (get-buffer-create " *t-queue-prefix-busy-reveal*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-busy")
+        (setq-local dsh-emacs--ml-busy t)
+        (setq-local dsh-emacs--queue-submit-suppress t)
+        (setq dsh-emacs--queue-items
+              (list (dsh-protocol-queue-item--from-alist
+                     (dsh-emacs-test--queue-item "pb" "queued" "parked"))))
+        (dsh-emacs-queue--update-prefix)
+        (dsh-test-assert "queue-submit-suppress-busy-reveals-parked"
+          dsh-emacs--queue-prefix
+          dsh-emacs--queue-submit-suppress))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
 ;; Submit-path arming/disarming: armed whenever the mirror is EMPTY at
 ;; submit time — idle (plain path) or behind a running turn (deferred
 ;; path) — with the defensive disarm timer; parked items keep the flag

@@ -225,10 +225,21 @@ minor) and stay undated until the release is cut.
   behind a running turn with nothing else pending — is spliced into the
   host inbox and claimed when the turn starts, and the `session/queue`
   mirror diffed those two frames into `queued:` / `running:` echo flashes.
-  Submitting with an empty mirror now suppresses that transient feedback —
-  the message is rendered directly in the transcript, as before — while
-  genuine queueing (items already parked) keeps its flashes and
-  `[next: …]` preview (rationale: postmortem/004).
+  Submitting with an empty mirror now suppresses that transient feedback,
+  including the input-line `[next: …]` preview (the preview would paint
+  and clear within milliseconds — the "flash" at the prompt) — the message
+  is rendered directly in the transcript, as before — while genuine
+  queueing (items already parked) keeps its flashes, `[next: …]` preview
+  and mode-line count (rationale: postmortem/004).
+- **A parked message's preview appears right away instead of after ~2s**:
+  the suppression arm stayed up for a defensive 2s window, so a message
+  genuinely queued behind a running turn surfaced in the `[next: …]`
+  preview only when that timer fired.  Revealing the parked preview is
+  now event-driven, not timed: while a turn is running an item in the
+  mirror can only be claimed at the turn end, so the preview shows it
+  immediately regardless of the arm — the millisecond self-submit
+  transient (turn idle) stays invisible as before
+  (refines postmortem/004).
 
 ### Documentation
 

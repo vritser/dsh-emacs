@@ -80,26 +80,38 @@ at the turn start (a frame without it) within milliseconds.  Diffing
 that pair flashes `queued:' then `running:' — the flash on sending a new
 message — though nothing was ever really parked: the submit path renders
 the user message directly.  While this flag is set, `dsh-emacs-queue-apply'
-updates the mirror but emits no feedback; it clears when the mirror
+updates the mirror but emits no feedback — it clears when the mirror
 settles back to empty (the claim frame), in the submit failure branch,
-or via `dsh-emacs-queue--submit-suppress-timer'.  Connection seeds do NOT
-clear it: on a fresh open the submit's own splice-in frame is the seed,
-and the claim leg that must stay silent follows it.  Set by
-`dsh-emacs-queue--mark-submit-suppress' (called from the submit
-paths), buffer-local per chat.")
+or via `dsh-emacs-queue--submit-suppress-timer' (transport-safety only:
+un-sticks the echo gate when neither a settle frame nor an RPC failure
+ever arrives; it paces NO preview).  The `[next: …]' preview is gated
+by this flag too — with one event-driven exception: while a turn is
+RUNNING (`dsh-emacs--busy-p') the preview shows regardless, because an
+item mirrored then can only be claimed at the turn end and is genuinely
+parked — that is how a queued message surfaces without any timing hack.
+Connection seeds do NOT clear it: on a fresh open the submit's own
+splice-in frame is the seed, and the claim leg that must stay silent
+follows it.  Set by `dsh-emacs-queue--mark-submit-suppress' (called
+from the submit paths), buffer-local per chat.")
 
 (defvar-local dsh-emacs-queue--submit-suppress-timer nil
-  "Defensive timeout timer for `dsh-emacs--queue-submit-suppress'.
-Clears the flag when no settled empty frame arrives (submit failure or
-a host that never claims); the transient normally resolves in
-milliseconds, so the timeout is generous.")
+  "Defensive disarm timer for `dsh-emacs--queue-submit-suppress'.
+Clears the flag when no settling frame arrives at all — a dead
+transport or an RPC that never fails visibly — so the echo gate does
+not stay stuck until the next submit.  The claim frame normally clears
+the flag within milliseconds, so this is pure transport hygiene: its
+value carries no user-visible timing (the parked preview is revealed by
+`dsh-emacs--busy-p', not by this timer).")
 
 (defun dsh-emacs-queue--submit-suppress-clear ()
-  "Clear the submit-suppression flag and its timer (idempotent)."
+  "Clear the submit-suppression flag and its timer (idempotent).
+Repaints once afterwards so the preview reflects the flag change
+immediately instead of waiting for the next queue frame."
   (when (timerp dsh-emacs-queue--submit-suppress-timer)
     (cancel-timer dsh-emacs-queue--submit-suppress-timer))
   (setq dsh-emacs-queue--submit-suppress-timer nil)
-  (setq dsh-emacs--queue-submit-suppress nil))
+  (setq dsh-emacs--queue-submit-suppress nil)
+  (dsh-emacs-queue--schedule-paint))
 
 (defun dsh-emacs-queue--mark-submit-suppress ()
   "Silence the queue echoes for the submit about to be sent.
@@ -113,10 +125,13 @@ flashes are genuine (ordering information) and stay."
   (dsh-emacs-queue--submit-suppress-clear)
   (setq dsh-emacs--queue-submit-suppress t)
   (let ((buf (current-buffer)))
-    ;; 2s matches the auto-dismiss of `dsh-emacs-queue--flash': the
-    ;; transient normally resolves in milliseconds, so the timeout only
-    ;; guards against a host that never sends the settling empty frame
-    ;; (transport failure / no claim).
+    ;; Transport hygiene only: a dead transport would otherwise leave the
+    ;; echo gate stuck until the next submit.  The parked preview is NOT
+    ;; revealed by this timer — `dsh-emacs--busy-p' gates the preview
+    ;; independently (see `dsh-emacs--queue-submit-suppress'), so the
+    ;; value only bounds the one remaining corner: an interrupted turn
+    ;; keeps its parked items while busy drops, and the preview there
+    ;; returns when this fires (2s, as before the busy-gate).
     (setq dsh-emacs-queue--submit-suppress-timer
           (run-at-time 2 nil
                        (lambda ()
@@ -356,11 +371,26 @@ into the same repaint — see `dsh-emacs-queue--prefix-timer'."
 The prefix sits in the read-only welcome region (prompt face run, so
 the input anchor keeps pointing at the run start); edits go through
 `inhibit-read-only' and the previous prefix is removed only when it is
-still exactly what this module inserted."
+still exactly what this module inserted.
+The gate is suppression minus the parked case, driven by state — no
+timing: while `dsh-emacs--queue-submit-suppress' is set the mirror's
+only item is the client's own just-submitted message, which the
+transcript renders directly, and a transient preview would flash the
+input line — UNLESS a turn is running (`dsh-emacs--busy-p'): an item
+mirrored while a turn runs can only be claimed at the turn end, so it
+is genuinely parked and the preview must show it at once, whatever the
+flag says.  The mode-line pending count is never gated."
   (when (and dsh-emacs--input-marker
              (marker-buffer dsh-emacs--input-marker))
     (let* ((anchor (dsh-emacs-render--input-anchor-pos))
-           (next (dsh-emacs-queue--next-item))
+           ;; Self-submit transient while idle: no `[next: …]' preview —
+           ;; the message goes straight into the transcript, a preview
+           ;; would only flash the input line (see
+           ;; `dsh-emacs--queue-submit-suppress').  A RUNNING turn lifts
+           ;; the gate: the item is parked, its preview is the point.
+           (next (and (or (null dsh-emacs--queue-submit-suppress)
+                          (dsh-emacs--busy-p))
+                      (dsh-emacs-queue--next-item)))
            (wanted (and anchor next
                         (dsh-emacs-queue--prefix
                          (dsh-emacs-queue-preview
