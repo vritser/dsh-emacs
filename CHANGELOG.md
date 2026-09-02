@@ -57,6 +57,15 @@ minor) and stay undated until the release is cut.
 - **New sessions inherit the current workspace**: starting a session from a
   chat buffer creates it inside that session's workspace instead of the
   ungrouped pool.
+- **New sessions follow the detected project**: `dsh-emacs-new-session`
+  outside any workspace context detects the Emacs project root of the
+  working directory (project.el on Emacs 28+, falling back to the VC root,
+  then a `.git` walk) and creates the session in the workspace registered
+  for that root — resolved via idempotent `workspace.create` on first use,
+  so every project's sessions group under one workspace.  Disable with
+  `dsh-emacs-new-session-auto-project`; remote dsh servers are skipped
+  (their workspace paths live on another host)
+  (rationale: postmortem/006).
 - **Image attachments are rendered inline** in the chat transcript.
 - **Run-finished notifications**: when a submitted run ends while its chat
   buffer is not visible on the focused frame, a notification is posted

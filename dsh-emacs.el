@@ -146,6 +146,24 @@ open."
   :type 'directory
   :group 'dsh-emacs)
 
+(defcustom dsh-emacs-new-session-auto-project t
+  "Auto-detect the Emacs project for a new session and place it there.
+When `dsh-emacs-new-session' starts a session outside any workspace
+context, it detects the project root of the working directory and
+creates the session in the workspace registered for that root instead of
+the Ungrouped CWD bucket.  The workspace is created server-side on first
+use (`workspace.create' is idempotent by canonical path, so re-runs
+resolve the existing registration).
+
+Detection prefers project.el (`project-current' / `project-root',
+built-in from Emacs 28, also reaching a user's `project-find-functions'
+finders), then the VC root, then a `.git' directory walk.  It only runs
+against the local loopback server — a remote dsh server's workspace
+paths live on another host and cannot match the local project directory.
+Set to nil to keep the old behavior (sessions always start in CWD)."
+  :type 'boolean
+  :group 'dsh-emacs)
+
 (defcustom dsh-emacs-default-model "deepseek-v4-flash-0731"
   "Default model name."
   :type 'string
@@ -658,11 +676,95 @@ after exhausting attempts so the user is not spammed with errors."
   "Resolve the workspace to create the next session in, or nil.
 Precedence: the workspace under point (session list header / New Session
 row), then — inside a chat buffer — the current session's workspace.
-Nil means create in CWD (session lands in the Ungrouped bucket)."
+Nil leaves the creation context to CWD; the session still lands in a
+workspace (rather than the Ungrouped bucket) when project auto-detection
+resolves one for the CWD, see `dsh-emacs-new-session'."
   (or (dsh-emacs-workspace-id-at-point)
       (and (derived-mode-p 'dsh-emacs-mode)
            (dsh-emacs--workspace-for-session
             (dsh-emacs--active-session-id)))))
+
+(defun dsh-emacs--project-root (&optional dir)
+  "Project root directory of DIR (default `default-directory'), or nil.
+Prefers project.el (`project-current' / `project-root', built-in from
+Emacs 28 — this also reaches a user's `project-find-functions' finders
+such as projectile), then the VC root, then a `.git' directory walk
+(the Emacs 27.1 baseline has neither project.el nor its completion
+machinery).  Any failure in the chain yields nil (no detection)."
+  (condition-case nil
+      (let* ((dir (expand-file-name (or dir default-directory)))
+             (root (or
+                    (when (and (require 'project nil t)
+                               (fboundp 'project-current)
+                               (fboundp 'project-root))
+                      (let ((pr (project-current nil dir)))
+                        (and pr (project-root pr))))
+                    (when (and (require 'vc nil t)
+                               (fboundp 'vc-root-dir))
+                      (vc-root-dir dir))
+                    (locate-dominating-file dir ".git"))))
+        ;; project.el may hand back an unexpanded `~' form; the canonical
+        ;; spellings downstream (workspace matching, `workspace.create')
+        ;; expect an absolute path without a trailing slash.
+        (and root (directory-file-name (expand-file-name root))))
+    (error nil)))
+
+(defun dsh-emacs--workspace-canonical-path (path)
+  "Canonical directory form of PATH for workspace-path matching, or nil.
+Mirrors the server's workspace uniqueness canon (`fs.realpath'): trailing
+slashes, `..' segments and symlinks are resolved, so a project root
+matches the workspace registered for it under any spelling."
+  (when (and path (not (string-empty-p path)))
+    (condition-case nil
+        (directory-file-name (file-truename (expand-file-name path)))
+      (error nil))))
+
+(defun dsh-emacs--workspace-id-by-path (dir)
+  "Workspace-id whose canonical path equals DIR, or nil."
+  (let ((want (dsh-emacs--workspace-canonical-path dir)))
+    (and want
+         (catch 'found
+           (dolist (ws dsh-emacs--workspaces)
+             (when (equal want
+                          (dsh-emacs--workspace-canonical-path
+                           (dsh-protocol-workspace-path ws)))
+               (throw 'found
+                      (dsh-protocol-workspace-workspace-id ws))))))))
+
+(declare-function dsh-emacs-events--host-upsert-workspace
+                  "dsh-emacs-events" (workspace))
+(declare-function dsh-emacs--server-local-host-p "dsh-emacs-server" ())
+
+(defun dsh-emacs--workspace-create-resolve (dir)
+  "Resolve the workspace for DIR, creating it server-side when missing.
+`workspace.create' is idempotent by canonical path, so this single call
+both finds an existing registration and registers a new one; the returned
+workspace is upserted into `dsh-emacs--workspaces' so the new session
+groups into it immediately.  Returns the workspace struct, or nil when
+the RPC failed."
+  (let ((resp (dsh-emacs--rpc-request
+               "workspace.create" `((path . ,dir)))))
+    (when (car resp)
+      (let* ((result (dsh-protocol-workspace-result--from-alist (cdr resp)))
+             (ws (dsh-protocol-workspace-result-workspace result)))
+        (when ws
+          (dsh-emacs-events--host-upsert-workspace ws)
+          ws)))))
+
+(defun dsh-emacs--new-session-project-workspace (dir)
+  "Workspace-id for the project containing DIR, or nil.
+When `dsh-emacs-new-session-auto-project' is on and the server is the
+local loopback one (only then do its workspace paths share this
+filesystem), detect the Emacs project root of DIR and resolve the
+workspace registered for it — creating it when the server has none.
+Else nil (the session keeps plain cwd semantics)."
+  (when (and dsh-emacs-new-session-auto-project
+             (dsh-emacs--server-local-host-p))
+    (let ((root (dsh-emacs--project-root dir)))
+      (when root
+        (or (dsh-emacs--workspace-id-by-path root)
+            (let ((ws (dsh-emacs--workspace-create-resolve root)))
+              (and ws (dsh-protocol-workspace-workspace-id ws))))))))
 
 ;;;###autoload
 (defun dsh-emacs-new-session (&optional cwd workspace-id preset)
@@ -675,10 +777,14 @@ host pick its default preset.
 Interactively, when point sits on a workspace header or its empty
 New Session row (in the session list), the session is created in that
 workspace; inside a chat buffer, it is created in the current session's
-workspace; otherwise in CWD.  With a prefix argument, first choose the
-agent preset from the live `agentPreset.list' roster (falling back to
-the built-in presets before the first roster arrives); without one
-the session uses `dsh-emacs-default-preset'."
+workspace.  Otherwise the session is created in CWD — unless that
+directory belongs to a detected Emacs project, in which case the session
+goes into the workspace registered for the project root (created on
+first use; disable with `dsh-emacs-new-session-auto-project').  With a
+prefix argument, first choose the agent preset from the live
+`agentPreset.list' roster (falling back to the built-in presets before
+the first roster arrives); without one the session uses
+`dsh-emacs-default-preset'."
   (interactive
    (let ((ws (dsh-emacs--new-session-workspace)))
      (list nil ws
@@ -686,54 +792,58 @@ the session uses `dsh-emacs-default-preset'."
                (dsh-emacs--read-preset dsh-emacs-default-preset)
              dsh-emacs-default-preset))))
   (dsh-emacs-server-ensure)
-  (dsh-emacs--rpc-async "session.create"
-                        (append (if workspace-id
-                                    `((workspaceId . ,workspace-id))
-                                  `((cwd . ,(dsh-emacs--absolute-cwd cwd))))
-                                `((model . ,dsh-emacs-default-model))
-                                (and preset `((agentPreset . ,preset))))
-                        (lambda (ok value)
-                          (if ok
-                              (let ((session-id (cdr (assq 'sessionId value))))
-                                ;; 把新会话补进缓存：sessions 列表 + workspace
-                                ;; session-ids（分组归属）——否则它落到 ungrouped
-                                ;; 且 `session/title' 事件找不到缓存 item，自动
-                                ;; 重命名无法实时生效。创建响应携带 agentPreset
-                                ;; 时一并入缓存，列表详情/页脚预设立即可见。
-                                (dsh-emacs--cache-new-session
-                                 session-id workspace-id
-                                 (cdr (assq 'agentPreset value)))
-                                (dsh-emacs-open-session session-id)
-                                ;; 新建的 workspace 会话尚未进入 session.list
-                                ;; 缓存（事件流不携带该信息），`--chat-buffer-sync'
-                                ;; 因此取不到 cwd；立即用 workspace 的 path 对齐
-                                ;; default-directory，magit-status 等按此定位项目。
-                                ;; 重新打开时缓存已刷新，走 `--chat-cwd' 分支。
-                                (when workspace-id
-                                  (let ((ws (cl-find-if
-                                             (lambda (w)
-                                               (equal workspace-id
-                                                      (dsh-protocol-workspace-workspace-id w)))
-                                             dsh-emacs--workspaces)))
-                                    (when ws
-                                      (let ((dir (dsh-protocol-workspace-path ws)))
-                                        (when (and dir (not (string-empty-p dir))
-                                                   (buffer-live-p
-                                                    dsh-emacs--current-buffer))
-                                          (with-current-buffer dsh-emacs--current-buffer
-                                            (setq-local default-directory
-                                                        (file-name-as-directory
-                                                         (expand-file-name dir))))))))))
-                            (message "Failed to create session: %S" value)))))
+  (let* ((dir (dsh-emacs--absolute-cwd cwd))
+         (ws (or workspace-id
+                 (dsh-emacs--new-session-project-workspace dir))))
+    (dsh-emacs--rpc-async "session.create"
+                          (append (if ws
+                                      `((workspaceId . ,ws))
+                                    `((cwd . ,dir)))
+                                  `((model . ,dsh-emacs-default-model))
+                                  (and preset `((agentPreset . ,preset))))
+                          (lambda (ok value)
+                            (if ok
+                                (let ((session-id (cdr (assq 'sessionId value))))
+                                  ;; 把新会话补进缓存：sessions 列表 + workspace
+                                  ;; session-ids（分组归属）——否则它落到 ungrouped
+                                  ;; 且 `session/title' 事件找不到缓存 item，自动
+                                  ;; 重命名无法实时生效。创建响应携带 agentPreset
+                                  ;; 时一并入缓存，列表详情/页脚预设立即可见。
+                                  (dsh-emacs--cache-new-session
+                                   session-id ws
+                                   (cdr (assq 'agentPreset value)))
+                                  (dsh-emacs-open-session session-id)
+                                  ;; 新建的 workspace 会话尚未进入 session.list
+                                  ;; 缓存（事件流不携带该信息），`--chat-buffer-sync'
+                                  ;; 因此取不到 cwd；立即用 workspace 的 path 对齐
+                                  ;; default-directory，magit-status 等按此定位项目。
+                                  ;; 重新打开时缓存已刷新，走 `--chat-cwd' 分支。
+                                  (when ws
+                                    (let ((ws-struct (cl-find-if
+                                                      (lambda (w)
+                                                        (equal ws
+                                                               (dsh-protocol-workspace-workspace-id w)))
+                                                      dsh-emacs--workspaces)))
+                                      (when ws-struct
+                                        (let ((dir (dsh-protocol-workspace-path ws-struct)))
+                                          (when (and dir (not (string-empty-p dir))
+                                                     (buffer-live-p
+                                                      dsh-emacs--current-buffer))
+                                            (with-current-buffer dsh-emacs--current-buffer
+                                              (setq-local default-directory
+                                                          (file-name-as-directory
+                                                           (expand-file-name dir))))))))))
+                              (message "Failed to create session: %S" value))))))
 
 ;;;###autoload
 (defun dsh-emacs-new-session-choose-preset ()
   "Create a new session after choosing its agent preset.
-Like `dsh-emacs-new-session' (the workspace under point, or the current
-chat session's workspace, decides the creation context), but always reads
-the preset first — bound to `C' in the session list, next to `c' which
-creates immediately with `dsh-emacs-default-preset'.  C-g during the
-preset prompt cancels the creation."
+Like `dsh-emacs-new-session' (the workspace under point, the current
+chat session's workspace, or the CWD's project workspace decides the
+creation context), but always reads the preset first — bound to `C' in
+the session list, next to `c' which creates immediately with
+`dsh-emacs-default-preset'.  C-g during the preset prompt cancels the
+creation."
   (interactive)
   (dsh-emacs-server-ensure)
   (dsh-emacs-new-session nil (dsh-emacs--new-session-workspace)

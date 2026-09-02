@@ -3200,8 +3200,11 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
       (kill-buffer buf))))
 
   ;; 4) 非 workspace 上下文：不带 workspaceId（ungrouped），只带 cwd
+  ;;    （项目自动归属在测试 80b 单独覆盖；此处关掉以免本机 repo 被检测为
+  ;;    project 而改写断言）
   (let ((calls nil)
-        (buf (generate-new-buffer " *dsh-plain-create*")))
+        (buf (generate-new-buffer " *dsh-plain-create*"))
+        (dsh-emacs-new-session-auto-project nil))
     (unwind-protect
         (with-current-buffer buf
           (insert "plain text\n")
@@ -3252,8 +3255,10 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
       (kill-buffer buf)))
 
   ;; 6) chat buffer 中，但当前会话不在任何 workspace：仍走 cwd（ungrouped）
+  ;;    （同测试 62-4：项目自动归属关闭，见测试 80b）
   (let ((calls nil)
-        (buf (generate-new-buffer " *dsh-chat-create-ungrouped*")))
+        (buf (generate-new-buffer " *dsh-chat-create-ungrouped*"))
+        (dsh-emacs-new-session-auto-project nil))
     (unwind-protect
         (with-current-buffer buf
           (dsh-emacs-mode)
@@ -4395,7 +4400,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
       (progn
         (setq dsh-emacs--sessions nil)
         ;; 带 preset（cwd 上下文）
-        (let ((calls nil))
+        (let ((calls nil)
+              (dsh-emacs-new-session-auto-project nil))
           (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                      (lambda (method params cb)
                        (push (list method params) calls)
@@ -4435,7 +4441,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                          (string= "code" (cdr (assq 'agentPreset params))))
                 (dsh-test-pass "new-session-workspace-with-preset")))))
         ;; 无 preset → 不发送 agentPreset
-        (let ((calls nil))
+        (let ((calls nil)
+              (dsh-emacs-new-session-auto-project nil))
           (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                      (lambda (method params cb)
                        (push (list method params) calls)
@@ -4456,6 +4463,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
 (let* ((old-sessions dsh-emacs--sessions)
        (buf (generate-new-buffer " *dsh-prefix-create*"))
        (calls nil)
+       (dsh-emacs-new-session-auto-project nil)
        (old-cache dsh-emacs--agent-presets))
   (unwind-protect
       (with-current-buffer buf
@@ -4501,7 +4509,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
 
 ;; c 路径：无前缀交互 → 只发 session.create，不带 agentPreset
 (let* ((calls nil)
-       (buf (generate-new-buffer " *dsh-c-default-create*")))
+       (buf (generate-new-buffer " *dsh-c-default-create*"))
+       (dsh-emacs-new-session-auto-project nil))
   (unwind-protect
       (with-current-buffer buf
         (insert "row text\n")
@@ -4556,6 +4565,264 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (setq dsh-emacs--agent-presets old-cache)
     (when (buffer-live-p buf) (kill-buffer buf))))
 
+;; --- 测试 80b: new-session 自动检测 project 并归属其 workspace ---
+;; 检测链依赖 project.el（Emacs 28+ 内置）；27 上 require 返回 nil 时整段跳过，
+;; 不影响其余测试。分层覆盖：
+;;   1) `dsh-emacs--project-root'：project.el 优先 → VC root → .git 行走；无
+;;      project → nil；
+;;   2) `dsh-emacs--workspace-id-by-path'：按 server 同款 canonical 路径匹配
+;;      （尾斜杠 / 符号链接均解析）；
+;;   3) `dsh-emacs--new-session-project-workspace' 编排：选项开关、本地/远程
+;;      server、缓存命中免 RPC、未命中走幂等 workspace.create 并即时入缓存、
+;;      RPC 失败回退 nil；
+;;   4) 端到端 call-interactively：plain buffer → session.create 带 workspaceId
+;;      不带 cwd；创建失败 → 仍带 cwd。
+(require 'project nil t)
+(require 'vc nil t)
+(when (and (fboundp 'project-current) (fboundp 'project-root)
+           (fboundp 'vc-root-dir))
+  ;; project.el 分支优先：返回其 root（还有 `~' / 尾斜杠归一化）
+  (let ((root (directory-file-name (make-temp-file "dsh-pj1-" t)))
+        (fake (list 'vc "fake-project")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'project-current) (lambda (&rest _) fake))
+                  ((symbol-function 'project-root) (lambda (_pr) root)))
+          (when (equal (dsh-emacs--project-root
+                        (expand-file-name "inside" root))
+                       root)
+            (dsh-test-pass "project-root-prefers-project-el")))
+      (delete-directory root t)))
+  ;; 退回链：project.el 无结果 + VC root 无结果 → .git 行走；全无 → nil
+  (let* ((root (directory-file-name (make-temp-file "dsh-pj2-" t)))
+         (empty (make-temp-file "dsh-pj3-" t)))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name ".git" root))
+          (make-directory (expand-file-name "nested" root))
+          (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+                    ((symbol-function 'project-root) (lambda (&rest _) nil))
+                    ((symbol-function 'vc-root-dir) (lambda (&rest _) nil)))
+            (when (equal (dsh-emacs--project-root
+                          (expand-file-name "nested" root))
+                         root)
+              (dsh-test-pass "project-root-walks-git-marker"))
+            (when (null (dsh-emacs--project-root empty))
+              (dsh-test-pass "project-root-nil-outside-any-project"))))
+      (delete-directory root t)
+      (delete-directory empty t))))
+
+;; workspace 路径匹配（canonical）：尾斜杠、符号链接、不同目录
+(let* ((root (directory-file-name (make-temp-file "dsh-wsp-" t)))
+       (sym (expand-file-name
+             (format "dsh-link-%d" (random 99999))
+             (directory-file-name temporary-file-directory)))
+       (ws (dsh-protocol-workspace--from-alist
+            (list (cons 'workspaceId "w-root")
+                  (cons 'path root)
+                  (cons 'sessionIds [])))))
+  (unwind-protect
+      (let ((dsh-emacs--workspaces (list ws)))
+        (when (equal (dsh-emacs--workspace-id-by-path (concat root "/"))
+                     "w-root")
+          (dsh-test-pass "workspace-id-by-path-matches-trailing-slash"))
+        (when (null (dsh-emacs--workspace-id-by-path
+                     (expand-file-name "elsewhere" root)))
+          (dsh-test-pass "workspace-id-by-path-misses-different-dir"))
+        (ignore-errors (delete-file sym))
+        (make-symbolic-link root sym)
+        (when (equal (dsh-emacs--workspace-id-by-path sym) "w-root")
+          (dsh-test-pass "workspace-id-by-path-resolves-symlink")))
+    (ignore-errors (delete-file sym))
+    (delete-directory root t)))
+
+;; 编排：缓存命中免 RPC；未命中创建并入缓存；RPC 失败回退 nil；选项关闭不
+;; 检测；远程 server 跳过
+(let* ((root (directory-file-name (make-temp-file "dsh-pjws-" t)))
+       (dsh-emacs-new-session-auto-project t))
+  (unwind-protect
+      (progn
+        (let ((dsh-emacs--workspaces
+               (list (dsh-protocol-workspace--from-alist
+                      (list (cons 'workspaceId "w-proj")
+                            (cons 'path root)
+                            (cons 'sessionIds [])))))
+              (rpc-called nil))
+          (cl-letf (((symbol-function 'dsh-emacs--server-local-host-p)
+                     (lambda () t))
+                    ((symbol-function 'dsh-emacs--project-root)
+                     (lambda (_dir) root))
+                    ((symbol-function 'dsh-emacs--rpc-request)
+                     (lambda (&rest _) (setq rpc-called t) (cons nil "no"))))
+            (when (equal (dsh-emacs--new-session-project-workspace root)
+                         "w-proj")
+              (dsh-test-pass "project-workspace-cache-hit-returns-id"))
+            (when (null rpc-called)
+              (dsh-test-pass "project-workspace-cache-hit-skips-create"))))
+        (let ((dsh-emacs--workspaces nil)
+              (created nil))
+          (cl-letf (((symbol-function 'dsh-emacs--server-local-host-p)
+                     (lambda () t))
+                    ((symbol-function 'dsh-emacs--project-root)
+                     (lambda (_dir) root))
+                    ((symbol-function 'dsh-emacs--rpc-request)
+                     (lambda (_method _params)
+                       (setq created t)
+                       (cons t (list (cons 'workspace
+                                           (list (cons 'workspaceId "w-created")
+                                                 (cons 'path root)
+                                                 (cons 'sessionIds []))))))))
+            (when (equal (dsh-emacs--new-session-project-workspace root)
+                         "w-created")
+              (dsh-test-pass "project-workspace-created-on-cache-miss"))
+            (when (and created
+                       (cl-find-if (lambda (w)
+                                     (equal "w-created"
+                                            (dsh-protocol-workspace-workspace-id w)))
+                                   dsh-emacs--workspaces))
+              (dsh-test-pass "project-workspace-created-upserts-cache"))))
+        (let ((dsh-emacs--workspaces nil))
+          (cl-letf (((symbol-function 'dsh-emacs--server-local-host-p)
+                     (lambda () t))
+                    ((symbol-function 'dsh-emacs--project-root)
+                     (lambda (_dir) root))
+                    ((symbol-function 'dsh-emacs--rpc-request)
+                     (lambda (&rest _) (cons nil "boom"))))
+            (when (null (dsh-emacs--new-session-project-workspace root))
+              (dsh-test-pass "project-workspace-rpc-failure-returns-nil"))))
+        (let ((dsh-emacs-new-session-auto-project nil)
+              (rpc-called nil))
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-request)
+                     (lambda (&rest _) (setq rpc-called t) nil)))
+            (when (and (null (dsh-emacs--new-session-project-workspace root))
+                       (null rpc-called))
+              (dsh-test-pass "project-workspace-option-off-disables"))))
+        (cl-letf (((symbol-function 'dsh-emacs--server-local-host-p)
+                   (lambda () nil))
+                  ((symbol-function 'dsh-emacs--project-root)
+                   (lambda (_dir) root))
+                  ((symbol-function 'dsh-emacs--rpc-request)
+                   (lambda (&rest _) (error "remote must not RPC"))))
+          (when (null (dsh-emacs--new-session-project-workspace root))
+            (dsh-test-pass "project-workspace-remote-server-skipped"))))
+    (delete-directory root t)))
+
+;; 端到端（call-interactively）：plain buffer → project 命中 → 归属该 workspace
+(let* ((old-sessions dsh-emacs--sessions)
+       (root (directory-file-name (make-temp-file "dsh-e2e-" t)))
+       (calls nil)
+       (buf (generate-new-buffer " *dsh-project-create*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (insert "plain text\n")
+        (goto-char (point-min))
+        (let ((dsh-emacs--workspaces
+               (list (dsh-protocol-workspace--from-alist
+                      (list (cons 'workspaceId "w-proj")
+                            (cons 'path root)
+                            (cons 'sessionIds []))))))
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (method params cb)
+                       (push (list method params) calls)
+                       (funcall cb t '((sessionId . "s-proj")))))
+                    ((symbol-function 'dsh-emacs-open-session)
+                     (lambda (_sid) nil))
+                    ((symbol-function 'dsh-emacs--project-root)
+                     (lambda (_dir) root))
+                    ((symbol-function 'dsh-emacs--server-local-host-p)
+                     (lambda () t))
+                    ((symbol-function 'dsh-emacs--rpc-request)
+                     (lambda (&rest _) (cons nil "must-not-fire"))))
+            (call-interactively #'dsh-emacs-new-session))
+          (let* ((create (cl-find-if
+                          (lambda (c) (string= "session.create" (car c)))
+                          calls))
+                 (params (and create (cadr create))))
+            (when (and create
+                       (string= "w-proj" (cdr (assq 'workspaceId params)))
+                       (null (assq 'cwd params)))
+              (dsh-test-pass
+               "new-session-attaches-to-detected-project-workspace")))))
+    (setq dsh-emacs--sessions old-sessions)
+    (delete-directory root t)
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; 端到端：缓存未命中 → 幂等创建 workspace 后归属
+(let* ((old-sessions dsh-emacs--sessions)
+       (old-ws dsh-emacs--workspaces)
+       (root (directory-file-name (make-temp-file "dsh-e2e-" t)))
+       (calls nil)
+       (buf (generate-new-buffer " *dsh-project-create2*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (insert "plain text\n")
+        (goto-char (point-min))
+        (setq dsh-emacs--workspaces nil)
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method params cb)
+                     (push (list method params) calls)
+                     (funcall cb t '((sessionId . "s-proj2")))))
+                  ((symbol-function 'dsh-emacs-open-session)
+                   (lambda (_sid) nil))
+                  ((symbol-function 'dsh-emacs--project-root)
+                   (lambda (_dir) root))
+                  ((symbol-function 'dsh-emacs--server-local-host-p)
+                   (lambda () t))
+                  ((symbol-function 'dsh-emacs--rpc-request)
+                   (lambda (_method _params)
+                     (cons t (list (cons 'workspace
+                                         (list (cons 'workspaceId "w-created2")
+                                               (cons 'path root)
+                                               (cons 'sessionIds []))))))))
+          (call-interactively #'dsh-emacs-new-session))
+        (let* ((create (cl-find-if
+                        (lambda (c) (string= "session.create" (car c)))
+                        calls))
+               (params (and create (cadr create))))
+          (when (and (string= "w-created2" (cdr (assq 'workspaceId params)))
+                     (null (assq 'cwd params)))
+            (dsh-test-pass
+             "new-session-creates-project-workspace-on-first-use"))))
+    (setq dsh-emacs--sessions old-sessions)
+    (setq dsh-emacs--workspaces old-ws)
+    (delete-directory root t)
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; 端到端：项目 workspace 创建失败 → 回退 cwd（plain 语义）
+(let* ((old-sessions dsh-emacs--sessions)
+       (old-ws dsh-emacs--workspaces)
+       (root (directory-file-name (make-temp-file "dsh-e2e-" t)))
+       (calls nil)
+       (buf (generate-new-buffer " *dsh-project-create3*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (insert "plain text\n")
+        (goto-char (point-min))
+        (setq dsh-emacs--workspaces nil)
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method params cb)
+                     (push (list method params) calls)
+                     (funcall cb t '((sessionId . "s-proj3")))))
+                  ((symbol-function 'dsh-emacs-open-session)
+                   (lambda (_sid) nil))
+                  ((symbol-function 'dsh-emacs--project-root)
+                   (lambda (_dir) root))
+                  ((symbol-function 'dsh-emacs--server-local-host-p)
+                   (lambda () t))
+                  ((symbol-function 'dsh-emacs--rpc-request)
+                   (lambda (&rest _) (cons nil "create-failed"))))
+          (call-interactively #'dsh-emacs-new-session))
+        (let* ((create (cl-find-if
+                        (lambda (c) (string= "session.create" (car c)))
+                        calls))
+               (params (and create (cadr create))))
+          (when (and create
+                     (null (assq 'workspaceId params))
+                     (assq 'cwd params))
+            (dsh-test-pass "new-session-project-create-failure-keeps-cwd"))))
+    (setq dsh-emacs--sessions old-sessions)
+    (setq dsh-emacs--workspaces old-ws)
+    (delete-directory root t)
+    (when (buffer-live-p buf) (kill-buffer buf))))
 
 ;; --- 测试 81: 用户提问（question/requested）minibuffer 选择与应答 ---
 ;; dsh 的 `ask' 工具经 mux 流推 question/requested（server-request，稳定
