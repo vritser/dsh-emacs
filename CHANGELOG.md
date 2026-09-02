@@ -180,6 +180,13 @@ minor) and stay undated until the release is cut.
   reconnect repainted every already-rendered event: the user message and
   the agent reply each appeared twice with the layout interleaved and
   garbled until the session was reopened.
+- **A fast second submit can no longer double-send**: the plain send path
+  (`C-c C-c` while idle) now clears the input at submit time, exactly like
+  the queue/steer and slash-command paths, so pressing the key again
+  before the server answers reads an empty input instead of sending the
+  same message twice.  A transport failure restores the draft when the
+  input is still empty (a newer draft typed meanwhile is left alone), and
+  a successful send never wipes text typed during the round-trip.
 
 ### Documentation
 

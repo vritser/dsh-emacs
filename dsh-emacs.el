@@ -2178,7 +2178,12 @@ reaches the model.
 On acceptance the message is echoed into the transcript (when non-empty),
 the running spinner lights up, and the watchdog starts.  Non-nil
 SKIP-HISTORY suppresses the input-history push: used by the slash-command
-fallback after the line was already recorded at submit time."
+fallback after the line was already recorded at submit time.
+The draft leaves the input area at submit time — the same web-style feel
+as the command and deferred paths — so a second submit keypress during
+the RPC round-trip reads an empty input instead of sending the message
+twice; on a transport failure the draft is restored when the input is
+still empty (a newer draft typed meanwhile is left alone)."
   (let* ((session-id (dsh-emacs--active-session-id))
          (chat-buffer (and (boundp 'dsh-emacs--buffer-session)
                            dsh-emacs--buffer-session
@@ -2206,6 +2211,12 @@ fallback after the line was already recorded at submit time."
         (unless (string-empty-p message)
           (setq dsh-emacs--pending-user-messages
                 (append dsh-emacs--pending-user-messages (list message))))))
+    ;; 提交即清空输入区（与 command/deferred 路径同手感）：RPC 往返期间
+    ;; 再按一次 C-c C-c 读到的只会是空输入，不会把同一句消息发两遍；文本
+    ;; 在传输失败的失败分支里恢复（见下）。
+    (when (buffer-live-p input-buffer)
+      (with-current-buffer input-buffer
+        (dsh-emacs--clear-input)))
     (dsh-emacs--rpc-async "session.prompt" payload
                           (lambda (ok value)
                             (if ok
@@ -2240,10 +2251,7 @@ fallback after the line was already recorded at submit time."
                                         (when (not (process-live-p
                                                     dsh-emacs--event-process))
                                           (dsh-emacs-events-connect
-                                           (current-buffer))))))
-                                  (when (buffer-live-p input-buffer)
-                                    (with-current-buffer input-buffer
-                                      (dsh-emacs--clear-input))))
+                                           (current-buffer)))))))
                               (message "Failed to send: %S" value)
                               ;; The server rejected the prompt, so no
                               ;; `user/message' will ever arrive to consume the
@@ -2253,7 +2261,16 @@ fallback after the line was already recorded at submit time."
                                 (with-current-buffer chat-buffer
                                   (setq dsh-emacs--turn-awaiting nil)
                                   (setq dsh-emacs--pending-user-messages
-                                        (delq message dsh-emacs--pending-user-messages)))))))))
+                                        (delq message dsh-emacs--pending-user-messages))))
+                              ;; 输入已在提交时清空：传输失败把草稿放回输入
+                              ;; 区。只有输入区仍是空的才恢复——用户趁 RPC
+                              ;; 往返敲下的新草稿不被覆盖（与
+                              ;; `dsh-emacs--submit-deferred' 的失败恢复一致）。
+                              (when (buffer-live-p input-buffer)
+                                (with-current-buffer input-buffer
+                                  (when (string-empty-p
+                                         (or (dsh-emacs--get-input) ""))
+                                    (dsh-emacs--replace-input message)))))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;;  附件 / 模型选择 / 输入历史

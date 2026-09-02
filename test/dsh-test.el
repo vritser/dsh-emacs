@@ -6730,6 +6730,61 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
           (= 4 dsh-emacs--anchor-seq)))
     (when (buffer-live-p chat) (kill-buffer chat))))
 
+(defun dsh-emacs-test--input-text ()
+  "Return the current editable input text (or \"\" when no input area)."
+  (condition-case nil
+      (or (dsh-emacs--get-input) "")
+    (error "")))
+
+;; --- 测试 98p: 普通发送路径提交即清空输入区, 失败恢复草稿, 杜绝连按双发 ---
+;; 回归: `dsh-emacs--submit-plain' 原先只在 RPC 成功回调里清空输入区——RPC
+;; 往返期间再按一次 C-c C-c（busy 仍为 nil）会原样再发一遍同一句消息
+;; （双发），且成功回调的清空会抹掉往返期间新敲的草稿。修复：提交即清空
+;; （与 command/deferred 路径同手感），传输失败时仅在输入区仍为空时恢复
+;; 原文，成功不再触碰输入区。
+(let ((buf (generate-new-buffer " *dsh-plain-submit-clear*"))
+      (cb nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq dsh-emacs--current-session "sess-plain-clear")
+        (dsh-emacs--ml-busy-clear)
+        ;; 场景 1: 提交即清空（不等 RPC 返回）；失败且输入区仍空 → 恢复原文
+        (goto-char dsh-emacs--input-marker)
+        (insert "draft one")
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_method _params callback) (setq cb callback))))
+          (dsh-emacs--submit-plain "draft one"))
+        (dsh-test-assert "plain-submit-clears-input-immediately"
+          (string-empty-p (dsh-emacs-test--input-text)))
+        (funcall cb nil '((error . "boom")))
+        (dsh-test-assert "plain-submit-failure-restores-draft"
+          (string= "draft one" (dsh-emacs-test--input-text)))
+        (dsh-test-assert "plain-submit-failure-drops-pending"
+          (null dsh-emacs--pending-user-messages))
+        ;; 场景 2: 失败不得覆盖往返期间新敲的草稿
+        (dsh-emacs--clear-input)
+        (setq cb nil)
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_method _params callback) (setq cb callback))))
+          (dsh-emacs--submit-plain "draft two"))
+        (insert "newer draft")
+        (funcall cb nil '((error . "boom")))
+        (dsh-test-assert "plain-submit-failure-keeps-newer-draft"
+          (string= "newer draft" (dsh-emacs-test--input-text)))
+        ;; 场景 3: 成功路径不再清空输入区（往返期间的新草稿保留）
+        (dsh-emacs--clear-input)
+        (setq cb nil)
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_method _params callback) (setq cb callback))))
+          (dsh-emacs--submit-plain "draft three"))
+        (insert "typed during flight")
+        (funcall cb t '((ok . t)))
+        (dsh-test-assert "plain-submit-success-keeps-newer-draft"
+          (string= "typed during flight" (dsh-emacs-test--input-text)))
+        (dsh-emacs--ml-busy-clear))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
 ;; --- 测试 98n: 重连时 socket 创建抛错不得让会话永久失聪 ---
 ;; 回归：`dsh-emacs-events-connect' 先用 disconnect 拆掉旧流（重连 timer
 ;; 一并取消），然后才建新 socket；若 `open-network-stream' 同步抛错
