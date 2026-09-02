@@ -101,6 +101,22 @@ items (host-injected next-step content) are mirrored but never counted,
 previewed, or listed; `steering` items count and list, and — as the
 next thing the host injects — head the preview.
 
+The echo feedback is silenced for the client's OWN empty-queue submit:
+the wire accepts only `queue`/`steer` prompt modes, so every send —
+idle, or queued behind a running turn with nothing else pending — is
+appended to the inbox and claimed when the turn starts, two
+`session/queue` frames within milliseconds.  With an empty mirror those
+frames carry no ordering information, so the transient splice/claim
+gets no `queued:` / `running:` echo (`dsh-emacs-queue--mark-submit-suppress`
+arms `dsh-emacs--queue-submit-suppress` when the mirror is empty at
+submit time, on both the plain and the deferred path; it clears when
+the mirror settles back to empty, in the submit failure branch, or
+after a 2s defensive timeout).  Genuine queueing — items already
+parked — keeps its feedback.
+This is the queue-frame complement of the anchor-gated replay dedup
+(rationale: postmortem/004): transcript frames are idempotent by seq,
+queue frames by submit context.
+
 ## Event rendering flow
 
 Opening a session first reads `session.history`, then connects to the

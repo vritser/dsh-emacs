@@ -2260,7 +2260,11 @@ the `session/queue' frame the host pushes on the splice.  IMAGES is the
 same wire-ready attachment list `dsh-emacs--submit-prompt' takes; the
 host admits images by the session's current model at claim time.  Slash
 lines are NOT routed to `commands.execute' here — busy input is queued
-as literal text, the same semantics as dsh web's busyEnter."
+as literal text, the same semantics as dsh web's busyEnter.
+With nothing already pending in the mirror, the submit arms
+`dsh-emacs-queue--mark-submit-suppress': the splice+claim transient of
+this own message gets no `queued:' / `running:' echo (nothing to order
+against); genuinely parked items keep their feedback."
   (let* ((mode (pcase mode
                  ((or 'queue 'steer) (symbol-name mode))
                  ('stop "queue")
@@ -2283,6 +2287,13 @@ as literal text, the same semantics as dsh web's busyEnter."
     (when (buffer-live-p input-buffer)
       (with-current-buffer input-buffer
         (dsh-emacs--clear-input)))
+    ;; Queue-empty submit (busy or idle): the host still splices the message
+    ;; into the inbox and claims it at the turn start; with nothing already
+    ;; parked those frames do not carry any ordering information, so their
+    ;; `queued:' / `running:' echoes are noise the submit path's own render
+    ;; already covers (see `dsh-emacs-queue--mark-submit-suppress').
+    (when (null (dsh-emacs-queue-items))
+      (dsh-emacs-queue--mark-submit-suppress))
     (dsh-emacs--rpc-async "session.prompt" payload
                           (lambda (ok value)
                             (if ok
@@ -2292,6 +2303,10 @@ as literal text, the same semantics as dsh web's busyEnter."
                                 ;; host claims it (user/message).  Nothing
                                 ;; to render here.
                                 nil
+                              ;; A failed prompt never produces the
+                              ;; splice/claim frames that would settle the
+                              ;; suppression: clear it here (idempotent).
+                              (dsh-emacs-queue--submit-suppress-clear)
                               (message "Failed to submit: %S" value)
                               ;; Nothing will consume the text, put it back
                               ;; (same restore as the command path).
@@ -2313,6 +2328,10 @@ On acceptance the message is echoed into the transcript (when non-empty),
 the running spinner lights up, and the watchdog starts.  Non-nil
 SKIP-HISTORY suppresses the input-history push: used by the slash-command
 fallback after the line was already recorded at submit time.
+Submitting with an empty queue arms
+`dsh-emacs-queue--mark-submit-suppress': the host's append+claim splice of
+this prompt (the wire has no direct mode) is rendered directly and
+silently, without the `queued:' / `running:' flashes.
 The draft leaves the input area at submit time — the same web-style feel
 as the command and deferred paths — so a second submit keypress during
 the RPC round-trip reads an empty input instead of sending the message
@@ -2344,7 +2363,17 @@ still empty (a newer draft typed meanwhile is left alone)."
         (setq dsh-emacs--turn-awaiting t)
         (unless (string-empty-p message)
           (setq dsh-emacs--pending-user-messages
-                (append dsh-emacs--pending-user-messages (list message))))))
+                (append dsh-emacs--pending-user-messages (list message))))
+        ;; A submit with an empty queue still passes through the host
+        ;; inbox (the wire knows only queue/steer modes): the host splices
+        ;; the message in and claims it again at the turn start, and the
+        ;; mirror would diff those two frames into `queued:' / `running:'
+        ;; echoes — the flash on sending a new message.  The message
+        ;; itself is already rendered directly in the response callback,
+        ;; so this transient should stay silent.  Genuine queueing (items
+        ;; already parked) keeps its feedback.
+        (when (null (dsh-emacs-queue-items))
+          (dsh-emacs-queue--mark-submit-suppress))))
     ;; 提交即清空输入区（与 command/deferred 路径同手感）：RPC 往返期间
     ;; 再按一次 C-c C-c 读到的只会是空输入，不会把同一句消息发两遍；文本
     ;; 在传输失败的失败分支里恢复（见下）。
@@ -2395,7 +2424,12 @@ still empty (a newer draft typed meanwhile is left alone)."
                                 (with-current-buffer chat-buffer
                                   (setq dsh-emacs--turn-awaiting nil)
                                   (setq dsh-emacs--pending-user-messages
-                                        (delq message dsh-emacs--pending-user-messages))))
+                                        (delq message dsh-emacs--pending-user-messages))
+                                  ;; A failed prompt never produces the
+                                  ;; splice/claim frames that would settle
+                                  ;; the suppression: clear it here
+                                  ;; (idempotent).
+                                  (dsh-emacs-queue--submit-suppress-clear)))
                               ;; 输入已在提交时清空：传输失败把草稿放回输入
                               ;; 区。只有输入区仍是空的才恢复——用户趁 RPC
                               ;; 往返敲下的新草稿不被覆盖（与

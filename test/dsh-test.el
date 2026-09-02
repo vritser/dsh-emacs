@@ -8310,6 +8310,205 @@ candidates as the UI would via `all-completions', not by destructuring."
                            (cadr dsh-emacs--queue-items))))))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
+;; --- Empty-queue submit transient never flashes the echo area (the
+;; "C-c C-c flash next message" fix) ---
+;; Regression: the protocol only knows queue/steer prompt modes, so a
+;; message sent with NOTHING PENDING — idle, or queued behind a running
+;; turn — is appended to the host inbox and claimed at the turn start
+;; (one `session/queue' frame each, observed live: 10ms apart).  72dbca0
+;; added the seq gate only to the session/event path; the queue frame
+;; path's diff still surfaced this transient as user events, flashing
+;; "queued: …" then "running: …".  Fix: the submit paths arm
+;; dsh-emacs--queue-submit-suppress when the mirror is empty; the mirror
+;; updates silently meanwhile, and the settling empty frame (the claim)
+;; disarms it.  Genuine queueing (items parked) keeps its feedback.
+(let ((chat (get-buffer-create " *t-queue-submit-suppress*"))
+      (proc (make-pipe-process :name "t-queue-suppress" :buffer nil))
+      (announced nil))
+  (unwind-protect
+      (progn
+        (process-put proc 'dsh-emacs-chat-buffer chat)
+        (with-current-buffer chat
+          (dsh-emacs-mode)
+          (setq-local dsh-emacs--buffer-session "sess-sup")
+          (cl-letf (((symbol-function 'dsh-emacs-queue--announce)
+                     (lambda (_events) (setq announced t)))
+                    ((symbol-function 'run-at-time) (lambda (&rest _) t)))
+            (setq-local dsh-emacs--queue-submit-suppress t)
+            ;; Frame 1: our message is spliced in → mirror updates, no
+            ;; flash, the flag survives
+            (dsh-emacs-events--dispatch-json
+             proc
+             (json-encode
+              (list (cons 'payload
+                          (list (cons 'type "session/queue")
+                                (cons 'sessionId "sess-sup")
+                                (cons 'items (vector (dsh-emacs-test--queue-item
+                                                      "x1" "queued" "hello"))))))))
+            (dsh-test-assert "queue-submit-suppress-swallows-splice-in"
+              (null announced)
+              (= 1 (length dsh-emacs--queue-items))
+              (equal "hello" (dsh-protocol-queue-item-text
+                              (car dsh-emacs--queue-items)))
+              dsh-emacs--queue-submit-suppress)
+            (setq announced nil)
+            ;; Frame 2: the item is claimed → mirror empty, flag
+            ;; disarmed, still no flash
+            (dsh-emacs-events--dispatch-json
+             proc
+             (json-encode
+              (list (cons 'payload
+                          (list (cons 'type "session/queue")
+                                (cons 'sessionId "sess-sup")
+                                (cons 'items []))))))
+            (dsh-test-assert "queue-submit-suppress-settles-and-unarms"
+              (null announced)
+              (null dsh-emacs--queue-items)
+              (null dsh-emacs--queue-submit-suppress))
+            ;; Reconnect seed frame: the transient stays silent across the
+            ;; connection (on a fresh open the splice-in frame IS the
+            ;; seed) — the seed seeds silently and keeps the flag, the
+            ;; claim frame then disarms it
+            (setq-local dsh-emacs--queue-submit-suppress t)
+            (dsh-emacs-queue-apply
+             chat 'proc-2
+             (list (cons 'items
+                         (vector (dsh-emacs-test--queue-item
+                                  "r1" "queued" "replay")))))
+            (dsh-test-assert "queue-submit-suppress-seed-keeps-flag"
+              (= 1 (length dsh-emacs--queue-items))
+              (null announced)
+              dsh-emacs--queue-submit-suppress)
+            (dsh-emacs-queue-apply chat 'proc-2 (list (cons 'items [])))
+            (dsh-test-assert "queue-submit-suppress-claim-settles-after-seed"
+              (null dsh-emacs--queue-items)
+              (null announced)
+              (null dsh-emacs--queue-submit-suppress)))))
+    (when (buffer-live-p chat) (kill-buffer chat))
+    (delete-process proc)))
+
+;; Submit-path arming/disarming: armed whenever the mirror is EMPTY at
+;; submit time — idle (plain path) or behind a running turn (deferred
+;; path) — with the defensive disarm timer; parked items keep the flag
+;; off (genuine queue/steer feedback must survive); the failure branch
+;; disarms (no settling frame will ever arrive).
+(let ((buf (get-buffer-create " *t-queue-suppress-arm*"))
+      (cbs nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-arm")
+        (setq dsh-emacs--current-session "sess-arm")
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_method _params cb) (push cb cbs))))
+          ;; Plain path, idle + empty mirror → armed (with the timer)
+          (dsh-emacs--ml-busy-clear)
+          (dsh-emacs--submit-plain "hello idle")
+          (dsh-test-assert "submit-plain-arms-suppress"
+            dsh-emacs--queue-submit-suppress
+            (timerp dsh-emacs-queue--submit-suppress-timer))
+          (dsh-emacs-queue--submit-suppress-clear)
+          ;; Plain path, items parked → not armed: "queued:" is genuine
+          (setq dsh-emacs--queue-items
+                (list (dsh-protocol-queue-item--from-alist
+                       (dsh-emacs-test--queue-item "p" "queued" "parked"))))
+          (dsh-emacs--submit-plain "hello parked")
+          (dsh-test-assert "submit-plain-parked-keeps-announce"
+            (null dsh-emacs--queue-submit-suppress))
+          (setq dsh-emacs--queue-items nil)
+          ;; Deferred path (busy), empty mirror → armed: the running
+          ;; turn's submit must not flash "queued:"/"running:" either
+          (dsh-emacs--ml-busy-set t)
+          (dsh-emacs--submit-deferred "hello busy" nil nil)
+          (dsh-test-assert "submit-deferred-arms-when-empty"
+            dsh-emacs--queue-submit-suppress
+            (timerp dsh-emacs-queue--submit-suppress-timer))
+          (dsh-emacs-queue--submit-suppress-clear)
+          ;; Deferred path, items parked → not armed
+          (setq dsh-emacs--queue-items
+                (list (dsh-protocol-queue-item--from-alist
+                       (dsh-emacs-test--queue-item "q" "queued" "parked2"))))
+          (dsh-emacs--submit-deferred "hello parked busy" nil nil)
+          (dsh-test-assert "submit-deferred-parked-keeps-announce"
+            (null dsh-emacs--queue-submit-suppress))
+          (setq dsh-emacs--queue-items nil)
+          (dsh-emacs--ml-busy-clear)
+          ;; Failure branch (plain): no splice/claim frames will ever
+          ;; settle the transient, so the submit path disarms directly
+          (dsh-emacs--submit-plain "hello fail")
+          (dsh-test-assert "submit-plain-failure-arms"
+            dsh-emacs--queue-submit-suppress)
+          (funcall (car cbs) nil '((code . "down")))
+          (dsh-test-assert "submit-plain-failure-clears-suppress"
+            (null dsh-emacs--queue-submit-suppress))
+          (dsh-test-assert "submit-plain-failure-clears-timer"
+            (null dsh-emacs-queue--submit-suppress-timer))
+          ;; Failure branch (deferred): same disarm
+          (dsh-emacs--ml-busy-set t)
+          (dsh-emacs--submit-deferred "hello fail busy" nil nil)
+          (dsh-test-assert "submit-deferred-failure-arms"
+            dsh-emacs--queue-submit-suppress)
+          (funcall (car cbs) nil '((code . "down")))
+          (dsh-test-assert "submit-deferred-failure-clears-suppress"
+            (null dsh-emacs--queue-submit-suppress))
+          (dsh-test-assert "submit-deferred-failure-clears-timer"
+            (null dsh-emacs-queue--submit-suppress-timer))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; Multi-session concurrency: the suppression flag, mirror, and timer are
+;; isolated per chat buffer — A's transient silence never mutes B's
+;; genuine queue feedback, and B's frames never touch A's mirror
+;; (session/queue frames are filtered per buffer-local session by the
+;; events dispatcher before reaching the mirror).
+(let ((chat-a (get-buffer-create " *t-queue-multi-a*"))
+      (chat-b (get-buffer-create " *t-queue-multi-b*"))
+      (proc-a (make-pipe-process :name "t-queue-multi-a" :buffer nil))
+      (proc-b (make-pipe-process :name "t-queue-multi-b" :buffer nil))
+      (announced nil))
+  (unwind-protect
+      (progn
+        (process-put proc-a 'dsh-emacs-chat-buffer chat-a)
+        (process-put proc-b 'dsh-emacs-chat-buffer chat-b)
+        (with-current-buffer chat-a
+          (dsh-emacs-mode)
+          (setq-local dsh-emacs--buffer-session "sess-multi-a"))
+        (with-current-buffer chat-b
+          (dsh-emacs-mode)
+          (setq-local dsh-emacs--buffer-session "sess-multi-b"))
+        (cl-letf (((symbol-function 'dsh-emacs-queue--announce)
+                   (lambda (_events) (setq announced t)))
+                  ((symbol-function 'run-at-time) (lambda (&rest _) t)))
+          ;; A's empty-queue submit arms its suppression (B unaffected)
+          (with-current-buffer chat-a
+            (dsh-emacs-queue--mark-submit-suppress))
+          (dsh-test-assert "queue-submit-suppress-buffer-isolated"
+            (with-current-buffer chat-a dsh-emacs--queue-submit-suppress)
+            (null (with-current-buffer chat-b dsh-emacs--queue-submit-suppress)))
+          ;; A session-B frame → B echoes normally; A's mirror and
+          ;; suppression stay untouched.  B's connection is seeded with an
+          ;; empty baseline first (the first frame is the connect snapshot
+          ;; by design), so the next frame is a real diff.
+          (dsh-emacs-queue-apply chat-b proc-b (list (cons 'items [])))
+          (dsh-emacs-events--dispatch-json
+           proc-b
+           (json-encode
+            (list (cons 'payload
+                        (list (cons 'type "session/queue")
+                              (cons 'sessionId "sess-multi-b")
+                              (cons 'items (vector (dsh-emacs-test--queue-item
+                                                    "b1" "queued" "b-real"))))))))
+          (dsh-test-assert "queue-submit-suppress-multi-session"
+            announced
+            (with-current-buffer chat-b
+              (equal "b-real" (dsh-protocol-queue-item-text
+                               (car dsh-emacs--queue-items))))
+            (null (with-current-buffer chat-a dsh-emacs--queue-items))
+            (with-current-buffer chat-a dsh-emacs--queue-submit-suppress))))
+    (when (buffer-live-p chat-a) (kill-buffer chat-a))
+    (when (buffer-live-p chat-b) (kill-buffer chat-b))
+    (delete-process proc-a)
+    (delete-process proc-b)))
+
 ;; 事件分发级：mux 的 session/queue 帧（payload 带 items 数组）按
 ;; buffer-local 会话路由到本缓冲的 dsh-emacs-queue-apply——镜像与 [next]
 ;; 前缀即时更新；其它会话的帧被网关过滤，不碰镜像。

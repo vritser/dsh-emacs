@@ -70,6 +70,60 @@ Their disappearance from the next frame is the delete being confirmed,
 not a consumption, so the `running' feedback is suppressed.  Ids are
 pruned once the confirming frame arrives.")
 
+(defvar-local dsh-emacs--queue-submit-suppress nil
+  "Non-nil while the mirror stays silent about a self-submitted transient.
+The wire knows only `queue' / `steer' prompt modes, so a message sent
+while the mirror is EMPTY — idle, or queued behind a running turn with
+nothing else pending — STILL passes through the host inbox: the host
+appends it (a `session/queue' frame with the item) and claims it again
+at the turn start (a frame without it) within milliseconds.  Diffing
+that pair flashes `queued:' then `running:' — the flash on sending a new
+message — though nothing was ever really parked: the submit path renders
+the user message directly.  While this flag is set, `dsh-emacs-queue-apply'
+updates the mirror but emits no feedback; it clears when the mirror
+settles back to empty (the claim frame), in the submit failure branch,
+or via `dsh-emacs-queue--submit-suppress-timer'.  Connection seeds do NOT
+clear it: on a fresh open the submit's own splice-in frame is the seed,
+and the claim leg that must stay silent follows it.  Set by
+`dsh-emacs-queue--mark-submit-suppress' (called from the submit
+paths), buffer-local per chat.")
+
+(defvar-local dsh-emacs-queue--submit-suppress-timer nil
+  "Defensive timeout timer for `dsh-emacs--queue-submit-suppress'.
+Clears the flag when no settled empty frame arrives (submit failure or
+a host that never claims); the transient normally resolves in
+milliseconds, so the timeout is generous.")
+
+(defun dsh-emacs-queue--submit-suppress-clear ()
+  "Clear the submit-suppression flag and its timer (idempotent)."
+  (when (timerp dsh-emacs-queue--submit-suppress-timer)
+    (cancel-timer dsh-emacs-queue--submit-suppress-timer))
+  (setq dsh-emacs-queue--submit-suppress-timer nil)
+  (setq dsh-emacs--queue-submit-suppress nil))
+
+(defun dsh-emacs-queue--mark-submit-suppress ()
+  "Silence the queue echoes for the submit about to be sent.
+Call in the chat buffer just before submitting while the mirror is
+empty (see `dsh-emacs--queue-submit-suppress'): the host will splice
+the message into the inbox — behind a running turn, or straight into
+the next one — and claim it again at the turn start, and neither
+transition deserves a `queued:' / `running:' flash; the message itself
+is rendered directly by the submit path.  With items already parked the
+flashes are genuine (ordering information) and stay."
+  (dsh-emacs-queue--submit-suppress-clear)
+  (setq dsh-emacs--queue-submit-suppress t)
+  (let ((buf (current-buffer)))
+    ;; 2s matches the auto-dismiss of `dsh-emacs-queue--flash': the
+    ;; transient normally resolves in milliseconds, so the timeout only
+    ;; guards against a host that never sends the settling empty frame
+    ;; (transport failure / no claim).
+    (setq dsh-emacs-queue--submit-suppress-timer
+          (run-at-time 2 nil
+                       (lambda ()
+                         (when (buffer-live-p buf)
+                           (with-current-buffer buf
+                             (dsh-emacs-queue--submit-suppress-clear))))))))
+
 (defvar-local dsh-emacs--queue-prefix nil
   "The input-prompt prefix string currently shown before `❯ ', or nil.
 Compared byte-wise before removal, so a stale prefix after an input-area
@@ -180,18 +234,31 @@ current one and no minibuffer session is active."
 The first frame of a connection is the connect-time snapshot and seeds
 the mirror silently; later frames diff against the mirror to emit the
 enqueue / steer / consumption feedback.  Payloads for other sessions
-are filtered out by the events dispatcher."
+are filtered out by the events dispatcher.
+
+While `dsh-emacs--queue-submit-suppress' is set no feedback is emitted:
+the frames are the append+claim transient of a prompt the client itself
+just submitted with an empty queue (see `dsh-emacs-queue--mark-submit-suppress') —
+the mirrored items still update, and the flag clears when the mirror
+settles back to empty or by its timeout."
   (when (buffer-live-p chat)
     (with-current-buffer chat
       (let* ((items (dsh-protocol-queue-items-from-alist payload))
              (seed (not (eq process dsh-emacs--queue-process))))
         (setq dsh-emacs--queue-process process)
-        (unless seed
+        (unless (or seed dsh-emacs--queue-submit-suppress)
           (dsh-emacs-queue--announce
            (dsh-emacs-queue--diff-events dsh-emacs--queue-items
                                          items
                                          dsh-emacs--queue-deleted)))
         (setq dsh-emacs--queue-items items)
+        ;; The claim frame of a submit transient: the mirror is empty
+        ;; again, the transient is over — re-arm the announcements.  Seeding
+        ;; (a connection's first frame) does NOT re-arm: on a fresh open the
+        ;; submit's own splice-in frame IS the seed, and the claim leg that
+        ;; must stay silent follows it.
+        (when (and dsh-emacs--queue-submit-suppress (null items))
+          (dsh-emacs-queue--submit-suppress-clear))
         ;; 删除已被服务器确认（项已消失）：清掉抑制标记，避免吞掉后续
         ;; 真实消费的反馈。
         (setq dsh-emacs--queue-deleted

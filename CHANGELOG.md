@@ -220,6 +220,15 @@ minor) and stay undated until the release is cut.
   same message twice.  A transport failure restores the draft when the
   input is still empty (a newer draft typed meanwhile is left alone), and
   a successful send never wipes text typed during the round-trip.
+- **Sending with an empty queue no longer flashes through the queue**: the
+  wire accepts only `queue`/`steer` prompt modes, so every send — idle, or
+  behind a running turn with nothing else pending — is spliced into the
+  host inbox and claimed when the turn starts, and the `session/queue`
+  mirror diffed those two frames into `queued:` / `running:` echo flashes.
+  Submitting with an empty mirror now suppresses that transient feedback —
+  the message is rendered directly in the transcript, as before — while
+  genuine queueing (items already parked) keeps its flashes and
+  `[next: …]` preview (rationale: postmortem/004).
 
 ### Documentation
 
