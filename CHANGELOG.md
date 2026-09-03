@@ -124,6 +124,11 @@ minor) and stay undated until the release is cut.
 
 ### Changed
 
+- **`scripts/verify.sh` gates byte-compilation**: undefined functions or
+  variables in the production `dsh-emacs*.el` files now fail the one-shot
+  gate instead of being caught only by manual compilation; warnings stay
+  allowed per AGENTS.md, and `.elc` artifacts are emitted to a temp dir so
+  they never land in the tree.
 - **`scripts/check-lisp.el` is diagnostics-only**: the auto-fixer was
   replaced by an ordered root-cause report (line / column / offset /
   context); repair procedure is documented in `AGENTS.md`.

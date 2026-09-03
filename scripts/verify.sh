@@ -4,10 +4,12 @@
 # 覆盖全部可机器检查的步骤：
 #   1. check-lisp 全量（dsh-check:files 默认列表）
 #   2. checker 自测（test/check-lisp-test.el）
-#   3. 主测试套件（test/dsh-test.el）
-#   4. 干净加载：emacs -Q --batch -L . -l dsh-emacs.el 必须无输出且 exit 0
-#   5. git diff HEAD --check（空白错误；仅覆盖已跟踪文件）
-#   6. 树内 junk 扫描（*.elc / 备份 / 自动保存 / 锁文件 / .DS_Store）
+#   3. 生产文件 byte-compile（仅 Error 计 FAIL；Warning 按 AGENTS.md 纪律可忽略
+#      -- .elc 产物重定向到临时目录，绝不落进仓库树）
+#   4. 主测试套件（test/dsh-test.el）
+#   5. 干净加载：emacs -Q --batch -L . -l dsh-emacs.el 必须无输出且 exit 0
+#   6. git diff HEAD --check（空白错误；仅覆盖已跟踪文件）
+#   7. 树内 junk 扫描（*.elc / 备份 / 自动保存 / 锁文件 / .DS_Store）
 # 不可机检、依赖人工/环境的部分不在此脚本内：
 #   - "review git diff" 的实质审阅（不只看空白）
 #   - "不自动提交"（由 harness 的 auto-commit 禁用保证，不是本文档承诺）
@@ -36,6 +38,18 @@ run 'check-lisp'      check     emacs -Q --batch -l scripts/check-lisp.el
 
 printf '\n== checker self-tests ==\n'
 run 'check-lisp-test' selftest  emacs -Q --batch -l test/check-lisp-test.el
+
+printf '\n== byte-compile (production files; Errors fail, Warnings pass) ==\n'
+byte_files=$(ls dsh-emacs*.el 2>/dev/null)
+if [ -z "$byte_files" ]; then
+  printf 'FAIL byte-compile (no dsh-emacs*.el production files)\n'
+  fail=1
+else
+  run 'byte-compile' compile env DSH_BYTE_TMP="$tmpdir" emacs -Q --batch -L . \
+    --eval "(require 'bytecomp)" \
+    --eval '(setq byte-compile-dest-file-function (lambda (src) (expand-file-name (concat (file-name-nondirectory src) "c") (getenv "DSH_BYTE_TMP"))))' \
+    -f batch-byte-compile $byte_files
+fi
 
 printf '\n== full unit suite ==\n'
 run 'dsh-test'        dsh       emacs -Q --batch -l test/dsh-test.el
