@@ -7124,6 +7124,62 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (dsh-emacs-events--watchdog-stop))
     (kill-buffer buf)))
 
+;; --- 测试 98p: 快速 run 的 turn/end 先于 prompt HTTP 回调送达 → 回调不得重新点亮 spinner ---
+;; 回归：send 路径在 session.prompt 的 HTTP 回调里点亮 mode-line busy。快速 run
+;; （极短回复、模型立即拒绝如 429 …）可以在回调前就在 mux 上 start+end —— 回调
+;; 若无条件 `dsh-emacs--ml-busy-set t'，会把这个已经结束的 turn 重新点亮，
+;; spinner 从此停不下来（直到下一次 turn/end 或断流）。修复：回调只在
+;; `dsh-emacs--turn-awaiting' 仍为 t（该次提交还没见到 turn/end）时点亮。
+(let ((buf (generate-new-buffer " *dsh-fast-run-race*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-fast")
+        (setq dsh-emacs--current-session "sess-fast")
+        (dsh-emacs--ml-busy-clear)
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_method _params cb)
+                     ;; mux 在 HTTP 回调之前送达 turn/start + turn/end
+                     (dsh-emacs-events--dispatch-event
+                      (current-buffer)
+                      '((type . "turn/start") (seq . 50)))
+                     (dsh-emacs-events--dispatch-event
+                      (current-buffer)
+                      '((type . "turn/end") (seq . 51)))
+                     (funcall cb t '((accepted . t)))))
+                  ((symbol-function 'dsh-emacs-events-connect)
+                   (lambda (_c) nil))
+                  ((symbol-function 'dsh-emacs-events--watchdog-start)
+                   (lambda () nil)))
+          (dsh-emacs--submit-plain "fast" nil t))
+        (dsh-test-assert "fast-run-end-before-callback-keeps-spinner-off"
+          (null dsh-emacs--ml-busy)
+          (null dsh-emacs--ml-busy-timer))
+        (dsh-emacs-events--watchdog-stop))
+    (kill-buffer buf)))
+
+;; 对照：turn/end 尚未送达时，回调仍正常点亮 —— 等待中的 run 必须有进度反馈。
+(let ((buf (generate-new-buffer " *dsh-normal-run-lights*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-normal")
+        (setq dsh-emacs--current-session "sess-normal")
+        (dsh-emacs--ml-busy-clear)
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_method _params cb)
+                     (funcall cb t '((accepted . t)))))
+                  ((symbol-function 'dsh-emacs-events-connect)
+                   (lambda (_c) nil))
+                  ((symbol-function 'dsh-emacs-events--watchdog-start)
+                   (lambda () nil)))
+          (dsh-emacs--submit-plain "normal" nil t))
+        (dsh-test-assert "pending-run-callback-lights-spinner"
+          (and dsh-emacs--ml-busy (timerp dsh-emacs--ml-busy-timer)))
+        (dsh-emacs--ml-busy-clear)
+        (dsh-emacs-events--watchdog-stop))
+    (kill-buffer buf)))
+
 (defun dsh-emacs-test--buffer-copies (needle)
   "Count non-overlapping occurrences of NEEDLE in the current buffer."
   (let ((n 0) (text (buffer-substring-no-properties (point-min) (point-max))))

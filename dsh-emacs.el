@@ -2325,7 +2325,9 @@ is part of `content' (each becomes a `{type: \"image\"}' part) — a
 top-level `images' field is stripped by the host schema and never
 reaches the model.
 On acceptance the message is echoed into the transcript (when non-empty),
-the running spinner lights up, and the watchdog starts.  Non-nil
+the running spinner lights up while the run is still awaited (a fast run
+that already finished on the stream before the callback repeats must not
+re-light it), and the watchdog starts.  Non-nil
 SKIP-HISTORY suppresses the input-history push: used by the slash-command
 fallback after the line was already recorded at submit time.
 Submitting with an empty queue arms
@@ -2393,9 +2395,18 @@ still empty (a newer draft typed meanwhile is left alone)."
                                   ;; bottom input buffer.
                                   (when (buffer-live-p chat-buffer)
                                     (with-current-buffer chat-buffer
-                                      ;; dsh is now executing: light up the
-                                      ;; mode-line running spinner.
-                                      (dsh-emacs--ml-busy-set t)
+                                      ;; The host accepted the prompt.  Light
+                                      ;; the mode-line running spinner only
+                                      ;; while the submitted run is still
+                                      ;; awaited: a fast run can start AND end
+                                      ;; on the mux before this HTTP callback
+                                      ;; runs (the ordering the
+                                      ;; `dsh-emacs--turn-awaiting'
+                                      ;; pre-registration above exists for),
+                                      ;; and re-lighting would leave the
+                                      ;; spinner running past that `turn/end'.
+                                      (when dsh-emacs--turn-awaiting
+                                        (dsh-emacs--ml-busy-set t))
                                       ;; Confirm the stream keeps delivering
                                       ;; while this turn runs.
                                       (dsh-emacs-events--watchdog-start)

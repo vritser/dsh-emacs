@@ -137,6 +137,13 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Mode-line running animation always stops at `turn/end`**: the spinner
+  could keep animating after a turn had finished — a fast run (a very short
+  reply, or a model immediately rejected, e.g. quota/rate) could start and
+  end on the event stream *before* the `session.prompt` HTTP callback ran,
+  and the callback then re-lit the spinner with no matching `turn/end` left
+  to extinguish it.  The callback now lights the spinner only while the
+  submitted run is still awaited, so an already-finished turn stays dark.
 - **Collapsed blocks no longer crash when a new chunk arrives**: appending
   into a folded fragment (a tool card kept collapsed while more output
   streams in) used to signal `void-variable old-body` — the hidden-count
