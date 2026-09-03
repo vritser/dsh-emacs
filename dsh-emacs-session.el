@@ -76,6 +76,10 @@
   "Globally active session (the last opened one); owned by dsh-emacs.el.
 Interactively resolve command targets through `dsh-emacs--active-session-id'
 (see the authoritative defvar in dsh-emacs.el).")
+;; Declare-only forward forms for buffer-local filter state defined further
+;; down (the header/render uses near the top precede their `defvar-local').
+(defvar dsh-emacs-session--filter-ws-id)
+(defvar dsh-emacs-session--filter-ws-title)
 
 ;;; ---------------------------------------------------------------------------
 ;;; 缓冲和模式

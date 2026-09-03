@@ -11,12 +11,14 @@ minor) and stay undated until the release is cut.
 ### Breaking Changes
 
 - **Status bar renamed from "footer" to "mode-line"**: the customize group
-  `dsh-emacs-footer` is now `dsh-emacs-modeline`, and its options
+  `dsh-emacs-footer` is now `dsh-emacs-modeline`, its options
   `dsh-emacs-footer-enabled` / `-format-spec` / `-branch-refresh-interval`
-  became `dsh-emacs-modeline-*`.  The old option, command and face names
-  remain as obsolete aliases (deprecated since 0.2.0), so existing configs
-  keep loading with deprecation warnings
-  (rationale: postmortem/002).
+  became `dsh-emacs-modeline-*`, the commands `dsh-emacs-footer-toggle` /
+  `-setup` / `-update` became `dsh-emacs-modeline-*`, and the seven footer
+  faces became `dsh-emacs-modeline-*`.  No compatibility aliases are
+  retained: the old footer names are gone, and saved customizations
+  referencing them stop working until renamed to the new names
+  (rationale: postmortem/007).
 - **Manual context-window options removed**: `dsh-emacs-footer-context-window`
   and `dsh-emacs-footer-context-window-alist` are gone.  The ctx% segment is
   driven exclusively by the context window the server reports; saved

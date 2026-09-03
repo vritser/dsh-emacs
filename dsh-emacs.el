@@ -1329,11 +1329,11 @@ Hands the completion framework a bounded candidate universe (see
 `dsh-emacs--switch-candidates') with standard programmed-completion
 semantics: trivial boundaries/metadata, and the entries the framework
 filters with the user's `completion-styles'."
-  (lambda (string _pred action)
+  (lambda (string pred action)
     (if (or (eq (car-safe action) 'boundaries) (eq action 'metadata))
         nil
       (let ((cands (dsh-emacs--switch-candidates vec string limit)))
-        (complete-with-action action cands string _pred)))))
+        (complete-with-action action cands string pred)))))
 
 (defun dsh-emacs--switch-id-table (vec)
   "Hash display label → session id for VEC; the most recent one wins.
@@ -3746,6 +3746,13 @@ back to `dsh-emacs--question-drain'."
              dsh-emacs--question-queue)
     (dsh-emacs--question-drain)))
 
+(defun dsh-emacs--avoid-minibuffer-prompt (&rest _)
+  "Point-entered handler keeping point off the read-only prompt tail.
+Same behavior as the obsolete `minibuffer-avoid-prompt' (deprecated
+since 25.1): entering the prompt region moves point past it."
+  (when (and (minibufferp) (< (point) (minibuffer-prompt-end)))
+    (goto-char (minibuffer-prompt-end))))
+
 (defun dsh-emacs--approval-prompt (session-id tool-name reason call-id)
   "Read the user's decision for one approval in the minibuffer.
 The prompt is multi-line, untruncated and colored: the asker's full
@@ -3793,7 +3800,7 @@ the same rejection (an unanswered frame would block the host forever)."
            ;; existing `face' — with it bound the justification/command
            ;; colors above would be wiped by `minibuffer-prompt'.
            (list 'read-only t
-                 'point-entered #'minibuffer-avoid-prompt)))
+                 'point-entered #'dsh-emacs--avoid-minibuffer-prompt)))
       (y-or-n-p prompt))))
 
 (defun dsh-emacs--approval-requested (chat rpc-id session-id approval-id

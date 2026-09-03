@@ -1,5 +1,9 @@
 # 002 — Footer to Mode-Line Rename
 
+_Superseded by 007 (alias-retention decision only): the obsolete footer
+aliases recorded below were removed in 0.2.0; the renames themselves
+stand._
+
 ## Background
 
 Pre-0.2.0 the status bar module was named `dsh-emacs-footer`, inspired by

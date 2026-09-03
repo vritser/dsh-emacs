@@ -47,6 +47,7 @@
 (declare-function dsh-emacs-list-queue "dsh-emacs-queue" ())
 
 ;;; ---------------------------------------------------------------------------
+
 ;;; 定制
 ;;; ---------------------------------------------------------------------------
 
@@ -813,21 +814,6 @@ when leaving dsh-emacs-mode."
     (setq dsh-emacs--modeline-overlay nil)))
 
 ;;; ---------------------------------------------------------------------------
-;;; 兼容别名（0.1.0 时代叫 footer）：老配置/老命令继续有效
-;;; ---------------------------------------------------------------------------
-
-(define-obsolete-variable-alias 'dsh-emacs-footer-enabled
-  'dsh-emacs-modeline-enabled "0.2.0")
-(define-obsolete-variable-alias 'dsh-emacs-footer-format-spec
-  'dsh-emacs-modeline-format-spec "0.2.0")
-(define-obsolete-variable-alias 'dsh-emacs-footer-branch-refresh-interval
-  'dsh-emacs-modeline-branch-refresh-interval "0.2.0")
-(define-obsolete-function-alias 'dsh-emacs-footer-toggle
-  'dsh-emacs-modeline-toggle "0.2.0")
-(define-obsolete-function-alias 'dsh-emacs-footer-setup
-  'dsh-emacs-modeline-setup "0.2.0")
-(define-obsolete-function-alias 'dsh-emacs-footer-update
-  'dsh-emacs-modeline-update "0.2.0")
 
 (provide 'dsh-emacs-modeline)
 

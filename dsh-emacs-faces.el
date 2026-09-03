@@ -495,25 +495,6 @@ Bold, no italic — matching dsh web's thinkingToggle style."
 	:group 'dsh-emacs-faces)
 
 ;;; ---------------------------------------------------------------------------
-;;;  兼容 face 别名（0.1.0 时代叫 footer）
-;;; ---------------------------------------------------------------------------
-
-(define-obsolete-face-alias 'dsh-emacs-footer-face
-  'dsh-emacs-modeline-face "0.2.0")
-(define-obsolete-face-alias 'dsh-emacs-footer-separator-face
-  'dsh-emacs-modeline-separator-face "0.2.0")
-(define-obsolete-face-alias 'dsh-emacs-footer-token-face
-  'dsh-emacs-modeline-token-face "0.2.0")
-(define-obsolete-face-alias 'dsh-emacs-footer-cost-face
-  'dsh-emacs-modeline-cost-face "0.2.0")
-(define-obsolete-face-alias 'dsh-emacs-footer-ctx-ok-face
-  'dsh-emacs-modeline-ctx-ok-face "0.2.0")
-(define-obsolete-face-alias 'dsh-emacs-footer-ctx-warn-face
-  'dsh-emacs-modeline-ctx-warn-face "0.2.0")
-(define-obsolete-face-alias 'dsh-emacs-footer-ctx-crit-face
-  'dsh-emacs-modeline-ctx-crit-face "0.2.0")
-
-;;; ---------------------------------------------------------------------------
 ;;;  Session list faces
 ;;; ---------------------------------------------------------------------------
 

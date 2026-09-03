@@ -48,6 +48,10 @@
 
 (defvar dsh-emacs--input-marker)
 (defvar dsh-emacs--buffer-session)
+;; Borrowed vertico runtime variables (see `dsh-emacs-queue--menu-item'):
+;; declare-only so the byte-compiler stays quiet — always read under `boundp'.
+(defvar vertico--index)
+(defvar vertico--candidates)
 
 ;;; ---------------------------------------------------------------------------
 ;;; 状态镜像（buffer-local，随 mux 帧全量更新）

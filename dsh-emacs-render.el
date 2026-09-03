@@ -43,6 +43,13 @@
 (declare-function notifications-notify "notifications" (&rest params))
 (declare-function ns-do-applescript "ns-win" (script))
 (declare-function w32-notification-notify "w32fns.c" (&rest params))
+;; Defined in dsh-emacs-command.el; called from the optimistic slash-command
+;; render path before that module is loaded.
+(declare-function dsh-emacs-command-parse "dsh-emacs-command" (line))
+;; Declare-only forward form: the real `defvar-local' with its initializer
+;; lives further down; this silences the byte-compiler for the earlier reset
+;; path without changing runtime initialization semantics.
+(defvar dsh-emacs--command-spinners)
 
 ;;; ---------------------------------------------------------------------------
 ;;; 定制
@@ -478,7 +485,7 @@ there is no previewable content."
                (when (and (stringp v) (not (string-empty-p v)))
                  (throw 'found (dsh-emacs-render--first-line v)))))))))))
 
-(defun dsh-emacs-render--tool-body-text (variant args-raw)
+(defun dsh-emacs-render--tool-body-text (_variant args-raw)
   "Format the args section of a tool card body."
   (let* ((parsed (condition-case nil (json-read-from-string args-raw) (error nil)))
          (command (and parsed (listp parsed)
@@ -1493,8 +1500,7 @@ the event seq but renders no ordinary tool card."
         (dsh-emacs-render-todo-write event)
       (if (not dsh-emacs-show-tool-calls)
           nil
-        (let* ((seq (dsh-emacs-render--event-seq event))
-         (data (dsh-emacs-render--event-data event))
+        (let* ((data (dsh-emacs-render--event-data event))
          (call-id (dsh-emacs-render--aget "callId" data))
          (name (dsh-emacs-render--aget "name" data))
          (args (dsh-emacs-render--aget "arguments" data))
@@ -1517,10 +1523,6 @@ the event seq but renders no ordinary tool card."
        :summary summary :args body-text :call-time ts :ns ns)
       ;; Maybe open / reuse an activity group.
       (dsh-emacs-render--ensure-group)
-      (when (and (>= dsh-emacs--current-group-count dsh-emacs-group-consecutive-tools)
-                 (= dsh-emacs--current-group-count 0))
-        ;; First call of a new group: render the header.
-        nil)
       (setq dsh-emacs--current-group-count (1+ dsh-emacs--current-group-count))
       (dsh-emacs-ui-update-fragment
        (dsh-emacs-ui-make-fragment
@@ -1599,8 +1601,7 @@ toggle — which strips faces — keeps them readable)."
   "Render a `tool/result' event by appending to the corresponding tool-call block."
   (if (not dsh-emacs-show-tool-calls)
       nil
-    (let* ((seq (dsh-emacs-render--event-seq event))
-         (data (dsh-emacs-render--event-data event))
+    (let* ((data (dsh-emacs-render--event-data event))
          (message (dsh-emacs-render--aget "message" data))
          ;; dsh Web stores the originating tool id under message.source;
          ;; accept the compact message.callId shape too (used by older

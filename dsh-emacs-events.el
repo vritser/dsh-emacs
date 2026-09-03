@@ -88,6 +88,12 @@
 ;; Owned by dsh-emacs-render.el (`defvar-local', default 0); the dispatch
 ;; seq gate reads it without loading order guarantees.
 (defvar dsh-emacs--anchor-seq)
+;; Cross-file free variables read under boundp guards: `dsh-emacs-base-url'
+;; is a defcustom in dsh-emacs.el, `dsh-emacs--buffer-session' its
+;; buffer-local session state.  Declare-only forms — the real definitions
+;; own the values.
+(defvar dsh-emacs-base-url)
+(defvar dsh-emacs--buffer-session)
 (declare-function dsh-emacs--chat-session-item "dsh-emacs" (session-id))
 (declare-function dsh-emacs--chat-buffer-sync "dsh-emacs" (session-id))
 (declare-function dsh-emacs--question-requested "dsh-emacs" (chat rpc-id session-id questions))
@@ -115,6 +121,8 @@
 (declare-function dsh-emacs-render-history-events "dsh-emacs-render" (events stream))
 (declare-function dsh-emacs-render--consume-pending-user-message "dsh-emacs-render" (event))
 (declare-function dsh-emacs-render--event-seq "dsh-emacs-render" (event))
+(declare-function dsh-emacs-render-event "dsh-emacs-render" (event))
+(declare-function dsh-emacs-render--follow-stream "dsh-emacs-render" ())
 
 (defun dsh-emacs-events--chat (process)
   "Return the chat buffer attached to PROCESS."
@@ -170,13 +178,13 @@ overrides it via the `dsh-emacs-event-path' process property."
                    (unibyte-string 129 (logior 128 length)))
                   ((< length 65536)
                    (concat (unibyte-string 129 254)
-                           (unibyte-string (logand (lsh length -8) 255)
+                           (unibyte-string (logand (ash length -8) 255)
                                            (logand length 255))))
                   (t
                    (concat (unibyte-string 129 255)
                            (apply #'unibyte-string
                                   (cl-loop for shift from 56 downto 0 by 8
-                                           collect (logand (lsh length (- shift))
+                                           collect (logand (ash length (- shift))
                                                            255)))))))
          ;; Replace the FIN/opcode byte after building the generic text header.
          (header (concat (unibyte-string (logior 128 opcode))
@@ -207,14 +215,14 @@ overrides it via the `dsh-emacs-event-path' process property."
         (cond
          ((= size 126)
           (when (< length (+ offset 2)) (cl-return-from dsh-emacs-events--read-frame nil))
-          (setq size (+ (lsh (aref input offset) 8)
+          (setq size (+ (ash (aref input offset) 8)
                         (aref input (1+ offset)))
                 offset (+ offset 2)))
          ((= size 127)
           (when (< length (+ offset 8)) (cl-return-from dsh-emacs-events--read-frame nil))
           (setq size 0)
           (dotimes (i 8)
-            (setq size (+ (lsh size 8) (aref input (+ offset i)))))
+            (setq size (+ (ash size 8) (aref input (+ offset i)))))
           (setq offset (+ offset 8))))
         (let ((mask (when masked
                       (when (< length (+ offset 4))
@@ -231,7 +239,7 @@ overrides it via the `dsh-emacs-event-path' process property."
                       (logxor (aref payload i) (aref mask (mod i 4))))))
             (list opcode fin payload rest)))))))
 
-(defun dsh-emacs-events--apply-title (chat session-id title)
+(defun dsh-emacs-events--apply-title (_chat session-id title)
   "Apply a live `session/title' event: update the session cache, the chat\n buffer name (when SESSION-ID is the buffer's session) and the session list\n row, without touching the transcript."
   (when (and session-id title (not (string-empty-p title))
              (listp dsh-emacs--sessions))
@@ -481,7 +489,7 @@ through the normal path once loading completes."
   (when (buffer-live-p (process-buffer process))
     (with-current-buffer (process-buffer process)
       (let ((input (concat (or (process-get process 'dsh-emacs-event-input) "")
-                           (string-as-unibyte string))))
+                           (string-to-unibyte string))))
         (if (process-get process 'dsh-emacs-event-ready)
             ;; Data is already past the handshake: buffer the raw bytes and
             ;; parse complete frames immediately so the live stream is
@@ -885,7 +893,7 @@ Unknown trailing ids (a workspace appearing in the payload before its
         (dsh-emacs--normalize-archived archived-ids))
   (dsh-emacs-events--host-repaint))
 
-(defun dsh-emacs-events--host-session-added (session-id blank cwd)
+(defun dsh-emacs-events--host-session-added (session-id _blank cwd)
   "Cache a freshly created SESSION-ID reported by the host stream.
 Mirrors `dsh-emacs--cache-new-session' but without workspace attachment:
 the host stream reports `host/workspace-changed' separately for the
@@ -919,7 +927,7 @@ until titles arrive via mux.  Idempotent: a session already cached (from a
             (and running (not (eq running :json-false))))))
   (dsh-emacs-events--host-repaint))
 
-(defun dsh-emacs-events--host-dispatch (process json)
+(defun dsh-emacs-events--host-dispatch (_process json)
   "Handle one decoded host-stream JSON envelope from PROCESS.
 Updates the shared caches (`dsh-emacs--workspaces', `dsh-emacs--sessions',
 `dsh-emacs--archived-sessions') in place from the wire payload and repaints
