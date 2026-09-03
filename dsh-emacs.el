@@ -199,6 +199,17 @@ of its own), so only files resolving to one of these types are sent."
   :type 'integer
   :group 'dsh-emacs)
 
+(defcustom dsh-emacs-input-history-cross-session nil
+  "Whether `M-p' / `M-n' recall prompts from every session.
+Non-nil shares one prompt history across all chat buffers; nil (the
+default) restricts recall to the prompts the CURRENT session submitted
+itself (per-session history, useful while several unrelated sessions are
+open).  Every prompt is recorded in both scopes regardless; the option
+only picks which list the keys browse, so toggling it never loses
+recorded prompts."
+  :type 'boolean
+  :group 'dsh-emacs)
+
 (defcustom dsh-emacs-busy-enter-behavior 'queue
   "What `\\[dsh-emacs-send-or-stop]' does with input while a turn is running.
 Mirrors dsh web's `busyEnter' setting: `queue' lines the input up as the
@@ -307,14 +318,26 @@ transcript or a `C-c C-c' belongs to.")
 (defvar dsh-emacs--input-history nil
   "Prompts submitted with `dsh-emacs-send-or-stop', newest first.
 Shared across chat buffers (session transcripts are volatile, the prompt
-history is not).")
+history is not).  Browsed by `M-p' / `M-n' when
+`dsh-emacs-input-history-cross-session' is non-nil.")
 
-(defvar dsh-emacs--input-history-pos nil
-  "Index into `dsh-emacs--input-history' while browsing with M-p/M-n.
-nil means not browsing (the input shows what the user typed).")
+(defvar dsh-emacs--input-history-by-session
+  (make-hash-table :test 'equal)
+  "Session id -> prompts that session submitted, newest first.
+The recall list per chat buffer's session for `M-p' / `M-n' when
+`dsh-emacs-input-history-cross-session' is nil.  Every prompt is recorded
+here alongside `dsh-emacs--input-history', so toggling the option never
+loses history — the lists merely start with the prompts recorded since
+this feature shipped.")
 
-(defvar dsh-emacs--input-history-pending nil
-  "Input text saved before history browsing started, restored by M-n.")
+(defvar-local dsh-emacs--input-history-pos nil
+  "Index into the browsed `M-p' / `M-n' history list, nil when not browsing.
+Buffer-local: each chat buffer holds its own recall position, so browsing
+one session never bleeds its index or pending text into another.")
+
+(defvar-local dsh-emacs--input-history-pending nil
+  "Input text saved before history browsing started, restored by M-n.
+Buffer-local alongside `dsh-emacs--input-history-pos'.")
 
 ;;; ---------------------------------------------------------------------------
 ;;;  RPC 客户端
@@ -1569,14 +1592,20 @@ is then cleared and the event stream resumes normal delivery."
                                   (with-current-buffer chat-buffer
                                     ;; Use the render module's batch function
                                     ;; which handles [{event: ...}] format.
-                                    (dsh-emacs-render-history-events
-                                     (dsh-emacs--sequence-list
-                                      (cdr (assq 'events value)))
-                                     nil)
-                                    ;; 补拉：覆盖装载期间被丢弃的新事件，
-                                    ;; 直到窗口稳定（见下）。
-                                    (dsh-emacs--refetch-history
-                                     session-id chat-buffer)))
+                                    (let ((events (dsh-emacs--sequence-list
+                                                   (cdr (assq 'events value)))))
+                                      (dsh-emacs-render-history-events events nil)
+                                      ;; Seed this session's `M-p' / `M-n' recall
+                                      ;; from the transcript's user messages —
+                                      ;; on first entry nothing would otherwise
+                                      ;; be recallable yet.
+                                      (dsh-emacs--seed-input-history
+                                       events session-id)
+                                      ;; Backfill: cover events dropped while
+                                      ;; loading, until the window stabilizes
+                                      ;; (see below).
+                                      (dsh-emacs--refetch-history
+                                       session-id chat-buffer))))
                               (when (buffer-live-p chat-buffer)
                                 (with-current-buffer chat-buffer
                                   (setq dsh-emacs--event-history-loading nil)))
@@ -1602,11 +1631,16 @@ default), far smaller than a full parse of 30k raw events."
                           (lambda (ok value)
                             (when (buffer-live-p chat-buffer)
                               (with-current-buffer chat-buffer
-                                (let ((advanced (and ok
-                                                     (dsh-emacs-render-history-events
-                                                      (dsh-emacs--sequence-list
-                                                       (cdr (assq 'events value)))
-                                                      t))))
+                                (let* ((events (and ok (dsh-emacs--sequence-list
+                                                        (cdr (assq 'events value)))))
+                                       (advanced (and ok
+                                                      (dsh-emacs-render-history-events
+                                                       events t))))
+                                  (when events
+                                    ;; Idempotent: seeds only texts the session's
+                                    ;; recall list does not hold yet.
+                                    (dsh-emacs--seed-input-history
+                                     events session-id))
                                   (if (and ok (> advanced 0))
                                       (dsh-emacs--refetch-history
                                        session-id chat-buffer)
@@ -2170,14 +2204,63 @@ ambiguous and are not accepted by the dsh API."
           local-zone)))
      (t "UTC"))))
 
+(defun dsh-emacs--input-history-record (list text)
+  "Return LIST with TEXT recorded newest-first.
+Drops TEXT when it repeats the newest entry and trims the result to
+`dsh-emacs-input-history-length' entries.  LIST may be nil."
+  (let ((list (if (string= text (car list)) list (cons text list)))
+        (len dsh-emacs-input-history-length))
+    (when (> (length list) len)
+      (setcdr (nthcdr (1- len) list) nil))
+    list))
+
 (defun dsh-emacs--push-input-history (text)
-  "Record TEXT in the shared input history, dropping consecutive repeats."
+  "Record TEXT in the input history, newest first.
+Lands in the shared cross-session list and in the per-session list of the
+buffer's session (see `dsh-emacs-input-history-cross-session'); both drop
+consecutive repeats and trim to `dsh-emacs-input-history-length'."
   (when (and text (not (string-empty-p text)))
-    (unless (string= text (car dsh-emacs--input-history))
-      (push text dsh-emacs--input-history))
-    (let ((len dsh-emacs-input-history-length))
-      (when (> (length dsh-emacs--input-history) len)
-        (setcdr (nthcdr (1- len) dsh-emacs--input-history) nil)))))
+    (let* ((session-id (dsh-emacs--active-session-id))
+           (own (gethash session-id dsh-emacs--input-history-by-session)))
+      (setq dsh-emacs--input-history
+            (dsh-emacs--input-history-record dsh-emacs--input-history text))
+      (puthash session-id
+               (dsh-emacs--input-history-record own text)
+               dsh-emacs--input-history-by-session))))
+
+(defun dsh-emacs--seed-input-history (events session-id)
+  "Seed SESSION-ID's per-session `M-p' / `M-n' recall from EVENTS.
+EVENTS is the [{event: ...}] history window; the texts of its
+`user/message' events are recorded into that session's per-session list,
+newest first.  First-entry recall would otherwise be empty — the
+per-session list only holds prompts submitted in THIS Emacs run until the
+session's earlier messages are backfilled here, on every history load
+(open, refresh, backfill).  Texts already present are skipped, so
+reloading the same window never duplicates entries; the shared
+cross-session list is untouched."
+  (when (and events session-id)
+    (let ((own (gethash session-id dsh-emacs--input-history-by-session)))
+      (dolist (entry (dsh-emacs--sequence-list events))
+        (let* ((ev (and entry (dsh-emacs--alist-state entry "event")))
+               (data (and ev (dsh-emacs--alist-state ev "data"))))
+          (when (and data
+                     (string= (dsh-emacs--alist-state ev "type")
+                              "user/message"))
+            (let ((text (mapconcat
+                         #'identity
+                         (delq nil
+                               (mapcar
+                                (lambda (block)
+                                  (and (equal (dsh-emacs--alist-state block "type")
+                                              "text")
+                                       (dsh-emacs--alist-state block "text")))
+                                (append (dsh-emacs--alist-state data "content")
+                                        nil)))
+                         "\n")))
+              (when (and (not (string-empty-p text))
+                         (not (member text own)))
+                (setq own (dsh-emacs--input-history-record own text)))))))
+      (puthash session-id own dsh-emacs--input-history-by-session))))
 
 (defun dsh-emacs--submit-prompt (message &optional images mode)
   "Submit MESSAGE to the current session.
@@ -2918,21 +3001,36 @@ the filter as \"error in process filter: Quit\"."
       (insert text)
       (goto-char (dsh-emacs--input-end)))))
 
+(defun dsh-emacs--input-history-active ()
+  "Return the prompt-history list `M-p' / `M-n' currently browse.
+Cross-session mode (`dsh-emacs-input-history-cross-session' non-nil)
+returns the shared global list; per-session mode returns the current
+session's own list (nil when the session recorded no prompts yet)."
+  (if dsh-emacs-input-history-cross-session
+      dsh-emacs--input-history
+    (let ((session-id (dsh-emacs--active-session-id)))
+      (and session-id
+           (gethash session-id dsh-emacs--input-history-by-session)))))
+
 (defun dsh-emacs-input-history-back ()
-  "Show the previous submitted prompt in the input area (M-p)."
+  "Show the previous submitted prompt in the input area (M-p).
+Browses the shared cross-session history, or the current session's own
+prompts when `dsh-emacs-input-history-cross-session' is nil."
   (interactive)
-  (let ((len (length dsh-emacs--input-history)))
+  (let* ((history (dsh-emacs--input-history-active))
+         (len (length history)))
     (cond
      ((zerop len) (message "No input history"))
      ((null dsh-emacs--input-history-pos)
-      (setq dsh-emacs--input-history-pending (dsh-emacs--get-input)
-            dsh-emacs--input-history-pos 0)
-      (dsh-emacs--replace-input (nth 0 dsh-emacs--input-history)))
+      (setq-local dsh-emacs--input-history-pending (dsh-emacs--get-input))
+      (setq-local dsh-emacs--input-history-pos 0)
+      (dsh-emacs--replace-input (nth 0 history)))
      ((>= (1+ dsh-emacs--input-history-pos) len)
       (message "Beginning of history"))
-     (t (setq dsh-emacs--input-history-pos (1+ dsh-emacs--input-history-pos))
+     (t (setq-local dsh-emacs--input-history-pos
+                   (1+ dsh-emacs--input-history-pos))
         (dsh-emacs--replace-input
-         (nth dsh-emacs--input-history-pos dsh-emacs--input-history))))))
+         (nth dsh-emacs--input-history-pos history))))))
 
 (defun dsh-emacs-input-history-forward ()
   "Show the next submitted prompt, or restore the typed text (M-n)."
@@ -2942,11 +3040,13 @@ the filter as \"error in process filter: Quit\"."
     (message "No newer history"))
    ((zerop dsh-emacs--input-history-pos)
     (dsh-emacs--replace-input dsh-emacs--input-history-pending)
-    (setq dsh-emacs--input-history-pos nil
-          dsh-emacs--input-history-pending nil))
-   (t (setq dsh-emacs--input-history-pos (1- dsh-emacs--input-history-pos))
+    (setq-local dsh-emacs--input-history-pos nil)
+    (setq-local dsh-emacs--input-history-pending nil))
+   (t (setq-local dsh-emacs--input-history-pos
+                 (1- dsh-emacs--input-history-pos))
       (dsh-emacs--replace-input
-       (nth dsh-emacs--input-history-pos dsh-emacs--input-history)))))
+       (nth dsh-emacs--input-history-pos
+            (dsh-emacs--input-history-active))))))
 
 (defun dsh-emacs--render-user-message (message &optional images)
   "Render the optimistic echo of MESSAGE, with IMAGES if any.

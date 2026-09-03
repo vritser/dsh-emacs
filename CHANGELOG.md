@@ -33,6 +33,13 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Per-session input history option**: `dsh-emacs-input-history-cross-session`
+  (default nil) chooses what `M-p` / `M-n` recall — only the current
+  session's own prompts (per-session history, the new default) or the
+  prompts from every session when set to `t`.  Prompts are recorded in both
+  scopes regardless, so toggling the option never loses history; browse
+  position and saved text are now per chat buffer, so recalling in one
+  session no longer bleeds into another.
 - **Filter-free question chooser**: single-select `ask` prompts now behave
   like a static key menu instead of a typing-narrowed completion prompt —
   pressing `1`–`9` (`0` = the 10th option) picks that option immediately,
@@ -137,6 +144,13 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **`M-p` / `M-n` recall works on first entry of a session**: per-session
+  history only held prompts submitted in the current Emacs run, so entering
+  a session with earlier messages recalled nothing until it submitted
+  something.  Loading a session's history now seeds its recall list from
+  the transcript's user messages (skipping texts already present, so
+  refresh/backfill never duplicate), and the shared cross-session list is
+  untouched.
 - **Mode-line running animation always stops at `turn/end`**: the spinner
   could keep animating after a turn had finished — a fast run (a very short
   reply, or a model immediately rejected, e.g. quota/rate) could start and

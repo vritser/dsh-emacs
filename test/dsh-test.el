@@ -2889,9 +2889,12 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
       (kill-buffer buf))))
 
 ;; --- 测试 52: 输入历史 M-p / M-n ---
+;; Pinned to cross-session mode on purpose: this test exercises the browse
+;; mechanics over the shared list (the new default is per-session; see 52b).
 (let ((old-hist dsh-emacs--input-history)
       (old-pos dsh-emacs--input-history-pos)
       (old-pending dsh-emacs--input-history-pending)
+      (dsh-emacs-input-history-cross-session t)
       (buf (generate-new-buffer " *dsh-hist-test*")))
   (unwind-protect
       (with-current-buffer buf
@@ -2934,6 +2937,145 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (kill-buffer buf)
     (setq dsh-emacs--input-history old-hist
           dsh-emacs--input-history-pos old-pos)))
+
+;; --- Test 52b: per-session history — with cross-session off, M-p/M-n only recall this session ---
+;; Regression: history used to be a single global list, so M-p/M-n in any
+;; session could surface other sessions' messages.  With
+;; `dsh-emacs-input-history-cross-session' nil, recall is isolated per
+;; session; every submit still lands in BOTH scopes (global + own session),
+;; so toggling the option never loses history.
+(let ((old-hist dsh-emacs--input-history)
+      (old-opt dsh-emacs-input-history-cross-session)
+      (buf-a (generate-new-buffer " *dsh-hist-a*"))
+      (buf-b (generate-new-buffer " *dsh-hist-b*")))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs-input-history-cross-session nil)
+        (with-current-buffer buf-a
+          (dsh-emacs-mode)
+          (setq-local dsh-emacs--buffer-session "sess-a")
+          (dsh-emacs--push-input-history "a1")
+          (dsh-emacs--push-input-history "a2"))
+        (with-current-buffer buf-b
+          (dsh-emacs-mode)
+          (setq-local dsh-emacs--buffer-session "sess-b")
+          (dsh-emacs--push-input-history "b1")
+          ;; B sees only its own submissions: newest is b1, not the global a2
+          (dsh-emacs-input-history-back)
+          (dsh-test-assert "per-session-history-b-newest"
+            (string= "b1" (dsh-emacs--get-input)))
+          ;; Back again: B has nothing older — the input stays b1
+          (dsh-emacs-input-history-back)
+          (dsh-test-assert "per-session-history-b-exhausted"
+            (string= "b1" (dsh-emacs--get-input))))
+        ;; A's recall is still its own: newest is a2 (browsing B never
+        ;; shifted A's browse position)
+        (with-current-buffer buf-a
+          (dsh-emacs-input-history-back)
+          (dsh-test-assert "per-session-history-a-newest"
+            (string= "a2" (dsh-emacs--get-input))))
+        ;; Double-write: the shared global list still accumulates, so
+        ;; switching back to cross-session mode recalls everything again.
+        (dsh-test-assert "per-session-records-global-too"
+          (string= "b1" (car dsh-emacs--input-history))))
+    (setq dsh-emacs-input-history-cross-session old-opt)
+    (setq dsh-emacs--input-history old-hist)
+    (remhash "sess-a" dsh-emacs--input-history-by-session)
+    (remhash "sess-b" dsh-emacs--input-history-by-session)
+    (kill-buffer buf-a)
+    (kill-buffer buf-b)))
+
+;; --- Test 52c: cross-session mode recalls the shared history ---
+(let ((old-hist dsh-emacs--input-history)
+      (old-opt dsh-emacs-input-history-cross-session)
+      (buf (generate-new-buffer " *dsh-hist-cross*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-c")
+        (setq dsh-emacs-input-history-cross-session t)
+        (dsh-emacs--push-input-history "global-1")
+        (dsh-emacs-input-history-back)
+        (dsh-test-assert "cross-session-back-shows-shared-newest"
+          (string= "global-1" (dsh-emacs--get-input))))
+    (setq dsh-emacs-input-history-cross-session old-opt)
+    (kill-buffer buf)))
+
+;; --- Test 52d: first entry into a session recalls history (backfill) ---
+;; Regression: per-session history only held prompts submitted in the
+;; current Emacs run, so entering an existing session left M-p/M-n empty.
+;; Fix: loading history backfills the session's recall list from the
+;; user/message texts in the window (texts already present are skipped, so
+;; reloading never duplicates; the shared cross-session list is untouched).
+(let ((old-hist dsh-emacs--input-history)
+      (old-opt dsh-emacs-input-history-cross-session)
+      (buf (generate-new-buffer " *dsh-seed-test*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-seed")
+        (setq dsh-emacs-input-history-cross-session nil)
+        ;; History window: old → assistant → newer (seq ascending, wire order)
+        (dsh-emacs--seed-input-history
+         '((("event" . ((type . "user/message") (seq . 1)
+                        (data . ((content . [((type . "text") (text . "old"))]))))))
+           (("event" . ((type . "assistant/message") (seq . 2)
+                        (data . ((turn . 1))))))
+           (("event" . ((type . "user/message") (seq . 3)
+                        (data . ((content . [((type . "text") (text . "newer"))])))))))
+         "sess-seed")
+        (dsh-test-assert "seed-fills-per-session-newest-first"
+          (equal '("newer" "old")
+                 (gethash "sess-seed" dsh-emacs--input-history-by-session)))
+        ;; Reloading the same window: texts already present are all skipped,
+        ;; the list stays unchanged
+        (dsh-emacs--seed-input-history
+         '((("event" . ((type . "user/message") (seq . 1)
+                        (data . ((content . [((type . "text") (text . "old"))]))))))
+           (("event" . ((type . "user/message") (seq . 3)
+                        (data . ((content . [((type . "text") (text . "newer"))])))))))
+         "sess-seed")
+        (dsh-test-assert "seed-idempotent-on-reload"
+          (equal '("newer" "old")
+                 (gethash "sess-seed" dsh-emacs--input-history-by-session)))
+        ;; Seeding never touches the shared cross-session list
+        (dsh-test-assert "seed-untouches-global-list"
+          (null (member "old" dsh-emacs--input-history)))
+        ;; Browsing: per-session M-p jumps straight to the newest recalled message
+        (dsh-emacs-input-history-back)
+        (dsh-test-assert "seed-recallable-via-M-p"
+          (string= "newer" (dsh-emacs--get-input))))
+    (remhash "sess-seed" dsh-emacs--input-history-by-session)
+    (setq dsh-emacs-input-history-cross-session old-opt)
+    (setq dsh-emacs--input-history old-hist)
+    (kill-buffer buf)))
+
+;; --- Test 52e: opening a session (load-history) seeds recall for M-p/M-n ---
+(let ((old-hist dsh-emacs--input-history)
+      (old-opt dsh-emacs-input-history-cross-session)
+      (buf (generate-new-buffer " *dsh-seed-load*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-load")
+        (setq dsh-emacs-input-history-cross-session nil)
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_method _params cb)
+                     (funcall cb t '((events . [((event . ((type . "user/message")
+                                                           (seq . 10)
+                                                           (data . ((content .
+                                                                     [((type . "text")
+                                                                       (text . "hist-1"))]))))))]))))))
+          (dsh-emacs--load-history "sess-load"))
+        (dsh-emacs-input-history-back)
+        (dsh-test-assert "load-history-seeds-recall"
+          (and (string= "hist-1" (dsh-emacs--get-input))
+               (equal '("hist-1")
+                      (gethash "sess-load" dsh-emacs--input-history-by-session)))))
+    (remhash "sess-load" dsh-emacs--input-history-by-session)
+    (setq dsh-emacs-input-history-cross-session old-opt)
+    (setq dsh-emacs--input-history old-hist)
+    (kill-buffer buf)))
 
 ;; --- 测试 55: thinking face 无显式背景（沿用主题背景） ---
 (let ((bg (face-attribute 'dsh-emacs-thinking-face :background nil)))
@@ -7124,12 +7266,16 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (dsh-emacs-events--watchdog-stop))
     (kill-buffer buf)))
 
-;; --- 测试 98p: 快速 run 的 turn/end 先于 prompt HTTP 回调送达 → 回调不得重新点亮 spinner ---
-;; 回归：send 路径在 session.prompt 的 HTTP 回调里点亮 mode-line busy。快速 run
-;; （极短回复、模型立即拒绝如 429 …）可以在回调前就在 mux 上 start+end —— 回调
-;; 若无条件 `dsh-emacs--ml-busy-set t'，会把这个已经结束的 turn 重新点亮，
-;; spinner 从此停不下来（直到下一次 turn/end 或断流）。修复：回调只在
-;; `dsh-emacs--turn-awaiting' 仍为 t（该次提交还没见到 turn/end）时点亮。
+;; --- Test 98p: a fast run's turn/end arriving before the prompt HTTP callback
+;; --- must not make the callback re-light the spinner ---
+;; Regression: the send path lights the mode-line busy flag inside the
+;; session.prompt HTTP callback.  A fast run (very short reply, model
+;; rejected immediately e.g. 429) can start AND end on the mux before that
+;; callback runs — an unconditional `dsh-emacs--ml-busy-set t' would then
+;; re-light an already-finished turn and the spinner would never stop until
+;; the next turn/end or a stream teardown.  Fix: the callback lights the
+;; spinner only while `dsh-emacs--turn-awaiting' is still t (the submitted
+;; run has not seen its turn/end yet).
 (let ((buf (generate-new-buffer " *dsh-fast-run-race*")))
   (unwind-protect
       (with-current-buffer buf
@@ -7139,7 +7285,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (dsh-emacs--ml-busy-clear)
         (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                    (lambda (_method _params cb)
-                     ;; mux 在 HTTP 回调之前送达 turn/start + turn/end
+                     ;; The mux delivers turn/start + turn/end before the HTTP callback
                      (dsh-emacs-events--dispatch-event
                       (current-buffer)
                       '((type . "turn/start") (seq . 50)))
@@ -7158,7 +7304,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (dsh-emacs-events--watchdog-stop))
     (kill-buffer buf)))
 
-;; 对照：turn/end 尚未送达时，回调仍正常点亮 —— 等待中的 run 必须有进度反馈。
+;; Control: while the turn/end has NOT arrived, the callback still lights
+;; the spinner — a pending run must always show progress.
 (let ((buf (generate-new-buffer " *dsh-normal-run-lights*")))
   (unwind-protect
       (with-current-buffer buf
