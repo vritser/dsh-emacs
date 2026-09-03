@@ -135,6 +135,12 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Collapsed blocks no longer crash when a new chunk arrives**: appending
+  into a folded fragment (a tool card kept collapsed while more output
+  streams in) used to signal `void-variable old-body` — the hidden-count
+  update bound `old-count` from `old-body` inside the same `let`, and Emacs
+  evaluates `let` bindings in parallel, so the reference hit an unbound
+  variable and the render path died.  The bindings now use `let*`.
 - **New sessions follow the directory you invoke them from**: the session's
   working directory now comes from the current buffer's `default-directory`
   (a dired buffer's browsed directory, magit's repo root, a file's

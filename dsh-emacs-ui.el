@@ -618,8 +618,8 @@ Returns the updated block range."
 
       (if collapsed
           ;; Just update the hidden count
-          (let ((old-body (or (map-elt state :body) ""))
-                (old-count (length (split-string old-body "\n" t))))
+          (let* ((old-body (or (map-elt state :body) ""))
+                 (old-count (length (split-string old-body "\n" t))))
             (delete-region body-start body-end)
             (unless (eq style (quote minimal))
               (goto-char body-start)

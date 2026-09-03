@@ -1173,6 +1173,28 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                    (string-match-p "Bash" recollapsed))
           (dsh-test-pass "tool-recollapse-single-line"))))))
 
+;; --- 测试 31bis: collapsed block 追加 chunk —— let 并行求值陷阱回归 ---
+;; Emacs `let' 并行求值：绑定列表内后者引用前者会 void-variable（实测
+;; `(let ((a 1) (b (1+ a))) ...)' 直接崩溃）。append-body-section 的
+;; collapsed 分支曾用 `let' 让 old-count 引用 old-body——修复前该路径
+;; 每次执行都崩，此处断言其完整跑完。
+(with-temp-buffer
+  (let ((inhibit-read-only t))
+    (insert "AAAA\nBBBB\n")
+    (put-text-property 1 (point) 'dsh-emacs-ui-state
+                       (list :collapsed t :body "a\nb" :style 'box)))
+  (let ((ran (condition-case err
+                 (progn
+                   (dsh-emacs-ui--append-body-section
+                    (list (cons :start 1) (cons :end (point))) "new" nil)
+                   t)
+               (error
+                (dsh-test-fail "ui-collapsed-append-survives"
+                               (format "collapsed append crashed: %S" err))
+                nil))))
+    (when ran
+      (dsh-test-pass "ui-collapsed-append-survives"))))
+
 ;; --- 测试 32: 工具名与图标解耦 —— 同图标不同名 ---
 (with-temp-buffer
   (dsh-emacs-mode)
