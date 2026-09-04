@@ -52,7 +52,11 @@ explicitly, `C-c C-q` manages the pending queue (minibuffer list, keys
 act on the highlighted item; `x` deletes all), `C-c C-m` switch model, `C-c C-a` attach an image, `C-c C-r`
 refresh, `C-c C-s` switch session in this workspace (`C-c M-s` or
 `C-u C-c C-s` across all workspaces),
-`C-c C-f` toggle the mode-line stats, `TAB` complete `/name`. In the
+`C-c C-f` toggle the mode-line stats, `TAB` complete `/name`, and typing
+`@` completes file/directory/session references — the web-style @ directive:
+`@src/` drills into a directory, `@session-title` inserts a canonical
+`@[label](dsh-session:…)` mention whose frozen snapshot the host injects as
+context when you send. In the
 session list: `RET` open, `c` create, `w` workspace filter, `/` search,
 `g` refresh.  Everything else is in the [manual](#documentation).
 
@@ -102,6 +106,7 @@ it in the dsh web UI (`M-x dsh-emacs-open-web`) or the dsh home files
 - [Architecture](docs/architecture.md) — module layout, RPC API, event flow
 - [RPC protocol](docs/rpc.md) — complete dsh wire reference: methods, events, projections
 - [Slash commands](docs/slash-commands.md) — semantics, catalog, completion
+- [@ references](docs/reference.md) — file & session mentions, the @ directive
 - [Model picker](docs/model-picker.md) — grouping, icons, reasoning effort
 - [Mode line](docs/modeline.md) — segments, context% source, spinner
 - [UI styling](docs/ui-styling.md) — faces, dsh-web icons, markdown rendering

@@ -80,6 +80,22 @@ minor) and stay undated until the release is cut.
   session/archive changes from any client repaint the list in place — no
   `g` needed — and queue/context projections stay current
   (rationale: postmortem/009).
+- **@ file/session references (web-style @ mentions)**: typing `@` in the chat
+  input opens a combined completion menu — file/directory candidates from the
+  session workspace (`fileReferences/list`) first, then session candidates
+  (`sessionReferenceResolver/candidates`).  Rows are grouped files →
+  directories → sessions in the host's order; picking a file inserts `@path`,
+  a directory inserts `@dir/` and keeps the menu open for the next level, and
+  a session inserts the host's canonical `@[label](dsh-session:…)` mention.
+  Grammar (`@"path with spaces"` quoting), host-side snapshots, and
+  stale-while-revalidate caching mirror dsh web's composer.  Completion is
+  cooperative like slash: dsh-emacs registers a `completion-at-point-functions`
+  backend and contributes `@` to an already-active front-end auto trigger
+  (corfu-auto), never driving the popup itself — a data-fetch watcher keeps
+  corfu's list fresh as the query changes, and stock/vertico/icomplete
+  complete on TAB.  Open-session prefetch, `M-x dsh-emacs-reference`, and the
+  `dsh-emacs-reference-*` options are covered in
+  [docs/reference.md](docs/reference.md) (rationale: postmortem/010).
 
 ### Fixed
 

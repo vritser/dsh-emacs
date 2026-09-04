@@ -455,6 +455,50 @@ kind (`user' for real user input)."
           (dsh-protocol--list (and (listp value)
                                    (cdr (assq 'items value))))))
 
+;; ---------------------------------------------------------------------------
+;; @ reference candidates (typert remotes used by dsh-emacs-reference.el)
+;; ---------------------------------------------------------------------------
+
+;; `fileReferences/list' VALUE is a bare array of path-only candidates;
+;; `sessionReferenceResolver/candidates' a bare array of mention-carrying
+;; candidates.  Both are mapped with `dsh-protocol--list' + the matching
+;; --from-alist constructor, the same pattern as `commands.list'.
+
+(cl-defstruct (dsh-protocol-file-reference-candidate
+               (:constructor dsh-protocol-file-reference-candidate--from-alist
+                             (alist
+                              &aux
+                              (path (cdr (assq 'path alist)))
+                              (kind (cdr (assq 'kind alist))))))
+  "One `fileReferences/list' item: a path-only completion candidate.
+PATH is the user-facing path inside the session cwd, KIND \\='file or
+\\='directory (directories keep completion open after a trailing slash)."
+  path
+  kind)
+
+(cl-defstruct (dsh-protocol-session-reference-candidate
+               (:constructor dsh-protocol-session-reference-candidate--from-alist
+                             (alist
+                              &aux
+                              (session-id (cdr (assq 'sessionId alist)))
+                              (label (cdr (assq 'label alist)))
+                              (cwd (cdr (assq 'cwd alist)))
+                              (same-workspace (cdr (assq 'sameWorkspace alist)))
+                              (created-at (cdr (assq 'createdAt alist)))
+                              (mention (cdr (assq 'mention alist))))))
+  "One `sessionReferenceResolver/candidates' item.
+SESSION-ID is the opaque source identity, LABEL the latest log-backed
+title (falling back to the id), CWD the source working directory when
+recorded, SAME-WORKSPACE whether it equals the requesting session's,
+CREATED-AT the source creation epoch milliseconds, and MENTION the
+canonical `@[label](dsh-session:...)' prompt text the client inserts."
+  session-id
+  label
+  cwd
+  same-workspace
+  created-at
+  mention)
+
 (defun dsh-protocol--struct (struct-alist-pred constructor value)
   "Return VALUE as a struct via CONSTRUCTOR if needed.
 STRUCT-ALIST-PRED distinguishes an already-converted struct from a wire

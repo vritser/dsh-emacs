@@ -58,6 +58,12 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
 (when (featurep 'dsh-emacs-markdown)
   (dsh-test-pass "dsh-emacs-markdown loaded"))
 
+(when (featurep 'dsh-emacs-command)
+  (dsh-test-pass "dsh-emacs-command loaded"))
+
+(when (featurep 'dsh-emacs-reference)
+  (dsh-test-pass "dsh-emacs-reference loaded"))
+
 ;; --- 测试 2: Token 格式化 ---
 (when (string= "1.2k" (dsh-emacs-format-tokens 1234))
   (dsh-test-pass "format-tokens 1234"))
@@ -8476,7 +8482,11 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (cl-letf (((symbol-function 'require) (lambda (&rest _) t)))
           (dsh-emacs-mode)
           (dsh-test-assert "slash-auto-corfu-coop-trigger-added"
-            (string= "/" (buffer-local-value 'corfu-auto-trigger buf))
+            ;; The cooperative mode contributes both "/" (slash) and "@"
+            ;; (reference) to corfu-auto-trigger; neither sets corfu-auto nor
+            ;; hooks corfu-auto--post-command.
+            (string-match-p "/" (buffer-local-value 'corfu-auto-trigger buf))
+            (string-match-p "@" (buffer-local-value 'corfu-auto-trigger buf))
             (not (memq 'corfu-auto--post-command
                        (buffer-local-value 'post-command-hook buf))))))
     (kill-buffer buf)))
@@ -8495,7 +8505,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (string= "" (buffer-local-value 'corfu-auto-trigger buf)))))
     (kill-buffer buf)))
 
-;; dsh-emacs-slash-auto-complete off: nothing contributed even when corfu-auto is on
+;; all auto options off: nothing contributed even when corfu-auto is on
 (let ((buf (generate-new-buffer " *dsh-corfu-coop-offopt*")))
   (unwind-protect
       (with-current-buffer buf
@@ -8504,9 +8514,10 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (setq corfu-auto t
               corfu-auto-trigger "")
         (cl-letf (((symbol-function 'require) (lambda (&rest _) t))
-                  (dsh-emacs-slash-auto-complete nil))
+                  (dsh-emacs-slash-auto-complete nil)
+                  (dsh-emacs-reference-auto-complete nil))
           (dsh-emacs-mode)
-          (dsh-test-assert "slash-auto-corfu-coop-off-when-option-off"
+          (dsh-test-assert "slash-auto-corfu-coop-off-when-options-off"
             (string= "" (buffer-local-value 'corfu-auto-trigger buf)))))
     (kill-buffer buf)))
 
@@ -10271,6 +10282,538 @@ candidates as the UI would via `all-completions', not by destructuring."
           (eq (key-binding (kbd "d")) #'dsh-emacs-queue--menu-delete)
           (eq (key-binding (kbd "x")) #'dsh-emacs-queue--menu-delete-all)
           (eq (key-binding (kbd "RET")) #'dsh-emacs-queue--menu-send)))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; ---------------------------------------------------------------------------
+;; @ reference（dsh-emacs-reference.el）
+;; ---------------------------------------------------------------------------
+
+(defun dsh-test-reference-reset ()
+  "Reset the buffer-local @ reference cache state (current buffer)."
+  (setq-local dsh-emacs--reference-candidates nil
+              dsh-emacs--reference-query nil
+              dsh-emacs--reference-requested nil
+              dsh-emacs--reference-inflight nil
+              dsh-emacs--reference-fetch-gen 0
+              dsh-emacs--reference-files nil
+              dsh-emacs--reference-sessions nil
+              dsh-emacs--reference-pop-token nil))
+
+;; --- 语法：at-token 对齐 web grammar.ts 的 activeAtToken ---
+(let ((t1 (dsh-emacs-reference--at-token "@"))
+      (t2 (dsh-emacs-reference--at-token "hi @fo"))
+      (t3 (dsh-emacs-reference--at-token "@\"my dir/te"))
+      (t4 (dsh-emacs-reference--at-token "a @src/")))
+  (dsh-test-assert "at-token-bare-at"
+    (equal t1 '("@" "" nil)))
+  (dsh-test-assert "at-token-after-whitespace"
+    (equal t2 '("@fo" "fo" nil)))
+  (dsh-test-assert "at-token-quoted-path"
+    (equal t3 '("@\"my dir/te" "my dir/te" t)))
+  (dsh-test-assert "at-token-dir-trailing-slash"
+    (equal t4 '("@src/" "src/" nil))))
+
+(let ((t1 (dsh-emacs-reference--at-token "mail@example"))
+      (t2 (dsh-emacs-reference--at-token "foo/bar"))
+      (t3 (dsh-emacs-reference--at-token "@done ")))
+  (dsh-test-assert "at-token-email-not-a-trigger" (null t1))
+  (dsh-test-assert "at-token-mid-word-not-a-trigger" (null t2))
+  (dsh-test-assert "at-token-trailing-space-closes-token" (null t3)))
+
+;; --- 语法：formatFileMention 对齐 web 的 formatFileMention ---
+(let ((cases
+       '(("README.md" "file" nil "@README.md")
+         ("src" "directory" nil "@src/")
+         ("my dir/a b" "file" nil "@\"my dir/a b\"")
+         ("src" "directory" t "@\"src/")
+         ("a b" "file" t "@\"a b\""))))
+  (dsh-test-assert "format-file-mention-cases"
+    (cl-every
+     (lambda (c)
+       (string= (apply #'dsh-emacs-reference--format-file-mention
+                       (butlast c))
+                (car (last c))))
+     cases)))
+
+(dsh-test-assert "format-file-mention-rejects-control"
+  (null (dsh-emacs-reference--format-file-mention "a\x01b" "file")))
+(dsh-test-assert "format-file-mention-rejects-quote"
+  (null (dsh-emacs-reference--format-file-mention "a\"b" "file")))
+
+;; --- collect-files：wire 数组 → 缓存条目，不可表示路径跳过；host 把目录
+;; 排在文件前（kindRank directory=0），客户端稳定分组为文件在先、目录在后
+(let ((entries
+       (dsh-emacs-reference--collect-files
+        [((path . "src") (kind . "directory"))
+         ((path . "README.md") (kind . "file"))
+         ((path . "docs") (kind . "directory"))
+         ((path . "bad\x01name") (kind . "file"))])))
+  (dsh-test-assert "collect-files-texts-and-kinds"
+    (equal (mapcar #'car entries)
+           '("@README.md" "@src/" "@docs/"))
+    (equal (plist-get (cdr (assoc "@src/" entries)) :kind) 'directory)
+    (equal (plist-get (cdr (assoc "@README.md" entries)) :path)
+           "README.md")
+    ;; 组内保持 host 顺序：两个目录按 wire 顺序 src → docs
+    (equal (mapcar (lambda (e) (plist-get (cdr e) :path))
+                   (cl-remove-if-not
+                    (lambda (e) (eq (plist-get (cdr e) :kind) 'directory))
+                    entries))
+           '("src" "docs"))))
+
+;; --- collect-sessions：mention 为主文本，无 mention 候选跳过 ---
+(let ((entries
+       (dsh-emacs-reference--collect-sessions
+        [((sessionId . "s1")
+          (label . "My Talk")
+          (cwd . "/work/a")
+          (sameWorkspace . t)
+          (createdAt . 123)
+          (mention . "@[My Talk](dsh-session:cyJpZCI6InMxIn0)"))
+         ((sessionId . "s2") (label . "x"))])))
+  (dsh-test-assert "collect-sessions-mention-and-drop"
+    (equal (mapcar #'car entries)
+           '("@[My Talk](dsh-session:cyJpZCI6InMxIn0)"))
+    (equal (plist-get (cdr (car entries)) :label) "My Talk")
+    (equal (plist-get (cdr (car entries)) :session-id) "s1")
+    (equal (plist-get (cdr (car entries)) :same-workspace) t)))
+
+;; --- combine：默认保留 host 返回的全部文件与会话 ---
+(let* ((dsh-emacs-reference-max-files nil)
+       (dsh-emacs-reference-max-sessions nil)
+       (files (list (cons "@a" '(:kind file))
+                    (cons "@b" '(:kind directory))
+                    (cons "@c" '(:kind file))))
+       (sessions (list (cons "@s1" '(:kind session))
+                       (cons "@s2" '(:kind session)))))
+  (dsh-test-assert "combine-default-keeps-all-candidates"
+    (= 5 (length (dsh-emacs-reference--combine files sessions)))))
+
+;; --- combine：文件在前、会话在后，各自截断到上限 ---
+(let* ((dsh-emacs-reference-max-files 2)
+       (dsh-emacs-reference-max-sessions 1)
+       (files (list (cons "@a" '(:kind file :path "a"))
+                    (cons "@b" '(:kind file :path "b"))
+                    (cons "@c" '(:kind file :path "c"))))
+       (sessions (list (cons "@[s1](dsh-session:x)" '(:kind session))
+                       (cons "@[s2](dsh-session:y)" '(:kind session))))
+       (combined (dsh-emacs-reference--combine files sessions)))
+  (dsh-test-assert "combine-order-and-caps"
+    (equal (mapcar #'car combined)
+           '("@a" "@b" "@[s1](dsh-session:x)"))))
+
+;; --- M-x 菜单：使用有序 completion helper，避免框架按文本重排 ---
+(let (collection)
+  (with-temp-buffer
+    (dsh-test-reference-reset)
+    (setq dsh-emacs--reference-query ""
+          dsh-emacs--reference-candidates
+          (list (cons "@file.txt" '(:kind file :path "file.txt"))
+                (cons "@dir/" '(:kind directory :path "dir"))
+                (cons "@[Session](dsh-session:s)" '(:kind session
+                                                       :label "Session"))))
+    (cl-letf (((symbol-function 'dsh-emacs-server-ensure) (lambda () nil))
+              ((symbol-function 'dsh-emacs--active-session-id)
+               (lambda () "sess"))
+              ((symbol-function 'dsh-emacs--completing-read-ordered)
+               (lambda (_prompt coll &rest _args)
+                 (setq collection coll)
+                 nil)))
+      (dsh-emacs-reference))
+    (dsh-test-assert "reference-menu-preserves-file-dir-session-order"
+      (equal (dsh-test-completion-items collection)
+             '("file.txt" "dir/" "Session")))))
+
+;; --- Corfu 活跃弹层：异步刷新不得重启原生 completion ---
+(let ((buf (generate-new-buffer " *t-ref-corfu-refresh*"))
+      (completed nil)
+      (native-refreshed nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (insert "@")
+        (setq-local dsh-emacs--input-marker (copy-marker (point-min))
+                    dsh-emacs--reference-requested ""
+                    dsh-emacs--reference-query "")
+        (cl-letf (((symbol-function 'get-buffer-window)
+                   (lambda (&rest _args) t))
+                  ((symbol-function 'run-with-idle-timer)
+                   (lambda (_delay _repeat function &rest _args)
+                     (funcall function)))
+                  ((symbol-function 'completion-at-point)
+                   (lambda () (setq completed t)))
+                  ((symbol-function 'corfu-auto--complete-deferred)
+                   (lambda (&optional _tick) (setq native-refreshed t))))
+          (let ((corfu-auto t)
+                (completion-in-region-mode t))
+            (dsh-emacs-reference--schedule-popup-refresh))
+          (dsh-test-assert "reference-refresh-leaves-active-corfu-alone"
+            (null completed)
+            (null native-refreshed))
+          (let ((corfu-auto t)
+                (completion-in-region-mode nil))
+            (dsh-emacs-reference--schedule-popup-refresh))
+          (dsh-test-assert "reference-refresh-does-not-reopen-nondirectory-corfu"
+            (null native-refreshed)
+            (null completed))
+          (let ((corfu-auto nil)
+                (completion-in-region-mode nil))
+            (dsh-emacs-reference--schedule-popup-refresh))
+          ;; Non-corfu has no auto channel (cooperative, like slash): an async
+          ;; refresh never opens the completion UI itself — that stays on TAB.
+          (dsh-test-assert "reference-refresh-never-opens-noncorfu"
+            (null completed))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; --- Corfu 原生表：编辑/退格只过滤当前候选，不启动远程刷新 ---
+(let ((buf (generate-new-buffer " *t-ref-corfu-native-table*"))
+      (fetched nil)
+      (opened nil)
+      (prefetched nil)
+      (delay-seen nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (insert "@")
+        (setq-local dsh-emacs--input-marker (copy-marker (point-min))
+                    dsh-emacs--reference-query "old"
+                    dsh-emacs--reference-requested nil
+                    dsh-emacs--reference-pop-token nil)
+        (cl-letf (((symbol-function 'dsh-emacs--active-session-id)
+                   (lambda () "sess"))
+                  ((symbol-function 'dsh-emacs-reference--require-cache)
+                   (lambda (_session _query) t))
+                  ((symbol-function 'dsh-emacs-reference--fetch-query)
+                   (lambda (session-id query)
+                     (setq fetched (list session-id query))))
+                  ((symbol-function 'dsh-emacs-reference--schedule-popup-refresh)
+                   (lambda () (setq prefetched t)))
+                  ((symbol-function 'completion-at-point)
+                   (lambda () (setq opened t)))
+                  ((symbol-function 'run-with-idle-timer)
+                   (lambda (delay _repeat function &rest _args)
+                     (setq delay-seen delay)
+                     (funcall function)))
+                  ((symbol-function 'get-buffer-window)
+                   (lambda (&rest _args) t)))
+          (let ((corfu-auto t)
+                (dsh-emacs-reference-fetch-delay 0.15))
+            (dsh-emacs-reference--auto-complete)
+            (dsh-emacs-reference-prefetch "sess"))
+          (dsh-test-assert "reference-corfu-refreshes-query-without-restarting"
+            (equal fetched '("sess" ""))
+            (null opened)
+            (null prefetched))
+          ;; A trailing slash is the one Corfu edit that drills remotely.
+          (goto-char (point-max))
+          (insert "src/")
+          (dsh-emacs-reference--auto-complete)
+          (dsh-test-assert "reference-corfu-slash-fetches-directory"
+            (equal fetched '("sess" "src/"))
+            (= delay-seen 0))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; --- fetch-query：两 remote 并发，双 slice 落地后安装缓存 ---
+(let ((rpc-calls nil))
+  (with-temp-buffer
+    (dsh-test-reference-reset)
+    (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+               (lambda (method params cb)
+                 (push (list method params) rpc-calls)
+                 (cond
+                  ((string= method "fileReferences/list")
+                   (funcall cb t [((path . "README.md") (kind . "file"))]))
+                  ((string= method "sessionReferenceResolver/candidates")
+                   (funcall cb t [((sessionId . "s1") (label . "T")
+                                   (mention
+                                    . "@[T](dsh-session:cyJpZCI6InMxIn0)"))]))
+                  (t (funcall cb nil nil))))))
+      (setq dsh-emacs--reference-requested "re")
+      (dsh-emacs-reference--fetch-query "sess" "re"))
+    (dsh-test-assert "fetch-query-both-remotes-called"
+      (= 2 (length rpc-calls))
+      (cl-every (lambda (m) (member m '("fileReferences/list"
+                                        "sessionReferenceResolver/candidates")))
+                (mapcar #'car rpc-calls)))
+    (dsh-test-assert "fetch-query-wire-args-flat"
+      ;; `dsh-emacs--rpc-async' 的 params 就是 payload.args 的内容：字段
+      ;; 平铺（agentId/query 直接在场），不能再包一层 args（rpc.md §1.2 /
+      ;; §4.3 / §4.13，服务端对多余字段回 gateway/arguments-invalid）
+      (let ((params (cadr (assoc "fileReferences/list" rpc-calls))))
+        (and (null (assq 'args params))
+             (string= (cdr (assq 'agentId params)) "sess")
+             (string= (cdr (assq 'query params)) "re"))))
+    (dsh-test-assert "fetch-query-installs-cache"
+      (equal dsh-emacs--reference-query "re")
+      (null dsh-emacs--reference-inflight)
+      (equal (mapcar #'car dsh-emacs--reference-candidates)
+             '("@README.md" "@[T](dsh-session:cyJpZCI6InMxIn0)")))))
+
+;; --- require-cache：首次同步拉取；陈旧缓存照常应答不再拉取 ---
+(let ((rpc-requests nil))
+  (with-temp-buffer
+    (dsh-test-reference-reset)
+    (cl-letf (((symbol-function 'dsh-emacs--rpc-request)
+               (lambda (method params)
+                 (push (list method params) rpc-requests)
+                 (cond
+                  ((string= method "fileReferences/list")
+                   (cons t [((path . "F") (kind . "file"))]))
+                  ((string= method "sessionReferenceResolver/candidates")
+                   (cons t []))
+                  (t (cons nil nil))))))
+      (let ((ok (dsh-emacs-reference--require-cache "sess" "")))
+        (dsh-test-assert "require-cache-first-trigger-sync"
+          ok
+          (= 2 (length rpc-requests))
+          (equal dsh-emacs--reference-query "")
+          (equal (mapcar #'car dsh-emacs--reference-candidates) '("@F"))
+          ;; 同步路径同样平铺 args（不得再包一层 args）
+          (equal (cadr (assoc "fileReferences/list" rpc-requests))
+                 '((agentId . "sess") (query . "")))))
+      (setq dsh-emacs--reference-requested "F2")
+      (let ((stale-len (length rpc-requests)))
+        (dsh-test-assert "require-cache-stale-answers-without-fetch"
+          (dsh-emacs-reference--require-cache "sess" "F2")
+          (= (length rpc-requests) stale-len))))))
+
+;; --- require-cache：in-flight 期间陈旧缓存照常应答（弹层不消失） ---
+(let ((rpc-requests nil))
+  (with-temp-buffer
+    (dsh-test-reference-reset)
+    (setq dsh-emacs--reference-query "re"
+          dsh-emacs--reference-candidates
+          (list (cons "@README.md" '(:kind file :path "README.md"))))
+    (cl-letf (((symbol-function 'dsh-emacs--rpc-request)
+               (lambda (method _params)
+                 (push method rpc-requests)
+                 (cons nil nil))))
+      (dsh-test-assert "require-cache-stale-answers-while-inflight"
+        (let ((dsh-emacs--reference-inflight t))
+          (and (dsh-emacs-reference--require-cache "sess" "re2")
+               ;; 陈旧缓存保留、不发起新拉取
+               (null rpc-requests))))
+      (dsh-test-assert "require-cache-no-cache-while-inflight-nil"
+        (let ((dsh-emacs--reference-inflight t)
+              (dsh-emacs--reference-query nil)
+              (dsh-emacs--reference-candidates nil))
+          (null (dsh-emacs-reference--require-cache "sess" "re2")))))))
+
+;; --- session-rows：会话行短标签 + 重名去歧（mention 留在缓存/cache）---
+(let ((dsh-emacs--reference-candidates
+       (list (cons "@README.md" '(:kind file :path "README.md"))
+             (cons "@[My Talk](dsh-session:cyJpZCI6InMxIn0)"
+                   '(:kind session :label "My Talk" :session-id "s1"))
+             (cons "@[My Talk](dsh-session:cyJpZCI6InMyIn0)"
+                   '(:kind session :label "My Talk" :session-id "s2")))))
+  (dsh-test-assert "session-rows-short-and-unique"
+    (equal (dsh-emacs-reference--session-rows)
+           '(("@My Talk" . "@[My Talk](dsh-session:cyJpZCI6InMxIn0)")
+             ("@My Talk #2" . "@[My Talk](dsh-session:cyJpZCI6InMyIn0)")))))
+;; --- affixate：文件/目录行前置类型图标列（consult-buffer 风格）---
+(let ((dsh-emacs--reference-candidates
+       (list (cons "@a.ts" '(:kind file :path "src/a.ts"))
+             (cons "@sub/" '(:kind directory :path "sub"))
+             (cons "@[T](dsh-session:x)"
+                   '(:kind session :label "T" :cwd "/w"
+                           :same-workspace t)))))
+  (cl-letf (((symbol-function 'dsh-emacs-reference--row-icon)
+             (lambda (path kind)
+               (pcase kind
+                 ('file "F")
+                 ('directory "D")
+                 ('session "R")
+                 (_ nil)))))
+    (dsh-test-assert "affixate-icon-column-shape"
+      (equal (dsh-emacs-reference--affixate
+              '("@a.ts" "@sub/" "@[T](dsh-session:x)"))
+             '(("@a.ts" "F " "")
+               ("@sub/" "D " "")
+               ("@[T](dsh-session:x)" "R " "")))))
+  (dsh-test-assert "affixate-without-provider-text-only"
+    (cl-letf (((symbol-function 'dsh-emacs-reference--row-icon)
+               (lambda (_path _kind) nil)))
+      (equal (dsh-emacs-reference--affixate '("@a.ts" "@sub/"))
+             '(("@a.ts" "" "")
+               ("@sub/" "" "")))))
+  (dsh-test-assert "affixate-inline-icons-off"
+    (let ((dsh-emacs-reference-inline-icons nil))
+      (equal (dsh-emacs-reference--affixate '("@a.ts"))
+             '(("@a.ts" "" "")))))
+  ;; --row-icon：非图形帧不输出 nerd-font PUA 字形（终端豆腐块）；图形帧
+  ;; 且提供者可用时按 kind 返回文件/目录/会话图标
+  (dsh-test-assert "row-icon-gated-off-on-non-graphic"
+    (cl-letf (((symbol-function 'display-graphic-p) (lambda () nil))
+              ((symbol-function 'featurep)
+               (lambda (f &optional _sub) (eq f 'nerd-icons)))
+              ((symbol-function 'fboundp)
+               (lambda (s)
+                 (memq s '(nerd-icons-icon-for-file nerd-icons-icon-for-dir)))))
+      (and (null (dsh-emacs-reference--row-icon "src/a.ts" 'file))
+           (null (dsh-emacs-reference--row-icon nil 'session)))))
+  (dsh-test-assert "row-icon-graphic-uses-provider"
+    (cl-letf (((symbol-function 'display-graphic-p) (lambda () t))
+              ((symbol-function 'featurep)
+               (lambda (f &optional _sub) (eq f 'nerd-icons)))
+              ((symbol-function 'fboundp)
+               (lambda (s)
+                 (memq s '(nerd-icons-icon-for-file nerd-icons-icon-for-dir))))
+              ((symbol-function 'nerd-icons-icon-for-file) (lambda (_f) "F"))
+              ((symbol-function 'nerd-icons-icon-for-dir) (lambda (_d) "D"))
+              ((symbol-function 'nerd-icons-codicon) (lambda (_n) "R")))
+      (and (string= (dsh-emacs-reference--row-icon "src/a.ts" 'file) "F")
+           (string= (dsh-emacs-reference--row-icon "src" 'directory) "D")
+           ;; 会话行用 codicon references 字形（path 被忽略）
+           (string= (dsh-emacs-reference--row-icon nil 'session) "R")))))
+
+;; --- active-token / capf：输入区令牌 → 补全区域与候选 ---
+(let ((buf (generate-new-buffer " *t-ref-capf*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (insert "hi @re")
+        (setq-local dsh-emacs--input-marker (point-min-marker))
+        (goto-char (point-max))
+        ;; 令牌恰好落在点前 → 补全返回 (start end candidates)
+        (let ((dsh-emacs--reference-query "re")
+              (dsh-emacs--reference-candidates
+               (list (cons "@README.md"
+                           '(:kind file :path "README.md")))))
+          (cl-letf (((symbol-function 'dsh-emacs--active-session-id)
+                     (lambda () "sess")))
+            (dsh-test-assert "active-token-at-point"
+              (equal (dsh-emacs-reference--active-token)
+                     '("@re" "re" nil)))
+            (let* ((res (dsh-emacs-reference-completion-at-point))
+                   (start (nth 0 res))
+                   (end (nth 1 res))
+                   (cands (nth 2 res))
+                   (props (nthcdr 3 res)))
+              (dsh-test-assert "capf-region-and-candidates"
+                (= start (- (point-max) 3))
+                (= end (point-max))
+                (equal (dsh-test-completion-items cands)
+                       '("@README.md")))
+              ;; 图标列一律由 :affixation-function 自绘，capf 结果里永不
+              ;; 提供 :company-kind（nerd-icons-corfu / kind-icon 的 :fn 型
+              ;; file/folder 字形会剥掉 nerd-font 字体族 → 乱码符号）
+              (dsh-test-assert "capf-plist-no-company-kind"
+                (fboundp (plist-get props :affixation-function))
+                (functionp (plist-get props :exit-function))
+                (null (plist-get props :company-kind)))
+              (dsh-test-assert "capf-reopens-bare-at-after-backspace"
+                (eq (plist-get props :company-prefix-length) t))
+              (dsh-test-assert "capf-preserves-reference-order"
+                (eq (plist-get props :display-sort-function) #'identity)
+                (eq (completion-metadata-get
+                     (completion-metadata "" cands nil)
+                     'display-sort-function)
+                    #'identity)
+                (eq (completion-metadata-get
+                     (completion-metadata "" cands nil)
+                     'cycle-sort-function)
+                    #'identity)))
+            ;; 点到输入区外（只读区）→ nil
+            (goto-char (point-min))
+            (dsh-test-assert "capf-outside-input-nil"
+              (null (dsh-emacs-reference-completion-at-point))))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; --- capf 会话行：短标签候选 + exit-function 改写为规范 mention ---
+(let ((buf (generate-new-buffer " *t-ref-exit*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (insert "hi @M")
+        (setq-local dsh-emacs--input-marker (point-min-marker))
+        (goto-char (point-max))
+        (let ((dsh-emacs--reference-query "")
+              (dsh-emacs--reference-candidates
+               (list (cons "@[My Talk](dsh-session:cyJpZCI6InMxIn0)"
+                           '(:kind session :label "My Talk"
+                                   :session-id "s1")))))
+          (cl-letf (((symbol-function 'dsh-emacs--active-session-id)
+                     (lambda () "sess")))
+            (let* ((res (dsh-emacs-reference-completion-at-point))
+                   (cands (nth 2 res))
+                   (exit (plist-get (nthcdr 3 res) :exit-function)))
+              (dsh-test-assert "capf-session-row-short"
+                (equal (dsh-test-completion-items cands)
+                       '("@My Talk")))
+              ;; 模拟前端插入行文本后调用 exit：短标签 → 规范 mention
+              (delete-region (- (point) 2) (point))
+              (insert "@My Talk")
+              (dsh-test-assert "capf-exit-inserts-mention"
+                (progn
+                  (funcall exit "@My Talk" 'finished)
+                  (string= (buffer-substring-no-properties
+                            (point-min) (point-max))
+                           "hi @[My Talk](dsh-session:cyJpZCI6InMxIn0)")))))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; --- 目录候选：选中后立即请求下一层，Corfu 可继续展开 ---
+(let ((buf (generate-new-buffer " *t-ref-directory-drill*"))
+      (requested nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (insert "hi @src/")
+        (setq-local dsh-emacs--reference-query "src/"
+                    dsh-emacs--reference-candidates
+                    (list (cons "@src/" '(:kind directory :path "src"))))
+        (cl-letf (((symbol-function 'dsh-emacs--active-session-id)
+                   (lambda () "sess"))
+                  ((symbol-function 'dsh-emacs-reference--fetch-query)
+                   (lambda (session-id query)
+                     (setq requested (list session-id query))))
+                  ((symbol-function 'dsh-emacs-reference--schedule-popup-refresh)
+                   #'ignore))
+          (dsh-emacs-reference--exit "@src/" 'finished nil))
+        (dsh-test-assert "directory-pick-fetches-next-level"
+          (equal requested '("sess" "src/"))
+          (null dsh-emacs--reference-query)))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; --- 插入：点前的活动令牌被替换；无令牌时在点处插入 ---
+(let ((buf (generate-new-buffer " *t-ref-insert*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (insert "see @old")
+        (setq-local dsh-emacs--input-marker (point-min-marker))
+        (goto-char (point-max))
+        (dsh-emacs-reference--insert-at-point
+         "@[New](dsh-session:cyJpZCI6InMxIn0)")
+        (dsh-test-assert "insert-replaces-active-token"
+          (string= (buffer-substring-no-properties (point-min) (point-max))
+                   "see @[New](dsh-session:cyJpZCI6InMxIn0)"))
+        (goto-char (point-max))
+        (dsh-emacs-reference--insert-at-point "@tail.md")
+        (dsh-test-assert "insert-no-token-inserts-at-point"
+          (string= (buffer-substring-no-properties (point-min) (point-max))
+                   "see @[New](dsh-session:cyJpZCI6InMxIn0)@tail.md")))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; --- active-token：完成的规范 mention（含标签转义）不再触发补全 ---
+(let ((buf (generate-new-buffer " *t-ref-done*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (insert "@[My Talk](dsh-session:cyJpZCI6InMxIn0)")
+        (setq-local dsh-emacs--input-marker (point-min-marker))
+        (goto-char (point-max))
+        (dsh-test-assert "active-token-completed-plain-nil"
+          (null (dsh-emacs-reference--active-token)))
+        ;; host 会把标签里的 `\` 与 `]` 转义成 `\\` / `\]`（见 harness 的
+        ;; formatSessionReferenceMention），完成判定必须跟得上
+        (erase-buffer)
+        (insert "@[My\\]Talk](dsh-session:cyJpZCI6InMxIn0)")
+        (goto-char (point-max))
+        (dsh-test-assert "active-token-completed-escaped-bracket-nil"
+          (null (dsh-emacs-reference--active-token)))
+        (erase-buffer)
+        (insert "@[a\\\\b](dsh-session:cyJpZCI6InMxIn0)")
+        (goto-char (point-max))
+        (dsh-test-assert "active-token-completed-escaped-backslash-nil"
+          (null (dsh-emacs-reference--active-token)))
+        (erase-buffer)
+        (insert "hi @re")
+        (goto-char (point-max))
+        (dsh-test-assert "active-token-in-progress-still-triggers"
+          (equal (dsh-emacs-reference--active-token) '("@re" "re" nil))))
     (when (buffer-live-p buf) (kill-buffer buf))))
 (princ "\n===== 测试总结 =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))

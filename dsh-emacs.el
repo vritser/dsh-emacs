@@ -64,6 +64,7 @@
 (require 'dsh-emacs-queue)
 (require 'dsh-emacs-server)
 (require 'dsh-emacs-command)
+(require 'dsh-emacs-reference)
 (require 'dsh-emacs-session)
 
 ;;; ---------------------------------------------------------------------------
@@ -1219,6 +1220,10 @@ realtime)."
       ;; fresh buffers start at anchor 0 and the snapshot seeds the whole
       ;; window.  No separate history fetch precedes the connect.
       (dsh-emacs-command-catalog-prefetch session-id)
+      ;; Pre-warm the @ reference candidate cache (files + session roster) so
+      ;; the first "@" popup reads warm cache.  Buffer-local cache, so it must
+      ;; run in the chat buffer (see dsh-emacs-reference.el).
+      (dsh-emacs-reference-prefetch session-id)
       ;; Mode-line setup appends its anchor newline at point-max.  Return point
       ;; to the editable prompt so the cursor stays on the `❯' line.
       (goto-char dsh-emacs--input-marker)
@@ -1855,15 +1860,26 @@ vertico, etc.)."
   (buffer-disable-undo)
   (setq-local comment-start "// ")
   (setq-local comment-end "")
-  ;; 输入区以 "/" 开头时，TAB 补全 slash 命令名（见 dsh-emacs-command.el）
+  ;; 输入区以 "/" 开头时补全 slash 命令；"@" 令牌进行中时补全文件/会话引用
+  ;; （见 dsh-emacs-command.el / dsh-emacs-reference.el）。
   (setq-local completion-at-point-functions
-              '(dsh-emacs-command-completion-at-point))
-  ;; Cooperative slash auto-trigger (see `dsh-emacs-command-auto-trigger-setup'):
-  ;; dsh-emacs never enables a completion front-end's auto mode itself — it only
-  ;; contributes "/" to a front-end the user already turned on, and that
-  ;; front-end pops the list (corfu-auto / company idle).  Stock *Completions* /
-  ;; vertico / icomplete have no auto channel and trigger on TAB only.
+              '(dsh-emacs-command-completion-at-point
+                dsh-emacs-reference-completion-at-point))
+  ;; Cooperative slash / @ auto-trigger (see `dsh-emacs-command-auto-trigger-setup'
+  ;; and `dsh-emacs-reference-auto-trigger-setup'): dsh-emacs never enables a
+  ;; completion front-end's auto mode itself — it only contributes "/" and "@"
+  ;; to a front-end the user already turned on, and that front-end pops the list
+  ;; (corfu-auto / company idle).  Stock *Completions* / vertico / icomplete have
+  ;; no auto channel and trigger on TAB only.
   (dsh-emacs-command-auto-trigger-setup)
+  (dsh-emacs-reference-auto-trigger-setup)
+  ;; @ references are host/query-dynamic (files, sessions), unlike the static
+  ;; slash catalog: while an @ token is in progress under corfu-auto, watch it
+  ;; and issue background host fetches so a settled query can reopen/refresh
+  ;; corfu's native popup.  This watcher only fetches data — it never opens a
+  ;; completion UI (corfu owns the popup via the "@" trigger; non-corfu buffers
+  ;; complete on TAB).  No-op without an active @ token or corfu-auto.
+  (add-hook 'post-command-hook #'dsh-emacs-reference--auto-complete nil t)
 
   ;; imenu: 按 user message 索引，M-x imenu 可跳转到任意历史输入
   (setq-local imenu-create-index-function #'dsh-emacs-imenu-create-user-index)
