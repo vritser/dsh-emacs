@@ -393,12 +393,15 @@ turns Chinese and emoji into mojibake such as `ä½\240'."
 
 (defun dsh-emacs--rpc-request (method params)
   "Send an RPC request to the dsh web service.
-METHOD is the method name and PARAMS is the parameter alist.
-Returns (ok-p . value) or nil."
-  (let* ((url (format "%s/api/%s" dsh-emacs-base-url method))
+METHOD is the `namespace/method' endpoint (e.g. \"session/list\") and
+PARAMS the wire `args' content (an alist, or nil for parameter-less
+methods).  Returns (ok-p . value) or nil."
+  (let* ((url (format "%s/api/%s" (dsh-emacs--server-base-url) method))
          (json-data (dsh-emacs--wrap-request method params))
          (url-request-method "POST")
-         (url-request-extra-headers '(("Content-Type" . "application/json")))
+         (url-request-extra-headers
+          (append '(("Content-Type" . "application/json"))
+                  (dsh-emacs--extra-request-headers)))
          (url-request-data (encode-coding-string json-data 'utf-8)))
     (condition-case err
         (with-current-buffer (url-retrieve-synchronously url)
@@ -412,27 +415,48 @@ Returns (ok-p . value) or nil."
             (kill-buffer)
             unwrapped))
       (error
+       ;; A 401 while we sent a cookie means the cached cookie is stale (an
+       ;; out-of-band server restarted and minted a new token): drop it so the
+       ;; next call re-mints / re-prompts instead of 401-looping until restart.
+       (when (and (dsh-emacs--server-auth-http-401-p err)
+                  (fboundp 'dsh-emacs--server-auth-maybe-expire))
+         (dsh-emacs--server-auth-maybe-expire))
        (message "RPC error: %s" (error-message-string err))
        (cons nil nil)))))
 
 (defun dsh-emacs--http-error-hint (err)
   "Human-readable hint for an HTTP error ERR, or \"\".
 ERR like `(error http 404)' comes from `url-retrieve' status.  404/405
-mean the method is not exposed by this dsh server version (e.g.
-`session.delete' is absent from the 0.1.1-rc.1 RPC table)."
+mean the `/api/<namespace>/<method>' endpoint is not claimed by this dsh
+server (unknown method or a non-POST RPC path; the gateway 404s
+unclaimed /api/* POSTs).  401 means the server requires browser-session
+authentication that was not satisfied."
   (if (and (listp err) (numberp (nth 2 err)))
       (let ((code (nth 2 err)))
-        (if (>= code 400)
-            (format " (HTTP %S: current dsh server may not expose this RPC)" code)
-          (format " (HTTP %S)" code)))
+        (if (equal code 401)
+            (format " (HTTP 401: dsh web requires authentication; see `C-h v dsh-emacs-server-auth-token')")
+          (if (>= code 400)
+              (format " (HTTP %S: current dsh server may not expose this RPC)" code)
+            (format " (HTTP %S)" code))))
     ""))
 
+(defun dsh-emacs--extra-request-headers ()
+  "Extra `url-request-extra-headers' for RPC posts: the browser-session
+cookie when this dsh server needs authentication, else nil.  Re-mints the
+cookie lazily when a token became available after the server was probed."
+  (when-let* ((auth (dsh-emacs--server-auth-header)))
+    auth))
+
 (defun dsh-emacs--rpc-async (method params callback)
-  "Asynchronous RPC request.  CALLBACK receives (ok-p value-or-error)."
-  (let* ((url (format "%s/api/%s" dsh-emacs-base-url method))
+  "Asynchronous RPC request; CALLBACK receives (ok-p value-or-error).
+METHOD is the `namespace/method' endpoint, PARAMS the wire `args'
+content — see `dsh-emacs--wrap-request'."
+  (let* ((url (format "%s/api/%s" (dsh-emacs--server-base-url) method))
          (json-data (dsh-emacs--wrap-request method params))
          (url-request-method "POST")
-         (url-request-extra-headers '(("Content-Type" . "application/json")))
+         (url-request-extra-headers
+          (append '(("Content-Type" . "application/json"))
+                  (dsh-emacs--extra-request-headers)))
          (url-request-data (encode-coding-string json-data 'utf-8))
          (callback-buffer (current-buffer)))
     ;; Keep progress messages out of the minibuffer.  In particular,
@@ -448,6 +472,14 @@ mean the method is not exposed by this dsh server version (e.g.
                           (gc-cons-percentage 0.6))
                       (if (plist-get status :error)
                           (let ((err (plist-get status :error)))
+                            ;; A 401 while we sent a cookie means the cached
+                            ;; cookie is stale (an out-of-band server restarted
+                            ;; and minted a new per-process token): drop it so
+                            ;; the next call re-mints / re-prompts instead of
+                            ;; 401-looping until Emacs restarts.
+                            (when (and (dsh-emacs--server-auth-http-401-p err)
+                                       (fboundp 'dsh-emacs--server-auth-maybe-expire))
+                              (dsh-emacs--server-auth-maybe-expire))
                             (message "RPC async error: %S%s" status
                                      (dsh-emacs--http-error-hint err))
                             (when (buffer-live-p callback-buffer)
@@ -766,6 +798,8 @@ matches the workspace registered for it under any spelling."
 (declare-function dsh-emacs-events--host-upsert-workspace
                   "dsh-emacs-events" (workspace))
 (declare-function dsh-emacs--server-local-host-p "dsh-emacs-server" ())
+(declare-function dsh-emacs--server-auth-http-401-p "dsh-emacs-server" (err))
+(declare-function dsh-emacs--server-auth-maybe-expire "dsh-emacs-server" ())
 
 (defun dsh-emacs--workspace-create-resolve (dir)
   "Resolve the workspace for DIR, creating it server-side when missing.

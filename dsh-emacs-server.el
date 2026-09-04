@@ -80,6 +80,28 @@ install dsh."
   :type '(repeat string)
   :group 'dsh-emacs-server)
 
+(defcustom dsh-emacs-server-auth-token nil
+  "dsh web process launch token, when the server needs authentication.
+
+Recent dsh web servers (0.1.2-rc.1 and later) authenticate every Host API
+call and WebSocket stream with a per-process \"launch token\": they print
+`dsh web: http://HOST:PORT/?token=TOKEN' at startup, and a request to
+`/?token=TOKEN' mints a signed browser cookie that all later calls must
+carry.  dsh-emacs performs that exchange itself.
+
+This should normally stay nil: for a server dsh-emacs starts itself the
+token is captured automatically from the `*dsh-server*' output.  Set it to
+the TOKEN (the `token=' value from the printed URL) only when pointing at a
+server dsh-emacs did not start, so its own token is not available to
+parse.  When nil and dsh-emacs points at an already-running external server
+that requires the cookie, it asks you for the token interactively (once)
+rather than showing a Basic username/password prompt.  The token changes on
+every server restart, so a manually-maintained value goes stale whenever the
+server is restarted."
+  :type '(choice (const :tag "None (auto-capture from managed server)" nil)
+                 (string :tag "Launch token (token= value from `dsh web:' output)"))
+  :group 'dsh-emacs-server)
+
 ;;; ---------------------------------------------------------------------------
 ;;; 内部状态
 ;;; ---------------------------------------------------------------------------
@@ -104,15 +126,42 @@ on every single invocation.")
 always loads this module first at package load; the fallback only matters
 for standalone use of this module.")
 
+(defvar dsh-emacs--server-auth-cookie nil
+  "Minted browser-session cookie value (\"name=value\") for the current base URL.
+Set by `dsh-emacs--server-auth-ensure'; nil means no cookie has been minted
+(no launch token known, or an older server that needs none).  Cleared when
+the base URL or the launch token changes, so a stale cookie is never sent.")
+
+(defvar dsh-emacs--server-auth-captured-token nil
+  "Launch token parsed from the `*dsh-server*' output, or nil.
+Used when `dsh-emacs-server-auth-token' is nil and this package started the
+server.  Reset whenever a fresh server is spawned.")
+
 ;;; ---------------------------------------------------------------------------
 ;;; URL / 探测
 ;;; ---------------------------------------------------------------------------
 
-(defun dsh-emacs--server-base-url ()
-  "The server URL to probe and start: `dsh-emacs-base-url' or the default."
+(defun dsh-emacs--server-base-url-raw ()
+  "The configured server URL exactly as set by the user: `dsh-emacs-base-url'
+(or the default).  This is the only accessor that may carry a `?token=' query
+(the URL dsh web prints); use `dsh-emacs--server-base-url' for anything that
+actually builds a request URL."
   (if (boundp 'dsh-emacs-base-url)
       dsh-emacs-base-url
     dsh-emacs-server-default-base-url))
+
+(defun dsh-emacs--server-base-url ()
+  "The server URL to probe and start: `dsh-emacs-base-url' or the default.
+A leading `?token=…' query — the form dsh web prints at startup — and any
+trailing slash before it are stripped, so callers can safely concatenate
+paths onto the result (`/api/…', `/').  The token itself is read separately
+via `dsh-emacs--server-auth-token-from-url'."
+  (let* ((raw (dsh-emacs--server-base-url-raw))
+         (at (and (stringp raw) (string-match-p "\\?" raw)))
+         (base (if at (substring raw 0 at) raw)))
+    (if (and (> (length base) 0) (string-match-p "/$" base))
+        (substring base 0 -1)
+      base)))
 
 (defun dsh-emacs--server-host-port ()
   "Return the (HOST . PORT) pair the base URL points at.
@@ -246,6 +295,331 @@ in one command chain do not re-probe."
   (setq dsh-emacs--server-alive-check nil))
 
 ;;; ---------------------------------------------------------------------------
+;;; 浏览器会话认证（launch token → dsh-auth-* cookie）
+;;; ---------------------------------------------------------------------------
+;;
+;; Recent dsh web (0.1.2-rc.1+) authenticates the whole Host API: RPC, exact
+;; Fetch routes, and every WebSocket upgrade return 401 unless the request
+;; carries an authority-bound, HMAC-signed cookie named `dsh-auth-<hash>'.
+;; The cookie is minted once by requesting `/?token=<launch-token>' (the CLI
+;; prints the token inside the URL `dsh web: .../?token=...').  This module
+;; owns that exchange and hands the resulting cookie to the RPC layer
+;; (`dsh-emacs--rpc-request' / `dsh-emacs--rpc-async') and the event streams
+;; (`dsh-emacs-events.el') via `dsh-emacs--server-auth-cookie-header'.
+
+(defun dsh-emacs--server-auth-capture-token ()
+  "Scan the managed `*dsh-server*' buffer for a `dsh web: ...?token=' line.
+When found, store the token in `dsh-emacs--server-auth-captured-token',
+reset any minted cookie (a fresh server means a fresh token), and return the
+token.  Returns nil if the line has not appeared yet — for a just-launched
+server the URL is printed once the plugin tree settles, which can follow the
+first successful probe."
+  (let ((buf (get-buffer "*dsh-server*")))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (goto-char (point-min))
+        (when (re-search-forward "\\(?:\\?\\|&\\)token=\\([A-Za-z0-9_-]+\\)" nil t)
+          (let ((token (match-string 1)))
+            (unless (equal token dsh-emacs--server-auth-captured-token)
+              (setq dsh-emacs--server-auth-captured-token token)
+              (dsh-emacs--server-auth-reset))
+            token))))))
+
+(defun dsh-emacs--server-auth-token ()
+  "Return the current launch token, or nil when none is known.
+Resolution order: a token just parsed from the managed `*dsh-server*' output
+(the capture is exact for the live process and therefore never goes stale),
+a previously captured token retained in the buffer variable, then the
+user-facing `dsh-emacs-server-auth-token'."
+  (or (dsh-emacs--server-auth-capture-token)
+      dsh-emacs--server-auth-captured-token
+      (when (and dsh-emacs-server-auth-token
+                 (not (string-empty-p dsh-emacs-server-auth-token)))
+        dsh-emacs-server-auth-token)))
+
+(defun dsh-emacs--server-auth-reset ()
+  "Drop any minted cookie after the base URL or token changed.
+Safe to call whenever the server address or identity may have changed; the
+next authenticated call re-mints from the fresh token."
+  (setq dsh-emacs--server-auth-cookie nil))
+
+(defun dsh-emacs--server-auth-maybe-expire ()
+  "Drop a stale cookie after an HTTP 401, and clear the ask-once memory.
+An out-of-band (user-managed) `dsh web' mints a NEW per-process token on
+every restart, which invalidates the cookie this client cached from the
+previous process — but nothing tells the client the token changed, so it
+keeps sending the dead cookie and every RPC 401s until Emacs restarts.
+Call this when a request that carried our cookie came back HTTP 401: clear
+the cookie (so the next authenticated call re-mints from a fresh capture
+or configured token) and forget `dsh-emacs--server-auth-ask-base' (so a
+server that really is unauthenticated re-prompts instead of short-circuiting
+to the stale \"already asked\" user-error).  Re-minting from a still-stale
+configured token simply 401s again, which is the correct, non-silent
+outcome (the hint points the user at the config)."
+  (when dsh-emacs--server-auth-cookie
+    (setq dsh-emacs--server-auth-cookie nil
+          dsh-emacs--server-auth-ask-base nil)))
+
+(defun dsh-emacs--server-auth-http-401-p (err)
+  "Non-nil when ERR is the `url' HTTP 401 error (`(error http 401)')."
+  (and (listp err) (numberp (nth 2 err)) (equal (nth 2 err) 401)))
+
+(defun dsh-emacs--server-auth-token-from-url (url)
+  "Return the `token' query value in URL, or nil.
+Lets a user point `dsh-emacs-base-url' at the exact URL dsh printed
+(`http://.../?token=...') without a separate `dsh-emacs-server-auth-token'."
+  (ignore-errors
+    (let* ((parsed (url-generic-parse-url url))
+           (query (cdr (url-path-and-query parsed)))
+           (value (and query
+                       (cdr (assoc "token" (url-parse-query-string query))))))
+      (cond
+       ((stringp value) value)
+       ((and (consp value) (stringp (car value))) (car value))
+       (t nil)))))
+
+(defun dsh-emacs--server-auth-cookie-header ()
+  "Return (\"Cookie\" . \"dsh-auth-*=*\") for the current base URL, or nil.
+Mints the cookie on demand from the launch token, caching the result in
+`dsh-emacs--server-auth-cookie'.  Nil when no token is known or the server
+declined the exchange: the caller then sends no cookie (an older server
+needs none).  Callers must ensure the server is alive before first use so a
+token captured at launch is already available."
+  (let ((cookie (if dsh-emacs--server-auth-cookie
+                    dsh-emacs--server-auth-cookie
+                  (let ((token (or (dsh-emacs--server-auth-token)
+                                   (dsh-emacs--server-auth-token-from-url
+                                    (dsh-emacs--server-base-url-raw)))))
+                    (when token
+                      (dsh-emacs--server-auth-ensure token)))
+                  dsh-emacs--server-auth-cookie)))
+    (dsh-emacs--server-auth-cookie-as-unibyte cookie)))
+
+(defun dsh-emacs--server-auth-cookie-as-unibyte (cookie)
+  "Return COOKIE as a unibyte byte string, or nil.
+The cookie is captured with `match-string' from a network response buffer,
+so even pure-ASCII content arrives flagged multibyte.  Emacs' `url' rejects a
+request whose concatenated header+body is multibyte (Bug#23750: it errors
+\"Multibyte text in HTTP request\" when `string-bytes' != `length'), and a
+multibyte-flagged header concatenated with the unibyte-encoded request body
+trips exactly that check.  Normalize to a true unibyte byte string (the cookie
+is a `dsh-auth-<name>=v1.<body>.<sig>' ASCII token), so the RPC header and the
+WS handshake both stay single-byte regardless of the body's non-ASCII payload."
+  (when cookie
+    (if (multibyte-string-p cookie)
+        (encode-coding-string cookie 'utf-8)
+      cookie)))
+
+(defun dsh-emacs--server-auth-ensure (&optional token)
+  "Mint the browser-session cookie for the current base URL.
+Scans the managed `*dsh-server*' buffer for the `token=' launch value when
+TOKEN is nil.  Exchanges `/<base>/?token=TOKEN' with the server and, when it
+mints a `dsh-auth-*' cookie, stores it in `dsh-emacs--server-auth-cookie' and
+returns it.  Returns nil otherwise — an older server that needs no cookie,
+or no token known.  Best-effort by design: a real authentication failure
+surfaces on the caller's own request as HTTP 401, which dsh-emacs reports
+with actionable instructions rather than failing the mint synchronously."
+  (let* ((token (or token
+                    (dsh-emacs--server-auth-token)
+                    (dsh-emacs--server-auth-token-from-url
+                     (dsh-emacs--server-base-url-raw))))
+         (base (dsh-emacs--server-base-url)))
+    (setq dsh-emacs--server-auth-cookie nil)
+    (when token
+      (let ((cookie (dsh-emacs--server-auth-exchange base token)))
+        (when cookie
+          (setq dsh-emacs--server-auth-cookie cookie)
+          cookie)))))
+
+(defun dsh-emacs--server-auth-exchange (base token)
+  "Exchange TOKEN for the `dsh-auth-*' cookie against BASE.
+BASE is the clean server origin (no query).  dsh's successful exchange is an
+HTTP 303 carrying the `Set-Cookie' header; the cookie MUST be read off that
+first 303.  `url-retrieve' would follow the 303 to `/' and return that
+follow-on response (a 401 when unauthenticated), dropping the header — hence
+a plain-http BASE is exchanged over a raw TCP socket (no redirect handling,
+see `dsh-emacs--server-auth-exchange-plain'), and an https BASE through the
+`url' library with redirects disabled (`url-max-redirections' bound to 0).
+Returns the cookie string, else nil."
+  (let ((url (concat base "/?token=" token)))
+    (if (equal (url-type (url-generic-parse-url base)) "https")
+        ;; HTTPS: TLS requires the url library; disable 303 redirect-follow so
+        ;; the response buffer is dsh's 303 (where the Set-Cookie lives).
+        (let ((url-max-redirections 0))
+          (with-current-buffer (url-retrieve-synchronously url t t 5)
+            (goto-char (point-min))
+            (when (re-search-forward "^Set-Cookie: \\([_A-Za-z0-9-]+=[^;\r\n]+\\)" nil t)
+              (match-string 1))))
+      (dsh-emacs--server-auth-exchange-plain url))))
+
+(defun dsh-emacs--server-auth-exchange-plain (url)
+  "Send raw `GET URL' to the base host and return its `Set-Cookie' value.
+Reuses the socket probe's pattern (`dsh-emacs--server-probe-plain'): hand-write
+the request, read the first response headers, and take the `Set-Cookie' line.
+Deliberately does NOT follow location redirects — dsh's token exchange answers
+with a 303 whose header is the only place the minted cookie appears."
+  (let* ((parsed (url-generic-parse-url url))
+         (pq (url-path-and-query parsed))
+         (req-path (concat (or (car pq) "/")
+                           (and (cdr pq) (concat "?" (cdr pq)))))
+         (host-port (dsh-emacs--server-host-port))
+         (host (dsh-emacs--server-host-name))
+         (host-header (car host-port))
+         (port (cdr host-port))
+         (buf (generate-new-buffer " *dsh-auth-exchange*"))
+         (cookie nil))
+    (unwind-protect
+        (let ((proc (open-network-stream "dsh-auth-exchange" buf
+                                         host port :type 'plain)))
+          (set-process-query-on-exit-flag proc nil)
+          (set-process-filter
+           proc (lambda (_proc string)
+                  (with-current-buffer buf
+                    (goto-char (point-max))
+                    (insert string))))
+          (process-send-string
+           proc (format "GET %s HTTP/1.0\r\nHost: %s:%d\r\n\r\n"
+                        req-path host-header port))
+          (let ((deadline (+ (float-time) 3.0)))
+            (while (and (process-live-p proc)
+                        (with-current-buffer buf
+                          (not (string-match-p "\r?\n\r?\n" (buffer-string))))
+                        (< (float-time) deadline))
+              (accept-process-output proc 0.1)))
+          (when (process-live-p proc)
+            (delete-process proc))
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (when (re-search-forward "^Set-Cookie: \\([_A-Za-z0-9-]+=[^;\r\n]+\\)" nil t)
+              (setq cookie (match-string 1)))))
+      (kill-buffer buf))
+    cookie))
+
+(defun dsh-emacs--server-auth-header ()
+  "Return an alist of headers the RPC/WS layers must send, or nil.
+Currently just the browser-session cookie (merging the nginx Basic header is
+left to the consumers that already build it).  Kept as a function so the
+layers share the single mint/cache path."
+  (let ((cookie (dsh-emacs--server-auth-cookie-header)))
+    (when cookie
+      (list (cons "Cookie" cookie)))))
+
+(defvar dsh-emacs--server-auth-ask-base nil
+  "Base URL this Emacs session already asked the user for a launch token.
+Prevents re-prompting on every server-touching command after the user
+declined once; cleared when the base URL or the token changes.")
+
+(defun dsh-emacs--server-auth-required-p ()
+  "Return non-nil when the live server demands the browser-session cookie.
+A bare `GET /' that answers HTTP 401 means the server is a dsh 0.1.2-rc.1+
+Host that requires the cookie; a 200 means an older server that needs none.
+Plain-http is checked over a raw socket (the same one the probe uses) so this
+never triggers `url''s Basic prompt itself.  HTTPS returns nil: probing over
+TLS would itself go through `url-retrieve' and pop the very prompt we are
+trying to avoid, so an https target's token is expected from configuration."
+  (ignore-errors
+    (and (not (equal (url-type (url-generic-parse-url
+                                (dsh-emacs--server-base-url)))
+                     "https"))
+         (dsh-emacs--server-auth-required-plain))))
+
+(defun dsh-emacs--server-auth-required-plain ()
+  "Return non-nil when a raw `GET /' to the plain-http base answers 401.
+Mirrors `dsh-emacs--server-probe-plain' but reports only the auth-required
+signal (status 401), reading the response over a hand-written TCP request so
+no `url' machinery (and no username/password prompt) is involved."
+  (let* ((host-port (dsh-emacs--server-host-port))
+         (host-header (car host-port))
+         (port (cdr host-port))
+         (auth (dsh-emacs-server--basic-auth-header))
+         (buf (generate-new-buffer " *dsh-auth-probe*"))
+         (result nil))
+    (unwind-protect
+        (let ((proc (open-network-stream "dsh-auth-probe" buf
+                                         (dsh-emacs--server-host-name)
+                                         port :type 'plain)))
+          (set-process-query-on-exit-flag proc nil)
+          (set-process-filter
+           proc (lambda (_proc string)
+                  (with-current-buffer buf
+                    (goto-char (point-max))
+                    (insert string))))
+          (process-send-string
+           proc (concat (format "GET / HTTP/1.0\r\nHost: %s:%d\r\n"
+                                host-header port)
+                        (if auth
+                            (format "%s: %s\r\n" (car auth) (cdr auth))
+                          "")
+                        "\r\n"))
+          (let ((deadline (+ (float-time) 2.0)))
+            (while (and (process-live-p proc)
+                        (with-current-buffer buf
+                          (not (string-match-p "\r?\n\r?\n" (buffer-string))))
+                        (< (float-time) deadline))
+              (accept-process-output proc 0.2)))
+          (when (process-live-p proc)
+            (delete-process proc))
+          (with-current-buffer buf
+            (when (string-match "^HTTP/1\\.[01] \\([0-9]+\\)"
+                                (buffer-string))
+              (setq result (equal (match-string 1 (buffer-string)) "401")))))
+      (kill-buffer buf))
+    result))
+
+(defun dsh-emacs--server-auth-ensure-interactive ()
+  "Ensure an auth cookie is ready before talking to a live external server.
+For a server dsh-emacs manages itself, the launch token is auto-captured from
+the server's output (see `dsh-emacs--server-auth-token'), so this is a silent
+no-op: a cookie that is not yet minted just means the `token=' line has not
+reached `*dsh-server*' yet, and the RPC/WS layers re-mint lazily on demand.
+For an already-running (external) server that demands the browser-session
+cookie but whose token is not configured, ask the user for the launch token
+ONCE per session, mint the cookie from it, and cache it — instead of letting
+the first unauthenticated RPC come back 401 and pop `url''s Basic
+username/password box.
+
+Interactive only (no-op in batch, so the mocked-RPC suite never prompts).
+When the user declines or the mint fails, signals `user-error' with actionable
+instructions rather than proceeding to an unauthenticated request."
+  (when (not noninteractive)
+    (cond
+     ;; A cookie already exists: nothing to do.
+     (dsh-emacs--server-auth-cookie t)
+     ;; A server dsh-emacs manages itself: never prompt — the token is
+     ;; auto-captured and a not-yet-minted cookie is transient.
+     ((and dsh-emacs--server-process (process-live-p dsh-emacs--server-process))
+      t)
+     ;; A token is resolvable (captured / configured / base-url): mint it.
+     ((let ((token (or (dsh-emacs--server-auth-token)
+                       (dsh-emacs--server-auth-token-from-url
+                        (dsh-emacs--server-base-url-raw)))))
+        (when token (dsh-emacs--server-auth-ensure token)))
+      t)
+     ;; Server needs no cookie (or is https, handled by config): proceed.
+     ((not (dsh-emacs--server-auth-required-p)) t)
+     ;; Server demands a cookie and none can be auto-minted: ask once.
+     (t
+      (if (equal (dsh-emacs--server-base-url) dsh-emacs--server-auth-ask-base)
+          ;; Already asked and the user declined / it failed this session:
+          ;; do not silently proceed to an unauthenticated RPC (that would
+          ;; pop `url''s Basic box again).  Surface the actionable error.
+          (user-error (concat "This dsh server requires a launch token but none was "
+                              "given.  Set `dsh-emacs-server-auth-token' (or put "
+                              "`?token=' in `dsh-emacs-base-url') to authenticate "
+                              "to the external dsh server"))
+        (setq dsh-emacs--server-auth-ask-base (dsh-emacs--server-base-url))
+        (let ((token (read-string
+                      (format "dsh server %s requires a launch token (paste the `token=' value from the `dsh web:' URL it printed): "
+                              (dsh-emacs--server-base-url)))))
+          (if (string-empty-p token)
+              (user-error (concat "No launch token given.  Set `dsh-emacs-server-auth-token' "
+                                  "(or put `?token=' in `dsh-emacs-base-url') to authenticate "
+                                  "to the external dsh server"))
+            (unless (dsh-emacs--server-auth-ensure token)
+              (user-error "dsh token exchange failed; the token may be stale or the URL wrong — check `C-h v dsh-emacs-server-auth-token'"))))
+        t)))))
+
+;;; ---------------------------------------------------------------------------
 ;;; CLI 检测与安装
 ;;; ---------------------------------------------------------------------------
 
@@ -314,6 +688,10 @@ Emacs exit never prompts about it."
                        (when (eq proc dsh-emacs--server-process)
                          (setq dsh-emacs--server-process nil))))))
   (set-process-query-on-exit-flag dsh-emacs--server-process nil)
+  ;; A fresh server process carries a fresh launch token; invalidate the
+  ;; captured token and any cookie minted from a previous process.
+  (setq dsh-emacs--server-auth-captured-token nil)
+  (dsh-emacs--server-auth-reset)
   (dsh-emacs--server-invalidate-alive)
   dsh-emacs--server-process)
 
@@ -338,6 +716,12 @@ fast when the spawned process already exited; otherwise signals
     (cond
      ((dsh-emacs--server-alive-p)
       (message "dsh server ready at %s" (dsh-emacs--server-base-url))
+      ;; Best-effort exchange of the launch token for the browser-session
+      ;; cookie, so the first RPC / WebSocket after the user acts is not a 401
+      ;; race against the captured token.  If the URL line has not reached
+      ;; `*dsh-server*' yet (older dsh prints none), or the token is stale, the
+      ;; cookie stays unset and the RPC/WS layers re-attempt lazily on demand.
+      (dsh-emacs--server-auth-ensure)
       t)
      ((and dsh-emacs--server-process
            (not (process-live-p dsh-emacs--server-process)))
@@ -361,6 +745,11 @@ responsive."
   (cond
    ((dsh-emacs--server-alive-p)
     (message "dsh server already running at %s" (dsh-emacs--server-base-url))
+    ;; External server needing the browser-session cookie: prompt once for the
+    ;; token so the caller's first RPC is authenticated instead of popping
+    ;; `url''s Basic username/password box (see
+    ;; `dsh-emacs--server-auth-ensure-interactive').
+    (dsh-emacs--server-auth-ensure-interactive)
     t)
    ((and dsh-emacs--server-process
          (process-live-p dsh-emacs--server-process))
@@ -406,14 +795,22 @@ touched."
 Provider/model configuration lives in dsh itself — the web UI (Settings
 opens as a modal there) or `~/.dsh/settings.yaml' plus
 `.credentials.yaml' (this package has no provider-editing surface and
-reads the catalog via `session.models').  This command is the bridge:
+reads the catalog via `session/modelCatalog').  This command is the bridge:
 changes made in the browser show up in dsh-emacs after a refresh (`g' in
-the session list, `C-c C-r' in a chat buffer)."
+the session list, `C-c C-r' in a chat buffer).
+
+When the server needs the browser-session launch token, the opened URL
+carries `?token=...' so the browser can complete the first-time exchange
+(an older server is opened at its clean base URL)."
   (interactive)
   (dsh-emacs-server-ensure)
-  (let ((url (dsh-emacs--server-base-url)))
-    (browse-url url)
-    (message "Opened %s" url)))
+  (let* ((base (dsh-emacs--server-base-url))
+         (token (or (dsh-emacs--server-auth-capture-token)
+                    (dsh-emacs--server-auth-token)
+                    (dsh-emacs--server-auth-token-from-url
+                     (dsh-emacs--server-base-url-raw)))))
+    (browse-url (if token (format "%s/?token=%s" base token) base))
+    (message "Opened %s" base)))
 
 (defun dsh-emacs--server-local-host-p ()
   "Return t when `dsh-emacs-base-url' points at the local machine.
@@ -439,10 +836,16 @@ start a LOCAL server, which is not what a remote deployment wants.
 A probe failure there signals the address/network problem and lets the
 user fix `dsh-emacs-base-url', while a successful probe proceeds as
 usual.  No-op in batch (`noninteractive') runs, so the mocked-RPC unit
-suite needs no service."
+suite needs no service.
+
+When a server is already reachable, also make sure an auth cookie is ready
+before the caller fires its first RPC: an external server that requires the
+browser-session cookie gets a token prompt here (once) rather than letting
+the unauthenticated request pop `url''s Basic username/password box."
   (interactive)
   (when (not noninteractive)
-    (unless (dsh-emacs--server-alive-p)
+    (if (dsh-emacs--server-alive-p)
+        (dsh-emacs--server-auth-ensure-interactive)
       (if (dsh-emacs--server-local-host-p)
           (if dsh-emacs-server-auto-start
               (dsh-emacs-server-start t)
