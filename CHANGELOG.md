@@ -6,7 +6,9 @@ All notable changes to this project are documented here. Format follows
 sections carry the planned next version (pre-1.0: `fix` → patch, features →
 minor) and stay undated until the release is cut.
 
-## 0.2.0 - Unreleased
+## 0.3.0 - Unreleased
+
+## 0.2.0 - 2026-09-04
 
 ### Breaking Changes
 
