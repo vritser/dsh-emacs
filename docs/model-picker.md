@@ -1,10 +1,15 @@
 # Model Picker
 
-`C-c C-m` (`dsh-emacs-select-model`) reads `session.models` and calls
-`session.selectModel`. Rows show the model **id** only (the provider name lives
+`C-c C-m` (`dsh-emacs-select-model`) reads the routable model catalog
+(`session/modelCatalog`, session-agnostic, args `{}`) and calls
+`session/selectModel`. Rows show the model **id** only (the provider name lives
 inside the row key, so it stays searchable while filtering); duplicates of the
 same id across providers keep their provider visible in the suffix.
 
+- **Reference model**: the catalog's `default` selection (host default) is
+  folded into the picker's "current model" prompt; the session's actual
+  last-used model rides the `modelSelection` projection (list rows / follow &
+  control projection frames) and is what the mode-line model segment shows.
 - **Sticky provider groups**: the table carries a `group-function` in its
   completion metadata. Modern vertico (and Emacs 27+ `*Completions*` buffers)
   draw one sticky header per provider, recomputed on every filter input, so
@@ -26,7 +31,7 @@ same id across providers keep their provider visible in the suffix.
   defaultEffort) get a second mini-prompt right after the model pick.
   Re-picking the current model pre-selects its live `reasoningEffort`; other
   models pre-select their `defaultEffort`. The chosen id is sent as
-  `session.selectModel`'s `reasoningEffort`; models without `reasoning` send no
+  `session/selectModel`'s `reasoningEffort`; models without `reasoning` send no
   effort field at all.
 - **Behaviour**: empty RET keeps the current model (no RPC), unknown input is
   rejected, `C-g` cancels cleanly inside the RPC filter; when vertico is active

@@ -272,7 +272,9 @@ resume；`updateQueue/cancel` 要求 live Agent；`follow` 打开冷会话、快
 
 #### session/list
 ```
-args     { request?: { cursor?: string } }   // cursor 是预留位，实现忽略；请求体可为 {}
+args     { _request?: { cursor?: string } }  // 参数名 `_request`（保留空列表请求对象，
+                                              // 与其它 session 方法的 `request` 不同）；
+                                              // cursor 预留位，实现忽略，请求体可发 {}
 value    { items: SessionSummary[] }          // updatedAt 降序
 ```
 `SessionSummary = { sessionId, updatedAt, running, blank, parentSessionId?,

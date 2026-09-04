@@ -8,6 +8,139 @@ minor) and stay undated until the release is cut.
 
 ## 0.3.0 - Unreleased
 
+### Breaking Changes
+
+- **dsh 0.1.2 wire protocol migration**: the client now talks the dsh 0.1.2
+  RPC/stream protocol.  The realtime event surfaces moved from the old
+  per-session mux + host stream (`/api/events.mux`, `/api/events.host`,
+  `session.history`, `session/event` envelope frames) to a single
+  `/api/remote.mux` WebSocket multiplexing logical streams: a chat opens a
+  `session/follow` stream whose snapshot seeds the transcript and whose
+  `event` items render live; the session list keeps a core connection
+  (`session/control` + `workspace/follow` + `$events`).  RPC endpoints use
+  the two-segment slash form (`session/list`, `session/create`, …) with the
+  request body wrapped as `payload = {args: …}`.  Ask-questions and tool
+  approvals arrive as `$events` waterfall frames and are answered through
+  the unary `$events/result` RPC (there is no `/api/respond` and no
+  `approvalId` on the wire); a question's answers carry the selected option
+  ids, and approval answers are the strings `allowed-once` / `rejected`.
+  Workspace state (workspaces, session→workspace membership, archives) is
+  delivered by the `workspace/follow` stream instead of a `workspace.list`
+  RPC.  `dsh-emacs-history-refetch-max-rounds` is removed — the snapshot
+  seeds the opening tail and reconnects reseed via a fresh snapshot, so no
+  load-gap backfill option exists.  Saved customizations of the removed
+  option are silently dropped on upgrade
+  (rationale: postmortem/009).
+
+### Added
+
+- **Browser-session authentication for dsh web (0.1.2-rc.1+)**: recent dsh
+  servers return `401` on every RPC and WebSocket stream unless the request
+  carries a `dsh-auth-*` browser cookie minted from the per-process launch
+  token the server prints (`dsh web: …/?token=…`).  dsh-emacs now performs
+  that token→cookie exchange itself — parsing the token from the managed
+  server's output automatically (or from a user-supplied
+  `dsh-emacs-server-auth-token` or a `?token=` in `dsh-emacs-base-url` for a
+  server dsh-emacs didn't start) and sending the cookie on all RPC posts and
+  the `/api/remote.mux` WebSocket handshakes, and the
+  `dsh web` URL opened by `dsh-emacs-open-web`.  A `?token=` in the base URL
+  is stripped before request paths are appended, so pasting dsh's printed URL
+  into `dsh-emacs-base-url` works.  A `401` RPC now reports an actionable
+  hint instead of a generic HTTP error (rationale: postmortem/008).
+- **External servers ask for the launch token instead of popping a
+  username/password box**: when dsh-emacs points at an already-running
+  (external) dsh 0.1.2-rc.1+ server that requires the browser-session
+  cookie and no token is configured, the first server-touching command now
+  prompts you once for the `token=` value from the URL the server printed,
+  mints the cookie, and proceeds — previously the unauthenticated RPC came
+  back `401` and Emacs' `url` library fell back to a Basic username/password
+  prompt that could never succeed (rationale: postmortem/008).
+- **Realtime live chat**: an open chat keeps a `session/follow` stream on
+  the shared `/api/remote.mux` socket, so replies stream in live and the
+  transcript never needs a polling or manual-history refresh; the follow
+  snapshot seeds the opening tail and reconnects reseed it, so nothing is
+  missed during a drop (rationale: postmortem/009).
+- **Realtime session list**: the session list keeps a core connection
+  (`session/control` + `workspace/follow` + `$events`), so workspace/
+  session/archive changes from any client repaint the list in place — no
+  `g` needed — and queue/context projections stay current
+  (rationale: postmortem/009).
+
+### Fixed
+
+- **Sending non-ASCII (Chinese) messages works again**: the browser-session
+  cookie was captured with `match-string` from a network response buffer, so
+  even its pure-ASCII content carried the multibyte string flag.  Emacs'
+  `url` library rejects a request whose concatenated header+body is multibyte
+  (`url-http-create-request` errors "Multibyte text in HTTP request" when
+  `string-bytes` ≠ `length`, Bug#23750), and a multibyte-flagged cookie header
+  mixed with the unibyte-encoded request body tripped exactly that — every
+  Chinese message failed before it was sent.  The cookie is now returned as a
+  true unibyte byte string, so the RPC header and the WebSocket handshake stay
+  single-byte regardless of the body's non-ASCII payload
+  (rationale: postmortem/009).
+- **The model picker shows the session's actual running model as
+  "current"**: `session/modelCatalog` is session-agnostic and only carries
+  the host `default`, so the picker used to announce the host default as the
+  session's "current" model — disagreeing with the mode-line (which reads the
+  session's `modelSelection` projection), misreporting empty-RET "Kept
+  current model", and pre-selecting a fresh effort instead of the running
+  model's live one.  The picker now derives its reference from the cached
+  session row's `modelSelection` projection, falling back to the catalog
+  default only for a session that has none yet (rationale: postmortem/009).
+- **A stale browser-session cookie self-heals instead of 401-looping**: when
+  an out-of-band dsh server restarts it mints a new per-process token,
+  silently invalidating the cookie this client cached.  A request that came
+  back `401` while carrying our cookie now clears the cached cookie (and the
+  ask-once memory), so the next call re-mints from a fresh token / re-prompts
+  instead of failing every RPC until Emacs restarts (rationale: postmortem/008).
+- **`g` workspace refresh no longer opens a second live `workspace/follow`
+  stream**: the re-baseline path re-opened `workspace/follow` on the live
+  core socket without retiring the one opened at connect, so two streams fed
+  the same workspace/archive caches (a stale frame from the retired stream
+  could transiently revert a newer reorder).  The prior stream is now
+  cancelled before a fresh one is opened, and the no-core fallback just
+  connects (its own handshake-time baseline repaints) instead of sending an
+  `open` frame before the WS upgrade completes (rationale: postmortem/009).
+- **The session list is grouped by workspace again**: the `workspace/follow`
+  and `session/control` `baseline` frames were misrouted — unlike the
+  incremental frames (`upsert`/`order`/`queue`/`projection`, whose fields sit
+  on the frame), a baseline nests its payload one level deeper
+  (`{type:'baseline', value:{items…}}`), and the dispatcher looked for
+  `items` at the frame top level, so every baseline was mistaken for a
+  `session/control` one and `dsh-emacs--workspaces` was never seeded.  The
+  core stream's baseline is now unwrapped before routing, so sessions render
+  under their workspace headers (and ungrouped sessions under "Ungrouped")
+  against a real server (rationale: postmortem/009).
+- **`session/list` now sends the wire `_request` parameter**: the dsh
+  0.1.2-rc.1 `session/list` Remote method declares its single (usually empty)
+  argument literally named `_request` — not `request` like the other session
+  methods.  Sending `args: {}` made the server reject it
+  (`missing "_request"`), so opening the session list failed with
+  `gateway/arguments-invalid`; the list fetch now sends `args: {"_request": {}}`
+  (rationale: postmortem/009).
+- **WebSocket send no longer crashes on multibyte payloads**: client frames
+  were encoded with `encode-coding-string … 'utf-8 t`, where the trailing `t`
+  is `nocopy` — inside a unibyte process buffer a multibyte JSON payload came
+  back still multibyte, so the mask loop's byte `aset` raised
+  `Attempt to store non-ASCII char into multibyte string` and the chat/core
+  stream died on connect.  Frames are now forced to a true unibyte UTF-8 byte
+  string before masking, so opening any session / the session list against a
+  real server works (rationale: postmortem/009).
+- **Browser-session cookie is now actually minted (`dsh-emacs-server-auth-token`,
+  self-started servers included)**: the token→cookie exchange requested
+  `GET /?token=…` through `url-retrieve-synchronously`, which followed dsh's
+  `303 `See Other`' redirect to `/` and returned that follow-on response — a
+  `401` — so the `Set-Cookie` header on the first `303` was never seen and
+  every RPC/WebSocket still came back `401`, surfacing as a Basic
+  username/password prompt (dsh sends no `WWW-Authenticate`; Emacs' `url`
+  library falls back to a `basic` challenge).  The exchange now reads the
+  first response's headers directly: a raw TCP request for a plain-`http`
+  base URL (redirect-follow is never performed), and `url-retrieve` with
+  `url-max-redirections` bound to `0` for an `https` base — so the minted
+  `dsh-auth-*` cookie is captured and sent, and the prompt no longer appears
+  (rationale: postmortem/008).
+
 ## 0.2.0 - 2026-09-04
 
 ### Breaking Changes

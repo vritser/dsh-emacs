@@ -3,9 +3,9 @@
 The most commonly used options, straight in your config:
 
 ```elisp
-(setq dsh-emacs-base-url "http://127.0.0.1:3080")  ; dsh service URL
+(setq dsh-emacs-base-url "http://127.0.0.1:3080")  ; dsh service URL; a `?token=...` query (the URL dsh prints) is read for auth and stripped before paths are appended
+(setq dsh-emacs-server-auth-token nil)         ; launch token for dsh web 0.1.2-rc.1+; nil = auto-captured from a server dsh-emacs starts itself.  Set it for a server YOU run externally (a fresh random value every server restart).  When pointing at an external auth-requiring server with no token set, dsh-emacs asks you for it once instead of showing a Basic username/password prompt
 (setq dsh-emacs-history-window 30)                  ; messages fetched when opening a session (maxMessages): larger = fuller history but slower opening (GC/parsing scale with it)
-(setq dsh-emacs-history-refetch-max-rounds 6)       ; max backfill rounds during load gaps: improves coverage when events are still arriving at high rate right after opening, at the cost of more small parse chunks
 (setq dsh-emacs-show-reasoning t)                  ; show reasoning content (on by default; nil = hide, unlike dsh web)
 (setq dsh-emacs-show-tool-calls t)                 ; show tool calls
 (setq dsh-emacs-default-cwd default-directory)     ; fallback working directory for new sessions (interactive ones use the current buffer's default-directory first)

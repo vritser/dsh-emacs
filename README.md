@@ -28,7 +28,7 @@ any workspace context takes the current buffer's `default-directory` (a dired
 buffer's browsed dir, magit's repo root, a file's directory) as the session's
 working directory, auto-detects its Emacs project (project.el on Emacs 28+,
 falling back to the VC root / `.git` walk) and creates the session in that
-project's workspace, resolving it via idempotent `workspace.create` on first
+project's workspace, resolving it via idempotent `workspace/create` on first
 use — disable with `dsh-emacs-new-session-auto-project`.
 
 ```emacs-lisp
@@ -67,6 +67,25 @@ start is used and never killed.
 Works with remote deployments too: a non-loopback base URL — including
 `https://` and nginx Basic-Auth via `user:pass@host` — is probed and used
 directly, and dsh-emacs never spawns a local server for a remote one.
+
+Recent dsh web (0.1.2-rc.1+) requires a short-lived per-process launch token
+for every Host call.  For a server dsh-emacs starts itself, the token is
+captured automatically from the server's output and exchanged for the
+authentication cookie — nothing to configure.  For a **server you start
+yourself** (external/remote), you can tell dsh-emacs the token once per
+server start, or let it ask you: if no token is configured, dsh-emacs
+prompts for it interactively (a single question on first connect) instead
+of a Basic username/password box.  To set it yourself:
+
+- set `dsh-emacs-server-auth-token` to the `token=` value from the URL dsh
+  prints (`dsh web: …/?token=…`), or
+- paste that whole printed URL (including `?token=…`) into
+  `dsh-emacs-base-url` — dsh-emacs reads the token from the query and strips
+  it before building request paths.
+
+Because the token is a fresh random value on every server start, a
+manually-set token goes stale whenever the external server is restarted;
+self-started servers avoid this by re-capturing automatically.
 
 Provider/model configuration is **owned by dsh**, not by dsh-emacs: configure
 it in the dsh web UI (`M-x dsh-emacs-open-web`) or the dsh home files

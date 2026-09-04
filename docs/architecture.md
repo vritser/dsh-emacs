@@ -14,7 +14,7 @@ dsh-emacs/
 ├── dsh-emacs-events.el       # Event stream: native WebSocket + reconnect
 ├── dsh-emacs-modeline.el       # Mode-line stats
 ├── dsh-emacs-queue.el        # Pending-input queue mirror (queue/steer)
-├── dsh-emacs-server.el       # Server bootstrap: probe / auto-start / install
+├── dsh-emacs-server.el       # Server bootstrap: probe / auto-start / install / browser-session auth
 └── dsh-emacs-session.el      # Session list card view
 ```
 
@@ -27,23 +27,23 @@ reads fields exclusively through generated accessors (e.g.
 each wire field name appears only in the matching `--from-alist` constructor, so
 when the server protocol changes you sync exactly one file. Covered payloads:
 
-- `session.list` → `dsh-protocol-session` (sessionId, title, cwd, agentPreset,
+- `session/list` → `dsh-protocol-session` (sessionId, title, cwd, agentPreset,
   updatedAt, blank, running, title-value, pending-interaction, context-pressure,
   context-window, context-projected)
-- `workspace.list` → `dsh-protocol-workspace-list` (items, archived-session-ids)
-  → `dsh-protocol-workspace` (workspaceId, sessionIds, title, path, createdAt,
-  updatedAt)
-- `workspace.create` / `rename` / `insertSessionBefore` →
+- `workspace/follow` baseline → `dsh-protocol-workspace-list` (items,
+  archived-session-ids) → `dsh-protocol-workspace` (workspaceId, sessionIds,
+  title, path, createdAt, updatedAt)
+- `workspace/create` / `rename` / `delete` / `insertBefore` →
   `dsh-protocol-workspace-result` (workspace, created)
-- `session.models` → `dsh-protocol-model-directory` → `provider-group` →
+- `session/modelCatalog` → `dsh-protocol-model-directory` → `provider-group` →
   `model-catalog-entry` → `reasoning` → `effort`, plus
   `dsh-protocol-model-selection` for `current`
-- `session.selectModel` → `dsh-protocol-model-selection-result` (selected)
-- `agentPreset.list` → `dsh-protocol-agent-preset-list` (presets, authorable,
+- `session/selectModel` → `dsh-protocol-model-selection-result` (selected)
+- `agentPresets/list` → `dsh-protocol-agent-preset-list` (presets, authorable,
   has-document) → `dsh-protocol-agent-preset` (id, trust, is-default, name,
   description, broken)
 
-Conversion is one-way and lossless: `session.models` responses become a
+Conversion is one-way and lossless: `session/modelCatalog` responses become a
 `dsh-protocol-model-directory` before the picker reads them; the cached
 session/workspace lists are stored as structs too. Helper `dsh-protocol--struct`
 accepts either a wire alist or an already-converted struct, so callers and
@@ -52,30 +52,41 @@ for now (their shapes vary per event type).
 
 ## RPC API
 
-`dsh-emacs.el` calls the dsh web service's RPC API (`POST /api/session.*`)
-directly, with no server-side changes required:
+`dsh-emacs.el` calls the dsh service's one-shot unary RPC API
+(`POST /api/<namespace>/<method>`, e.g. `/api/session/list`) directly, with
+no server-side changes required.  Endpoint names are the two-segment
+slash form of the dsh 0.1.2 wire protocol (rpc.md §4); the request body
+is the `client-request` envelope with `payload = {args: {...}}`:
 
 | RPC method | Purpose |
 |---|---|
-| `session.list` | List sessions (including running status, title, cwd) |
-| `session.create` | Create a session |
-| `session.history` | Read event history (incremental, anchor-diffed rendering) |
-| `session.prompt` | Send a message (`mode: "queue"` = next turn, `"steer"` = wake the running agent; text and/or inline base64 image attachments) |
-| `session.updateQueue` | Manage pending inbox items (`edit` text / `remove` / `steer` by itemId) |
-| `session.cancel` | Interrupt the running turn (partial reply is kept, inbox preserved) |
-| `session.fork` | Branch a session into a child inheriting its history |
-| `session.models` | List the routable model catalog for a session |
-| `session.selectModel` | Switch the session's model |
-| `session.rename` | Rename a session |
-| `workspace.archiveSession` | Archive a session (remove from its workspace view) |
+| `session/list` | List sessions (including running status, title, cwd) |
+| `session/create` | Create a session |
+| `session/prompt` | Send a message (`mode: "queue"` = next turn, `"steer"` = wake the running agent; text and/or inline base64 image attachments; `requestId` dedups resends) |
+| `session/updateQueue` | Manage pending inbox items (`edit` text / `remove` / `steer` by itemId) |
+| `session/cancel` | Interrupt the running turn (partial reply is kept, inbox preserved) |
+| `session/fork` | Branch a session into a child inheriting its history |
+| `session/modelCatalog` | List the routable model catalog for a session |
+| `session/selectModel` | Switch the session's model |
+| `session/rename` | Rename a session (its display title) |
+| `session/attachment` | Fetch a stored image attachment (ref + base64 data) |
+| `workspace/create` / `rename` / `delete` / `insertBefore` / `archiveSession` | Mutate a workspace or a session's workspace membership |
+| `agentPresets/list` | List agent presets |
+| `commands/list` / `commands/execute` | List / run slash commands |
+| `$events/result` | Answer a `$events` waterfall (approval/question), args `{clientId, eventId, outcome}` |
 
-## Pending-input queue (`session/queue` frames)
+Real-time state — the transcript, the session list, queue/steer mirrors,
+projections, and the approval/question waterfalls — is NOT polled; it
+arrives over `/api/remote.mux` logical streams (next section).
+
+## Pending-input queue (`session/queue` frames on `session/control`)
 
 Input sent while a turn runs is delivered through the agent inbox:
 `queue` lands in next-turn (the next turn), `steer` in next-step (before
-the running agent's next step).  The host pushes the authoritative
-snapshot as `session/queue` mux frames — once per connection for sessions
-with pending items, and on every inbox splice thereafter — so
+the running agent's next step).  The host publishes the authoritative
+snapshot as `session/queue` frames on the core connection's
+`session/control` logical stream — once per connection (the baseline) for
+sessions with pending items, and on every inbox splice thereafter — so
 `dsh-emacs-queue.el` only mirrors frames (no fetch RPC, no local drift).
 The wire item shape (`id`, `placement` = `queued`/`steering`/`context`,
 `message.content`) is normalized to `dsh-protocol-queue-item` in
@@ -128,11 +139,13 @@ queue frames by submit context.
 
 ## Event rendering flow
 
-Opening a session first reads `session.history`, then connects to the
-`/api/events.mux` WebSocket that dsh web uses, receiving new events in real
-time; the mux stream is the only automatic reply channel — when it drops,
-the health-check / watchdog / reconnect machinery below restores it, and
-until then replies appear only via manual refresh (`C-c C-r`):
+dsh web multiplexes all logical Remote streams over one long-lived
+WebSocket, `/api/remote.mux`.  A chat buffer opens a `session/follow`
+stream whose opening `snapshot` seeds the transcript and whose `event`
+items render live; the follow stream is the only automatic reply channel
+for a chat — when it drops, the health-check / watchdog / reconnect
+machinery below restores it, and until then replies appear only via manual
+refresh (`C-c C-r`):
 
 1. **user/message** → `dsh-emacs-render-user-message`: rendered as a card background
 2. **assistant/chunk** → `dsh-emacs-render-assistant-chunk`: the text-delta is appended to the current reply and re-rendered as Markdown in place
@@ -141,9 +154,11 @@ until then replies appear only via manual refresh (`C-c C-r`):
 5. **tool/result** → `dsh-emacs-render-tool-result`: updates the existing tool card (success/error state)
 6. **turn/start** / **turn/end** → `dsh-emacs-render-turn-start/end`: rendered as a divider
 
-When opening history for the first time, old `assistant/chunk` events are
-skipped and the completed `assistant/message` is used directly; new chunks from
-live WebSocket events are handled directly. The streamed body uses
+The follow snapshot is the opening history tail: `chunks` packed rows are
+skipped and only message-aligned `event` records seed the buffer, so old
+`assistant/chunk` deltas are not replayed and the completed
+`assistant/message` is used directly; new chunks from live follow events
+are handled directly. The streamed body uses
 `agent-shell-markdown`'s watermark/frozen properties so that only the
 not-yet-stable tail is re-rendered.
 
@@ -163,12 +178,12 @@ not-yet-stable tail is re-rendered.
   throws outward, Emacs silently removes the timer, leaving an unrecoverable
   deadlock where the process stays "open" but nothing ever kills it; this is a
   pitfall hit in real testing.
-- **Incremental history rendering**: history is fetched with the
-  `maxMessages` semantics (about 850 raw events for the default window) and
-  rendered incrementally anchored on the seq — it never parses the whole
-  history each time (full parsing of tens of thousands of events in large
-  sessions was the main source of stutter).  The same anchored diff also makes
-  the watchdog's periodic `session.history` probe harmless to re-render.
+- **Snapshot-first rendering**: opening a session opens a `session/follow`
+  stream whose `snapshot` seeds the transcript.  The snapshot carries a
+  `cursor` plus message-aligned `records` (a bounded tail — the client requests
+  up to `dsh-emacs-history-window` messages via `maxMessages`).  Rendering
+  parses only the snapshot records and live `event` frames, never the whole
+  session history, so opening is cheap even for very large sessions.
 - **Reconnect is self-healing**: the reconnect socket pins `no-conversion` — on
   a reused events buffer the re-inferred process coding system folds the 101
   response's `\r\n\r\n` to `\n\n`, so the handshake never matched and the
@@ -177,38 +192,38 @@ not-yet-stable tail is re-rendered.
   against a real server).  A synchronous connect error (unresolvable host,
   malformed `dsh-emacs-base-url`) is contained: the reconnect is re-armed and
   another connect scheduled, instead of a timer-error leaving the chat with no
-  recovery channel.
+  recovery channel.  Reconnecting re-opens the `session/follow` stream, and the
+  fresh snapshot reseeds whatever was missed.
+- **Replayed frames never render twice**: on a mid-session reconnect the fresh
+  follow snapshot re-sends the transcript tail; the dispatch path
+  (`dsh-emacs-events--dispatch-event`) gates every transcript frame on
+  `dsh-emacs--anchor-seq` — the newest seq this buffer rendered or consumed —
+  and drops frames whose seq is not newer, the same gate
+  `dsh-emacs-render-history-events` applies to re-fetch windows.  The follow
+  snapshot advances the anchor to its `cursor`, so replaying the same tail
+  renders nothing; events generated during the outage carry seq > anchor and
+  render once as the catch-up.  Without the gate a reconnect repainted the
+  whole transcript a second time (doubled user messages and assistant replies,
+  interleaved layout, only fixed by reopening the session).
 - **Stream health watchdog**: after sending a message, if the event stream
-  delivers nothing for 3 consecutive seconds mid-turn, one windowed history
-  probe is made; if the stream turns out to be stalled, the socket is killed and
-  the sentinel reconnects.
-- **Opening a session does not swallow global replay**: the mux replays the
-  entire global event stream to every new connection (the protocol has no
-  baseline-sync parameter; large sessions can reach 500k+ raw events, still
-  growing each turn). While the initial history is being loaded on first open,
-  the replayed frames arriving on the event stream are dropped outright — not
-  parsed frame by frame, not queued, not sorted (the old "queue → sort → flush"
-  path was exactly why every open froze for seconds); after the history page
-  renders, a small-window **loop backfill** (`dsh-emacs-history-refetch-max-rounds`
-  rounds, anchored incremental rendering until the window stops advancing)
-  covers the load gap, and then real-time resumes.
-- **Replayed frames never render twice**: the same full replay arrives on
-  MID-SESSION reconnects (stream drop, health-check kill, watchdog kill),
-  when `dsh-emacs--event-history-loading` is already clear.  The live
-  dispatch path (`dsh-emacs-events--dispatch-event`) gates every transcript
-  frame on `dsh-emacs--anchor-seq` — the newest seq this buffer rendered or
-  consumed — and drops frames whose seq is not newer, the identical gate
-  `dsh-emacs-render-history-events` applies to re-fetch windows; events
-  generated during the outage carry seq > anchor and render once as the
-  catch-up.  Without the gate a reconnect repainted the whole transcript a
-  second time (doubled user messages and assistant replies, interleaved
-  layout, only fixed by reopening the session).
-- **The open window is bounded**: the history page is fetched per
+  delivers nothing for 3 consecutive seconds mid-turn, the socket is killed so
+  the sentinel reconnects; the fresh follow snapshot then reseeds whatever was
+  missed (records carry original seqs, the anchor gate renders only the new
+  tail) — no history-probe RPC is needed anymore.
+- **The open window is bounded**: the snapshot is requested with
   `dsh-emacs-history-window` (default 30 messages), and the GC threshold is
   raised dynamically (cpu-profiler measurements showed Automatic GC consuming
   ~46% of the whole open duration when parsing large windows). Measured on a
   560k-event session: opening dropped from ~1.8s / two ~0.9s freezes to ~0.55s /
   two ~0.35s small blocks, independent of session size.
+- **Core connection (list side)**: the session list keeps a separate
+  `/api/remote.mux` connection that opens `session/control` + `workspace/follow`
+  + `$events`.  `session/control` delivers whole-host queue/jobs/projection
+  baselines and increments; `workspace/follow` seeds and then upserts/removes/
+  reorders the workspace caches; `$events` carries the session list's live
+  changes (`api-session/added|removed|status|activity` emits) and the
+  approval/question waterfalls.  This connection is scoped to the list buffer's
+  lifecycle and is also self-healing (reconnect + re-baseline).
 
 ## Activity groups
 
