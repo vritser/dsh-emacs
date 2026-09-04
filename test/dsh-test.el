@@ -233,53 +233,79 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
   (setq dsh-emacs--modeline-model nil
         dsh-emacs--modeline-effort nil))
 
-;; --- 测试 5f+1: 打开会话从 session.models 同步权威 (provider, model, effort) ---
-;; 默认模型只作段级兜底：同步回调必须用 `current' 三元组覆盖 buffer-local
-;; 值，且只路由回自己的会话缓冲（不串台）。
-(let* ((buf (get-buffer-create " *t5f1-chat*"))
+;; --- 测试 5f+0: 空白会话（无 request/投影喂料）时 model 段兜底默认模型 ---
+;; 一个刚建、尚无任何 request 事件的会话，mode-line 的 per-buffer model 是 nil；
+;; model 段必须回退显示 `dsh-emacs-default-model'，而不是留空。
+(let ((old-default dsh-emacs-default-model))
+  (unwind-protect
+      (let ((txt (with-temp-buffer
+                   (dsh-emacs-mode)
+                   (let ((dsh-emacs-modeline-format-spec
+                          '(:separator " " :segments (model))))
+                     (setq dsh-emacs-default-model "fallback-model-7")
+                     (setq-local dsh-emacs--modeline-model nil)
+                     (dsh-emacs-modeline-format)))))
+        (dsh-test-assert "blank-session-model-falls-back-to-default"
+          (string-match-p "fallback-model-7" txt)))
+    (setq dsh-emacs-default-model old-default)))
+
+;; --- 测试 5f+1: 打开会话从缓存行的 modelSelection 投影同步权威模型 ---
+;; 默认模型只作段级兜底：同步必须用 `lastUsed' 三元组覆盖 buffer-local
+;; 值（投影随 session/list 行与 follow/control 投影帧到达，无额外 RPC）。
+(let* ((old-sessions dsh-emacs--sessions)
+       (buf (get-buffer-create " *t5f1-chat*"))
        (calls nil)
-       (payload '((current . ((provider . "zhipu")
-                              (model . "glm-5.3-flash")
-                              (reasoningEffort . "max"))))))
+       (item (dsh-protocol-session--from-alist
+              '((sessionId . "sess-modelsync")
+                (projections . ((values
+                                 . ((modelSelection
+                                     . ((lastUsed
+                                         . ((provider . "zhipu")
+                                            (model . "glm-5.3-flash")
+                                            (reasoningEffort . "max")))))))))))))
   (unwind-protect
       (progn
+        (setq dsh-emacs--sessions (list item))
         (with-current-buffer buf
           (setq-local dsh-emacs--buffer-session "sess-modelsync")
           (setq dsh-emacs--modeline-model "stale-model"
                 dsh-emacs--modeline-effort "stale-effort"
                 dsh-emacs--modeline-provider "stale-provider"))
         (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
-                   (lambda (method params cb)
-                     (push (list method params) calls)
-                     (funcall cb t payload))))
-          (dsh-emacs--chat-buffer-model-sync "sess-modelsync" buf)
-          (with-current-buffer buf
-            (when (and (equal "glm-5.3-flash" dsh-emacs--modeline-model)
-                       (equal "max" dsh-emacs--modeline-effort)
-                       (equal "zhipu" dsh-emacs--modeline-provider)
-                       (equal "session.models" (caar calls))
-                       (equal "sess-modelsync"
-                              (cdr (assq 'sessionId (cadr (car calls))))))
-              (dsh-test-pass
-               "chat-buffer-model-sync-lands-provider-model-effort")))))
+                   (lambda (&rest _) (push t calls))))
+          (dsh-emacs--chat-buffer-model-sync "sess-modelsync" buf))
+        (with-current-buffer buf
+          (when (and (equal "glm-5.3-flash" dsh-emacs--modeline-model)
+                     (equal "max" dsh-emacs--modeline-effort)
+                     (equal "zhipu" dsh-emacs--modeline-provider)
+                     (null calls))
+            (dsh-test-pass
+             "chat-buffer-model-sync-lands-provider-model-effort"))))
+    (setq dsh-emacs--sessions old-sessions)
     (when (buffer-live-p buf) (kill-buffer buf))))
-(let* ((buf (get-buffer-create " *t5f2-chat*"))
-       (payload '((current . ((provider . "p9") (model . "m9"))))))
-  ;; 会话不匹配的回调不得落入别的会话缓冲（防串台）
+(let* ((old-sessions dsh-emacs--sessions)
+       (buf (get-buffer-create " *t5f2-chat*"))
+       (item (dsh-protocol-session--from-alist
+              '((sessionId . "sess-modelsync")
+                (projections . ((values
+                                 . ((modelSelection
+                                     . ((lastUsed
+                                         . ((provider . "p9") (model . "m9")))))))))))))
+  ;; 会话不匹配（同步目标行属于别的会话）不得落入该缓冲（防串台）
   (unwind-protect
       (progn
+        (setq dsh-emacs--sessions (list item))
         (with-current-buffer buf
           (setq-local dsh-emacs--buffer-session "sess-other")
           (setq dsh-emacs--modeline-model nil
                 dsh-emacs--modeline-provider nil))
-        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
-                   (lambda (_method _params cb) (funcall cb t payload))))
-          (dsh-emacs--chat-buffer-model-sync "sess-modelsync" buf)
-          (with-current-buffer buf
-            (when (and (null dsh-emacs--modeline-model)
-                       (null dsh-emacs--modeline-provider))
-              (dsh-test-pass
-               "chat-buffer-model-sync-ignores-foreign-session")))))
+        (dsh-emacs--chat-buffer-model-sync "sess-modelsync" buf)
+        (with-current-buffer buf
+          (when (and (null dsh-emacs--modeline-model)
+                     (null dsh-emacs--modeline-provider))
+            (dsh-test-pass
+             "chat-buffer-model-sync-ignores-foreign-session"))))
+    (setq dsh-emacs--sessions old-sessions)
     (when (buffer-live-p buf) (kill-buffer buf))))
 ;; tooltip 携带 provider（同 id 跨 provider 时 model 段消歧）
 (let ((dsh-emacs-modeline-format-spec '(:separator " " :segments (model))))
@@ -373,15 +399,25 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (let ((p (buffer-local-value 'dsh-emacs--modeline-context-pressure buf)))
           (when (= 13067 p)
             (dsh-test-pass "session-projection-falls-back-to-pressure")))
-        ;; dispatch 级：完整帧经 --dispatch-json 走到处理器
+        ;; dispatch 级：完整帧经 --dispatch-json（host-stream 门）走到处理器
         (with-current-buffer buf
           (setq-local dsh-emacs--modeline-context-pressure nil
                      dsh-emacs--modeline-context-window-server nil))
-        (cl-letf (((symbol-function 'dsh-emacs-events--chat)
-                   (lambda (_p) buf)))
-          (dsh-emacs-events--dispatch-json
-           'process
-           "{\"type\":\"server-frame\",\"payload\":{\"type\":\"session/projection\",\"sessionId\":\"sess-proj\",\"key\":\"contextPressure\",\"seq\":50,\"value\":{\"projectedTokens\":88345,\"pressureTokens\":88000,\"contextWindow\":1000000}}}"))
+        (let ((host-props (list (cons 'dsh-emacs-host-stream t))))
+          (cl-letf (((symbol-function 'processp)
+                     (lambda (_p) t))
+                    ((symbol-function 'process-get)
+                     (lambda (_p prop)
+                       (cdr (assq prop host-props)))))
+            (dsh-emacs-events--dispatch-json
+             'host-proc
+             (concat "{\"type\":\"item\",\"streamId\":\"c1\","
+                     "\"value\":{\"type\":\"projection\","
+                     "\"sessionId\":\"sess-proj\","
+                     "\"key\":\"contextPressure\",\"seq\":50,"
+                     "\"value\":{\"projectedTokens\":88345,"
+                     "\"pressureTokens\":88000,"
+                     "\"contextWindow\":1000000}}}"))))
         (let ((p (buffer-local-value 'dsh-emacs--modeline-context-pressure buf)))
           (when (= 88345 p)
             (dsh-test-pass "session-projection-frame-dispatch"))))
@@ -595,9 +631,21 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
   (dsh-test-pass "rpc-async function exists"))
 
 ;; --- 测试 14: RPC JSON 布尔值和空 payload ---
-(let ((request (dsh-emacs--wrap-request "session.list" nil)))
-  (when (string-match-p "\"payload\":{}" request)
+(let ((request (dsh-emacs--wrap-request "session/list" nil)))
+  (when (string-match-p "\"payload\":{\"args\":{}}" request)
     (dsh-test-pass "rpc-empty-payload-is-object")))
+
+;; --- 测试 14b: session/list 携带 _request 参数（0.1.2 真实 descriptor） ---
+;; 0.1.2-rc.1 的 `session/list' 唯一参数叫 `_request'（保留空列表请求对象），
+;; 不是其它 session 方法的 `request'。发 `{}' 会被服务器拒
+;; (`missing "_request"')；args 必须带 `_request' 键且值为 `{}'。
+(let* ((args (dsh-emacs--session-list-args))
+       (wrap (dsh-emacs--wrap-request "session/list" args)))
+  (dsh-test-assert "session-list-args-carries-_request"
+    (and (= 1 (length args))
+         (eq '_request (car (car args)))))
+  (dsh-test-assert "session-list-wrap-encodes-_request-object"
+    (string-match-p "\"args\":{\"_request\":{}}" wrap)))
 
 (let* ((response (json-read-from-string
                   "{\"result\":{\"ok\":false,\"error\":{\"code\":\"bad-request\"}}}"))
@@ -1002,24 +1050,26 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (dispatch-count 0))
     (accept-process-output fake-proc 1)
     (process-put fake-proc 'dsh-emacs-chat-buffer (current-buffer))
+    (process-put fake-proc 'dsh-emacs-follow-stream-id "f1")
     (process-put fake-proc 'dsh-emacs-event-input "")
     (process-put fake-proc 'dsh-emacs-event-ready t)
     (advice-add 'dsh-emacs-events--dispatch-json :before
                 (lambda (&rest _) (setq dispatch-count (1+ dispatch-count))))
     (unwind-protect
         (progn
-          ;; A valid masked text frame carrying one JSON envelope, arriving
-          ;; as a *separate* chunk after the handshake.  Build it with the
-          ;; real frame encoder (handles extended lengths like the server's
-          ;; real >125-byte frames).
-          (let* ((json (format "{\"type\":\"server-request\",\"rpcId\":\"r1\",\"method\":\"session/event\",\"payload\":{\"type\":\"session/event\",\"sessionId\":\"s1\",\"event\":{\"type\":\"assistant/message\",\"seq\":1,\"data\":{\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hello ws\"}]}}}}}"))
+          ;; A valid masked text frame carrying one session/follow item frame
+          ;; (`item' wrapping an `event' value), arriving as a *separate*
+          ;; chunk after the handshake.  Build it with the real frame encoder
+          ;; (handles extended lengths like the server's real >125-byte
+          ;; frames).
+          (let* ((json (format "{\"type\":\"item\",\"streamId\":\"f1\",\"value\":{\"type\":\"event\",\"event\":{\"type\":\"assistant/message\",\"seq\":1,\"data\":{\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hello ws\"}]}}}}}"))
                  (frame (dsh-emacs-events--frame 1
                                                   (encode-coding-string json 'utf-8 t))))
             ;; Simulate the post-handshake filter path: store the raw bytes
             ;; then consume them (frames must be parsed on every chunk).
             (process-put fake-proc 'dsh-emacs-event-input frame)
             (dsh-emacs-events--consume-frames fake-proc))
-          (when (and (= dispatch-count 1)          ; exactly one envelope dispatched
+          (when (and (= dispatch-count 1)          ; exactly one frame dispatched
                      (string-empty-p (process-get fake-proc 'dsh-emacs-event-input))
                      (string-match-p "hello ws"
                                      (buffer-substring-no-properties (point-min) (point-max))))
@@ -1592,7 +1642,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (setq dsh-emacs--sessions old)
     (when (buffer-live-p buf) (kill-buffer buf))))
 
-;; --- 测试 40b: 会话工作区路径来源（session.list 的 cwd 字段） ---
+;; --- 测试 40b: 会话工作区路径来源（session/list 的 cwd 字段） ---
 (let* ((item (list (cons 'sessionId "sess-cwd")
                    (cons 'blank :json-false)
                    (cons 'cwd "/Users/ed/playground/dsh-emacs")
@@ -1644,7 +1694,6 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
 ;; 首次打开的缓冲因此被 sync 的守卫静默跳过，default-directory 从未设置
 ;; 导致 magit 无法定位项目。这里用 stub 屏蔽网络/渲染，走完整 open 路径。
 (cl-letf (((symbol-function 'dsh-emacs-events-connect) (lambda (&rest _) nil))
-          ((symbol-function 'dsh-emacs--load-history) (lambda (&rest _) nil))
           ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
   (let ((old-sessions dsh-emacs--sessions)
         (old-current-buffer dsh-emacs--current-buffer)
@@ -1707,8 +1756,6 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                   ((symbol-function 'dsh-emacs-events-disconnect)
                    (lambda (&optional chat)
                      (push (list 'disconnect chat) disconnects)))
-                  ((symbol-function 'dsh-emacs--load-history)
-                   (lambda (&rest _) nil))
                   ((symbol-function 'dsh-emacs--rpc-async)
                    (lambda (&rest _) nil))
                   ((symbol-function 'pop-to-buffer)
@@ -1729,8 +1776,6 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                   ((symbol-function 'dsh-emacs-events-disconnect)
                    (lambda (&optional chat)
                      (push (list 'disconnect chat) disconnects)))
-                  ((symbol-function 'dsh-emacs--load-history)
-                   (lambda (&rest _) nil))
                   ((symbol-function 'dsh-emacs--rpc-async)
                    (lambda (&rest _) nil))
                   ((symbol-function 'pop-to-buffer)
@@ -1751,7 +1796,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
 
 ;; --- 测试 43d: 首次打开新会话（缓存缺失）→ 补拉列表以取得 ctx 快照 ---
 ;; 新会话不在 `dsh-emacs--sessions' 缓存：`dsh-emacs--link-session-preset'
-;; 增强守卫（preset 或会话缺失都触发）应懒拉 session.list —— 回调里的
+;; 增强守卫（preset 或会话缺失都触发）应懒拉 session/list —— 回调里的
 ;; `dsh-emacs--chat-buffers-sync-all'（含 context-sync）把 contextPressure
 ;; 快照喂进 mode-line，ctx% 首次打开最终显示而非永久空缺。
 (let* ((old-sessions dsh-emacs--sessions)
@@ -1776,7 +1821,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                                                                                    (list (cons 'pressureTokens 129946)
                                                                                          (cons 'contextWindow 262144)))))))))))))))
           (dsh-emacs--link-session-preset "sess-first"))
-        (when (member "session.list" methods)
+        (when (member "session/list" methods)
           (dsh-test-pass "first-open-fetches-session-list")))
     (setq dsh-emacs--sessions old-sessions)
     (remhash "sess-first" dsh-emacs--chat-buffers)
@@ -1802,8 +1847,6 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                    (lambda (_method _params cb)
                      ;; preset 链路缓存已有 → 不应 fetch，若 fetch 说明守卫失效
                      (funcall cb t (list (cons 'items [])))))
-                  ((symbol-function 'dsh-emacs--load-history)
-                   (lambda (&rest _) nil))
                   ((symbol-function 'dsh-emacs-events-connect)
                    (lambda (&rest _) nil))
                   ((symbol-function 'pop-to-buffer)
@@ -1821,7 +1864,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
       (remhash "sess-ctxexist" dsh-emacs--chat-buffers)
       (when (buffer-live-p b) (kill-buffer b)))))
 
-;; --- 测试 43f: 模型失败后 session.list 行缺 contextWindow 时不清空 ctx 快照 ---
+;; --- 测试 43f: 模型失败后 session/list 行缺 contextWindow 时不清空 ctx 快照 ---
 ;; 回归：`dsh-emacs--chat-buffer-context-sync' 曾无条件把列表行的
 ;; contextPressure 喂进 mode-line。列表投影列是部分填充的（缓存未物化的
 ;; 单元格/失败模型运行后 contextWindow 缺失都会以残缺行返回），把
@@ -1880,7 +1923,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
 ;; --- 测试 43g: 模型失败（QUOTA）的零 usage 样本不清空 ctx 快照 ---
 ;; 回归：供应商拒绝（配额/限流）时报告 usage 0/0 的 assistant/chunk 样本，
 ;; token-meter 的 last-wins 折叠把 contextPressure 压成 0 —— 实时
-;; session/projection 帧（以及随后的 session.list 行）携带
+;; session/projection 帧（以及随后的 session/list 行）携带
 ;; {projectedTokens/pressureTokens 0, contextWindow}。此前 setter 会把
 ;; (0, window) 原样落地，ctx% 从失败前的正确值（如 66617/1000000 ≈ 6.7%）
 ;; 塌成 0%（实测所有 session 日志里零 usage 样本只出现在错误完成之前，是
@@ -1916,7 +1959,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (dsh-test-assert "submit-after-error-keeps-ctx-snapshot"
           (= 66617 (buffer-local-value 'dsh-emacs--modeline-context-pressure buf))
           (= 1000000 (buffer-local-value 'dsh-emacs--modeline-context-window-server buf)))
-        ;; session.list 行同样携带零对（pressureTokens 0 + contextWindow 完整）
+        ;; session/list 行同样携带零对（pressureTokens 0 + contextWindow 完整）
         (setq dsh-emacs--sessions
               (list (dsh-protocol-session--from-alist
                      '((sessionId . "sess-zero")
@@ -2065,7 +2108,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
   (when (not (string-match-p "█" (dsh-emacs-modeline--doom-segment)))
     (dsh-test-pass "doom-segment-idle-has-no-spinner")))
 
-;; --- 测试 46: send-or-stop 忙碌时打断（session.cancel），空闲时发送 ---
+;; --- 测试 46: send-or-stop 忙碌时打断（session/cancel），空闲时发送 ---
 (let ((buf (generate-new-buffer " *dsh-interrupt-test*"))
       (calls nil))
   (unwind-protect
@@ -2075,24 +2118,25 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                    (lambda (method params _cb)
                      (push (list method params) calls))))
-          ;; 忙碌 → 再按 C-c C-c 应发 session.cancel 而不是排新消息
+          ;; 忙碌 → 再按 C-c C-c 应发 session/cancel 而不是排新消息
           (setq-local dsh-emacs--ml-busy t)
           (dsh-emacs-send-or-stop)
-          (let ((call (car calls)))
-            (when (and (string= "session.cancel" (car call))
+          (let* ((call (car calls))
+                 (req (cdr (assq 'request (cadr call)))))
+            (when (and (string= "session/cancel" (car call))
                        (string= "sess-cancel"
-                                (cdr (assq 'sessionId (cadr call)))))
+                                (cdr (assq 'sessionId req))))
               (dsh-test-pass "send-or-stop-busy-interrupts-via-cancel")))
-          ;; 空闲 + 有文本 → 发送 session.prompt
+          ;; 空闲 + 有文本 → 发送 session/prompt
           (setq-local dsh-emacs--ml-busy nil)
           (setq calls nil)
           (dsh-emacs--replace-input "hello there")
           (dsh-emacs-send-or-stop)
           (let* ((call (car calls))
-                 (params (cadr call))
-                 (content (cdr (assq 'content params)))
+                 (req (cdr (assq 'request (cadr call))))
+                 (content (cdr (assq 'content req)))
                  (part (and content (aref content 0))))
-            (when (and (string= "session.prompt" (car call))
+            (when (and (string= "session/prompt" (car call))
                        (string= "hello there" (cdr (assq 'text part))))
               (dsh-test-pass "send-or-stop-idle-sends-prompt")))
           ;; 空闲 + 空文本 → 不发出任何请求
@@ -2137,7 +2181,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                    (lambda (method params cb)
                      (push (list method params) calls)
-                     (when (string= method "session.models")
+                     (when (string= method "session/modelCatalog")
                        (funcall cb
                                 t
                                 '((current . ((provider . "p1") (model . "m0")))
@@ -2152,10 +2196,11 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
           (dsh-emacs-select-model)
           (let* ((call (car calls))
                  (params (cadr call)))
-            (when (and (string= "session.selectModel" (car call))
-                       (string= "m1" (cdr (assq 'model params)))
-                       (string= "g1" (cdr (assq 'provider params)))
-                       (string= "sess-m" (cdr (assq 'sessionId params))))
+            (when (and (string= "session/selectModel" (car call))
+                       (string= "m1" (cdr (assq 'model (cdr (assq 'request params)))))
+                       (string= "g1" (cdr (assq 'provider (cdr (assq 'request params)))))
+                       (string= "sess-m" (cdr (assq 'sessionId
+                                                    (cdr (assq 'request params))))))
               (dsh-test-pass "select-model-sends-selectModel")))))
     (kill-buffer buf)))
 
@@ -2189,7 +2234,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                    (lambda (method params cb)
                      (push (list method params) calls)
-                     (when (string= method "session.models")
+                     (when (string= method "session/modelCatalog")
                        (funcall
                         cb t
                         '((current . ((provider . "g1") (model . "m1")))
@@ -2203,8 +2248,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                      (push (apply #'format fmt args) msgs))))
           (dsh-emacs-select-model)
           (let ((methods (mapcar #'car calls)))
-            (when (and (member "session.models" methods)
-                       (not (member "session.selectModel" methods))
+            (when (and (member "session/modelCatalog" methods)
+                       (not (member "session/selectModel" methods))
                        (cl-some (lambda (m) (string-prefix-p "Kept" m))
                                 msgs))
               (dsh-test-pass "select-model-empty-pick-keeps-current")))))
@@ -2220,7 +2265,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                    (lambda (method params cb)
                      (push (list method params) calls)
-                     (when (string= method "session.models")
+                     (when (string= method "session/modelCatalog")
                        (funcall
                         cb t
                         '((current . ((provider . "g1") (model . "m1")))
@@ -2234,14 +2279,62 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                      (push (apply #'format fmt args) msgs))))
           (dsh-emacs-select-model)
           (let ((methods (mapcar #'car calls)))
-            (when (and (member "session.models" methods)
-                       (not (member "session.selectModel" methods))
+            (when (and (member "session/modelCatalog" methods)
+                       (not (member "session/selectModel" methods))
                        (cl-some (lambda (m) (string-prefix-p "Unknown" m))
                                 msgs))
               (dsh-test-pass "select-model-unknown-pick-rejected")))))
     (kill-buffer buf)))
 
-;; --- 测试 47d: provider 只展示一次，models 缩进跟随（分组展示） ---
+;; --- 测试 47d: picker 的 current 来自会话 modelSelection 投影而非目录默认 ---
+;; 回归：modelCatalog 是 session 无关的，其 current/default 是宿主默认；会话
+;; 真正在跑的模型在缓存行的 modelSelection.lastUsed 投影里（mode-line 同一权威
+;; 源）。picker 的 "current" 提示与空 RET 的 "Kept current model" 必须用投影值
+;; （本例目录 default 是 m0、投影是 m9），否则提示与真实运行模型不符。
+(let* ((old-sessions dsh-emacs--sessions)
+       (buf (get-buffer-create " *dsh-model-proj-test*"))
+       (calls nil)
+       (msgs nil)
+       (prompts nil)
+       (item (dsh-protocol-session--from-alist
+              '((sessionId . "sess-proj")
+                (projections . ((values
+                                 . ((modelSelection
+                                     . ((lastUsed
+                                         . ((provider . "g1")
+                                            (model . "m9")))))))))))))
+  (unwind-protect
+      (with-current-buffer buf
+        (setq dsh-emacs--current-session "sess-proj")
+        (setq dsh-emacs--sessions (list item))
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method params cb)
+                     (push (list method params) calls)
+                     (when (string= method "session/modelCatalog")
+                       (funcall
+                        cb t
+                        '((current . ((provider . "g1") (model . "m0")))
+                          (groups . [((id . "g1") (name . "DeepSeek")
+                                      (models . [((id . "m0") (name . "m0"))
+                                                 ((id . "m1") (name . "Model One"))
+                                                 ((id . "m9") (name . "m9"))]))]))))))
+                  ((symbol-function 'completing-read)
+                   (lambda (prompt &rest _)
+                     (push prompt prompts)
+                     ""))
+                  ((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (push (apply #'format fmt args) msgs))))
+          (dsh-emacs-select-model)
+          (let ((has-m9 (cl-some (lambda (p) (string-match-p "(current m9)" p)) prompts))
+                (has-m0 (cl-some (lambda (p) (string-match-p "(current m0)" p)) prompts))
+                (kept-m9 (cl-some (lambda (m) (string-match-p "Kept current model m9" m)) msgs)))
+            (when (and has-m9 (not has-m0) kept-m9)
+              (dsh-test-pass "select-model-current-from-session-projection")))))
+    (setq dsh-emacs--sessions old-sessions)
+    (kill-buffer buf)))
+
+;; --- 测试 47e: provider 只展示一次，models 缩进跟随（分组展示） ---
 ;; 行键 = "id [provider-id|Provider Name]"：键里内嵌 provider id 与显示
 ;; 名，保证同 id 跨 provider（m2 在 Qwen 和 Anthropic 下）时两行内容唯一、
 ;; assoc 精确命中；键开头就是 id（前缀过滤可用）；display 属性渲染时把
@@ -2286,7 +2379,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                    (lambda (method params cb)
                      (push (list method params) calls)
-                     (when (string= method "session.models")
+                     (when (string= method "session/modelCatalog")
                        (funcall cb
                                 t
                                 '((current . ((provider . "g1") (model . "m1")))
@@ -2297,8 +2390,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                    (lambda (&rest _) "DeepSeek")))
           (dsh-emacs-select-model)
           (let ((methods (mapcar #'car calls)))
-            (when (and (member "session.models" methods)
-                       (not (member "session.selectModel" methods)))
+            (when (and (member "session/modelCatalog" methods)
+                       (not (member "session/selectModel" methods)))
               (dsh-test-pass "select-model-header-pick-rejected")))))
     (kill-buffer buf)))
 
@@ -2315,13 +2408,13 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (setq dsh-emacs--current-session "sess-d")
         (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                    (lambda (method params cb)
-                     ;; 模型切换成功后产品会跟一次 session.list 刷新（拉取新
+                     ;; 模型切换成功后产品会跟一次 session/list 刷新（拉取新
                      ;; 模型的 contextPressure 快照）；它不进断言用的 calls，
                      ;; 否则 (car calls) 不再指向 selectModel。
-                     (unless (string= method "session.list")
+                     (unless (string= method "session/list")
                        (push (list method params) calls))
                      (cond
-                      ((string= method "session.models")
+                      ((string= method "session/modelCatalog")
                        (funcall
                         cb t
                         '((current . ((provider . "g1") (model . "m1")))
@@ -2331,7 +2424,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                                      ((id . "g2") (name . "Qwen")
                                       (models . [((id . "m2")
                                                   (name . "Dup-2"))]))]))))
-                      ((string= method "session.selectModel")
+                      ((string= method "session/selectModel")
                        ;; 成功回调触发确认消息（"Model switched to ..."）
                        (funcall cb t nil)))))
                   ;; 用户选了 Qwen 那行：返回该行完整键（含隐藏的 provider）
@@ -2345,9 +2438,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
           (dsh-emacs-select-model)
           (let* ((call (car calls))
                  (params (cadr call)))
-            (when (and (string= "session.selectModel" (car call))
-                       (string= "m2" (cdr (assq 'model params)))
-                       (string= "g2" (cdr (assq 'provider params)))
+            (when (and (string= "session/selectModel" (car call))
+                       (string= "m2" (cdr (assq 'model (cdr (assq 'request params)))))
+                       (string= "g2" (cdr (assq 'provider (cdr (assq 'request params)))))
                        (= 1 cr-count)
                        (cl-some (lambda (m)
                                   (string-match-p (regexp-quote "Dup-2 (Qwen)") m))
@@ -2364,10 +2457,10 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (setq dsh-emacs--current-session "sess-d2")
         (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                    (lambda (method params cb)
-                     (unless (string= method "session.list")
+                     (unless (string= method "session/list")
                        (push (list method params) calls))
                      (cond
-                      ((string= method "session.models")
+                      ((string= method "session/modelCatalog")
                        (funcall
                         cb t
                         '((current . ((provider . "g1") (model . "m1")))
@@ -2377,7 +2470,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                                      ((id . "g2") (name . "Qwen")
                                       (models . [((id . "m2")
                                                   (name . "Dup-2"))]))]))))
-                      ((string= method "session.selectModel")
+                      ((string= method "session/selectModel")
                        (funcall cb t nil)))))
                   ;; 用户选了 DeepSeek 那行
                   ((symbol-function 'completing-read)
@@ -2388,8 +2481,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
           (dsh-emacs-select-model)
           (let* ((call (car calls))
                  (params (cadr call)))
-            (when (and (string= "session.selectModel" (car call))
-                       (string= "g1" (cdr (assq 'provider params)))
+            (when (and (string= "session/selectModel" (car call))
+                       (string= "g1" (cdr (assq 'provider (cdr (assq 'request params)))))
                        (cl-some (lambda (m)
                                   (string-match-p (regexp-quote "Dup-1 (DeepSeek)") m))
                                 msgs))
@@ -2431,10 +2524,10 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (setq dsh-emacs--current-session "sess-g")
         (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                    (lambda (method params cb)
-                     (unless (string= method "session.list")
+                     (unless (string= method "session/list")
                        (push (list method params) calls))
                      (cond
-                      ((string= method "session.models")
+                      ((string= method "session/modelCatalog")
                        (funcall
                         cb t
                         '((current . ((provider . "g1") (model . "m1")))
@@ -2444,7 +2537,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                                      ((id . "g2") (name . "Qwen")
                                       (models . [((id . "m2")
                                                   (name . "Dup-2"))]))]))))
-                      ((string= method "session.selectModel")
+                      ((string= method "session/selectModel")
                        (funcall cb t nil)))))
                   ((symbol-function 'completing-read)
                    (lambda (&rest _) "m2 [g2|Qwen]"))
@@ -2455,8 +2548,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (dsh-emacs-select-model))
           (let* ((call (car calls))
                  (params (cadr call)))
-            (when (and (string= "session.selectModel" (car call))
-                       (string= "g2" (cdr (assq 'provider params)))
+            (when (and (string= "session/selectModel" (car call))
+                       (string= "g2" (cdr (assq 'provider (cdr (assq 'request params)))))
                        (cl-some (lambda (m)
                                   (string-match-p (regexp-quote "Dup-2 (Qwen)") m))
                                 msgs))
@@ -2595,14 +2688,14 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
           (setq dsh-emacs--current-session "sess-t")
           (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                      (lambda (method params cb)
-                       (unless (string= method "session.list")
+                       (unless (string= method "session/list")
                          (push (list method params) calls)
-                         ;; 模型切换成功后会跟一次 session.list 刷新（拉新模型的
+                         ;; 模型切换成功后会跟一次 session/list 刷新（拉新模型的
                          ;; contextPressure 快照）：它不在本测试的断言范围内，
                          ;; 既不进 calls 也不回调（回调会把 session 缓存清空，
                          ;; 污染后续测试的全局状态）。
                          (funcall cb t
-                                  (if (string= method "session.models")
+                                  (if (string= method "session/modelCatalog")
                                       dir
                                     '((selected . ((provider . "p1")
                                                    (model . "m1"))))))))))
@@ -2613,9 +2706,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
               (dsh-emacs-select-model)
               (let* ((call (car calls))
                      (params (cadr call)))
-                (if (and (string= "session.selectModel" (car call))
-                         (string= "m1" (cdr (assq 'model params))))
-                    (cdr (assq 'reasoningEffort params))
+                (if (and (string= "session/selectModel" (car call))
+                         (string= "m1" (cdr (assq 'model (cdr (assq 'request params))))))
+                    (cdr (assq 'reasoningEffort (cdr (assq 'request params))))
                   :no-call)))))
       (kill-buffer buf))))
 
@@ -2663,7 +2756,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (dsh-test-pass "select-model-no-reasoning-omits-effort")))
 
 
-;; --- 测试 48: 附件（图片 base64 内联进 session.prompt） ---
+;; --- 测试 48: 附件（图片 base64 内联进 session/prompt） ---
 (let ((png-file (make-temp-file "dsh-test-1px" nil ".png"))
       (calls nil)
       (buf (generate-new-buffer " *dsh-attach-test*")))
@@ -2681,15 +2774,16 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (dsh-emacs-attach-file png-file "the pixel"))
           (let* ((call (car calls))
                  (params (cadr call))
+                 (req (cdr (assq 'request params)))
                  (images (cdr (assq 'images params)))
-                 (content (cdr (assq 'content params)))
+                 (content (cdr (assq 'content req)))
                  (part (and content (aref content 0)))
                  (img (and content (> (length content) 1)
                            (aref content 1))))
             ;; 规范线上形状（rpc.md §4.1）：图片是 content 的
             ;; `{type:'image', mediaType, data, name}' 块，不存在顶层 images
             ;; 字段（会被 host schema 剥掉，图片到不了模型）。
-            (when (and (string= "session.prompt" (car call))
+            (when (and (string= "session/prompt" (car call))
                        (null images)
                        (string= "the pixel" (cdr (assq 'text part))))
               (dsh-test-pass "attach-sends-caption"))
@@ -2735,7 +2829,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (dsh-test-pass "image-inline-renders-placeholder"))))
     (kill-buffer buf)))
 
-;; --- 测试 48c: attachmentId 引用块走 session.attachment 回填占位 ---
+;; --- 测试 48c: attachmentId 引用块走 session/attachment 回填占位 ---
 (let ((png-b64 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
       (buf (generate-new-buffer " *dsh-image-ref*"))
       (calls nil))
@@ -2757,12 +2851,12 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (let* ((text (buffer-substring (point-min) (point-max)))
                (pos (string-match "\\[image: remote\\.png\\]" text))
                (call (car calls))
-               (params (cadr call))
+               (req (cdr (assq 'request (cadr call))))
                (stash (and pos (get-text-property
                                 (1+ pos) 'dsh-emacs-image-data text))))
-          (when (and (equal (car call) "session.attachment")
-                     (equal (cdr (assq 'sessionId params)) "sess-ref")
-                     (equal (cdr (assq 'attachmentId params)) "att-1")
+          (when (and (equal (car call) "session/attachment")
+                     (equal (cdr (assq 'sessionId req)) "sess-ref")
+                     (equal (cdr (assq 'attachmentId req)) "att-1")
                      (string-match "look\n\\[image: remote.png\\]" text)
                      (equal stash (base64-decode-string png-b64)))
             (dsh-test-pass "image-ref-fetched-via-session-attachment"))))
@@ -2819,7 +2913,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
   (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
              (lambda (method params cb)
                (push (list method params) calls)
-               (when (string= method "session.fork")
+               (when (string= method "session/fork")
                  (funcall cb t '((sessionId . "child-1"))))))
             ((symbol-function 'dsh-emacs-open-session)
              (lambda (sid) (setq opened sid)))
@@ -2828,8 +2922,10 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (dsh-emacs-fork-session "parent-1")
     (let* ((call (car calls))
            (params (cadr call)))
-      (when (and (string= "session.fork" (car call))
-                 (string= "parent-1" (cdr (assq 'sessionId params))))
+      (when (and (string= "session/fork" (car call))
+                 (string= "parent-1"
+                          (cdr (assq 'sessionId
+                                     (cdr (assq 'request params))))))
         (dsh-test-pass "fork-passes-session-id")))
     (when (string= "child-1" opened)
       (dsh-test-pass "fork-opens-child"))
@@ -3050,7 +3146,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (setq dsh-emacs--input-history old-hist)
     (kill-buffer buf)))
 
-;; --- Test 52e: opening a session (load-history) seeds recall for M-p/M-n ---
+;; --- Test 52e: opening a session (follow snapshot) seeds recall for M-p/M-n ---
 (let ((old-hist dsh-emacs--input-history)
       (old-opt dsh-emacs-input-history-cross-session)
       (buf (generate-new-buffer " *dsh-seed-load*")))
@@ -3059,16 +3155,20 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (dsh-emacs-mode)
         (setq-local dsh-emacs--buffer-session "sess-load")
         (setq dsh-emacs-input-history-cross-session nil)
-        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
-                   (lambda (_method _params cb)
-                     (funcall cb t '((events . [((event . ((type . "user/message")
-                                                           (seq . 10)
-                                                           (data . ((content .
-                                                                     [((type . "text")
-                                                                       (text . "hist-1"))]))))))]))))))
-          (dsh-emacs--load-history "sess-load"))
+        ;; The `session/follow' snapshot is the opening history seed now: it
+        ;; renders the records and backfills the per-session M-p/M-n recall.
+        (dsh-emacs-events--follow-snapshot
+         (current-buffer)
+         '((type . "snapshot")
+           (cursor . 10)
+           (records .
+                    [((type . "event")
+                      (event . ((type . "user/message") (seq . 10)
+                                (data . ((content .
+                                          [((type . "text")
+                                            (text . "hist-1"))]))))))])))
         (dsh-emacs-input-history-back)
-        (dsh-test-assert "load-history-seeds-recall"
+        (dsh-test-assert "follow-snapshot-seeds-recall"
           (and (string= "hist-1" (dsh-emacs--get-input))
                (equal '("hist-1")
                       (gethash "sess-load" dsh-emacs--input-history-by-session)))))
@@ -3110,8 +3210,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (dsh-test-pass "thinking-block-body-gets-face"))))
     (kill-buffer buf)))
 
-;; --- 测试 57: 协议层 workspace-list / workspace-result / model-selection-result ---
-;; workspace.list 顶层响应：items 数组→列表、archivedSessionIds 数组→列表
+;; --- 测试 57: 协议层 workspace 基线 / workspace-result / model-selection-result ---
+;; workspace/follow 基线顶层值：items 数组→列表、archivedSessionIds 数组→列表
 (let* ((value '((items . [((workspaceId . "w1") (title . "WS A")
                            (path . "/tmp/a") (sessionIds . ["s1" "s2"])
                            (createdAt . "2026-08-25T00:00:00Z")
@@ -3142,7 +3242,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                       "w2"))
     (dsh-test-pass "protocol-workspace-list-conversion")))
 
-;; workspace.create 响应：{workspace, created}
+;; workspace/create 响应：{workspace, created}
 (let* ((value '((workspace . ((workspaceId . "w3") (title . "New")
                               (path . "/tmp/new") (sessionIds . [])
                               (createdAt . "x") (updatedAt . "y")))
@@ -3155,7 +3255,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                       "New"))
     (dsh-test-pass "protocol-workspace-create-result")))
 
-;; workspace.rename / insertSessionBefore 响应：只有 {workspace}，created 为 nil
+;; workspace/rename / insertSessionBefore 响应：只有 {workspace}，created 为 nil
 (let* ((r (dsh-protocol-workspace-result--from-alist
            '((workspace . ((workspaceId . "w1") (title . "Renamed"))))))
        (d (dsh-protocol-workspace-result-created r)))
@@ -3165,7 +3265,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
              (null d))
     (dsh-test-pass "protocol-workspace-rename-result")))
 
-;; session.selectModel 响应：{selected}
+;; session/selectModel 响应：{selected}
 (let* ((r (dsh-protocol-model-selection-result--from-alist
            '((selected . ((provider . "deepseek")
                           (model . "deepseek-chat")
@@ -3178,7 +3278,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                       "high"))
     (dsh-test-pass "protocol-model-selection-result")))
 
-;; --- 测试 58: 归档会话（workspace.archiveSession）---
+;; --- 测试 58: 归档会话（workspace/archiveSession）---
 ;; server 无 session.delete，唯一移除途径是归档；响应为完整归档集。
 (let ((listed nil)
       (calls nil)
@@ -3187,7 +3287,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
   (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
              (lambda (method params cb)
                (push (list method params) calls)
-               (when (string= method "workspace.archiveSession")
+               (when (string= method "workspace/archiveSession")
                  (funcall cb t '((archivedSessionIds . ["s1" "s2"]))))))
             ((symbol-function 'dsh-emacs-list-sessions)
              (lambda () (setq listed t))))
@@ -3195,8 +3295,10 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (let* ((call (car calls))
            (method (car call))
            (params (cadr call)))
-      (when (and (string= "workspace.archiveSession" method)
-                 (string= "s3" (cdr (assq 'sessionId params))))
+      (when (and (string= "workspace/archiveSession" method)
+                 (string= "s3"
+                          (cdr (assq 'sessionId
+                                     (cdr (assq 'request params))))))
         (dsh-test-pass "archive-passes-session-id")))
     (when (and (gethash "s1" dsh-emacs--archived-sessions)
                (gethash "s2" dsh-emacs--archived-sessions)
@@ -3226,10 +3328,11 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                    (lambda () nil)))
           (dsh-emacs-rename-session-at-point)
           (let* ((call (car calls))
-                 (params (cadr call)))
-            (when (and (string= "session.rename" (car call))
-                       (string= "sid-1" (cdr (assq 'sessionId params)))
-                       (string= "新标题" (cdr (assq 'title params))))
+                 (params (cadr call))
+                 (req (cdr (assq 'request params))))
+            (when (and (string= "session/rename" (car call))
+                       (string= "sid-1" (cdr (assq 'sessionId req)))
+                       (string= "新标题" (cdr (assq 'title req))))
               (dsh-test-pass "rename-at-point-uses-point-session")))))
     (kill-buffer buf)))
 
@@ -3350,13 +3453,13 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (call-interactively #'dsh-emacs-new-session)
             (let* ((call (car calls))
                    (params (cadr call)))
-              (when (and (string= "session.create" (car call))
+              (when (and (string= "session/create" (car call))
                          (string= "w-empty"
-                                  (cdr (assq 'workspaceId params)))
-                         (null (assq 'cwd params)))
+                                  (cdr (assq 'workspaceId (cdr (assq 'request params)))))
+                         (null (assq 'cwd (cdr (assq 'request params)))))
                 (dsh-test-pass "new-session-in-workspace-uses-workspace-id"))
               ;; 新会话 buffer 的 default-directory 应为 workspace 的 path
-              (when (or (null (cdr (assq 'workspaceId params)))
+              (when (or (null (cdr (assq 'workspaceId (cdr (assq 'request params)))))
                         (string-suffix-p "/tmp/dsh-empty-ws"
                                          (directory-file-name
                                           default-directory)))
@@ -3382,9 +3485,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (call-interactively #'dsh-emacs-new-session)
             (let* ((call (car calls))
                    (params (cadr call)))
-              (when (and (string= "session.create" (car call))
-                         (null (assq 'workspaceId params))
-                         (assq 'cwd params))
+              (when (and (string= "session/create" (car call))
+                         (null (assq 'workspaceId (cdr (assq 'request params))))
+                         (assq 'cwd (cdr (assq 'request params))))
                 (dsh-test-pass "new-session-outside-workspace-ungrouped")))))
       (kill-buffer buf)))
 
@@ -3411,10 +3514,10 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (call-interactively #'dsh-emacs-new-session)
             (let* ((call (car calls))
                    (params (cadr call)))
-              (when (and (string= "session.create" (car call))
+              (when (and (string= "session/create" (car call))
                          (string= "w-here"
-                                  (cdr (assq 'workspaceId params)))
-                         (null (assq 'cwd params)))
+                                  (cdr (assq 'workspaceId (cdr (assq 'request params)))))
+                         (null (assq 'cwd (cdr (assq 'request params)))))
                 (dsh-test-pass "new-session-in-chat-uses-session-workspace")))))
       (kill-buffer buf)))
 
@@ -3437,9 +3540,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (call-interactively #'dsh-emacs-new-session)
             (let* ((call (car calls))
                    (params (cadr call)))
-              (when (and (string= "session.create" (car call))
-                         (null (assq 'workspaceId params))
-                         (assq 'cwd params))
+              (when (and (string= "session/create" (car call))
+                         (null (assq 'workspaceId (cdr (assq 'request params))))
+                         (assq 'cwd (cdr (assq 'request params))))
                 (dsh-test-pass "new-session-in-ungrouped-chat-uses-cwd")))))
       (kill-buffer buf)))
 
@@ -3486,9 +3589,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         dsh-emacs--workspaces old-ws))
 
 ;; --- 测试 63: session/title 事件实时更新标题（server 自动重命名） ---
-;; server 在前 1-2 轮对话后自动重命名（摘要标题），通过 mux 流广播
+;; server 在前 1-2 轮对话后自动重命名（摘要标题），通过 follow 流广播
 ;; `session/title' 事件；emacs 侧应实时：更新缓存 title-value、重命名
-;; 已打开的 chat buffer、重绘 session 列表——不等 session.list 刷新。
+;; 已打开的 chat buffer、重绘 session 列表——不等 session/list 刷新。
 (let* ((old-sessions dsh-emacs--sessions)
        (old-buffers dsh-emacs--chat-buffers)
        (item (list (cons 'sessionId "sess-title")
@@ -3499,9 +3602,10 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                                      (list (cons 'title "旧标题")))))))
        (chat-buf (get-buffer-create " *dsh-test-title-chat*"))
        (list-buf (get-buffer-create "*dsh-sessions*"))
+       (proc (make-pipe-process :name "t-title" :buffer nil))
        (old-sessions-buffer dsh-emacs-sessions-buffer)
-       (json (concat "{\"payload\":{\"type\":\"session/event\","
-                     "\"sessionId\":\"sess-title\","
+       (json (concat "{\"type\":\"item\",\"streamId\":\"t1\","
+                     "\"value\":{\"type\":\"event\","
                      "\"event\":{\"type\":\"session/title\","
                      "\"data\":{\"title\":\"自动摘要标题\"}}}}")))
   (unwind-protect
@@ -3527,10 +3631,10 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                 (dsh-emacs-session--filter-ws-title nil))
             (dsh-emacs-session--render))
           (setq dsh-emacs-sessions-buffer (buffer-name)))
-        ;; 调 dispatch-json：mock `--chat' 返回 chat-buf。
-        (cl-letf (((symbol-function 'dsh-emacs-events--chat)
-                   (lambda (_p) chat-buf)))
-          (dsh-emacs-events--dispatch-json 'process json))
+        ;; follow 流帧经 --dispatch-json：进程绑定 follow-stream-id 与 chat-buf。
+        (process-put proc 'dsh-emacs-follow-stream-id "t1")
+        (process-put proc 'dsh-emacs-chat-buffer chat-buf)
+        (dsh-emacs-events--dispatch-json proc json)
         ;; 1) 缓存 title-value 已更新
         (let ((cached (cl-find-if
                        (lambda (s)
@@ -3553,10 +3657,11 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (setq dsh-emacs--chat-buffers old-buffers)
     (setq dsh-emacs-sessions-buffer old-sessions-buffer)
     (when (buffer-live-p chat-buf) (kill-buffer chat-buf))
-    (when (buffer-live-p list-buf) (kill-buffer list-buf))))
+    (when (buffer-live-p list-buf) (kill-buffer list-buf))
+    (when (process-live-p proc) (delete-process proc))))
 
 ;; --- 测试 64: 新建 workspace session 归入该 workspace，标题事件清 blank ---
-;; 回归：session.create 回调曾只 open 会话，新会话未进缓存/workspace
+;; 回归：session/create 回调曾只 open 会话，新会话未进缓存/workspace
 ;; session-ids → 分组落 ungrouped，且 session/title 事件找不到缓存 item、
 ;; blank 不清 → 自动重命名不生效。
 (let* ((old-sessions dsh-emacs--sessions)
@@ -3634,11 +3739,12 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (setq dsh-emacs--chat-buffers old-buffers)
     (when (buffer-live-p chat-buf) (kill-buffer chat-buf))))
 
-;; --- 测试 64b: host 流先到（session-added 入缓存）后 RPC 回调 ---
+;; --- 测试 64b: $events api-session/added 先到（session 入缓存）后 RPC 回调 ---
 ;; 回归：cache-new-session 曾用同一个 not-cached 守卫包住“入缓存 + workspace
-;; attach”。host 流的 session-added 先于 session.create 回调到达时，session
-;; 已在缓存 → 整个 when 跳过 → workspace 没 attach，新会话落到 Ungrouped。
-;; 现在 attach 独立于入缓存执行（幂等），竞态窗口不再丢归属。
+;; attach”。core 流（$events 的 api-session/added emit）先于 session/create
+;; 回调到达时，session 已在缓存 → 整个 when 跳过 → workspace 没 attach，新
+;; 会话落到 Ungrouped。现在 attach 独立于入缓存执行（幂等），竞态窗口不再
+;; 丢归属。
 (let* ((old-sessions dsh-emacs--sessions)
        (old-workspaces dsh-emacs--workspaces)
        (old-sessions-buffer dsh-emacs-sessions-buffer)
@@ -3653,12 +3759,13 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (setq dsh-emacs--sessions nil)
         (setq dsh-emacs--workspaces (list ws))
         (setq dsh-emacs-sessions-buffer (buffer-name list-buf))
-        ;; 1) host 事件先到：session-added 把 s-new 入 sessions 缓存（无归属）
+        ;; 1) core 事件先到：api-session/added 把 s-new 入 sessions 缓存（无归属）
         (dsh-emacs-events--host-dispatch
          'host-proc
-         (concat "{\"payload\":{\"type\":\"host/session-added\","
-                 "\"sessionId\":\"s-new\",\"blank\":true,"
-                 "\"cwd\":\"/tmp/race-ws\"}}"))
+         (concat "{\"type\":\"item\",\"streamId\":\"c1\","
+                 "\"value\":{\"type\":\"emit\",\"event\":\"api-session/added\","
+                 "\"args\":[{\"sessionId\":\"s-new\",\"blank\":true,"
+                 "\"cwd\":\"/tmp/race-ws\"}]}}"))
         ;; 2) RPC 回调随后到达：cache-new-session 必须仍然 attach 到 workspace
         (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                    (lambda (_method params cb)
@@ -3751,18 +3858,19 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
               (call-interactively #'dsh-emacs-new-session))
             (let* ((call (car calls))
                    (params (cadr call)))
-              (when (and (string= "session.create" (car call))
+              (when (and (string= "session/create" (car call))
                          (string= "w-mid"
-                                  (cdr (assq 'workspaceId params)))
-                         (null (assq 'cwd params)))
+                                  (cdr (assq 'workspaceId (cdr (assq 'request params)))))
+                         (null (assq 'cwd (cdr (assq 'request params)))))
                 (dsh-test-pass "new-session-on-workspace-session-row-uses-workspace-id"))))))
     (setq dsh-emacs--sessions old-sessions)
     (setq dsh-emacs--workspaces old-workspaces)
     (when (buffer-live-p buf) (kill-buffer buf))))
 
-;; --- 测试 66: host 事件流（/api/events.host）实时更新缓存 ---
-;; workspace/session/归档变化经 host 流广播（镜像 dsh web 的 WorkspaceBrowser
-;; 实时订阅）。帧 envelope：{payload: {type, ...}}（与 mux 相同）。
+;; --- 测试 66: core 流（$events + workspace/follow）实时更新缓存 ---
+;; workspace/session/归档变化经 core 连接广播（镜像 dsh web 的
+;; WorkspaceBrowser 实时订阅）。帧 envelope：{type:'item', value:{...}}
+;; （/api/remote.mux 逻辑流帧，与 mux 相同）。
 (let* ((old-sessions dsh-emacs--sessions)
        (old-workspaces dsh-emacs--workspaces)
        (old-archived dsh-emacs--archived-sessions)
@@ -3778,10 +3886,11 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
           (insert "placeholder"))
         (setq dsh-emacs-sessions-buffer (buffer-name list-buf))
 
-        ;; 1) host/workspace-changed：新增 workspace 并入缓存（含 sessionIds）
+        ;; 1) workspace/follow upsert：新增 workspace 并入缓存（含 sessionIds）
         (dsh-emacs-events--host-dispatch
          'host-proc
-         (concat "{\"payload\":{\"type\":\"host/workspace-changed\","
+         (concat "{\"type\":\"item\",\"streamId\":\"c1\","
+                 "\"value\":{\"type\":\"upsert\","
                  "\"workspace\":{\"workspaceId\":\"w-live\","
                  "\"path\":\"/tmp/live\",\"title\":\"Live WS\","
                  "\"sessionIds\":[],\"createdAt\":\"2026-01-01\","
@@ -3791,16 +3900,17 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                      (equal "w-live" (dsh-protocol-workspace-workspace-id ws))
                      (equal "Live WS" (dsh-protocol-workspace-title ws)))
             (dsh-test-pass "host-workspace-changed-upserts")))
-        ;; workspace-changed 还触发列表重绘（placeholder 已被真正内容覆盖）
+        ;; upsert 还触发列表重绘（placeholder 已被真正内容覆盖）
         (when (not (string-match-p "placeholder"
                                    (with-current-buffer list-buf
                                      (buffer-string))))
           (dsh-test-pass "host-workspace-changed-repaints"))
 
-        ;; 2) host/workspace-changed：替换已有 workspace（成员变化）
+        ;; 2) workspace/follow upsert：替换已有 workspace（成员变化）
         (dsh-emacs-events--host-dispatch
          'host-proc
-         (concat "{\"payload\":{\"type\":\"host/workspace-changed\","
+         (concat "{\"type\":\"item\",\"streamId\":\"c1\","
+                 "\"value\":{\"type\":\"upsert\","
                  "\"workspace\":{\"workspaceId\":\"w-live\","
                  "\"path\":\"/tmp/live\",\"title\":\"Live WS\","
                  "\"sessionIds\":[\"s-1\"],\"createdAt\":\"2026-01-01\","
@@ -3812,64 +3922,69 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                             (dsh-protocol-workspace-session-ids ws)))
             (dsh-test-pass "host-workspace-changed-replaces-members")))
 
-        ;; 3) host/workspace-removed：删除缓存项
+        ;; 3) workspace/follow remove：删除缓存项
         (dsh-emacs-events--host-dispatch
          'host-proc
-         (concat "{\"payload\":{\"type\":\"host/workspace-removed\","
-                 "\"workspaceId\":\"w-live\"}}"))
+         (concat "{\"type\":\"item\",\"streamId\":\"c1\","
+                 "\"value\":{\"type\":\"remove\",\"workspaceId\":\"w-live\"}}"))
         (when (null dsh-emacs--workspaces)
           (dsh-test-pass "host-workspace-removed-drops"))
 
-        ;; 4) host/archived-sessions-changed：替换归档集合
+        ;; 4) workspace/follow archived：替换归档集合
         (setq dsh-emacs--sessions
               (dsh-emacs-test--session-items
                (list (list (cons 'sessionId "s-archive")
                            (cons 'blank :json-false)))))
         (dsh-emacs-events--host-dispatch
          'host-proc
-         (concat "{\"payload\":{\"type\":\"host/archived-sessions-changed\","
+         (concat "{\"type\":\"item\",\"streamId\":\"c1\","
+                 "\"value\":{\"type\":\"archived\","
                  "\"archivedSessionIds\":[\"s-archive\"]}}"))
         (let ((archived dsh-emacs--archived-sessions))
           (when (and (hash-table-p archived)
                      (gethash "s-archive" archived))
             (dsh-test-pass "host-archived-sessions-changed")))
 
-        ;; 5) host/session-added：新会话进缓存（blank 占位）
+        ;; 5) $events api-session/added：新会话进缓存（blank 占位）
         (setq dsh-emacs--sessions nil)
         (dsh-emacs-events--host-dispatch
          'host-proc
-         (concat "{\"payload\":{\"type\":\"host/session-added\","
-                 "\"sessionId\":\"s-new\",\"blank\":true,"
-                 "\"cwd\":\"/tmp/new\"}}"))
+         (concat "{\"type\":\"item\",\"streamId\":\"c1\","
+                 "\"value\":{\"type\":\"emit\",\"event\":\"api-session/added\","
+                 "\"args\":[{\"sessionId\":\"s-new\",\"blank\":true,"
+                 "\"cwd\":\"/tmp/new\"}]}}"))
         (let ((item (dsh-emacs--chat-session-item "s-new")))
           (when (and item (equal t (dsh-protocol-session-blank item)))
             (dsh-test-pass "host-session-added-caches")))
-        ;; session-added 幂等：再次广播不产生重复行
+        ;; api-session/added 幂等：再次广播不产生重复行
         (dsh-emacs-events--host-dispatch
          'host-proc
-         (concat "{\"payload\":{\"type\":\"host/session-added\","
-                 "\"sessionId\":\"s-new\",\"blank\":true}}"))
+         (concat "{\"type\":\"item\",\"streamId\":\"c1\","
+                 "\"value\":{\"type\":\"emit\",\"event\":\"api-session/added\","
+                 "\"args\":[{\"sessionId\":\"s-new\",\"blank\":true}]}}"))
         (when (= 1 (length dsh-emacs--sessions))
           (dsh-test-pass "host-session-added-idempotent"))
 
-        ;; 6) host/session-status：更新 running 标志并重绘
+        ;; 6) $events api-session/status：更新 running 标志并重绘
         (dsh-emacs-events--host-dispatch
          'host-proc
-         (concat "{\"payload\":{\"type\":\"host/session-status\","
-                 "\"sessionId\":\"s-new\",\"running\":true}}"))
+         (concat "{\"type\":\"item\",\"streamId\":\"c1\","
+                 "\"value\":{\"type\":\"emit\",\"event\":\"api-session/status\","
+                 "\"args\":[\"s-new\",true]}}"))
         (let ((item (dsh-emacs--chat-session-item "s-new")))
           (when (and item (equal t (dsh-protocol-session-running item)))
             (dsh-test-pass "host-session-status-updates")))
 
-        ;; 7) host/session-removed：删除缓存行
+        ;; 7) $events api-session/removed：删除缓存行
         (dsh-emacs-events--host-dispatch
          'host-proc
-         (concat "{\"payload\":{\"type\":\"host/session-removed\","
-                 "\"sessionId\":\"s-new\"}}"))
+         (concat "{\"type\":\"item\",\"streamId\":\"c1\","
+                 "\"value\":{\"type\":\"emit\",\"event\":\"api-session/removed\","
+                 "\"args\":[\"s-new\"]}}"))
         (when (null dsh-emacs--sessions)
           (dsh-test-pass "host-session-removed-drops"))
 
-        ;; 8) host/workspace-order-changed：按 server 顺序重排
+        ;; 8) workspace/follow order：按 server 顺序重排
         (setq dsh-emacs--workspaces
               (list (dsh-protocol-workspace--from-alist
                      (list (cons 'workspaceId "w-a") (cons 'title "A")
@@ -3879,18 +3994,20 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                            (cons 'path "/b") (cons 'sessionIds [])))))
         (dsh-emacs-events--host-dispatch
          'host-proc
-         (concat "{\"payload\":{\"type\":\"host/workspace-order-changed\","
+         (concat "{\"type\":\"item\",\"streamId\":\"c1\","
+                 "\"value\":{\"type\":\"order\","
                  "\"workspaceIds\":[\"w-b\",\"w-a\"]}}"))
         (let ((order (mapcar #'dsh-protocol-workspace-workspace-id
                              dsh-emacs--workspaces)))
           (when (equal '("w-b" "w-a") order)
             (dsh-test-pass "host-workspace-order-changed")))
 
-        ;; 9) 未知 host 帧类型（如 host/remote-event）安全忽略
+        ;; 9) 未知逻辑帧类型（不认识的 emit/其他）安全忽略
         (dsh-emacs-events--host-dispatch
          'host-proc
-         (concat "{\"payload\":{\"type\":\"host/remote-event\","
-                 "\"event\":\"some.event\",\"args\":[]}}"))
+         (concat "{\"type\":\"item\",\"streamId\":\"c1\","
+                 "\"value\":{\"type\":\"emit\",\"event\":\"some.event\","
+                 "\"args\":[]}}"))
         (when (= 2 (length dsh-emacs--workspaces))
           (dsh-test-pass "host-unknown-frame-ignored"))
 
@@ -3907,8 +4024,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                      (lambda (_p) nil)))
             (dsh-emacs-events--dispatch-json
              'host-proc
-             (concat "{\"payload\":{\"type\":\"host/session-added\","
-                     "\"sessionId\":\"s-gated\",\"blank\":true}}")))
+             (concat "{\"type\":\"item\",\"streamId\":\"c1\","
+                     "\"value\":{\"type\":\"emit\",\"event\":\"api-session/added\","
+                     "\"args\":[{\"sessionId\":\"s-gated\",\"blank\":true}]}}")))
           (when (dsh-emacs--chat-session-item "s-gated")
             (dsh-test-pass "host-dispatch-gated-by-property")))
     (setq dsh-emacs--sessions old-sessions)
@@ -3917,8 +4035,56 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (setq dsh-emacs-sessions-buffer old-sessions-buffer)
     (when (buffer-live-p list-buf) (kill-buffer list-buf)))))
 
+;; --- 测试 66b: workspace/follow + session/control baseline 帧按真实嵌套正确分派 ---
+;; 回归：`workspace/follow' 与 `session/control' 的 baseline 帧与增量帧（upsert/
+;; order/queue/projection 把字段放在帧顶层）不同——逻辑帧是
+;; `{type:'baseline', value:{...}}'，payload 再内嵌一层（workspace/follow:
+;; value.items + value.archivedSessionIds；session/control: value.queues/jobs/
+;; projections）。host-item 曾只在帧顶层找 `items'（恒 nil），于是每条 baseline
+;; 都被误分派到 session/control，`dsh-emacs--workspaces' 永不被播种——会话列表
+;; 因此不按 workspace 分组（全部落 Ungrouped）。
+(let* ((old-workspaces dsh-emacs--workspaces)
+       (old-archived dsh-emacs--archived-sessions)
+       (old-sessions-buffer dsh-emacs-sessions-buffer))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs--workspaces nil)
+        (setq dsh-emacs--archived-sessions nil)
+        (setq dsh-emacs-sessions-buffer nil) ; host-repaint 无列表缓冲则跳过
+        ;; 1) workspace/follow baseline（真实线上形状：payload 在 value 之下）
+        (dsh-emacs-events--host-dispatch
+         'host-proc
+         (concat "{\"type\":\"item\",\"streamId\":\"c1\","
+                 "\"value\":{\"type\":\"baseline\",\"value\":{\"items\":"
+                 "[{\"workspaceId\":\"w-b1\",\"path\":\"/x\","
+                 "\"title\":\"B WS\",\"sessionIds\":[\"s1\",\"s2\"],"
+                 "\"createdAt\":\"2026-01-01\",\"updatedAt\":\"2026-01-01\"}],"
+                 "\"archivedSessionIds\":[\"s-arch\"]}}}"))
+        (let ((ws (car dsh-emacs--workspaces)))
+          (dsh-test-assert "host-workspace-baseline-seeds-workspaces"
+            ws
+            (equal "w-b1" (dsh-protocol-workspace-workspace-id ws))
+            (equal '("s1" "s2") (dsh-protocol-workspace-session-ids ws))
+            (equal "B WS" (dsh-protocol-workspace-title ws)))
+          (dsh-test-assert "host-workspace-baseline-seeds-archived"
+            (gethash "s-arch" dsh-emacs--archived-sessions)))
+        ;; 2) session/control baseline（queues/jobs/projections）不再误吞
+        ;;    workspace baseline：workspace 缓存保持不变（不被清空/改写）
+        (dsh-emacs-events--host-dispatch
+         'host-proc
+         (concat "{\"type\":\"item\",\"streamId\":\"c2\","
+                 "\"value\":{\"type\":\"baseline\",\"value\":{\"queues\":{},"
+                 "\"jobs\":{},\"projections\":{}}}}}"))
+        (let ((ids (mapcar #'dsh-protocol-workspace-workspace-id
+                           dsh-emacs--workspaces)))
+          (dsh-test-assert "host-control-baseline-leaves-workspaces"
+            (equal '("w-b1") ids))))
+    (setq dsh-emacs--workspaces old-workspaces)
+    (setq dsh-emacs--archived-sessions old-archived)
+    (setq dsh-emacs-sessions-buffer old-sessions-buffer)))
+
 ;; --- 测试 67: workspace 排序 move-workspace (insertBefore) ---
-;; web 端拖拽 workspace 排序调用 workspace.insertBefore（always RPC）；
+;; web 端拖拽 workspace 排序调用 workspace/insertBefore（always RPC）；
 ;; emacs 用 M 键命令完成同款排序。beforeWorkspaceId 缺省 = 移到末尾。
 (let* ((old-workspaces dsh-emacs--workspaces)
        (old-sessions dsh-emacs--sessions)
@@ -3948,9 +4114,10 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (dsh-emacs-move-workspace "w-c" "w-a"))
           (let* ((call (car calls))
                  (params (cadr call)))
-            (when (and (string= "workspace.insertBefore" (car call))
-                       (string= "w-c" (cdr (assq 'workspaceId params)))
-                       (string= "w-a" (cdr (assq 'beforeWorkspaceId params))))
+            (when (and (string= "workspace/insertBefore" (car call))
+                       (string= "w-c" (cdr (assq 'workspaceId (cdr (assq 'request params)))))
+                       (string= "w-a" (cdr (assq 'beforeWorkspaceId
+                                                 (cdr (assq 'request params))))))
               (dsh-test-pass "move-workspace-sends-before-workspace-id")))
           ;; 回调按响应 workspaceIds 重排缓存（w-c 置顶）
           (let ((order (mapcar #'dsh-protocol-workspace-workspace-id
@@ -3970,9 +4137,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (dsh-emacs-move-workspace "w-a" nil))
           (let* ((call (car calls))
                  (params (cadr call)))
-            (when (and (string= "workspace.insertBefore" (car call))
-                       (string= "w-a" (cdr (assq 'workspaceId params)))
-                       (null (assq 'beforeWorkspaceId params)))
+            (when (and (string= "workspace/insertBefore" (car call))
+                       (string= "w-a" (cdr (assq 'workspaceId (cdr (assq 'request params)))))
+                       (null (assq 'beforeWorkspaceId (cdr (assq 'request params)))))
               (dsh-test-pass "move-workspace-to-end-omits-before")))
           (let ((order (mapcar #'dsh-protocol-workspace-workspace-id
                                dsh-emacs--workspaces)))
@@ -4006,8 +4173,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                      (list (cons 'workspaceId "w2") (cons 'title "Two")
                            (cons 'path "/two") (cons 'sessionIds [])))))
 
-        ;; 场景 1：刷新在途时 workspace-changed/removed 帧到达，迟到快照不含
-        ;; 它们 → drain 后新 workspace 仍在、被删的不复现。
+        ;; 场景 1：刷新在途时 workspace/follow 的 upsert/remove 帧到达，迟到
+        ;; 快照不含它们 → drain 后新 workspace 仍在、被删的不复现。
         (setq dsh-emacs--host-refresh-depth 0
               dsh-emacs--host-refresh-frames nil)
         (dsh-emacs-events--host-refresh-begin)   ; list-workspaces 发出
@@ -4091,9 +4258,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
 
 ;; --- 测试 69: 多会话并行时转录事件按缓冲归属路由（守卫不得用全局 current-session） ---
 ;; 同时打开会话 A、B 后，全局 dsh-emacs--current-session 指向最后打开的 B；
-;; A 缓冲的 mux 流收到 A 的 transcript 事件时，归属判定必须看 buffer-local
-;; dsh-emacs--buffer-session（open-session 时 setq-local），否则 A 的实时转录
-;; 会被全局 current-session（“B”）吞掉。反向：B 的事件也只到 B。
+;; A 缓冲的 follow 流收到 A 的 transcript 事件时，归属判定必须看该进程绑定的
+;; chat 缓冲（open-session 时按进程记录），否则 A 的实时转录会被全局
+;; current-session（“B”）吞掉。反向：B 的事件也只到 B。
 (let* ((chat-a (let ((b (generate-new-buffer " *t69-a*")))
                  (with-current-buffer b
                    (setq-local dsh-emacs--buffer-session "sess-a"))
@@ -4110,7 +4277,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
   (unwind-protect
       (progn
         (process-put proc-a 'dsh-emacs-chat-buffer chat-a)
+        (process-put proc-a 'dsh-emacs-follow-stream-id "fa")
         (process-put proc-b 'dsh-emacs-chat-buffer chat-b)
+        (process-put proc-b 'dsh-emacs-follow-stream-id "fb")
         (setq dsh-emacs--current-session "sess-b") ; 后开的会话
         (cl-letf (((symbol-function 'dsh-emacs-render-event)
                    (lambda (&rest _)
@@ -4119,24 +4288,26 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                        (setq rendered-b t))))
                   ((symbol-function 'dsh-emacs-render--consume-pending-user-message)
                    (lambda (&rest _) nil)))
-          ;; A 的流事件 → 应渲染到 A（不被全局 “sess-b” 吞掉）
+          ;; A 的 follow 事件 → 应渲染到 A（不被全局 “sess-b” 吞掉）
           (dsh-emacs-events--dispatch-json
            proc-a
            (json-encode
-            '((payload . ((type . "session/event")
-                          (sessionId . "sess-a")
-                          (event . ((type . "assistant/message")
-                                    (sessionId . "sess-a"))))))))
+            '((type . "item")
+              (streamId . "fa")
+              (value . ((type . "event")
+                        (event . ((type . "assistant/message")
+                                  (sessionId . "sess-a"))))))))
           (when (and rendered-a (null rendered-b))
             (dsh-test-pass "parallel-sessions-mux-event-routes-to-owner"))
-          ;; B 的流事件 → 仍只到 B，且不因全局 current-session 变化受影响
+          ;; B 的 follow 事件 → 仍只到 B，且不因全局 current-session 变化受影响
           (dsh-emacs-events--dispatch-json
            proc-b
            (json-encode
-            '((payload . ((type . "session/event")
-                          (sessionId . "sess-b")
-                          (event . ((type . "assistant/message")
-                                    (sessionId . "sess-b"))))))))
+            '((type . "item")
+              (streamId . "fb")
+              (value . ((type . "event")
+                        (event . ((type . "assistant/message")
+                                  (sessionId . "sess-b"))))))))
           (when (and rendered-a rendered-b)
             (dsh-test-pass "parallel-sessions-both-streams-render"))))
     (setq dsh-emacs--current-session old-session)
@@ -4170,7 +4341,10 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (with-current-buffer buf-a
           (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                      (lambda (method params cb)
-                       (push (list method (cdr (assq 'sessionId params))) sent)
+                       (push (list method
+                                   (cdr (assq 'sessionId
+                                              (cdr (assq 'request params)))))
+                             sent)
                        (funcall cb t '((accepted . t)))))
                     ((symbol-function 'dsh-emacs--get-input)
                      (lambda () "from A"))
@@ -4178,32 +4352,35 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                      (lambda (&rest _) nil)))
             (dsh-emacs--submit-prompt "from A"))
           (when (and sent
-                     (equal (list "session.prompt" "sess-a") (car sent)))
+                     (equal (list "session/prompt" "sess-a") (car sent)))
             (dsh-test-pass "send-in-inactive-buffer-targets-its-own-session")))
-        ;; 场景 2：打断 → session.cancel 同样带 sess-a
+        ;; 场景 2：打断 → session/cancel 同样带 sess-a
         (with-current-buffer buf-a
           (setq sent nil)
           (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                      (lambda (method params cb)
-                       (push (list method (cdr (assq 'sessionId params))) sent)
+                       (push (list method
+                                   (cdr (assq 'sessionId
+                                              (cdr (assq 'request params)))))
+                             sent)
                        (funcall cb t nil)))
                     ((symbol-function 'dsh-emacs--ml-busy-set)
                      (lambda (&rest _) nil)))
             (dsh-emacs-interrupt-turn))
           (when (and sent
-                     (equal (list "session.cancel" "sess-a") (car sent)))
+                     (equal (list "session/cancel" "sess-a") (car sent)))
             (dsh-test-pass "interrupt-in-inactive-buffer-targets-own-session")))
-        ;; 场景 3：刷新 → load-history 用 sess-a
+        ;; 场景 3：刷新 → 断连并重连当前 chat 的 follow 流（快照补缝）
         (with-current-buffer buf-a
           (setq sent nil)
-          (cl-letf (((symbol-function 'dsh-emacs--load-history)
-                     (lambda (session-id)
-                       (push (list "load-history" session-id) sent)))
-                    ((symbol-function 'dsh-emacs--rpc-async)
-                     (lambda (&rest _) nil)))
+          (cl-letf (((symbol-function 'dsh-emacs-events-disconnect)
+                     (lambda () (push 'disconnect sent)))
+                    ((symbol-function 'dsh-emacs-events-connect)
+                     (lambda (target) (push (list "connect" target) sent))))
             (dsh-emacs-refresh))
           (when (and sent
-                     (equal (list "load-history" "sess-a") (car sent)))
+                     (memq 'disconnect sent)
+                     (equal (list "connect" buf-a) (car sent)))
             (dsh-test-pass "refresh-in-inactive-buffer-targets-own-session")))
         ;; 场景 4：无归属上下文（如 *dsh-sessions* 列表 buffer）→ 全局兜底
         (with-temp-buffer
@@ -4214,15 +4391,15 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (kill-buffer buf-a)
     (kill-buffer buf-b)))
 
-;; --- 测试 70b: 非最后打开的 chat buffer 里 C-c C-r 刷新 → 历史渲染进当前缓冲 ---
-;; 回归：`dsh-emacs--load-history' 曾把渲染目标取成全局
-;; `dsh-emacs--current-buffer'（只有 open-session 更新它）。打开 A 再打开 B 后
-;; 全局指向 B；用户 switch-to-buffer 切回 A 按 C-c C-r，session-id 从 A 的
-;; buffer-local 解析（对），但历史被渲染进 B 的 chat buffer —— A 的文本
-;; 出现在别的会话里。渲染目标必须绑定当前缓冲，与 session-id 同源。
+;; --- 测试 70b: 非最后打开的 chat buffer 里 C-c C-r 刷新 → 重连当前缓冲的流 ---
+;; 回归：刷新曾把历史渲染目标取成全局 `dsh-emacs--current-buffer'（只有
+;; open-session 更新它）。打开 A 再打开 B 后全局指向 B；用户 switch-to-buffer
+;; 切回 A 按 C-c C-r，session-id 从 A 的 buffer-local 解析（对），但历史被渲染
+;; 进 B 的 chat buffer —— A 的文本出现在别的会话里。0.1.2 起刷新 = 断连并
+;; 重连当前缓冲自己的 `session/follow' 流，目标必须仍是当前缓冲。
 (let* ((buf-a (generate-new-buffer " *t70b-a*"))
        (buf-b (generate-new-buffer " *t70b-b*"))
-       (rendered nil)
+       (targets nil)
        (old-session dsh-emacs--current-session)
        (old-buffer dsh-emacs--current-buffer))
   (unwind-protect
@@ -4236,22 +4413,17 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (setq dsh-emacs--current-session "sess-b")
         (setq dsh-emacs--current-buffer buf-b)
         (with-current-buffer buf-a
-          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
-                     (lambda (_method params cb)
-                       (funcall cb t
-                               `((events .
-                                  [((event . ((type . "user/message")
-                                              (seq . 5)
-                                              (data . ((content . "from A"))))))])))))
-                    ((symbol-function 'dsh-emacs-render-history-events)
-                     (lambda (_events _stream)
-                       (push (current-buffer) rendered)
-                       0)))
+          (cl-letf (((symbol-function 'dsh-emacs-events-disconnect)
+                     (lambda () (push 'disconnect targets)))
+                    ((symbol-function 'dsh-emacs-events-connect)
+                     (lambda (target) (push (list "connect" target) targets))))
             (dsh-emacs-refresh)))
         (dsh-test-assert "refresh-from-inactive-chat-renders-into-own-buffer"
-          (and rendered (eq buf-a (car rendered)))
-          ;; 且绝不能渲染进最后打开的 B
-          (null (memq buf-b rendered))))
+          ;; 重连目标是发起刷新的 A，绝不是最后打开的 B
+          (and targets
+               (eq buf-a (cadr (car targets)))
+               (memq 'disconnect targets))
+          (null (memq (list "connect" buf-b) targets))))
     (setq dsh-emacs--current-session old-session)
     (setq dsh-emacs--current-buffer old-buffer)
     (kill-buffer buf-a)
@@ -4418,7 +4590,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (setq dsh-emacs--modeline-branch-cache old-cache)))
 
 
-;; --- 测试 74: agentPreset.list 协议结构（新建会话的 thinking preset 候选） ---
+;; --- 测试 74: agentPresets/list 协议结构（新建会话的 thinking preset 候选） ---
 ;; wire alist（presets 数组为 vector）→ struct：presets 归一为 list、字段
 ;; 全部经访问器读取；broken/缺失字段不破坏转换。
 (let* ((v (dsh-protocol-agent-preset-list--from-alist
@@ -4504,7 +4676,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
 ;; 按显示名选 → 其 id；空 RET 接受预选（模拟 completing-read 返回 DEF）；
 ;; 无预选时空 RET → nil（host default，不发送 agentPreset）；C-g 冒泡
 ;; 取消整个创建（quit 不被 read-preset 吞掉）。每次读取都会触发一次
-;; agentPreset.list 刷新（rpc-async 被 mock 捕获）。
+;; agentPresets/list 刷新（rpc-async 被 mock 捕获）。
 (let ((old-cache dsh-emacs--agent-presets)
       (calls nil))
   (unwind-protect
@@ -4521,7 +4693,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                    (lambda (method _params _cb)
                      (push method calls))))
           (when (and (equal "standard" (dsh-emacs--read-preset nil))
-                     (member "agentPreset.list" calls))
+                     (member "agentPresets/list" calls))
             (dsh-test-pass "read-preset-pick-by-display-name")))
         ;; 空 RET → 接受预选默认（roster isDefault = standard）
         (cl-letf (((symbol-function 'completing-read)
@@ -4556,7 +4728,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (setq dsh-emacs--agent-presets old-cache)))
 
 ;; --- 测试 78: 新建会话携带 agentPreset ---
-;; 直接调用带 preset → session.create 参数含 agentPreset（cwd / workspaceId
+;; 直接调用带 preset → session/create 参数含 agentPreset（cwd / workspaceId
 ;; 两种上下文都要）；响应里的 agentPreset 进入占位缓存行（列表详情/页脚
 ;; 立即可见）；不带 preset → 不发 agentPreset。
 (let* ((old-sessions dsh-emacs--sessions))
@@ -4576,11 +4748,11 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (dsh-emacs-new-session nil nil "standard")
             (let* ((call (car calls))
                    (params (cadr call)))
-              (when (and (string= "session.create" (car call))
-                         (null (assq 'workspaceId params))
-                         (assq 'cwd params)
+              (when (and (string= "session/create" (car call))
+                         (null (assq 'workspaceId (cdr (assq 'request params))))
+                         (assq 'cwd (cdr (assq 'request params)))
                          (string= "standard"
-                                  (cdr (assq 'agentPreset params))))
+                                  (cdr (assq 'agentPreset (cdr (assq 'request params))))))
                 (dsh-test-pass "new-session-with-preset-sends-agent-preset")))
             ;; 占位缓存行带了 preset（响应回填）
             (let ((item (dsh-emacs--chat-session-item "s-preset")))
@@ -4599,10 +4771,10 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (dsh-emacs-new-session nil "w1" "code")
             (let* ((call (car calls))
                    (params (cadr call)))
-              (when (and (string= "session.create" (car call))
-                         (string= "w1" (cdr (assq 'workspaceId params)))
-                         (null (assq 'cwd params))
-                         (string= "code" (cdr (assq 'agentPreset params))))
+              (when (and (string= "session/create" (car call))
+                         (string= "w1" (cdr (assq 'workspaceId (cdr (assq 'request params)))))
+                         (null (assq 'cwd (cdr (assq 'request params))))
+                         (string= "code" (cdr (assq 'agentPreset (cdr (assq 'request params))))))
                 (dsh-test-pass "new-session-workspace-with-preset")))))
         ;; 无 preset → 不发送 agentPreset
         (let ((calls nil)
@@ -4616,14 +4788,14 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (dsh-emacs-new-session nil nil nil)
             (let* ((call (car calls))
                    (params (cadr call)))
-              (when (and (string= "session.create" (car call))
-                         (null (assq 'agentPreset params)))
+              (when (and (string= "session/create" (car call))
+                         (null (assq 'agentPreset (cdr (assq 'request params)))))
                 (dsh-test-pass "new-session-without-preset-omits-agent-preset"))))))
     (setq dsh-emacs--sessions old-sessions)))
 
 ;; --- 测试 79: 交互带前缀参数 → 先选 preset 再创建 ---
 ;; C-u 下 call-interactively：interactive spec 读 preset（completing-read
-;; mock 返回显示名），session.create 携带其 id，且触发过 agentPreset.list。
+;; mock 返回显示名），session/create 携带其 id，且触发过 agentPresets/list。
 (let* ((old-sessions dsh-emacs--sessions)
        (buf (generate-new-buffer " *dsh-prefix-create*"))
        (calls nil)
@@ -4639,7 +4811,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                    (lambda (method params cb)
                      (push (list method params) calls)
-                     (when (string= method "session.create")
+                     (when (string= method "session/create")
                        (funcall cb t '((sessionId . "s-pfx"))))))
                   ((symbol-function 'dsh-emacs-open-session)
                    (lambda (_sid) nil))
@@ -4648,12 +4820,13 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                   (current-prefix-arg '(4)))
           (call-interactively #'dsh-emacs-new-session))
         (let ((create (cl-find-if
-                       (lambda (c) (string= "session.create" (car c)))
+                       (lambda (c) (string= "session/create" (car c)))
                        calls)))
           (when (and create
                      (string= "minimal"
-                              (cdr (assq 'agentPreset (cadr create))))
-                     (member "agentPreset.list" (mapcar #'car calls)))
+                              (cdr (assq 'agentPreset
+                                         (cdr (assq 'request (cadr create))))))
+                     (member "agentPresets/list" (mapcar #'car calls)))
             (dsh-test-pass "new-session-prefix-asks-preset"))))
     (setq dsh-emacs--sessions old-sessions)
     (setq dsh-emacs--agent-presets old-cache)
@@ -4663,7 +4836,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
 ;; c → dsh-emacs-new-session（不弹选择，会话带 dsh-emacs-default-preset，
 ;; nil 即 host default，不发 agentPreset 也不拉 roster）；
 ;; C → dsh-emacs-new-session-choose-preset（先选 preset 再建，workspace
-;; 上下文沿用，且触发 agentPreset.list 刷新）。
+;; 上下文沿用，且触发 agentPresets/list 刷新）。
 (when (eq (lookup-key dsh-emacs-session-mode-map "c")
           #'dsh-emacs-new-session)
   (dsh-test-pass "session-map-c-binds-plain-create"))
@@ -4671,7 +4844,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
           #'dsh-emacs-new-session-choose-preset)
   (dsh-test-pass "session-map-C-binds-preset-choose"))
 
-;; c 路径：无前缀交互 → 只发 session.create，不带 agentPreset
+;; c 路径：无前缀交互 → 只发 session/create，不带 agentPreset
 (let* ((calls nil)
        (buf (generate-new-buffer " *dsh-c-default-create*"))
        (dsh-emacs-new-session-auto-project nil))
@@ -4688,14 +4861,14 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
           (call-interactively #'dsh-emacs-new-session))
         (let* ((call (car calls))
                (params (cadr call)))
-          (when (and (string= "session.create" (car call))
-                     (null (assq 'agentPreset params))
-                     (not (member "agentPreset.list" (mapcar #'car calls))))
+          (when (and (string= "session/create" (car call))
+                     (null (assq 'agentPreset (cdr (assq 'request params))))
+                     (not (member "agentPresets/list" (mapcar #'car calls))))
             (dsh-test-pass "session-c-creates-without-preset-prompt"))))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
 ;; C 路径：先选 preset（completing-read mock 返回显示名），workspace 上下文
-;; 创建 → session.create 带 workspaceId + agentPreset，且触发过 roster。
+;; 创建 → session/create 带 workspaceId + agentPreset，且触发过 roster。
 (let* ((calls nil)
        (buf (generate-new-buffer " *dsh-C-preset-create*"))
        (old-cache dsh-emacs--agent-presets))
@@ -4711,7 +4884,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                    (lambda (method params cb)
                      (push (list method params) calls)
-                     (when (string= method "session.create")
+                     (when (string= method "session/create")
                        (funcall cb t '((sessionId . "s-C"))))))
                   ((symbol-function 'dsh-emacs-open-session)
                    (lambda (_sid) nil))
@@ -4719,12 +4892,14 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                    (lambda (&rest _) "PTC mode")))
           (call-interactively #'dsh-emacs-new-session-choose-preset))
         (let ((create (cl-find-if
-                       (lambda (c) (string= "session.create" (car c)))
+                       (lambda (c) (string= "session/create" (car c)))
                        calls)))
           (when (and create
-                     (string= "w-C" (cdr (assq 'workspaceId (cadr create))))
-                     (string= "code" (cdr (assq 'agentPreset (cadr create))))
-                     (member "agentPreset.list" (mapcar #'car calls)))
+                     (string= "w-C" (cdr (assq 'workspaceId
+                                               (cdr (assq 'request (cadr create))))))
+                     (string= "code" (cdr (assq 'agentPreset
+                                                (cdr (assq 'request (cadr create))))))
+                     (member "agentPresets/list" (mapcar #'car calls)))
             (dsh-test-pass "session-C-creates-with-chosen-preset"))))
     (setq dsh-emacs--agent-presets old-cache)
     (when (buffer-live-p buf) (kill-buffer buf))))
@@ -4737,9 +4912,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
 ;;   2) `dsh-emacs--workspace-id-by-path'：按 server 同款 canonical 路径匹配
 ;;      （尾斜杠 / 符号链接均解析）；
 ;;   3) `dsh-emacs--new-session-project-workspace' 编排：选项开关、本地/远程
-;;      server、缓存命中免 RPC、未命中走幂等 workspace.create 并即时入缓存、
+;;      server、缓存命中免 RPC、未命中走幂等 workspace/create 并即时入缓存、
 ;;      RPC 失败回退 nil；
-;;   4) 端到端 call-interactively：plain buffer → session.create 带 workspaceId
+;;   4) 端到端 call-interactively：plain buffer → session/create 带 workspaceId
 ;;      不带 cwd；创建失败 → 仍带 cwd。
 (require 'project nil t)
 (require 'vc nil t)
@@ -4898,12 +5073,12 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                      (lambda (&rest _) (cons nil "must-not-fire"))))
             (call-interactively #'dsh-emacs-new-session))
           (let* ((create (cl-find-if
-                          (lambda (c) (string= "session.create" (car c)))
+                          (lambda (c) (string= "session/create" (car c)))
                           calls))
                  (params (and create (cadr create))))
             (when (and create
-                       (string= "w-proj" (cdr (assq 'workspaceId params)))
-                       (null (assq 'cwd params)))
+                       (string= "w-proj" (cdr (assq 'workspaceId (cdr (assq 'request params)))))
+                       (null (assq 'cwd (cdr (assq 'request params)))))
               (dsh-test-pass
                "new-session-attaches-to-detected-project-workspace")))))
     (setq dsh-emacs--sessions old-sessions)
@@ -4939,11 +5114,11 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                                                (cons 'sessionIds []))))))))
           (call-interactively #'dsh-emacs-new-session))
         (let* ((create (cl-find-if
-                        (lambda (c) (string= "session.create" (car c)))
+                        (lambda (c) (string= "session/create" (car c)))
                         calls))
                (params (and create (cadr create))))
-          (when (and (string= "w-created2" (cdr (assq 'workspaceId params)))
-                     (null (assq 'cwd params)))
+          (when (and (string= "w-created2" (cdr (assq 'workspaceId (cdr (assq 'request params)))))
+                     (null (assq 'cwd (cdr (assq 'request params)))))
             (dsh-test-pass
              "new-session-creates-project-workspace-on-first-use"))))
     (setq dsh-emacs--sessions old-sessions)
@@ -4976,12 +5151,12 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                    (lambda (&rest _) (cons nil "create-failed"))))
           (call-interactively #'dsh-emacs-new-session))
         (let* ((create (cl-find-if
-                        (lambda (c) (string= "session.create" (car c)))
+                        (lambda (c) (string= "session/create" (car c)))
                         calls))
                (params (and create (cadr create))))
           (when (and create
-                     (null (assq 'workspaceId params))
-                     (assq 'cwd params))
+                     (null (assq 'workspaceId (cdr (assq 'request params))))
+                     (assq 'cwd (cdr (assq 'request params))))
             (dsh-test-pass "new-session-project-create-failure-keeps-cwd"))))
     (setq dsh-emacs--sessions old-sessions)
     (setq dsh-emacs--workspaces old-ws)
@@ -4991,7 +5166,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
 ;; --- 测试 80c: 新会话 CWD 跟随当前缓冲的 default-directory ---
 ;; 从 dired/magit 等缓冲调用 `dsh-emacs-new-session' 时，会话新建所在的
 ;; 工作目录必须是当前缓冲的 default-directory（dired 的浏览目录、magit
-;; 的仓库根、文件所在目录）——项目检测与 workspace.create 都基于它。
+;; 的仓库根、文件所在目录）——项目检测与 workspace/create 都基于它。
 ;; 回归：曾恒取 `dsh-emacs-default-cwd'（加载时的固定值，典型用户不设置），
 ;; 会话落到启动目录，浏览中的 project 从未进入检测，workspace 自然没有。
 ;; （project-root mock 只做 dir 透传 + 归一化：锁"dir 投递自缓冲目录"
@@ -5032,18 +5207,19 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                                                  (cons 'sessionIds []))))))))
             (call-interactively #'dsh-emacs-new-session)
             (let* ((create (cl-find-if
-                            (lambda (c) (string= "session.create" (car c)))
+                            (lambda (c) (string= "session/create" (car c)))
                             calls))
                    (params (and create (cadr create))))
               (dsh-test-assert
                "new-session-cwd-follows-buffer-default-directory"
                (and created
-                    (equal (cdr (assq 'path created)) proj)))
+                    (equal (cdr (assq 'path (cdr (assq 'request created))))
+                           proj)))
               (dsh-test-assert
                "new-session-buffer-dir-workspace-used"
                (and create
-                    (string= "w-dired" (cdr (assq 'workspaceId params)))
-                    (null (assq 'cwd params))))))))
+                    (string= "w-dired" (cdr (assq 'workspaceId (cdr (assq 'request params)))))
+                    (null (assq 'cwd (cdr (assq 'request params))))))))))
     (setq dsh-emacs--sessions old-sessions)
     (setq dsh-emacs--workspaces old-ws)
     (delete-directory proj t)
@@ -5069,27 +5245,35 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (delete-directory flat t)))
 
 
-;; --- 测试 81: 用户提问（question/requested）minibuffer 选择与应答 ---
-;; dsh 的 `ask' 工具经 mux 流推 question/requested（server-request，稳定
-;; rpcId）：每帧逐题在 minibuffer 选择 — 选项为 completion 候选（单选
-;; 一个 / 多选多个），末尾附「Type answer…」输入自定义文本；全部答完
-;; 一次性 client-response 回 POST /api/respond。selected 恒为数组
-;; （custom-only 时为 []），标签比较用 equal。minibuffer 是全局唯一资源：
-;; 多个会话并发提问时帧进 FIFO 队列串行应答，提示语带所属会话标识。
+;; --- 测试 81: 用户提问（user-questions/request）minibuffer 选择与应答 ---
+;; dsh 的 `ask' 工具经核心连接 `$events' 流推 waterfall（event 名
+;; user-questions/request，宿主分发的 eventId + agentId + request.questions）：
+;; 每帧逐题在 minibuffer 选择 — 选项为 completion 候选（单选一个 / 多选
+;; 多个），末尾附「Type answer…」输入自定义文本；全部答完以一元端点
+;; POST /api/$events/result 回 outcome（value = {answers: …}，clientId 来自
+;; $events ready、eventId 回显 waterfall）。selected 恒为数组（custom-only
+;; 时为 []），标签比较用 equal。minibuffer 是全局唯一资源：多个会话并发
+;; 提问时帧进 FIFO 队列串行应答，提示语带所属会话标识。
 
-;; 1) respond 信封：client-response + 回声 rpcId + result.value
-(when (string= (concat "{\"type\":\"client-response\","
-                       "\"rpcId\":\"rpc-1\","
-                       "\"result\":{\"ok\":true,\"value\":"
-                       "{\"sessionId\":\"s1\","
-                       "\"answer\":{\"answers\":"
-                       "[{\"id\":\"q1\",\"selected\":[\"Yes\"]}]}}}}")
-               (dsh-emacs--respond-envelope-json
-                "rpc-1"
-                '((sessionId . "s1")
-                  (answer . ((answers .
-                              (((id . "q1") (selected "Yes")))))))))
-  (dsh-test-pass "respond-envelope-json-client-response"))
+;; 1) $events/result 应答信封：一元 client-request，method $events/result，
+;; payload args {clientId, eventId, outcome:{kind:result, value:{answers}}}
+(cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+           (lambda (method params cb)
+             (dsh-test-assert "events-result-wire-envelope"
+               (string= "$events/result" method)
+               (let ((outcome (cdr (assq 'outcome params))))
+                 (and (equal "c1" (cdr (assq 'clientId params)))
+                      (equal "wf-1" (cdr (assq 'eventId params)))
+                      (equal "result" (cdr (assq 'kind outcome)))
+                      (equal '((answers . (((id . "q1")
+                                            (selected "Yes")))))
+                             (cdr (assq 'value outcome))))))
+             (funcall cb t nil))))
+  (dsh-emacs--events-result-async
+   "c1" "wf-1"
+   '((kind . "result")
+     (value . ((answers . (((id . "q1") (selected "Yes")))))))
+   (lambda (&rest _) nil)))
 
 ;; 2) 候选构建：选项带序号（按数字键选择），Type answer… 垫底；skip 不再
 ;; 有可见候选（只走 dsh-emacs-question-skip-key 快捷键的哨兵路径）
@@ -5442,209 +5626,215 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                     (options . (((label . "A")) ((label . "B"))))))))
     (dsh-test-pass "question-choice-multi-type-answer-empty-backs")))
 
-;; 3b) 帧分发：question/requested → minibuffer 应答（不渲染任何卡片）
-;; （单题；mux 重放时 history 加载中也应答）
+;; 3b) 帧分发：waterfall 帧（user-questions/request）→ minibuffer 应答
+;; （不渲染任何卡片）。经 `dsh-emacs-events--host-item' 走完整 `$events'
+;; 分发面：宿主把带 agentId 的 waterfall 交给本端，events 层按 agentId 在
+;; `dsh-emacs--chat-buffers' 里解析活跃聊天缓冲后调用 `dsh-emacs--question-requested'；
+;; 答案以一元 $events/result outcome（value = {answers: …}，回显 eventId）发回。
 (let* ((chat (get-buffer-create " *dsh-test-question*"))
        (responds nil))
   (unwind-protect
-      (let ((dsh-emacs-enable-notifications nil))
+      (let ((dsh-emacs--chat-buffers (make-hash-table :test 'equal))
+            (dsh-emacs-events--client-id "c1")
+            (dsh-emacs-enable-notifications nil))
+        (puthash "sess-q" chat dsh-emacs--chat-buffers)
         (with-current-buffer chat
           (setq-local dsh-emacs--buffer-session "sess-q"))
-        (cl-letf (((symbol-function 'dsh-emacs-events--chat)
-                   (lambda (_p) chat))
-                  ((symbol-function 'dsh-emacs--rpc-respond-async)
-                   (lambda (rpc-id payload cb)
-                     (push (list rpc-id payload) responds)
+        (cl-letf (((symbol-function 'dsh-emacs--events-result-async)
+                   (lambda (client-id event-id outcome cb)
+                     (push (list client-id event-id outcome) responds)
                      (funcall cb t nil)))
                   ((symbol-function 'completing-read)
                    (lambda (&rest _) "Yes")))
-          (dsh-emacs-events--dispatch-json
+          (dsh-emacs-events--host-item
            'process
-           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-q\","
-                   "\"method\":\"question/requested\","
-                   "\"payload\":{\"type\":\"question/requested\","
-                   "\"sessionId\":\"sess-q\","
-                   "\"questions\":[{\"id\":\"q1\","
-                   "\"question\":\"Proceed?\","
-                   "\"options\":[{\"label\":\"Yes\"},"
-                   "{\"label\":\"No\"}]}]}}"))
+           '((type . "waterfall")
+             (event . "user-questions/request")
+             (eventId . "rpc-q")
+             (agentId . "sess-q")
+             (request . ((questions .
+                          (((id . "q1") (question . "Proceed?")
+                            (options . (((label . "Yes"))
+                                        ((label . "No")))))))))))
           (let ((r (car responds)))
-            (when (and (equal "rpc-q" (car r))
-                       (equal '((sessionId . "sess-q")
-                                (answer . ((answers .
-                                            (((id . "q1")
-                                              (selected "Yes")))))))
-                             (cadr r)))
-              (dsh-test-pass "question-frame-responds-echoing-rpc-id")))
+            (when (and (equal "c1" (nth 0 r))
+                       (equal "rpc-q" (nth 1 r))
+                       (equal '((kind . "result")
+                                (value . ((answers .
+                                           (((id . "q1")
+                                             (selected "Yes")))))))
+                              (nth 2 r)))
+              (dsh-test-pass "question-frame-answers-with-result-outcome")))
           ;; 不再插入选项卡：应答后缓冲内容没有任何问题卡片
           (let ((text (with-current-buffer chat (buffer-string))))
             (when (not (string-match-p "❓ Question" text))
               (dsh-test-pass "question-frame-inserts-no-card")))))
     (when (buffer-live-p chat) (kill-buffer chat))))
 
-;; 4) 多问题帧：顺序渲染 + 逐题 minibuffer 选择，答完只 respond 一次
+;; 4) 多问题帧：顺序逐题 minibuffer 选择，答完只回一次 $events/result outcome
 (let* ((chat (get-buffer-create " *dsh-test-question-multi*"))
        (responds nil)
        (queue '("Yes" "X")))
   (unwind-protect
-      (let ((dsh-emacs-enable-notifications nil))
+      (let ((dsh-emacs--chat-buffers (make-hash-table :test 'equal))
+            (dsh-emacs-events--client-id "c1")
+            (dsh-emacs-enable-notifications nil))
+        (puthash "sess-m" chat dsh-emacs--chat-buffers)
         (with-current-buffer chat
           (setq-local dsh-emacs--buffer-session "sess-m"))
-        (cl-letf (((symbol-function 'dsh-emacs-events--chat)
-                   (lambda (_p) chat))
-                  ((symbol-function 'dsh-emacs--rpc-respond-async)
-                   (lambda (rpc-id payload cb)
-                     (push (list rpc-id payload) responds)
+        (cl-letf (((symbol-function 'dsh-emacs--events-result-async)
+                   (lambda (client-id event-id outcome cb)
+                     (push (list client-id event-id outcome) responds)
                      (funcall cb t nil)))
                   ((symbol-function 'completing-read)
                    (lambda (&rest _)
                      (if queue (pop queue) "Yes")))
                   ((symbol-function 'completing-read-multiple)
                    (lambda (&rest _) '("X"))))
-          (dsh-emacs-events--dispatch-json
+          (dsh-emacs-events--host-item
            'process
-           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-m\","
-                   "\"method\":\"question/requested\","
-                   "\"payload\":{\"type\":\"question/requested\","
-                   "\"sessionId\":\"sess-m\","
-                   "\"questions\":[{\"id\":\"q1\","
-                   "\"question\":\"One?\","
-                   "\"options\":[{\"label\":\"Yes\"},"
-                   "{\"label\":\"No\"}]},"
-                   "{\"id\":\"q2\",\"question\":\"Two?\","
-                   "\"multiSelect\":true,"
-                   "\"options\":[{\"label\":\"X\"},"
-                   "{\"label\":\"Y\"}]}]}}"))
+           '((type . "waterfall")
+             (event . "user-questions/request")
+             (eventId . "rpc-m")
+             (agentId . "sess-m")
+             (request . ((questions .
+                          (((id . "q1") (question . "One?")
+                            (options . (((label . "Yes")) ((label . "No")))))
+                           ((id . "q2") (question . "Two?")
+                            (multiSelect . t)
+                            (options . (((label . "X")) ((label . "Y")))))))))))
           (let ((r (car responds)))
-            (when (and (equal "rpc-m" (car r))
-                       (equal '((sessionId . "sess-m")
-                                (answer . ((answers .
-                                            (((id . "q1")
-                                              (selected "Yes"))
-                                             ((id . "q2")
-                                              (selected "X")))))))
-                             (cadr r)))
-              (dsh-test-pass "question-multi-answers-sequential-in-order")))
+            (when (and (equal "c1" (nth 0 r))
+                       (equal "rpc-m" (nth 1 r))
+                       (equal '((kind . "result")
+                                (value . ((answers .
+                                           (((id . "q1")
+                                             (selected "Yes"))
+                                            ((id . "q2")
+                                             (selected "X")))))))
+                              (nth 2 r)))
+              (dsh-test-pass "question-multi-answers-in-one-result")))
           ;; 仍然不插入任何卡片（纯 minibuffer 回答）
           (let ((text (with-current-buffer chat (buffer-string))))
             (when (not (string-match-p "❓ Question" text))
               (dsh-test-pass "question-multi-inserts-no-card")))))
     (when (buffer-live-p chat) (kill-buffer chat))))
 
-;; 5) 帧分发：C-g/ESC → 放弃整组问题：以协议保留的 cancelled 错误回执应答
-;; （ok:false + error.code=cancelled —— dsh web 的 abandon 同一信号），
-;; 宿主把该 ask 撤销为 cancelled 并广播 question/resolved(cancelled)
-;; 回归：旧实现完全不应答，宿主保持 pending，agent 回合永久卡死。
+;; 5) 帧分发：C-g/ESC → 放弃整组问题：以 outcome kind `rejected' + error body
+;; （name/message = 保留的 cancelled 意图，dsh web 的 abandon 同一信号）应答，
+;; 宿主把该 ask 撤销为 cancelled。回归：旧实现完全不应答，宿主保持 pending，
+;; agent 回合永久卡死。
 (let* ((chat (get-buffer-create " *dsh-test-question-cg*"))
-       (responds nil)
-       (expected (dsh-emacs--respond-cancel-envelope-json
-                  "rpc-qc" "User abandoned the questions")))
+       (responds nil))
   (unwind-protect
-      (let ((dsh-emacs-enable-notifications nil))
+      (let ((dsh-emacs--chat-buffers (make-hash-table :test 'equal))
+            (dsh-emacs-events--client-id "c1")
+            (dsh-emacs-enable-notifications nil))
+        (puthash "sess-qc" chat dsh-emacs--chat-buffers)
         (with-current-buffer chat
           (setq-local dsh-emacs--buffer-session "sess-qc"))
-        (cl-letf (((symbol-function 'dsh-emacs-events--chat)
-                   (lambda (_p) chat))
-                  ((symbol-function 'dsh-emacs--respond-post)
-                   (lambda (json-data cb)
-                     (push json-data responds)
+        (cl-letf (((symbol-function 'dsh-emacs--events-result-async)
+                   (lambda (client-id event-id outcome cb)
+                     (push (list client-id event-id outcome) responds)
                      (funcall cb t nil)))
                   ((symbol-function 'completing-read)
                    (lambda (&rest _) (signal 'quit nil))))
-          (dsh-emacs-events--dispatch-json
+          (dsh-emacs-events--host-item
            'process
-           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-qc\","
-                   "\"method\":\"question/requested\","
-                   "\"payload\":{\"type\":\"question/requested\","
-                   "\"sessionId\":\"sess-qc\","
-                   "\"questions\":[{\"id\":\"q1\","
-                   "\"question\":\"Proceed?\","
-                   "\"options\":[{\"label\":\"Yes\"}]}]}}"))
-          (dsh-test-assert "question-frame-c-g-cancels-with-receipt"
-            (equal (list expected) responds))))
+           '((type . "waterfall")
+             (event . "user-questions/request")
+             (eventId . "rpc-qc")
+             (agentId . "sess-qc")
+             (request . ((questions .
+                          (((id . "q1") (question . "Proceed?")
+                            (options . (((label . "Yes")))))))))))
+          (dsh-test-assert "question-frame-c-g-declines-waterfall"
+            (equal (list (list "c1" "rpc-qc"
+                               '((kind . "rejected")
+                                 (error . ((name . "cancelled")
+                                           (message . "User abandoned the questions"))))))
+                   responds))))
     (when (buffer-live-p chat) (kill-buffer chat))))
 
 ;; 6) 帧分发：history 加载中也要应答（mux 重放的 pending 问题在打开时到达）
 (let* ((chat (get-buffer-create " *dsh-test-question-load*"))
        (responds nil))
   (unwind-protect
-      (let ((dsh-emacs-enable-notifications nil))
+      (let ((dsh-emacs--chat-buffers (make-hash-table :test 'equal))
+            (dsh-emacs-events--client-id "c1")
+            (dsh-emacs-enable-notifications nil))
+        (puthash "sess-ql" chat dsh-emacs--chat-buffers)
         (with-current-buffer chat
           (setq-local dsh-emacs--buffer-session "sess-ql")
           (setq-local dsh-emacs--event-history-loading t))
-        (cl-letf (((symbol-function 'dsh-emacs-events--chat)
-                   (lambda (_p) chat))
-                  ((symbol-function 'dsh-emacs--rpc-respond-async)
-                   (lambda (rpc-id payload cb)
-                     (push rpc-id responds)
+        (cl-letf (((symbol-function 'dsh-emacs--events-result-async)
+                   (lambda (_client-id event-id _outcome cb)
+                     (push event-id responds)
                      (funcall cb t nil)))
                   ((symbol-function 'completing-read)
                    (lambda (&rest _) "Yes")))
-          (dsh-emacs-events--dispatch-json
+          (dsh-emacs-events--host-item
            'process
-           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-ql\","
-                   "\"method\":\"question/requested\","
-                   "\"payload\":{\"type\":\"question/requested\","
-                   "\"sessionId\":\"sess-ql\","
-                   "\"questions\":[{\"id\":\"q1\","
-                   "\"question\":\"Proceed?\","
-                   "\"options\":[{\"label\":\"Yes\"}]}]}}"))
+           '((type . "waterfall")
+             (event . "user-questions/request")
+             (eventId . "rpc-ql")
+             (agentId . "sess-ql")
+             (request . ((questions .
+                          (((id . "q1") (question . "Proceed?")
+                            (options . (((label . "Yes")))))))))))
           (when (equal '("rpc-ql") responds)
             (dsh-test-pass "question-frame-during-history-load-answered"))))
     (when (buffer-live-p chat) (kill-buffer chat))))
 
-;; 7) 非本会话的问题/审批、question/resolved、approval/resolved → 忽略
+;; 7) 未打开聊天缓冲的会话（foreign / 其它端）waterfall → 本端不应答、不提示，
+;;    events 层只把它交给下一个接单者（outcome kind `next'）。退役语义现在
+;;    由 `$events' 的 cancel 帧承担（见测试 10 与 78e）。
 (let* ((chat (get-buffer-create " *dsh-test-question-other*"))
-       (responds nil))
+       (responds nil)
+       (prompted nil))
   (unwind-protect
-      (progn
+      (let ((dsh-emacs--chat-buffers (make-hash-table :test 'equal))
+            (dsh-emacs-events--client-id "c1")
+            (dsh-emacs-enable-notifications nil))
+        ;; 只注册本端会话 "mine"；foreign 会话不在表里（无活跃聊天缓冲）
+        (puthash "mine" chat dsh-emacs--chat-buffers)
         (with-current-buffer chat
           (setq-local dsh-emacs--buffer-session "mine"))
-        (cl-letf (((symbol-function 'dsh-emacs-events--chat)
-                   (lambda (_p) chat))
-                  ((symbol-function 'dsh-emacs--rpc-respond-async)
-                   (lambda (&rest _) (push t responds)))
-                  ((symbol-function 'dsh-emacs--approval-prompt)
-                   (lambda (&rest _) t))
+        (cl-letf (((symbol-function 'dsh-emacs--events-result-async)
+                   (lambda (client-id event-id outcome cb)
+                     (push (list client-id event-id outcome) responds)
+                     (funcall cb t nil)))
                   ((symbol-function 'completing-read)
-                   (lambda (&rest _) "Yes")))
-          ;; 另一会话的问题帧 → 忽略
-          (dsh-emacs-events--dispatch-json
+                   (lambda (&rest _) (setq prompted t) "Yes"))
+                  ((symbol-function 'dsh-emacs--approval-prompt)
+                   (lambda (&rest _) (setq prompted t) t)))
+          ;; 未打开会话的问题 waterfall → 交给下一个接单者（next），不提示
+          (dsh-emacs-events--host-item
            'process
-           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-o\","
-                   "\"method\":\"question/requested\","
-                   "\"payload\":{\"type\":\"question/requested\","
-                   "\"sessionId\":\"other-session\","
-                   "\"questions\":[{\"id\":\"q1\","
-                   "\"question\":\"Proceed?\","
-                   "\"options\":[{\"label\":\"Yes\"}]}]}}"))
-          ;; question/resolved（纯推送）→ 不应答；只退役同 rpcId 的队列帧
-          ;;（这里没有排队中的帧，仅验证不 respond；退役语义见测试 10）
-          (dsh-emacs-events--dispatch-json
+           '((type . "waterfall")
+             (event . "user-questions/request")
+             (eventId . "rpc-o")
+             (agentId . "other-session")
+             (request . ((questions .
+                          (((id . "q1") (question . "Proceed?")
+                            (options . (((label . "Yes")))))))))))
+          ;; 未打开会话的审批 waterfall → 同样 next，不提示
+          (dsh-emacs-events--host-item
            'process
-           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-r\","
-                   "\"method\":\"question/resolved\","
-                   "\"payload\":{\"type\":\"question/resolved\","
-                   "\"sessionId\":\"mine\","
-                   "\"questionRpcId\":\"rpc-q\",\"outcome\":\"answered\"}}"))
-          ;; 另一会话的审批帧 → 忽略（只应答本缓冲所属会话的审批）
-          (dsh-emacs-events--dispatch-json
-           'process
-           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-ao\","
-                   "\"method\":\"approval/requested\","
-                   "\"payload\":{\"type\":\"approval/requested\","
-                   "\"sessionId\":\"other-session\",\"approvalId\":\"a-other\","
-                   "\"toolName\":\"bash\"}}"))
-          ;; approval/resolved（纯推送）→ 不应答，只清队列
-          (dsh-emacs-events--dispatch-json
-           'process
-           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-ar\","
-                   "\"method\":\"approval/resolved\","
-                   "\"payload\":{\"type\":\"approval/resolved\","
-                   "\"sessionId\":\"mine\",\"approvalId\":\"a1\","
-                   "\"outcome\":\"cancelled\"}}"))
-          (when (null responds)
-            (dsh-test-pass "other-session-and-push-frames-ignored"))))
+           '((type . "waterfall")
+             (event . "approval/request")
+             (eventId . "rpc-ao")
+             (agentId . "other-session")
+             (request . ((toolName . "fs") (reason . "outside")))))
+          (dsh-test-assert "foreign-no-chat-waterfalls-handed-on"
+            (null prompted)
+            (= 2 (length responds))
+            (cl-every (lambda (r)
+                        (and (equal "c1" (nth 0 r))
+                             (equal '((kind . "next")) (nth 2 r))))
+                      responds)
+            (equal '("rpc-ao" "rpc-o")
+                   (mapcar (lambda (r) (nth 1 r)) responds)))))
     (when (buffer-live-p chat) (kill-buffer chat))))
 
 ;; 8) 多会话并发提问：minibuffer 是全局唯一资源，回答一帧的途中到达的
@@ -5664,9 +5854,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
           (setq-local dsh-emacs--buffer-session "sess-a"))
         (with-current-buffer chat-b
           (setq-local dsh-emacs--buffer-session "sess-b"))
-        (cl-letf (((symbol-function 'dsh-emacs--rpc-respond-async)
-                   (lambda (rpc-id payload cb)
-                     (push (list rpc-id payload) responds)
+        (cl-letf (((symbol-function 'dsh-emacs--events-result-async)
+                   (lambda (_client-id event-id outcome cb)
+                     (push (list event-id outcome) responds)
                      (funcall cb t nil)))
                   ((symbol-function 'completing-read)
                    (lambda (prompt &rest _)
@@ -5691,20 +5881,22 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                        (cons 'question "A asks?")
                        (cons 'options
                              (list (list (cons 'label "Yes")))))))
-          ;; A 答完后 B 排进同一回答槽继续答；respond 与到达顺序一致
-          (let ((r2 (nth 1 (pop responds)))
-                (r1 (nth 1 (pop responds))))
+          ;; A 答完后 B 排进同一回答槽继续答；$events/result 与到达顺序一致
+          (let ((r2 (pop responds))
+                (r1 (pop responds)))
             (dsh-test-assert "question-queue-serial-first"
-              (equal '((sessionId . "sess-a")
-                       (answer . ((answers .
-                                   (((id . "qa")
-                                     (selected "Yes")))))))
+              (equal (list "rpc-a"
+                           '((kind . "result")
+                             (value . ((answers .
+                                        (((id . "qa")
+                                          (selected "Yes"))))))))
                      r1))
             (dsh-test-assert "question-queue-serial-second"
-              (equal '((sessionId . "sess-b")
-                       (answer . ((answers .
-                                   (((id . "qb")
-                                     (selected "Yes")))))))
+              (equal (list "rpc-b"
+                           '((kind . "result")
+                             (value . ((answers .
+                                        (((id . "qb")
+                                          (selected "Yes"))))))))
                      r2)))
           ;; 队列串行的每个提示语都带 Question N/M 框架与各自的问题文本
           (dsh-test-assert "question-serial-prompts-framed"
@@ -5721,7 +5913,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (when (buffer-live-p chat-a) (kill-buffer chat-a))
     (when (buffer-live-p chat-b) (kill-buffer chat-b))))
 
-;; 9) 同一 rpc-id 的重复帧（mux 重放）不得再次提问：第一帧正在回答时
+;; 9) 同一 event-id 的重复帧（mux 重放）不得再次提问：第一帧正在回答时
 ;; 重复到达的副本必须被丢弃，不排队不重问
 ;; 回归：曾对同一问题问两次（第一帧答完后副本又进队列再弹一次）。
 (let* ((chat (get-buffer-create " *dsh-test-question-dup*"))
@@ -5736,14 +5928,14 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
               dsh-emacs--question-active nil)
         (with-current-buffer chat
           (setq-local dsh-emacs--buffer-session "sess-dup"))
-        (cl-letf (((symbol-function 'dsh-emacs--rpc-respond-async)
-                   (lambda (rpc-id payload cb)
-                     (push (list rpc-id payload) responds)
+        (cl-letf (((symbol-function 'dsh-emacs--events-result-async)
+                   (lambda (_client-id event-id outcome cb)
+                     (push (list event-id outcome) responds)
                      (funcall cb t nil)))
                   ((symbol-function 'completing-read)
                    (lambda (prompt &rest _)
                      (setq prompts (1+ prompts))
-                     ;; 回答第一帧的途中，同一 rpc-id 的重放副本到达 → 必须丢弃。
+                     ;; 回答第一帧的途中，同一 event-id 的重放副本到达 → 必须丢弃。
                      ;; 只注入一次副本（修复前的代码会把它再答一遍并再次触发本
                      ;; 桩，形成复问循环——正是本回归要消灭的症状）。
                      (unless dup-sent
@@ -5770,107 +5962,104 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (dsh-test-pass "question-replay-duplicate-drained-clean"))))
     (when (buffer-live-p chat) (kill-buffer chat))))
 
-;; 10) question/resolved（纯推送）→ 队列里同 rpcId 的待答帧退役，
-;; 重放的 requested→resolved 对不再复问已了结的问题
-;; 回归：resolved 被忽略，排队中的副本继续弹给用户选。
-(let* ((chat (get-buffer-create " *dsh-test-question-resolved*"))
+;; 10) cancel 帧（宿主撤回一个 waterfall）→ 队列里同 eventId 的待答帧退役，
+;; 重放的 requested→cancel 对不再复问已了结的问题。退役语义由 `$events' 的
+;; cancel 帧（eventId）承担；wire 上没有 question/resolved 纯推送信封。
+;; 回归：cancel 被忽略，排队中的副本继续弹给用户选。
+(let* ((chat (get-buffer-create " *dsh-test-question-cancel*"))
        (responds nil)
        (prompted nil))
   (unwind-protect
       (let ((dsh-emacs--sessions nil)
             (dsh-emacs--chat-buffers (make-hash-table :test 'equal))
+            (dsh-emacs-events--client-id "c1")
             (dsh-emacs-enable-notifications nil))
+        (puthash "sess-res" chat dsh-emacs--chat-buffers)
         (setq dsh-emacs--question-queue nil
               dsh-emacs--question-active t)  ; 模拟另一帧正占用回答槽
         (with-current-buffer chat
           (setq-local dsh-emacs--buffer-session "sess-res"))
-        (cl-letf (((symbol-function 'dsh-emacs--rpc-respond-async)
-                   (lambda (&rest _) (push t responds)))
-                  ((symbol-function 'dsh-emacs-events--chat)
-                   (lambda (_p) chat))
+        (cl-letf (((symbol-function 'dsh-emacs--events-result-async)
+                   (lambda (_client-id _event-id _outcome cb)
+                     (push t responds)
+                     (funcall cb t nil)))
                   ((symbol-function 'completing-read)
                    (lambda (&rest _) (setq prompted t) "Yes")))
-          ;; 副本先到（排队），宿主已了结的 resolved 后到（重放同序）
-          (dsh-emacs-events--dispatch-json
+          ;; 副本先到（排队），宿主随后以 cancel 帧撤销同一 eventId（重放同序）
+          (dsh-emacs-events--host-item
            'process
-           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-rs\","
-                   "\"method\":\"question/requested\","
-                   "\"payload\":{\"type\":\"question/requested\","
-                   "\"sessionId\":\"sess-res\","
-                   "\"questions\":[{\"id\":\"q1\","
-                   "\"question\":\"Proceed?\","
-                   "\"options\":[{\"label\":\"Yes\"}]}]}}"))
-          (dsh-emacs-events--dispatch-json
+           '((type . "waterfall")
+             (event . "user-questions/request")
+             (eventId . "rpc-rs")
+             (agentId . "sess-res")
+             (request . ((questions .
+                          (((id . "q1") (question . "Proceed?")
+                            (options . (((label . "Yes")))))))))))
+          (dsh-emacs-events--host-item
            'process
-           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-rs2\","
-                   "\"method\":\"question/resolved\","
-                   "\"payload\":{\"type\":\"question/resolved\","
-                   "\"sessionId\":\"sess-res\","
-                   "\"questionRpcId\":\"rpc-rs\",\"outcome\":\"answered\"}}"))
-          (dsh-test-assert "question-resolved-retires-queued-frame"
+           '((type . "cancel") (eventId . "rpc-rs")))
+          (dsh-test-assert "question-cancel-retires-queued-frame"
             (null dsh-emacs--question-queue))
           ;; 回答槽清空后队列里也没有残留 → 不再弹不再答
           (setq dsh-emacs--question-active nil)
           (dsh-emacs--question-drain)
-          (dsh-test-assert "question-resolved-never-prompts"
+          (dsh-test-assert "question-cancel-never-prompts"
             (null prompted)
             (null responds)
             (null dsh-emacs--question-queue))))
     (when (buffer-live-p chat) (kill-buffer chat))))
 
-;; --- 测试 78a: approval/requested 帧分发 → 审批 → 应答（含 history 加载中） ---
-;; 沙箱工具要访问 workspace 之外的文件时，宿主推送 answerable 的
-;; approval/requested 帧（server-request，rpcId 稳定）。客户端展示审批、
-;; 读取决定并以 client-response 回 POST /api/respond（ApprovalResponsePayload:
-;; sessionId + approvalId + outcome）。审批像提问一样不受 history 加载门控。
+;; --- 测试 78a: approval/request 帧分发 → 审批 → 应答（含 history 加载中） ---
+;; 沙箱工具要访问 workspace 之外的文件时，宿主经 `$events' 流推 waterfall
+;; （approval/request，eventId + agentId + request.toolName/reason/callId）。
+;; 客户端展示审批、读取决定并以一元端点 POST /api/$events/result 回 outcome
+;; （value = ApprovalOutcome 字符串）。审批像提问一样不受 history 加载门控。
 (let* ((chat (get-buffer-create " *dsh-test-approval-dispatch*"))
        (responds nil))
   (unwind-protect
-      (let ((dsh-emacs-enable-notifications nil))
+      (let ((dsh-emacs--chat-buffers (make-hash-table :test 'equal))
+            (dsh-emacs-events--client-id "c1")
+            (dsh-emacs-enable-notifications nil))
+        (puthash "sess-ap" chat dsh-emacs--chat-buffers)
         (with-current-buffer chat
           (setq-local dsh-emacs--buffer-session "sess-ap"))
-        (cl-letf (((symbol-function 'dsh-emacs-events--chat)
-                   (lambda (_p) chat))
-                  ((symbol-function 'dsh-emacs--approval-prompt)
+        (cl-letf (((symbol-function 'dsh-emacs--approval-prompt)
                    (lambda (&rest _) t))
-                  ((symbol-function 'dsh-emacs--rpc-respond-async)
-                   (lambda (rpc-id payload cb)
-                     (push (list rpc-id payload) responds)
+                  ((symbol-function 'dsh-emacs--events-result-async)
+                   (lambda (client-id event-id outcome cb)
+                     (push (list client-id event-id outcome) responds)
                      (funcall cb t nil))))
-          (dsh-emacs-events--dispatch-json
+          (dsh-emacs-events--host-item
            'process
-           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-ap\","
-                   "\"method\":\"approval/requested\","
-                   "\"payload\":{\"type\":\"approval/requested\","
-                   "\"sessionId\":\"sess-ap\","
-                   "\"approvalId\":\"aid-x\","
-                   "\"toolName\":\"fs\","
-                   "\"reason\":\"read outside workspace\","
-                   "\"callId\":\"call-x\"}}"))
+           '((type . "waterfall")
+             (event . "approval/request")
+             (eventId . "rpc-ap")
+             (agentId . "sess-ap")
+             (request . ((toolName . "fs")
+                         (reason . "read outside workspace")
+                         (callId . "call-x")))))
           (let ((entry (car responds)))
             (dsh-test-assert "approval-frame-answered"
-              (and (equal "rpc-ap" (nth 0 entry))
-                   (equal '((sessionId . "sess-ap")
-                            (approvalId . "aid-x")
-                            (outcome . "allowed-once"))
-                          (nth 1 entry)))))
+              (and (equal "c1" (nth 0 entry))
+                   (equal "rpc-ap" (nth 1 entry))
+                   (equal '((kind . "result") (value . "allowed-once"))
+                          (nth 2 entry)))))
           ;; 审批在 history 加载中也必须应答（mux 打开时重放 pending 审批）
           (with-current-buffer chat
             (setq-local dsh-emacs--event-history-loading t))
           (setq responds nil)
-          (dsh-emacs-events--dispatch-json
+          (dsh-emacs-events--host-item
            'process
-           (concat "{\"type\":\"server-request\",\"rpcId\":\"rpc-ap2\","
-                   "\"method\":\"approval/requested\","
-                   "\"payload\":{\"type\":\"approval/requested\","
-                   "\"sessionId\":\"sess-ap\","
-                   "\"approvalId\":\"aid-y\","
-                   "\"toolName\":\"bash\"}}"))
+           '((type . "waterfall")
+             (event . "approval/request")
+             (eventId . "rpc-ap2")
+             (agentId . "sess-ap")
+             (request . ((toolName . "bash")))))
           (dsh-test-assert "approval-frame-during-history-load-answered"
-            (and responds (equal "rpc-ap2" (nth 0 (car responds)))))))
+            (and responds (equal "rpc-ap2" (nth 1 (car responds)))))))
     (when (buffer-live-p chat) (kill-buffer chat))))
 
-;; --- 测试 78b: 审批 allow-once / reject 决定 → ApprovalResponsePayload ---
+;; --- 测试 78b: 审批 allow-once / reject 决定 → $events/result outcome ---
 (let* ((chat (get-buffer-create " *dsh-test-approval-decision*"))
        (responds nil))
   (unwind-protect
@@ -5879,33 +6068,31 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
           (setq-local dsh-emacs--buffer-session "sess-ad"))
         (cl-letf (((symbol-function 'dsh-emacs--approval-prompt)
                    (lambda (&rest _) t))
-                  ((symbol-function 'dsh-emacs--rpc-respond-async)
-                   (lambda (rpc-id payload cb)
-                     (push (list rpc-id payload) responds)
+                  ((symbol-function 'dsh-emacs--events-result-async)
+                   (lambda (_client-id event-id outcome cb)
+                     (push (list event-id outcome) responds)
                      (funcall cb t nil))))
           (dsh-emacs--approval-requested
-           chat "rpc-ad1" "sess-ad" "aid-1" "bash"
+           chat "rpc-ad1" "sess-ad" "bash"
            "needs /etc/passwd" "call-1")
-          (dsh-test-assert "approval-allow-once-payload"
-            (equal '((sessionId . "sess-ad")
-                     (approvalId . "aid-1")
-                     (outcome . "allowed-once"))
-                   (nth 1 (car responds)))))
+          (dsh-test-assert "approval-allow-once-outcome"
+            (equal (list "rpc-ad1"
+                         '((kind . "result") (value . "allowed-once")))
+                   (car responds))))
         (setq responds nil)
         (cl-letf (((symbol-function 'dsh-emacs--approval-prompt)
                    (lambda (&rest _) nil))
-                  ((symbol-function 'dsh-emacs--rpc-respond-async)
-                   (lambda (rpc-id payload cb)
-                     (push (list rpc-id payload) responds)
+                  ((symbol-function 'dsh-emacs--events-result-async)
+                   (lambda (_client-id event-id outcome cb)
+                     (push (list event-id outcome) responds)
                      (funcall cb t nil))))
           (dsh-emacs--approval-requested
-           chat "rpc-ad2" "sess-ad" "aid-2" "fs"
+           chat "rpc-ad2" "sess-ad" "fs"
            "write outside workspace" "call-2")
-          (dsh-test-assert "approval-reject-payload"
-            (equal '((sessionId . "sess-ad")
-                     (approvalId . "aid-2")
-                     (outcome . "rejected"))
-                   (nth 1 (car responds))))))
+          (dsh-test-assert "approval-reject-outcome"
+            (equal (list "rpc-ad2"
+                         '((kind . "result") (value . "rejected")))
+                   (car responds)))))
     (when (buffer-live-p chat) (kill-buffer chat))))
 
 ;; --- 测试 78h: 审批提示多行展示：完整 justification + 具体 bash 命令 ---
@@ -5930,11 +6117,11 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                    dsh-emacs--tool-states))
         (cl-letf (((symbol-function 'y-or-n-p)
                    (lambda (prompt) (setq captured prompt) t))
-                  ((symbol-function 'dsh-emacs--rpc-respond-async)
-                   (lambda (_rpc _payload cb) (funcall cb t nil))))
+                  ((symbol-function 'dsh-emacs--events-result-async)
+                   (lambda (&rest _) nil)))
           ;; 经 drain 在 chat 缓冲上下文读取 transcript 状态
           (dsh-emacs--approval-requested
-           chat "rpc-h" "sess-h" "aid-h" "bash" just "call-1")
+           chat "rpc-h" "sess-h" "bash" just "call-1")
           (dsh-test-assert "approval-prompt-full-justification-and-command"
             (equal (concat just "\n\n$ cat /etc/os-release")
                    (substring-no-properties captured)))
@@ -5947,7 +6134,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
           ;; 查不到 callId（重放早于 tool/call 渲染）→ 只显示 justification
           (setq captured nil)
           (dsh-emacs--approval-requested
-           chat "rpc-h2" "sess-h" "aid-h2" "bash" just "call-unknown")
+           chat "rpc-h2" "sess-h" "bash" just "call-unknown")
           (dsh-test-assert "approval-prompt-falls-back-to-justification"
             (equal just (substring-no-properties captured)))
           (dsh-test-assert "approval-prompt-fallback-still-colored"
@@ -5965,50 +6152,49 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
           (setq-local dsh-emacs--buffer-session "sess-cg"))
         (cl-letf (((symbol-function 'dsh-emacs--approval-prompt)
                    (lambda (&rest _) (signal 'quit nil)))
-                  ((symbol-function 'dsh-emacs--rpc-respond-async)
-                   (lambda (rpc-id payload cb)
-                     (push (list rpc-id payload) responds)
+                  ((symbol-function 'dsh-emacs--events-result-async)
+                   (lambda (_client-id event-id outcome cb)
+                     (push (list event-id outcome) responds)
                      (funcall cb t nil))))
           (dsh-emacs--approval-requested
-           chat "rpc-cg" "sess-cg" "aid-cg" "bash" nil nil)
+           chat "rpc-cg" "sess-cg" "bash" nil nil)
           (when (and (equal responds
                             (list (list "rpc-cg"
-                                        '((sessionId . "sess-cg")
-                                          (approvalId . "aid-cg")
-                                          (outcome . "rejected")))))
+                                        '((kind . "result")
+                                          (value . "rejected")))))
                      (null dsh-emacs--approval-active)
                      (null dsh-emacs--approval-queue))
             (dsh-test-pass "approval-c-g-answers-rejected"))))
     (when (buffer-live-p chat) (kill-buffer chat))))
 
-;; --- 测试 78d: mux 重放同一审批（同 approvalId）→ 只问一次 ---
+;; --- 测试 78d: mux 重放同一审批（同 eventId）→ 只问一次 ---
 (let* ((chat (get-buffer-create " *dsh-test-approval-dedup*")))
   (unwind-protect
       (let ((dsh-emacs--approval-queue
-             (list (list chat "rpc-d0" "sess-d" "aid-d" "bash" "reason" nil)))
+             (list (list chat "wf-d0" "sess-d" "bash" "reason" nil)))
             (dsh-emacs--approval-active
-             (list chat "rpc-d1" "sess-d" "aid-other" "bash" "reason" nil)))
-        ;; 同一 approvalId 的 mux 重放：已在队列中 → 不再入队
+             (list chat "wf-d1" "sess-d" "bash" "reason" nil)))
+        ;; 同一 eventId 的 mux 重放：已在队列中 → 不再入队
         (dsh-emacs--approval-requested
-         chat "rpc-d2" "sess-d" "aid-d" "bash" "reason" nil)
-        ;; 正在回答中的同一审批 → 也不入队
+         chat "wf-d0" "sess-d" "bash" "reason" nil)
+        ;; 正在回答中的同一 eventId → 也不入队
         (dsh-emacs--approval-requested
-         chat "rpc-d3" "sess-d" "aid-d" "bash" "reason" nil)
+         chat "wf-d1" "sess-d" "bash" "reason" nil)
         (when (= 1 (length dsh-emacs--approval-queue))
           (dsh-test-pass "approval-replay-dedup-single-prompt")))
     (kill-buffer chat)))
 
-;; --- 测试 78e: approval/resolved 撤离排队中的同一审批帧 ---
-(let* ((chat (get-buffer-create " *dsh-test-approval-resolved*")))
+;; --- 测试 78e: cancel 帧撤离排队中的同一审批帧 ---
+(let* ((chat (get-buffer-create " *dsh-test-approval-cancel*")))
   (unwind-protect
       (progn
         (setq dsh-emacs--approval-queue
-              (list (list chat "rpc-e1" "sess-e" "aid-e" "bash" "reason" nil)
-                    (list chat "rpc-e2" "sess-e" "aid-other" "fs" "r" nil)))
-        (dsh-emacs--approval-resolved "sess-e" "aid-e" "cancelled")
+              (list (list chat "wf-e1" "sess-e" "bash" "reason" nil)
+                    (list chat "wf-e2" "sess-e" "fs" "r" nil)))
+        (dsh-emacs--approval-cancelled "wf-e1")
         (when (and (= 1 (length dsh-emacs--approval-queue))
-                   (equal "aid-other" (nth 3 (car dsh-emacs--approval-queue))))
-          (dsh-test-pass "approval-resolved-drops-only-matching-frame")))
+                   (equal "wf-e2" (nth 1 (car dsh-emacs--approval-queue))))
+          (dsh-test-pass "approval-cancel-drops-only-matching-frame")))
     (setq dsh-emacs--approval-queue nil)
     (when (buffer-live-p chat) (kill-buffer chat))))
 
@@ -6027,13 +6213,13 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                    (lambda (&rest _) (push :approval-prompt trace) t))
                   ((symbol-function 'completing-read)
                    (lambda (&rest _) (push :question-prompt trace) "Yes"))
-                  ((symbol-function 'dsh-emacs--rpc-respond-async)
-                   (lambda (rpc-id _payload cb)
-                     (push (list :respond rpc-id) trace)
+                  ((symbol-function 'dsh-emacs--events-result-async)
+                   (lambda (_client-id event-id _outcome cb)
+                     (push (list :respond event-id) trace)
                      (funcall cb t nil))))
           ;; 提问进行中到达的审批 → 只入队，不提示
           (dsh-emacs--approval-requested
-           chat "rpc-ap" "sess-s" "aid-s" "bash" "outside" nil)
+           chat "rpc-ap" "sess-s" "bash" "outside" nil)
           (when (and (null trace)
                      (= 1 (length dsh-emacs--approval-queue)))
             (dsh-test-pass "approval-queued-while-question-active"))
@@ -6062,15 +6248,15 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (dsh-emacs--question-active nil)
             (dsh-emacs--approval-queue nil)
             (dsh-emacs--approval-active
-             (list chat "rpc-ax" "sess-x" "aid-x" "bash" nil nil)) ; 审批正在回答中
+             (list chat "rpc-ax" "sess-x" "bash" nil nil)) ; 审批正在回答中
             (dsh-emacs-enable-notifications nil))
         (cl-letf (((symbol-function 'dsh-emacs--approval-prompt)
                    (lambda (&rest _) (push :approval-prompt trace) t))
                   ((symbol-function 'completing-read)
                    (lambda (&rest _) (push :question-prompt trace) "Yes"))
-                  ((symbol-function 'dsh-emacs--rpc-respond-async)
-                   (lambda (rpc-id _payload cb)
-                     (push (list :respond rpc-id) trace)
+                  ((symbol-function 'dsh-emacs--events-result-async)
+                   (lambda (_client-id event-id _outcome cb)
+                     (push (list :respond event-id) trace)
                      (funcall cb t nil))))
           ;; 审批进行中到达的提问 → 只入队，不提示
           (dsh-emacs--question-requested
@@ -6105,8 +6291,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
           (setq-local dsh-emacs--buffer-session "sess-nt"))
         (cl-letf (((symbol-function 'dsh-emacs-notify--post)
                    (lambda (_session body _buffer) (push body posted)))
-                  ((symbol-function 'dsh-emacs--rpc-respond-async)
-                   (lambda (_rpc _payload cb) (funcall cb t nil)))
+                  ((symbol-function 'dsh-emacs--events-result-async)
+                   (lambda (&rest _) nil))
                   ((symbol-function 'completing-read)
                    (lambda (&rest _) "Yes"))
                   ((symbol-function 'dsh-emacs--approval-prompt)
@@ -6119,7 +6305,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                        (cons 'options (list (list (cons 'label "a")))))))
           (dsh-test-assert "question-notify-on-accept"
             (equal '("Question: Which dir?") posted))
-          ;; 同 rpc-id 副本仍在队列中（mux 重放）→ 丢弃，不重复通知
+          ;; 同 event-id 副本仍在队列中（mux 重放）→ 丢弃，不重复通知
           (setq posted nil)
           (setq dsh-emacs--question-queue
                 (list (list chat "rpc-n1" "sess-nt"
@@ -6140,17 +6326,75 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                            :args "$ cat /etc/hostname" :call-time nil :ns nil)
                      dsh-emacs--tool-states))
           (dsh-emacs--approval-requested
-           chat "rpc-n2" "sess-nt" "aid-n" "bash" "needs outside" "call-n")
+           chat "rpc-n2" "sess-nt" "bash" "needs outside" "call-n")
           (dsh-test-assert "approval-notify-body-carries-command"
             (equal '("Approval: $ cat /etc/hostname") posted))
-          ;; 同 approvalId 副本仍在队列中 → 丢弃，不重复通知
+          ;; 同 event-id 副本仍在队列中 → 丢弃，不重复通知
           (setq posted nil)
           (setq dsh-emacs--approval-queue
-                (list (list chat "rpc-zz" "sess-nt" "aid-n" "bash" "x" nil)))
+                (list (list chat "rpc-n3" "sess-nt" "bash" "x" nil)))
           (dsh-emacs--approval-requested
-           chat "rpc-n3" "sess-nt" "aid-n" "bash" "needs outside" "call-n")
+           chat "rpc-n3" "sess-nt" "bash" "needs outside" "call-n")
           (dsh-test-assert "approval-notify-replay-dropped"
             (null posted))))
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
+;; --- 测试 78j: $events ready → 捕获 clientId；换代退役 pending waterfall ---
+;; `$events' 每代（每次重连）先发 ready(clientId)；本端用该 clientId 应答
+;; waterfall，换代后旧代的 pending 帧（其 result 已成 no-op）整体退役。
+(let ((dsh-emacs--chat-buffers (make-hash-table :test 'equal))
+      (dsh-emacs--question-queue nil)
+      (dsh-emacs--approval-queue nil))
+  (setq dsh-emacs-events--client-id nil)
+  ;; 首代 ready → 捕获 clientId
+  (dsh-emacs-events--host-item
+   'process '((type . "ready") (clientId . "gen-1")))
+  (dsh-test-assert "events-ready-captures-client-id"
+    (equal "gen-1" dsh-emacs-events--client-id))
+  ;; 同一 clientId 重放 → 不退役（同代）
+  (setq dsh-emacs--question-queue
+        (list (list (get-buffer-create " *t-gen-q*")
+                    "e-1" "sess-g" '((id . "q1")))))
+  (dsh-emacs-events--host-item
+   'process '((type . "ready") (clientId . "gen-1")))
+  (dsh-test-assert "events-ready-same-generation-keeps-pending"
+    (= 1 (length dsh-emacs--question-queue)))
+  ;; 新代 ready → 旧代 pending 退役（question + approval 都清空）
+  (setq dsh-emacs--approval-queue
+        (list (list (get-buffer-create " *t-gen-a*")
+                    "e-2" "sess-g" "bash" "reason" nil)))
+  (dsh-emacs-events--host-item
+   'process '((type . "ready") (clientId . "gen-2")))
+  (dsh-test-assert "events-new-generation-retires-pending"
+    (equal "gen-2" dsh-emacs-events--client-id)
+    (null dsh-emacs--question-queue)
+    (null dsh-emacs--approval-queue))
+  (setq dsh-emacs-events--client-id nil))
+
+;; --- 测试 78k: $events cancel → 按 eventId 退役匹配的 pending waterfall ---
+;; 宿主取消（会话结束 / withdraw）会发 cancel(eventId)；只退役同 eventId 的
+;; 帧，其它 pending 保留。
+(let ((chat (get-buffer-create " *t-cancel-chat*")))
+  (unwind-protect
+      (let ((dsh-emacs--chat-buffers (make-hash-table :test 'equal))
+            (dsh-emacs--question-queue
+             (list (list chat "q-cancel" "sess-q" '((id . "qa")))
+                   (list chat "q-keep" "sess-q" '((id . "qb")))))
+            (dsh-emacs--approval-queue
+             (list (list chat "a-cancel" "sess-q" "fs" "r" nil)
+                   (list chat "a-keep" "sess-q" "bash" "r" nil))))
+        (dsh-emacs-events--host-item
+         'process '((type . "cancel") (eventId . "q-cancel")))
+        (dsh-test-assert "events-cancel-retires-matching-question"
+          (= 1 (length dsh-emacs--question-queue))
+          (equal "q-keep" (nth 1 (car dsh-emacs--question-queue)))
+          (= 2 (length dsh-emacs--approval-queue)))
+        (dsh-emacs-events--host-item
+         'process '((type . "cancel") (eventId . "a-cancel")))
+        (dsh-test-assert "events-cancel-retires-matching-approval"
+          (= 1 (length dsh-emacs--approval-queue))
+          (equal "a-keep" (nth 1 (car dsh-emacs--approval-queue)))
+          (= 1 (length dsh-emacs--question-queue))))
     (when (buffer-live-p chat) (kill-buffer chat))))
 
 (when (featurep 'dsh-emacs-server)
@@ -6198,6 +6442,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
 (let ((started 0)
       (noninteractive nil))
   (cl-letf (((symbol-function 'dsh-emacs--server-alive-p) (lambda () t))
+            ((symbol-function 'dsh-emacs--server-auth-ensure-interactive)
+             ;; 只测 ensure 的启动控制流：auth 门禁单独测，避免连真实 401 服务器
+             (lambda () t))
             ((symbol-function 'dsh-emacs-server-start)
              (lambda (&optional _wait) (setq started (1+ started)))))
     (dsh-emacs-server-ensure))
@@ -6377,6 +6624,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
 ;; --- 测试 87: server-start：已就绪 → 不拉起进程 ---
 (let ((commands nil))
   (cl-letf (((symbol-function 'dsh-emacs--server-alive-p) (lambda () t))
+            ((symbol-function 'dsh-emacs--server-auth-ensure-interactive)
+             ;; 只测 server-start 的启动控制流；auth 门禁单独测。
+             (lambda () t))
             ((symbol-function 'make-process)
              (lambda (&rest args) (push args commands) 'fake-proc)))
     (dsh-emacs-server-start))
@@ -6449,6 +6699,418 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
        (when (string-match-p "not reachable" (error-message-string err))
          (dsh-test-pass "open-web-guard-fails-with-guidance"))))))
 
+;; --- 测试 93bis: 浏览器会话认证 —— 从 *dsh-server* 输出捕获 launch token ---
+(let ((dsh-emacs--server-auth-captured-token nil)
+      (buf (get-buffer-create "*dsh-server*")))
+  (unwind-protect
+      (progn
+        (with-current-buffer buf
+          (erase-buffer)
+          (insert "dsh web: http://127.0.0.1:3080/?token=CapturedTok123 (LAN: http://192.168.1.5:3080/?token=CapturedTok123)\n"))
+        (dsh-test-assert "auth-token-captured-from-server-output"
+          (equal "CapturedTok123"
+                 (dsh-emacs--server-auth-token))))
+    (kill-buffer buf))
+  (setq dsh-emacs--server-auth-captured-token nil))
+
+;; --- 测试 93c: launch token 从 base-url 的 token 查询参数提取 ---
+(dsh-test-assert "auth-token-from-url-single"
+  (equal "AbC_-D"
+         (dsh-emacs--server-auth-token-from-url
+          "http://127.0.0.1:3080/?token=AbC_-D")))
+(dsh-test-assert "auth-token-from-url-clean-is-nil"
+  (null (dsh-emacs--server-auth-token-from-url "http://127.0.0.1:3080")))
+
+;; --- 测试 93c2: base-url 里的 ?token= 查询在拼接请求 URL 时被剥离 ---
+;; 用户把 dsh web 打印的完整 URL（含 ?token=）设进 dsh-emacs-base-url 时，
+;; RPC/probe/open-web 的路径拼接不能把查询串进去（否则 URL 变成
+;; ...?token=X/api/...）——清理后的 base 去掉查询和结尾斜杠，token 单独提取。
+(let ((dsh-emacs-base-url "http://127.0.0.1:3080/?token=Xy-9_"))
+  (dsh-test-assert "auth-base-url-strips-token-query-for-url-building"
+    (and (equal "http://127.0.0.1:3080"
+                (dsh-emacs--server-base-url))
+         (equal "http://127.0.0.1:3080/api/session/list"
+                (format "%s/api/session/list"
+                        (dsh-emacs--server-base-url)))
+         (equal "http://127.0.0.1:3080/"
+                (concat (dsh-emacs--server-base-url) "/"))))
+  (dsh-test-assert "auth-base-url-raw-still-carries-token"
+    (equal "Xy-9_"
+           (dsh-emacs--server-auth-token-from-url
+            (dsh-emacs--server-base-url-raw)))))
+
+;; --- 测试 93d: token → cookie 交换解析 Set-Cookie 并缓存，不重复 mint ---
+;; exchange 走 `dsh-emacs--server-auth-exchange-plain'（raw TCP）：dsh 的成功
+;; 交换是 303 + Set-Cookie，必须读首个 303 的头，不能跟随重定向（url-retrieve
+;; 会跟到 / 丢掉 header）。单测用 mock socket 灌入真实的 303 响应。
+(let ((dsh-emacs-base-url "http://127.0.0.1:3080")
+      (filter nil)
+      (sent nil))
+  (cl-letf (((symbol-function 'open-network-stream)
+             (lambda (&rest _) 'fake-sock))
+            ((symbol-function 'set-process-query-on-exit-flag)
+             (lambda (&rest _) nil))
+            ((symbol-function 'set-process-filter)
+             (lambda (_proc f) (setq filter f)))
+            ((symbol-function 'process-send-string)
+             (lambda (_proc string) (setq sent string)))
+            ((symbol-function 'accept-process-output)
+             (lambda (&rest _)
+               (funcall filter 'fake-sock
+                (concat "HTTP/1.1 303 See Other\r\nLocation: /\r\n"
+                        "Set-Cookie: dsh-auth-HASH=eyJ2MSJ9.sig; Max-Age=2592000; "
+                        "Path=/; HttpOnly; SameSite=Strict\r\n\r\n"))))
+            ((symbol-function 'process-live-p) (lambda (&rest _) t))
+            ((symbol-function 'delete-process) (lambda (&rest _) nil)))
+    (let ((cookie (dsh-emacs--server-auth-exchange-plain
+                   "http://127.0.0.1:3080/?token=TokD")))
+      (dsh-test-assert "auth-raw-exchange-hits-token-query"
+        (string-match-p "GET /\\?token=TokD HTTP/1.0" sent))
+      (dsh-test-assert "auth-raw-exchange-parses-303-set-cookie"
+        (equal "dsh-auth-HASH=eyJ2MSJ9.sig" cookie)))))
+
+;; --- 测试 93d2: https base 的 token 交换走 url-retrieve 且解析 303 Set-Cookie ---
+;; https 需要 TLS，只能经 url 库；实现用 `url-max-redirections 0' 让
+;; url-retrieve 停在首个 303，以读到 Set-Cookie（而不是跟随到 /）。
+(let ((dsh-emacs-base-url "https://auth.example:3080")
+      (redirs-unbounded nil))
+  (cl-letf (((symbol-function 'url-retrieve-synchronously)
+             (lambda (&rest _)
+               (setq redirs-unbounded (and (boundp 'url-max-redirections)
+                                           (= url-max-redirections 0)))
+               (with-current-buffer (generate-new-buffer " *dsh-https-mint*")
+                 (insert "HTTP/1.1 303 See Other\r\nLocation: /\r\n"
+                         "Set-Cookie: dsh-auth-ABC=v1.body.sig; Path=/; HttpOnly; SameSite=Strict\r\n\r\n")
+                 (current-buffer)))))
+    (let ((cookie (dsh-emacs--server-auth-exchange "https://auth.example:3080"
+                                                   "TokH")))
+      (dsh-test-assert "auth-https-exchange-disables-redirects"
+        redirs-unbounded)
+      (dsh-test-assert "auth-https-exchange-parses-303-set-cookie"
+        (equal "dsh-auth-ABC=v1.body.sig" cookie)))))
+
+;; --- 测试 93d3: ensure 端到端——已知 token 交换出 cookie 并缓存 ---
+(let ((dsh-emacs-base-url "http://127.0.0.1:3080")
+      (dsh-emacs-server-auth-token "TokE")
+      (filter nil)
+      (dsh-emacs--server-auth-cookie nil))
+  (cl-letf (((symbol-function 'open-network-stream)
+             (lambda (&rest _) 'fake-sock))
+            ((symbol-function 'set-process-query-on-exit-flag)
+             (lambda (&rest _) nil))
+            ((symbol-function 'set-process-filter)
+             (lambda (_proc f) (setq filter f)))
+            ((symbol-function 'process-send-string) (lambda (&rest _) nil))
+            ((symbol-function 'accept-process-output)
+             (lambda (&rest _)
+               (funcall filter 'fake-sock
+                (concat "HTTP/1.1 303 See Other\r\nLocation: /\r\n"
+                        "Set-Cookie: dsh-auth-EEE=v1.sig; Path=/; HttpOnly; SameSite=Strict\r\n\r\n"))))
+            ((symbol-function 'process-live-p) (lambda (&rest _) t))
+            ((symbol-function 'delete-process) (lambda (&rest _) nil)))
+    (let ((cookie (dsh-emacs--server-auth-ensure)))
+      (dsh-test-assert "auth-ensure-mints-from-token-and-caches"
+        (and (equal "dsh-auth-EEE=v1.sig" cookie)
+             (equal "dsh-auth-EEE=v1.sig" dsh-emacs--server-auth-cookie)))))
+  (setq dsh-emacs--server-auth-cookie nil
+        dsh-emacs-server-auth-token nil))
+
+;; --- 测试 93d3b: cookie-header 把 multibyte 标志的 cookie 规整为 unibyte ---
+;; 回归：cookie 用 `match-string' 从网络响应 buffer 捕获，即使内容纯 ASCII 也带
+;; multibyte 标志。Emacs `url' 对"multibyte 头 + unibyte 请求体"的拼接报
+;; Bug#23750（"Multibyte text in HTTP request"）——发中文时 request body 是
+;; unibyte UTF-8 字节，拼接即崩。cookie-header 必须返回真正的 unibyte 字节串，
+;; 让 RPC 请求与 WS 握手都保持单字节（cookie 是 `dsh-auth-<name>=v1.<body>.<sig>'
+;; ASCII 令牌，规整无损）。
+(let ((old dsh-emacs--server-auth-cookie))
+  (unwind-protect
+      (let* ((cookie (string-as-multibyte "dsh-auth-MB=v1.body.sig"))
+             (dsh-emacs--server-auth-cookie cookie))
+        (dsh-test-assert "auth-cookie-multibyte-flag-normalized"
+          (let ((out (dsh-emacs--server-auth-cookie-header)))
+            (and (stringp out)
+                 (equal "dsh-auth-MB=v1.body.sig"
+                        (decode-coding-string out 'utf-8))
+                 (not (multibyte-string-p out)))))
+        (dsh-test-assert "auth-cookie-already-unibyte-passthrough"
+          (let ((dsh-emacs--server-auth-cookie "dsh-auth-UB=v1.sig"))
+            (equal "dsh-auth-UB=v1.sig"
+                   (dsh-emacs--server-auth-cookie-header))))
+        (dsh-test-assert "auth-cookie-nil-returns-nil"
+          (let ((dsh-emacs--server-auth-cookie nil))
+            (null (dsh-emacs--server-auth-cookie-header)))))
+    (setq dsh-emacs--server-auth-cookie old)))
+
+;; --- 测试 93d3c: 外置服务器重启后的陈旧 cookie 在 401 时清除 ---
+;; 回归：用户自管的外置 `dsh web' 每次重启都发新 per-process token，使本端
+;; 缓存的旧 cookie 失效；客户端无从得知 token 变了，于是持续发死 cookie、每个
+;; RPC 都 401，直到 Emacs 重启。收到"带着我们 cookie 的 401"时应清缓存
+;; （下次调用重新 mint / 重新询问），并忘掉 ask-once 记忆。
+(let ((dsh-emacs--server-auth-cookie "dsh-auth-STALE=v1.old")
+      (dsh-emacs--server-auth-ask-base "http://127.0.0.1:3080"))
+  (dsh-test-assert "auth-http-401-p-detects-http-401"
+    (dsh-emacs--server-auth-http-401-p '(error http 401))
+    (not (dsh-emacs--server-auth-http-401-p '(error http 404)))
+    (not (dsh-emacs--server-auth-http-401-p nil)))
+  (dsh-emacs--server-auth-maybe-expire)
+  (dsh-test-assert "auth-stale-cookie-cleared-on-401"
+    (null dsh-emacs--server-auth-cookie)
+    (null dsh-emacs--server-auth-ask-base))
+  ;; 没有 cookie 时 maybe-expire 保持原样（不误清无 cookie 场景的状态）
+  (let ((dsh-emacs--server-auth-ask-base "http://127.0.0.1:3080"))
+    (dsh-emacs--server-auth-maybe-expire)
+    (dsh-test-assert "auth-maybe-expire-keeps-ask-base-when-no-cookie"
+      (equal "http://127.0.0.1:3080" dsh-emacs--server-auth-ask-base)))
+  (setq dsh-emacs--server-auth-cookie nil
+        dsh-emacs--server-auth-ask-base nil))
+
+;; --- 测试 93d4: 交互 auth 门禁 —— 已知 cookie 时不询问 ---
+(let ((dsh-emacs-base-url "http://127.0.0.1:3080")
+      (dsh-emacs--server-auth-cookie "dsh-auth-HASH=ok.sig")
+      (noninteractive nil)
+      (asked 0)
+      (dsh-emacs--server-auth-ask-base nil))
+  (cl-letf (((symbol-function 'read-string)
+             (lambda (&rest _) (setq asked (1+ asked)) "Tok")))
+    (dsh-emacs--server-auth-ensure-interactive))
+  (when (= 0 asked)
+    (dsh-test-pass "auth-gate-cookie-present-asks-nothing"))
+  (setq dsh-emacs--server-auth-cookie nil))
+
+;; --- 测试 93d5: 交互 auth 门禁 —— 已知 token → 直接 mint，不询问 ---
+(let ((dsh-emacs-base-url "http://127.0.0.1:3080")
+      (dsh-emacs-server-auth-token "TokKnown")
+      (dsh-emacs--server-auth-cookie nil)
+      (noninteractive nil)
+      (asked 0)
+      (filter nil)
+      (dsh-emacs--server-auth-ask-base nil))
+  (cl-letf (((symbol-function 'read-string)
+             (lambda (&rest _) (setq asked (1+ asked)) "x"))
+            ((symbol-function 'open-network-stream)
+             (lambda (&rest _) 'fake-sock))
+            ((symbol-function 'set-process-query-on-exit-flag)
+             (lambda (&rest _) nil))
+            ((symbol-function 'set-process-filter)
+             (lambda (_proc f) (setq filter f)))
+            ((symbol-function 'process-send-string) (lambda (&rest _) nil))
+            ((symbol-function 'accept-process-output)
+             (lambda (&rest _)
+               (funcall filter 'fake-sock
+                (concat "HTTP/1.1 303 See Other\r\nLocation: /\r\n"
+                        "Set-Cookie: dsh-auth-KNOWN=v1.sig; Path=/; HttpOnly; SameSite=Strict\r\n\r\n"))))
+            ((symbol-function 'process-live-p) (lambda (&rest _) t))
+            ((symbol-function 'delete-process) (lambda (&rest _) nil)))
+    (dsh-emacs--server-auth-ensure-interactive))
+  (dsh-test-assert "auth-gate-known-token-mints-silently"
+    (and (= 0 asked)
+         (equal "dsh-auth-KNOWN=v1.sig" dsh-emacs--server-auth-cookie)))
+  (setq dsh-emacs--server-auth-cookie nil
+        dsh-emacs-server-auth-token nil))
+
+;; --- 测试 93d6: 交互 auth 门禁 —— 服务器不需 cookie → 不询问即过 ---
+(let ((dsh-emacs-base-url "http://127.0.0.1:3080")
+      (dsh-emacs--server-auth-cookie nil)
+      (noninteractive nil)
+      (asked 0)
+      (dsh-emacs--server-auth-ask-base nil))
+  (cl-letf (((symbol-function 'dsh-emacs--server-auth-required-p)
+             (lambda () nil))
+            ((symbol-function 'read-string)
+             (lambda (&rest _) (setq asked (1+ asked)) "x")))
+    (dsh-emacs--server-auth-ensure-interactive))
+  (when (= 0 asked)
+    (dsh-test-pass "auth-gate-no-auth-needed-asks-nothing")))
+
+;; --- 测试 93d7: 交互 auth 门禁 —— 外部需 auth 服务器 → 询问 token 并 mint ---
+(let ((dsh-emacs-base-url "http://127.0.0.1:3080")
+      (dsh-emacs--server-auth-cookie nil)
+      (dsh-emacs-server-auth-token nil)
+      (noninteractive nil)
+      (dsh-emacs--server-auth-ask-base nil)
+      (filter nil)
+      (asked 0))
+  (cl-letf (((symbol-function 'dsh-emacs--server-auth-required-p)
+             (lambda () t))
+            ((symbol-function 'read-string)
+             (lambda (_prompt) (setq asked (1+ asked)) "UserTok"))
+            ((symbol-function 'open-network-stream)
+             (lambda (&rest _) 'fake-sock))
+            ((symbol-function 'set-process-query-on-exit-flag)
+             (lambda (&rest _) nil))
+            ((symbol-function 'set-process-filter)
+             (lambda (_proc f) (setq filter f)))
+            ((symbol-function 'process-send-string) (lambda (&rest _) nil))
+            ((symbol-function 'accept-process-output)
+             (lambda (&rest _)
+               (funcall filter 'fake-sock
+                (concat "HTTP/1.1 303 See Other\r\nLocation: /\r\n"
+                        "Set-Cookie: dsh-auth-USERT=v1.sig; Path=/; HttpOnly; SameSite=Strict\r\n\r\n"))))
+            ((symbol-function 'process-live-p) (lambda (&rest _) t))
+            ((symbol-function 'delete-process) (lambda (&rest _) nil)))
+    (dsh-emacs--server-auth-ensure-interactive))
+  (dsh-test-assert "auth-gate-external-auth-asks-and-mints"
+    (and (= 1 asked)
+         (equal "dsh-auth-USERT=v1.sig" dsh-emacs--server-auth-cookie)))
+  (setq dsh-emacs--server-auth-cookie nil
+        dsh-emacs-server-auth-token nil
+        dsh-emacs--server-auth-ask-base nil))
+
+;; --- 测试 93d8: 交互 auth 门禁 —— 用户空输入 → user-error 指引 ---
+(let ((dsh-emacs-base-url "http://127.0.0.1:3080")
+      (dsh-emacs--server-auth-cookie nil)
+      (noninteractive nil)
+      (dsh-emacs--server-auth-ask-base nil))
+  (cl-letf (((symbol-function 'dsh-emacs--server-auth-required-p)
+             (lambda () t))
+            ((symbol-function 'read-string)
+             (lambda (&rest _) "")))
+    (condition-case err
+        (dsh-emacs--server-auth-ensure-interactive)
+      (user-error
+       (when (string-match-p "dsh-emacs-server-auth-token"
+                             (error-message-string err))
+         (dsh-test-pass "auth-gate-empty-token-errors-with-guidance")))))
+  (setq dsh-emacs--server-auth-ask-base nil))
+
+;; --- 测试 93d8b: declined 之后同一会话不再静默放行 ---
+;; 用户拒绝输入 token 后，本会话对该 base 不再重问，但也绝不再静默发
+;; 未认证请求（否则 url 又弹 Basic 框）：后续命令应给明确错误而不是放行。
+(let ((dsh-emacs-base-url "http://127.0.0.1:3080")
+      (dsh-emacs--server-auth-cookie nil)
+      (noninteractive nil)
+      (asked 0))
+  (setq dsh-emacs--server-auth-ask-base dsh-emacs-base-url)  ; 已问过并 declined
+  (cl-letf (((symbol-function 'dsh-emacs--server-auth-required-p)
+             (lambda () t))
+            ((symbol-function 'read-string)
+             (lambda (&rest _) (setq asked (1+ asked)) "x")))
+    (condition-case err
+        (dsh-emacs--server-auth-ensure-interactive)
+      (user-error
+       (when (and (= 0 asked)
+                  (string-match-p "requires a launch token"
+                                  (error-message-string err)))
+         (dsh-test-pass "auth-gate-declined-base-errors-not-silent-proceed")))))
+  (setq dsh-emacs--server-auth-ask-base nil))
+
+;; --- 测试 93d9: 交互 auth 门禁 —— 同一会话不重复询问（declined 记忆） ---
+(let ((dsh-emacs-base-url "http://127.0.0.1:3080")
+      (dsh-emacs--server-auth-cookie nil)
+      (noninteractive nil)
+      (dsh-emacs-server-auth-token nil)
+      (asked 0)
+      (filter nil))
+  (setq dsh-emacs--server-auth-ask-base nil)
+  (cl-letf (((symbol-function 'dsh-emacs--server-auth-required-p)
+             (lambda () t))
+            ((symbol-function 'read-string)
+             (lambda (_prompt) (setq asked (1+ asked)) "TokA"))
+            ((symbol-function 'open-network-stream)
+             (lambda (&rest _) 'fake-sock))
+            ((symbol-function 'set-process-query-on-exit-flag)
+             (lambda (&rest _) nil))
+            ((symbol-function 'set-process-filter)
+             (lambda (_proc f) (setq filter f)))
+            ((symbol-function 'process-send-string) (lambda (&rest _) nil))
+            ((symbol-function 'accept-process-output)
+             (lambda (&rest _)
+               (funcall filter 'fake-sock
+                (concat "HTTP/1.1 303 See Other\r\nLocation: /\r\n"
+                        "Set-Cookie: dsh-auth-A=v1.sig; Path=/; HttpOnly; SameSite=Strict\r\n\r\n"))))
+            ((symbol-function 'process-live-p) (lambda (&rest _) t))
+            ((symbol-function 'delete-process) (lambda (&rest _) nil)))
+    ;; 第一次 mint 成功，cookie 缓存 → 第二次不再问。
+    (dsh-emacs--server-auth-ensure-interactive)
+    (dsh-emacs--server-auth-ensure-interactive))
+  (dsh-test-assert "auth-gate-cookie-cached-skips-repeat-ask"
+    (and (= 1 asked)
+         (equal "dsh-auth-A=v1.sig" dsh-emacs--server-auth-cookie)))
+  (setq dsh-emacs--server-auth-cookie nil
+        dsh-emacs-server-auth-token nil
+        dsh-emacs--server-auth-ask-base nil))
+
+;; --- 测试 93e: WebSocket 握手携带浏览器会话 cookie ---
+(let ((dsh-emacs-base-url "http://127.0.0.1:3080")
+      (sent nil)
+      (dsh-emacs--server-auth-cookie "dsh-auth-HASH=ok.sig")
+      (dsh-emacs--server-auth-captured-token nil))
+  (cl-letf (((symbol-function 'dsh-emacs-events--random-mask)
+             (lambda () (apply #'unibyte-string (list 1 2 3 4))))
+            ((symbol-function 'process-send-string)
+             (lambda (_proc string) (setq sent string))))
+    (dsh-emacs-events--send-handshake
+     (make-pipe-process :name "ws-auth" :buffer (get-buffer-create " *ws*"))))
+  (when (and sent (string-match-p "Cookie: dsh-auth-HASH=ok\\.sig" sent))
+    (dsh-test-pass "server-websocket-handshake-carries-browser-cookie"))
+  (setq dsh-emacs--server-auth-cookie nil))
+
+;; --- 测试 93g: /api/remote.mux open 消息与下行帧信封 ---
+(let* ((json (dsh-emacs-events--open-message
+              "follow-1" "session/follow"
+              '((request . ((address . ((kind . "session")
+                                        (sessionId . "s1"))))))))
+       (msg (json-read-from-string json)))
+  (dsh-test-assert "mux-open-message-shape"
+    (equal "open" (dsh-emacs-render--aget "type" msg))
+    (equal "follow-1" (dsh-emacs-render--aget "streamId" msg))
+    (equal "session/follow" (dsh-emacs-render--aget "endpoint" msg))
+    (equal "s1"
+           (dsh-emacs-render--aget
+            "sessionId"
+            (dsh-emacs-render--aget
+             "address"
+             (dsh-emacs-render--aget "request"
+                                     (dsh-emacs-render--aget "args"
+                                                             (dsh-emacs-render--aget "payload" msg))))))))
+
+(let* ((json (dsh-emacs-events--open-message "events-1" "$events" nil))
+       (msg (json-read-from-string json))
+       (args (assq 'args (dsh-emacs-render--aget "payload" msg))))
+  ;; An empty object decodes to nil in json-read: the wire frame must still
+  ;; carry the `args' key (a `{}' value), never drop it.
+  (when (and args (null (cdr args)))
+    (dsh-test-pass "mux-open-no-args-encodes-empty-object")))
+
+(dsh-test-assert "mux-frame-parses-item-error-other"
+  (let ((item (dsh-emacs-events--message-frame
+               "{\"type\":\"item\",\"streamId\":\"f1\",\"value\":{\"type\":\"event\",\"event\":{}}}")))
+    (and (equal "item" (plist-get item :type))
+         (equal "f1" (plist-get item :stream-id))
+         (listp (plist-get item :value))))
+  (let ((err (dsh-emacs-events--message-frame
+              "{\"type\":\"error\",\"streamId\":\"f1\",\"error\":{\"code\":\"x\"}}")))
+    (and (equal "error" (plist-get err :type))
+         (equal "x" (dsh-emacs-render--aget "code" (plist-get err :error)))))
+  (let ((ready (dsh-emacs-events--message-frame
+                "{\"type\":\"ready\",\"clientId\":\"c1\"}")))
+    (equal "ready" (plist-get ready :type))))
+
+
+;; --- 测试 93f: http-error-hint 对 401 给出认证指引 ---
+(dsh-test-assert "http-error-hint-401-mentions-auth"
+  (string-match-p "401"
+                  (dsh-emacs--http-error-hint '(error http 401))))
+
+;; --- 测试 93f2: --frame 在 unibyte 缓冲里编码 multibyte payload 仍产出 unibyte ---
+;; 回归：`dsh-emacs-events--frame' 曾用 `(encode-coding-string p 'utf-8 t)'
+;; 编码，`t' 是 nocopy；在 unibyte 进程缓冲里 json-encode 的字符串是 multibyte，
+;; nocopy 编码原样返回 multibyte → 之后 aset 掩码把字节塞进 multibyte 串抛
+;; "Attempt to store non-ASCII char into multibyte string"（连接 core/chat 流即崩）。
+;; 现在编码后强制 string-to-unibyte，无论当前缓冲 unibyte 与否都产出纯字节串。
+(with-temp-buffer
+  (set-buffer-multibyte nil)          ; 复现 process buffer（host/chat 流）环境
+  (let ((payload (string-make-multibyte
+                  "{\"type\":\"open\",\"streamId\":\"s1\",\"x\":\"中文\"}")))
+    (when (multibyte-string-p payload)
+      (let ((frame (condition-case err
+                       (dsh-emacs-events--frame 1 payload)
+                     (error (list :err err)))))
+        (dsh-test-assert "frame-encodes-multibyte-payload-in-unibyte-buffer"
+          (and (not (and (consp frame) (eq (car frame) :err)))
+               (not (multibyte-string-p frame))
+               (stringp frame)))))))
+
 ;; --- 测试 94: slash 命令解析（与 dsh 注册表一致的准入语法） ---
 (let ((cases '(("/compact" "compact" "")
                ("/goal set x" "goal" " set x")
@@ -6483,11 +7145,11 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
      "sess-exec" "/compact" nil
      (lambda (ok ex _err) (setq done (list ok ex))))
     (let* ((call (car calls))
-           (args (cdr (assq 'args (cadr call))))
-           (images (cdr (assq 'images args))))
+           (params (cadr call))
+           (images (cdr (assq 'images params))))
       (when (and (string= "commands/execute" (car call))
-                 (string= "/compact" (cdr (assq 'line args)))
-                 (string= "sess-exec" (cdr (assq 'agentId args)))
+                 (string= "/compact" (cdr (assq 'line params)))
+                 (string= "sess-exec" (cdr (assq 'agentId params)))
                  (vectorp images) (zerop (length images))
                  (equal done
                         (list t (dsh-protocol-command-execution--from-alist
@@ -6512,8 +7174,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                (funcall cb t nil))))
     (dsh-emacs-command-execute
      "s" "/goal" '((mediaType . "image/png") (data . "x")) nil))
-  (let ((args (cdr (assq 'args (cadr (car calls))))))
-    (when (equal (cdr (assq 'images args))
+  (let ((params (cadr (car calls))))
+    (when (equal (cdr (assq 'images params))
                  '((mediaType . "image/png") (data . "x")))
       (dsh-test-pass "command-execute-passes-images"))))
 
@@ -6528,8 +7190,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                    (lambda (method params cb)
                      (push (list method params) calls)
                      (if (string= method "commands/execute")
-                         (let ((line (cdr (assq 'line
-                                                (cdr (assq 'args params))))))
+                         (let ((line (cdr (assq 'line params))))
                            (if (equal line "/frobnicate")
                                (funcall cb t nil)
                              (funcall cb t '((commandId . "c9")
@@ -6542,31 +7203,33 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                    (lambda (_c) nil))
                   ((symbol-function 'dsh-emacs-events--watchdog-start)
                    (lambda () nil)))
-          ;; 普通消息 → session.prompt（原路径不变）
+          ;; 普通消息 → session/prompt（原路径不变）
           (dsh-emacs--submit-prompt "hi")
           (let* ((call (car calls))
-                 (content (cdr (assq 'content (cadr call))))
+                 (content (cdr (assq 'content
+                                     (cdr (assq 'request (cadr call))))))
                  (part (and content (aref content 0))))
-            (when (and (string= "session.prompt" (car call))
+            (when (and (string= "session/prompt" (car call))
                        (string= "hi" (cdr (assq 'text part))))
               (dsh-test-pass "submit-plain-sends-session-prompt")))
-          ;; 已知命令 → commands.execute，且不再发 session.prompt
+          ;; 已知命令 → commands.execute，且不再发 session/prompt
           (setq calls nil)
           (dsh-emacs--submit-prompt "/compact")
           (let* ((call (car calls))
-                 (args (cdr (assq 'args (cadr call)))))
+                 (params (cadr call)))
             (when (and (string= "commands/execute" (car call))
-                       (string= "/compact" (cdr (assq 'line args)))
+                       (string= "/compact" (cdr (assq 'line params)))
                        (= (length calls) 1))
               (dsh-test-pass "submit-slash-routes-to-execute")))
           ;; 未命中注册表 → 回退成普通消息（浏览器同款语义）
           (setq calls nil)
           (dsh-emacs--submit-prompt "/frobnicate")
           (let* ((prompt-call (car calls))
-                 (content (cdr (assq 'content (cadr prompt-call))))
+                 (content (cdr (assq 'content
+                                     (cdr (assq 'request (cadr prompt-call))))))
                  (part (and content (aref content 0))))
             (when (and (= (length calls) 2)
-                       (string= "session.prompt" (car prompt-call))
+                       (string= "session/prompt" (car prompt-call))
                        (string= "commands/execute" (car (cadr calls)))
                        (string= "/frobnicate" (cdr (assq 'text part))))
               (dsh-test-pass "submit-unknown-slash-falls-back-to-plain")))))
@@ -7107,7 +7770,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
 
 ;; --- 测试 98g: 重连（connect→disconnect→恢复）不丢 mode-line busy flag ---
 ;; 回归：切走再切回期间流断掉、reconnect 时 disconnect 会清掉 busy flag，
-;; 而 busy flag 正是 C-c C-c 打断（session.cancel）的开关 —— 丢了它就会
+;; 而 busy flag 正是 C-c C-c 打断（session/cancel）的开关 —— 丢了它就会
 ;; 出现「无法打断、提示 Please enter a message」。
 (let ((buf (generate-new-buffer " *dsh-ml-reconnect-busy*")))
   (unwind-protect
@@ -7235,7 +7898,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (kill-buffer buf-b)))
 
 ;; --- 测试 98l: 乐观用户回显不重复 —— mux 先于 HTTP 回调送达 user/message ---
-;; 回归：pending 登记原在 session.prompt 的 HTTP 回调里，而 mux 流可能抢先
+;; 回归：pending 登记原在 session/prompt 的 HTTP 回调里，而 mux 流可能抢先
 ;; 送达同一 user/message（此时 pending 为空 → 渲染一版真实消息），回调随后又
 ;; 渲染一遍乐观回显 → 「偶尔渲染两个 user input message」。修复：pending 在
 ;; RPC 发出前登记，任何时刻到达的事件都能被去重闸门消费。
@@ -7269,7 +7932,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
 ;; --- Test 98p: a fast run's turn/end arriving before the prompt HTTP callback
 ;; --- must not make the callback re-light the spinner ---
 ;; Regression: the send path lights the mode-line busy flag inside the
-;; session.prompt HTTP callback.  A fast run (very short reply, model
+;; session/prompt HTTP callback.  A fast run (very short reply, model
 ;; rejected immediately e.g. 429) can start AND end on the mux before that
 ;; callback runs — an unconditional `dsh-emacs--ml-busy-set t' would then
 ;; re-light an already-finished turn and the spinner would never stop until
@@ -7405,6 +8068,51 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (dsh-test-assert "reconnect-catchup-renders-new-events"
           (= 1 (dsh-emacs-test--buffer-copies "during-outage"))
           (= 4 dsh-emacs--anchor-seq)))
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
+;; --- 测试 98o: 重连后的 follow snapshot reseed 不重复、断线补齐照常 ---
+;; 重连（`session/follow' 重新 open）会送来一条新 snapshot。它的 records 带
+;; ORIGINAL seq —— 其中 <= `dsh-emacs--anchor-seq' 的旧帧本端早已渲染，reseed
+;; 必须丢弃，不得把整个 transcript 再画一遍；只有 seq > anchor 的新内容（断线
+;; 期间产生）作为补齐渲染一次。这正是 spec-m4 §Part1-2 的 follow-snapshot
+;; 补位：之前只有 dispatch-event 与首次打开（anchor=0）两条路径被测到，这里
+;; 直接喂「既有 anchor + 重连 snapshot」。
+(let ((chat (get-buffer-create " *dsh-snapshot-reseed*")))
+  (unwind-protect
+      (with-current-buffer chat
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-reseed")
+        ;; 打开已久：anchor 已推进到 6，前文都在屏。
+        (setq dsh-emacs--anchor-seq 6)
+        ;; 重连 snapshot：records 是同一段旧史（seq 4/5 <= anchor 6），
+        ;; cursor 也只到 6 → 不得重复渲染。
+        (dsh-emacs-events--follow-snapshot
+         (current-buffer)
+         '((type . "snapshot")
+           (cursor . 6)
+           (records .
+                    [((type . "event")
+                      (event . ((type . "user/message") (seq . 4)
+                                (data . ((content . [((type . "text")
+                                                      (text . "reseed-old-msg"))]))))))
+                     ((type . "event")
+                      (event . ((type . "assistant/message") (seq . 5)
+                                (data . ((turn . 1) (step . 1)
+                                         (message . ((content .
+                                                      [((type . "text")
+                                                        (text . "reseed-old-reply"))]))))))))])))
+        (dsh-test-assert "snapshot-reseed-no-duplicate"
+          (= 0 (dsh-emacs-test--buffer-copies "reseed-old-msg"))
+          (= 0 (dsh-emacs-test--buffer-copies "reseed-old-reply"))
+          (= 6 dsh-emacs--anchor-seq))
+        ;; 断线期间产生的新事件（seq > anchor）经 live 路径补齐一次。
+        (dsh-emacs-events--dispatch-event
+         chat '((type . "user/message") (seq . 7)
+                (data . ((content . [((type . "text")
+                                      (text . "reseed-catchup"))])))))
+        (dsh-test-assert "snapshot-reseed-catchup-renders-new"
+          (= 1 (dsh-emacs-test--buffer-copies "reseed-catchup"))
+          (= 7 dsh-emacs--anchor-seq)))
     (when (buffer-live-p chat) (kill-buffer chat))))
 
 (defun dsh-emacs-test--input-text ()
@@ -7613,9 +8321,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                                           (text . "t"))))))))
     (dsh-emacs-command)
     (let* ((call (car calls))
-           (args (cdr (assq 'args (cadr call)))))
+           (params (cadr call)))
       (when (and (string= "commands/execute" (car call))
-                 (string= "/goal set x" (cdr (assq 'line args)))
+                 (string= "/goal set x" (cdr (assq 'line params)))
                  read-called)
         (dsh-test-pass "command-menu-hint-prompts-args")))))
 
@@ -7637,9 +8345,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                                           (text . "t"))))))))
     (dsh-emacs-command)
     (let* ((call (car calls))
-           (args (cdr (assq 'args (cadr call)))))
+           (params (cadr call)))
       (when (and (string= "commands/execute" (car call))
-                 (string= "/compact" (cdr (assq 'line args)))
+                 (string= "/compact" (cdr (assq 'line params)))
                  (null read-called))
         (dsh-test-pass "command-menu-bare-no-args")))))
 
@@ -8631,15 +9339,14 @@ candidates as the UI would via `all-completions', not by destructuring."
                     ((symbol-function 'run-at-time) (lambda (&rest _) t)))
             (setq-local dsh-emacs--queue-submit-suppress t)
             ;; Frame 1: our message is spliced in → mirror updates, no
-            ;; flash, the flag survives
-            (dsh-emacs-events--dispatch-json
-             proc
-             (json-encode
-              (list (cons 'payload
-                          (list (cons 'type "session/queue")
-                                (cons 'sessionId "sess-sup")
-                                (cons 'items (vector (dsh-emacs-test--queue-item
-                                                      "x1" "queued" "hello"))))))))
+            ;; flash, the flag survives.  Queue mirrors arrive on the core
+            ;; connection's `session/control' stream; `dsh-emacs-queue-apply'
+            ;; is the dispatcher's consumer.
+            (dsh-emacs-queue-apply
+             chat proc
+             (list (cons 'items
+                         (vector (dsh-emacs-test--queue-item
+                                  "x1" "queued" "hello")))))
             (dsh-test-assert "queue-submit-suppress-swallows-splice-in"
               (null announced)
               (= 1 (length dsh-emacs--queue-items))
@@ -8649,13 +9356,7 @@ candidates as the UI would via `all-completions', not by destructuring."
             (setq announced nil)
             ;; Frame 2: the item is claimed → mirror empty, flag
             ;; disarmed, still no flash
-            (dsh-emacs-events--dispatch-json
-             proc
-             (json-encode
-              (list (cons 'payload
-                          (list (cons 'type "session/queue")
-                                (cons 'sessionId "sess-sup")
-                                (cons 'items []))))))
+            (dsh-emacs-queue-apply chat proc (list (cons 'items [])))
             (dsh-test-assert "queue-submit-suppress-settles-and-unarms"
               (null announced)
               (null dsh-emacs--queue-items)
@@ -8826,17 +9527,22 @@ candidates as the UI would via `all-completions', not by destructuring."
 ;; Multi-session concurrency: the suppression flag, mirror, and timer are
 ;; isolated per chat buffer — A's transient silence never mutes B's
 ;; genuine queue feedback, and B's frames never touch A's mirror
-;; (session/queue frames are filtered per buffer-local session by the
-;; events dispatcher before reaching the mirror).
-(let ((chat-a (get-buffer-create " *t-queue-multi-a*"))
-      (chat-b (get-buffer-create " *t-queue-multi-b*"))
-      (proc-a (make-pipe-process :name "t-queue-multi-a" :buffer nil))
-      (proc-b (make-pipe-process :name "t-queue-multi-b" :buffer nil))
-      (announced nil))
+;; (queue mirrors arrive on the core connection's `session/control' stream
+;; and `dsh-emacs-events--host-item' routes each `queue' item by session-id
+;; to that session's live chat buffer, leaving other buffers untouched).
+(let* ((old-chats dsh-emacs--chat-buffers)
+       (chat-a (get-buffer-create " *t-queue-multi-a*"))
+       (chat-b (get-buffer-create " *t-queue-multi-b*"))
+       (proc-a (make-pipe-process :name "t-queue-multi-a" :buffer nil))
+       (proc-b (make-pipe-process :name "t-queue-multi-b" :buffer nil))
+       (announced nil))
   (unwind-protect
       (progn
-        (process-put proc-a 'dsh-emacs-chat-buffer chat-a)
-        (process-put proc-b 'dsh-emacs-chat-buffer chat-b)
+        (setq dsh-emacs--chat-buffers
+              (let ((h (make-hash-table :test 'equal)))
+                (puthash "sess-multi-a" chat-a h)
+                (puthash "sess-multi-b" chat-b h)
+                h))
         (with-current-buffer chat-a
           (dsh-emacs-mode)
           (setq-local dsh-emacs--buffer-session "sess-multi-a"))
@@ -8852,19 +9558,17 @@ candidates as the UI would via `all-completions', not by destructuring."
           (dsh-test-assert "queue-submit-suppress-buffer-isolated"
             (with-current-buffer chat-a dsh-emacs--queue-submit-suppress)
             (null (with-current-buffer chat-b dsh-emacs--queue-submit-suppress)))
-          ;; A session-B frame → B echoes normally; A's mirror and
-          ;; suppression stay untouched.  B's connection is seeded with an
+          ;; A session-B queue item → B echoes normally; A's mirror and
+          ;; suppression stay untouched.  B's mirror is seeded with an
           ;; empty baseline first (the first frame is the connect snapshot
           ;; by design), so the next frame is a real diff.
           (dsh-emacs-queue-apply chat-b proc-b (list (cons 'items [])))
-          (dsh-emacs-events--dispatch-json
+          (dsh-emacs-events--host-item
            proc-b
-           (json-encode
-            (list (cons 'payload
-                        (list (cons 'type "session/queue")
-                              (cons 'sessionId "sess-multi-b")
-                              (cons 'items (vector (dsh-emacs-test--queue-item
-                                                    "b1" "queued" "b-real"))))))))
+           (list (cons 'type "queue")
+                 (cons 'sessionId "sess-multi-b")
+                 (cons 'items (vector (dsh-emacs-test--queue-item
+                                       "b1" "queued" "b-real")))))
           (dsh-test-assert "queue-submit-suppress-multi-session"
             announced
             (with-current-buffer chat-b
@@ -8872,54 +9576,66 @@ candidates as the UI would via `all-completions', not by destructuring."
                                (car dsh-emacs--queue-items))))
             (null (with-current-buffer chat-a dsh-emacs--queue-items))
             (with-current-buffer chat-a dsh-emacs--queue-submit-suppress))))
+    (setq dsh-emacs--chat-buffers old-chats)
     (when (buffer-live-p chat-a) (kill-buffer chat-a))
     (when (buffer-live-p chat-b) (kill-buffer chat-b))
     (delete-process proc-a)
     (delete-process proc-b)))
 
-;; 事件分发级：mux 的 session/queue 帧（payload 带 items 数组）按
-;; buffer-local 会话路由到本缓冲的 dsh-emacs-queue-apply——镜像与 [next]
-;; 前缀即时更新；其它会话的帧被网关过滤，不碰镜像。
-(let ((chat (get-buffer-create " *t-queue-dispatch*"))
-      (proc (make-pipe-process :name "t-queue-proc" :buffer nil))
-      (paints nil))
+;; 事件分发级：session/control 的 `queue' item（value 带 items 数组）经
+;; `dsh-emacs-events--host-item' 按 session-id 路由到该会话的 chat 缓冲的
+;; dsh-emacs-queue-apply——镜像与 [next] 前缀即时更新；其它会话的 queue item
+;; 找不到打开的 chat 缓冲（fallback 到 current-buffer），不碰本镜像。
+(let* ((old-chats dsh-emacs--chat-buffers)
+       (chat (get-buffer-create " *t-queue-dispatch*"))
+       (proc (make-pipe-process :name "t-queue-proc" :buffer nil))
+       (neutral (get-buffer-create " *t-queue-neutral*"))
+       (paints nil))
   (unwind-protect
       (progn
-        (process-put proc 'dsh-emacs-chat-buffer chat)
+        (setq dsh-emacs--chat-buffers
+              (let ((h (make-hash-table :test 'equal)))
+                (puthash "sess-q" chat h)
+                h))
         (with-current-buffer chat
           (dsh-emacs-mode)
-          (setq-local dsh-emacs--buffer-session "sess-q")
-          (cl-letf (((symbol-function 'run-at-time)
-                     (lambda (_delay _repeat fn) (push fn paints) t)))
-            ;; 匹配会话的帧 → 路由到 queue-apply；突发结束重绘一次后前缀可见
-            (let ((item (dsh-emacs-test--queue-item "q1" "queued" "dispatched")))
-              (dsh-emacs-events--dispatch-json
-               proc
-               (json-encode
-                (list (cons 'payload
-                            (list (cons 'type "session/queue")
-                                  (cons 'sessionId "sess-q")
-                                  (cons 'items (vector item)))))))
-              (funcall (car paints))
-              (setq paints nil))
+          (setq-local dsh-emacs--buffer-session "sess-q"))
+        (with-current-buffer neutral (dsh-emacs-mode))
+        (cl-letf (((symbol-function 'run-at-time)
+                   (lambda (_delay _repeat fn) (push fn paints) t)))
+          ;; 匹配会话的 queue item → 路由到该会话 chat 缓冲的 queue-apply；
+          ;; 突发结束重绘一次后前缀可见
+          (dsh-emacs-events--host-item
+           proc
+           (list (cons 'type "queue")
+                 (cons 'sessionId "sess-q")
+                 (cons 'items (vector (dsh-emacs-test--queue-item
+                                       "q1" "queued" "dispatched")))))
+          (funcall (car paints))
+          (setq paints nil)
+          (with-current-buffer chat
             (dsh-test-assert "queue-frame-dispatch-routes-to-chat"
               (= 1 (length dsh-emacs--queue-items))
               (equal "dispatched"
                      (dsh-protocol-queue-item-text (car dsh-emacs--queue-items)))
-              dsh-emacs--queue-prefix)
-            ;; 其它会话的帧 → 网关过滤，镜像与前缀原样
-            (dsh-emacs-events--dispatch-json
+              dsh-emacs--queue-prefix))
+          ;; 其它会话的 queue item（无打开的 chat 缓冲）→ 落在 current-buffer，
+          ;; 本镜像与前缀原样
+          (with-current-buffer neutral
+            (dsh-emacs-events--host-item
              proc
-             (json-encode
-              '((payload . ((type . "session/queue")
-                            (sessionId . "sess-other")
-                            (items . []))))))
+             (list (cons 'type "queue")
+                   (cons 'sessionId "sess-other")
+                   (cons 'items []))))
+          (with-current-buffer chat
             (dsh-test-assert "queue-frame-dispatch-filters-foreign-session"
               (= 1 (length dsh-emacs--queue-items))
               (equal "dispatched"
                      (dsh-protocol-queue-item-text (car dsh-emacs--queue-items)))
               dsh-emacs--queue-prefix))))
+    (setq dsh-emacs--chat-buffers old-chats)
     (when (buffer-live-p chat) (kill-buffer chat))
+    (when (buffer-live-p neutral) (kill-buffer neutral))
     (when (process-live-p proc) (delete-process proc))))
 
 ;; 模式行指示器：空队列隐藏，非空显示 [Qn Sm]，context 不计
@@ -9127,15 +9843,26 @@ candidates as the UI would via `all-completions', not by destructuring."
                 (dsh-emacs--submit-deferred "wake up" nil nil)))
             (dsh-test-assert "queue-deferred-mode-resolution"
               (= 3 (length calls))
-              (equal "session.prompt" (car (nth 2 calls)))
-              (equal "steer" (cdr (assq 'mode (cadr (nth 2 calls)))))
-              (equal "queue" (cdr (assq 'mode (cadr (nth 1 calls)))))
-              (equal "steer" (cdr (assq 'mode (cadr (nth 0 calls))))))
+              (equal "session/prompt" (car (nth 2 calls)))
+              (equal "steer"
+                     (cdr (assq 'mode
+                                (cdr (assq 'request (cadr (nth 2 calls)))))))
+              (equal "queue"
+                     (cdr (assq 'mode
+                                (cdr (assq 'request (cadr (nth 1 calls)))))))
+              (equal "steer"
+                     (cdr (assq 'mode
+                                (cdr (assq 'request (cadr (nth 0 calls))))))))
             (dsh-test-assert "queue-deferred-payload-shape"
-              (equal "sess-q" (cdr (assq 'sessionId (cadr (nth 0 calls)))))
+              (equal "sess-q"
+                     (cdr (assq 'sessionId
+                                (cdr (assq 'request (cadr (nth 0 calls)))))))
               (equal "wake up"
                      (cdr (assq 'text
-                                (aref (cdr (assq 'content (cadr (nth 0 calls)))) 0))))))))
+                                (aref (cdr (assq 'content
+                                                 (cdr (assq 'request
+                                                            (cadr (nth 0 calls))))))
+                                      0))))))))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
 ;; C-c C-c 分派：busy + behavior 语义（stop=中断、空输入=中断、queue/steer=挂起提交）
@@ -9208,16 +9935,19 @@ candidates as the UI would via `all-completions', not by destructuring."
               (dsh-emacs-queue--steer item)
               (dsh-emacs-queue--edit item "rewritten")
               (let* ((ordered (nreverse (copy-sequence calls)))
-                     (actions (mapcar (lambda (call)
-                                        (cdr (assq 'action (cadr call))))
-                                      ordered)))
+                     (reqs (mapcar (lambda (call)
+                                     (cdr (assq 'request (cadr call))))
+                                   ordered))
+                     (actions (mapcar (lambda (req)
+                                        (cdr (assq 'action req)))
+                                      reqs)))
                 (dsh-test-assert "queue-update-wire-actions"
                   (= 3 (length ordered))
-                  (equal "session.updateQueue" (car (car ordered)))
+                  (equal "session/updateQueue" (car (car ordered)))
                   (equal '((kind . "remove")) (nth 0 actions))
                   (equal '((kind . "steer")) (nth 1 actions))
-                  (equal "it1" (cdr (assq 'itemId (cadr (car ordered)))))
-                  (equal "sess-a" (cdr (assq 'sessionId (cadr (car ordered)))))
+                  (equal "it1" (cdr (assq 'itemId (car reqs))))
+                  (equal "sess-a" (cdr (assq 'sessionId (car reqs))))
                   (equal "rewritten"
                          (cdr (assq 'text
                                     (aref (cdr (assq 'content (nth 2 actions))) 0)))))))))
@@ -9494,9 +10224,10 @@ candidates as the UI would via `all-completions', not by destructuring."
         (setq-local dsh-emacs--buffer-session "sess-q")
         (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                    (lambda (method params _cb)
-                     (let ((action (cdr (assq 'action params))))
+                     (let* ((req (cdr (assq 'request params)))
+                            (action (cdr (assq 'action req))))
                        (push (list method
-                                   (cdr (assq 'itemId params))
+                                   (cdr (assq 'itemId req))
                                    (cdr (assq 'kind action)))
                              calls))))
                   ((symbol-function 'minibuffer-contents)
@@ -9514,7 +10245,7 @@ candidates as the UI would via `all-completions', not by destructuring."
           ;; 动作只能经 exit 前注册的定时器触发
           (dolist (fn (nreverse deferred)) (funcall fn))
           (dsh-test-assert "queue-menu-delete-runs-in-chat-buffer"
-            (equal '("session.updateQueue" "m1" "remove")
+            (equal '("session/updateQueue" "m1" "remove")
                    (car (nreverse calls))))))
     (when (buffer-live-p chat) (kill-buffer chat))))
 
@@ -9533,7 +10264,9 @@ candidates as the UI would via `all-completions', not by destructuring."
         (setq-local dsh-emacs--buffer-session "sess-q")
         (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                    (lambda (method params _cb)
-                     (push (cdr (assq 'itemId params)) calls)))
+                     (push (cdr (assq 'itemId
+                                      (cdr (assq 'request params))))
+                           calls)))
                   ((symbol-function 'y-or-n-p)
                    (lambda (_prompt) t))
                   ((symbol-function 'run-at-time)

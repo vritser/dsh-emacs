@@ -119,17 +119,6 @@ history is needed, at the cost of a slower open."
   :type 'integer
   :group 'dsh-emacs)
 
-(defcustom dsh-emacs-history-refetch-max-rounds 6
-  "Maximum number of load-gap re-fetches when opening a session.
-Each round fetches `dsh-emacs-history-window' latest messages and renders
-them incrementally, until the window stops advancing or the limit is reached;
-the higher the limit, the lower the chance of missing intermediate increments
-while the session is still producing events rapidly at open time (e.g. a
-session mid-streaming), at the cost of more small parse chunks during the
-open."
-  :type 'integer
-  :group 'dsh-emacs)
-
 (defcustom dsh-emacs-show-reasoning t
   "Whether to show reasoning content.  Enabled by default, matching dsh web
 (the web always shows the Think line).  Set to nil for a leaner transcript."
@@ -289,12 +278,7 @@ NOT resolve their target from this variable alone — they read
   "Marker for the start of the input area (buffer-local).")
 
 (defvar-local dsh-emacs--pending-user-messages nil
-  "Text of messages the user sent but that are not yet confirmed in session.history.")
-
-(defvar-local dsh-emacs--history-refetch-rounds 0
-  "How many bounded re-fetches the open of this buffer has issued.
-The open closes the history/stream gap by repeatedly re-fetching the newest
-window until it stops advancing or the round budget is spent.")
+  "Text of messages the user sent but that are not yet rendered in the transcript.")
 
 (defvar-local dsh-emacs--buffer-session nil
   "Session ID owned by this chat buffer (buffer-local).
@@ -968,10 +952,10 @@ arrives."
                              (cons 'cwd cwd))
                        (and preset (list (cons 'agentPreset preset)))))
               dsh-emacs--sessions)))
-    ;; Attach even when the session row already arrived via the host stream:
-    ;; membership comes solely from the workspace `session-ids', so the row
-    ;; must be accounted there or it renders in Ungrouped.  Idempotent by
-    ;; membership.
+    ;; Attach even when the session row already arrived via the core
+    ;; `$events' stream (an `api-session/added' emit): membership comes solely
+    ;; from the workspace `session-ids', so the row must be accounted there or
+    ;; it renders in Ungrouped.  Idempotent by membership.
     (when (and ws
                (not (member session-id
                             (dsh-protocol-workspace-session-ids ws))))
@@ -1226,27 +1210,22 @@ realtime)."
       ;; 与 `dsh-emacs-modeline-setup' 之后：此前喂入的 buffer-local 快照会
       ;; 被 mode 切换整个清掉，ctx% 就永远不显示（首次打开的经典症状）。
       (dsh-emacs--chat-buffer-context-sync session-id buf)
-      ;; 思考预设（agentPreset）来自会话列表缓存；缺失时补拉一次 session.list。
+      ;; 思考预设（agentPreset）来自会话列表缓存；缺失时补拉一次 session/list。
       (dsh-emacs--link-session-preset session-id)
-      ;; Reopening must re-render: `dsh-emacs--anchor-seq' gates the seq
-      ;; filter in `dsh-emacs-render-history-events', and a reused buffer
-      ;; keeps the previous maximum, which would filter out the freshly
-      ;; fetched history (and with it the usage/model feed) entirely.
-      (setq dsh-emacs--anchor-seq 0)
-      ;; 空闲预取 slash 命令目录（commands.list）：首次 "/" / TAB 不再同步
-      ;; 往返阻塞。目录按会话缓存，打开即有 session-id 才拉得了。
+      ;; Reopening an already-live chat buffer resumes its realtime stream
+      ;; without re-rendering what is on screen: the follow snapshot is the
+      ;; catch-up (its records carry original seqs, so the
+      ;; `dsh-emacs--anchor-seq' gate drops everything already rendered);
+      ;; fresh buffers start at anchor 0 and the snapshot seeds the whole
+      ;; window.  No separate history fetch precedes the connect.
       (dsh-emacs-command-catalog-prefetch session-id)
       ;; Mode-line setup appends its anchor newline at point-max.  Return point
       ;; to the editable prompt so the cursor stays on the `❯' line.
       (goto-char dsh-emacs--input-marker)
-      ;; Connect before loading history.  While the history page loads, mux
-      ;; replay events for this session are dropped (see
-      ;; `dsh-emacs-events--dispatch-json') and recovered by one bounded
-      ;; re-fetch at the end of `dsh-emacs--load-history', so no event can
-      ;; fall into a history/stream hand-off gap.
-      (setq dsh-emacs--event-history-loading t)
-      (dsh-emacs-events-connect dsh-emacs--current-buffer)
-      (dsh-emacs--load-history session-id))
+      ;; Connect: the first `session/follow' item is the snapshot that seeds
+      ;; the transcript (see `dsh-emacs-events--follow-snapshot'), followed by
+      ;; gapless live event frames — no history/stream hand-off gap exists.
+      (dsh-emacs-events-connect dsh-emacs--current-buffer))
     (pop-to-buffer dsh-emacs--current-buffer)))
 
 ;; ---------------------------------------------------------------------------
@@ -1620,99 +1599,15 @@ preset, context snapshot, title and workspace in one round trip."
                                           item))
                                         (throw 'found t)))))))))))
 
-(defun dsh-emacs--load-history (session-id)
-  "Load the session history of SESSION-ID and render it.
-The transcript renders into the CURRENT buffer at call time (callers run
-this in the target chat buffer); the target is captured up front so a
-later `C-c C-r' issued from a chat buffer that is not the last-opened one
-still renders into ITS OWN buffer, never the global
-`dsh-emacs--current-buffer' of the last session opened.
-
-On the first open the mux replays globally (the current protocol has no
-baseline-sync parameter; large sessions can reach 500k+ raw events).  Events
-arriving while loading are dropped directly by
-`dsh-emacs-events--dispatch-json' (no more queueing/sorting/flush — that used
-to be the source of multi-second stalls on every open).  Once the history
-page (`dsh-emacs-history-window' messages, sized to avoid parse/GC storms on
-large windows) has been rendered, `dsh-emacs--refetch-history' re-fetches the
-same window in a small loop, incrementally rendering by anchor until the
-window stops growing, covering the load gap; `dsh-emacs--event-history-loading'
-is then cleared and the event stream resumes normal delivery."
-  (let ((chat-buffer (current-buffer)))
-    (setq dsh-emacs--history-refetch-rounds 0)
-    (dsh-emacs--rpc-async "session.history"
-                          `((sessionId . ,session-id)
-                            (maxMessages . ,dsh-emacs-history-window))
-                          (lambda (ok value)
-                            (if ok
-                                (when (buffer-live-p chat-buffer)
-                                  (with-current-buffer chat-buffer
-                                    ;; Use the render module's batch function
-                                    ;; which handles [{event: ...}] format.
-                                    (let ((events (dsh-emacs--sequence-list
-                                                   (cdr (assq 'events value)))))
-                                      (dsh-emacs-render-history-events events nil)
-                                      ;; Seed this session's `M-p' / `M-n' recall
-                                      ;; from the transcript's user messages —
-                                      ;; on first entry nothing would otherwise
-                                      ;; be recallable yet.
-                                      (dsh-emacs--seed-input-history
-                                       events session-id)
-                                      ;; Backfill: cover events dropped while
-                                      ;; loading, until the window stabilizes
-                                      ;; (see below).
-                                      (dsh-emacs--refetch-history
-                                       session-id chat-buffer))))
-                              (when (buffer-live-p chat-buffer)
-                                (with-current-buffer chat-buffer
-                                  (setq dsh-emacs--event-history-loading nil)))
-                              (message "Failed to load history: %S" value))))))
-
-(defun dsh-emacs--refetch-history (session-id chat-buffer)
-  "Re-fetch one history window, covering event-stream increments dropped
-during loading.
-Each fetch pulls `dsh-emacs-history-window' latest messages and renders them
-incrementally by anchor; as long as the window keeps advancing (a running
-turn keeps producing events) the refetch loop continues, for at most
-`dsh-emacs-history-refetch-max-rounds' rounds, after which
-`dsh-emacs--event-history-loading' is cleared so the event stream resumes
-realtime delivery (increments after that moment are covered by the async
-windows/realtime stream).
-The per-round cost is proportional to the window size (a ~0.2~0.4s chunk by
-default), far smaller than a full parse of 30k raw events."
-  (when (< dsh-emacs--history-refetch-rounds dsh-emacs-history-refetch-max-rounds)
-    (cl-incf dsh-emacs--history-refetch-rounds)
-    (dsh-emacs--rpc-async "session.history"
-                          `((sessionId . ,session-id)
-                            (maxMessages . ,dsh-emacs-history-window))
-                          (lambda (ok value)
-                            (when (buffer-live-p chat-buffer)
-                              (with-current-buffer chat-buffer
-                                (let* ((events (and ok (dsh-emacs--sequence-list
-                                                        (cdr (assq 'events value)))))
-                                       (advanced (and ok
-                                                      (dsh-emacs-render-history-events
-                                                       events t))))
-                                  (when events
-                                    ;; Idempotent: seeds only texts the session's
-                                    ;; recall list does not hold yet.
-                                    (dsh-emacs--seed-input-history
-                                     events session-id))
-                                  (if (and ok (> advanced 0))
-                                      (dsh-emacs--refetch-history
-                                       session-id chat-buffer)
-                                    (setq dsh-emacs--event-history-loading
-                                          nil)))))))))
-
 (defun dsh-emacs-archive-session (session-id)
   "Archive SESSION-ID: remove it from its workspace view.
-`workspace.archiveSession' (the only session-removal RPC this dsh version
+`workspace/archiveSession' (the only session-removal RPC this dsh version
 exposes; there is no `session.delete').  Refreshes the archived set and
 the session list on success."
   (interactive (list (dsh-emacs--completing-session-id "Archive session: ")))
   (dsh-emacs-server-ensure)
-  (dsh-emacs--rpc-async "workspace.archiveSession"
-                        `((sessionId . ,session-id))
+  (dsh-emacs--rpc-async "workspace/archiveSession"
+                        `((request . ((sessionId . ,session-id))))
                         (lambda (ok value)
                           (if ok
                               (progn
@@ -1756,37 +1651,31 @@ the session list on success."
 
 ;;;###autoload
 (defun dsh-emacs-list-workspaces ()
-  "Fetch the workspace list."
+  "Re-baseline the workspace cache from the core `workspace/follow' stream.
+The 0.1.2 protocol has no `workspace/list' RPC: the list state comes from
+the `workspace/follow' logical stream (a baseline frame on open).  A
+refresh re-opens that stream on the live core connection (retiring the
+previous one first); the fresh baseline seeds
+`dsh-emacs--workspaces'/`dsh-emacs--archived-sessions' and repaints.
+When no core connection is open the session list is connected first and
+the connect's own `workspace/follow' baseline (opened by
+`dsh-emacs-events--host-open' once the handshake completes) repaints —
+no immediate re-baseline is attempted on a not-yet-handshaken socket."
   (interactive)
   (dsh-emacs-server-ensure)
-  (dsh-emacs-events--host-refresh-begin)
-  (dsh-emacs--rpc-async "workspace.list" nil
-                        (lambda (ok value)
-                          (unwind-protect
-                              (progn
-                                (when ok
-                                  (let ((wl (dsh-protocol-workspace-list--from-alist value)))
-                                    (setq dsh-emacs--workspaces
-                                          (dsh-protocol-workspace-list-items wl))
-                                    (setq dsh-emacs--archived-sessions
-                                          (dsh-emacs--normalize-archived
-                                           (dsh-protocol-workspace-list-archived-session-ids wl)))))
-                                ;; Always re-render the session list so grouping
-                                ;; reflects the latest workspace data (or falls back
-                                ;; to the ungrouped view when the fetch failed).
-                                (when (and dsh-emacs-sessions-buffer
-                                           (get-buffer dsh-emacs-sessions-buffer))
-                                  (with-current-buffer dsh-emacs-sessions-buffer
-                                    (dsh-emacs-session--render))))
-                            (dsh-emacs-events--host-refresh-drain)))))
+  (unless (dsh-emacs-events--core-workspace-rebaseline)
+    (when (and dsh-emacs-sessions-buffer
+               (get-buffer dsh-emacs-sessions-buffer))
+      (with-current-buffer (get-buffer dsh-emacs-sessions-buffer)
+        (dsh-emacs-events-host-connect)))))
 
 ;;;###autoload
 (defun dsh-emacs-create-workspace (path)
   "Create a workspace.  PATH is the path of an existing directory."
   (interactive "DWorkspace directory: ")
   (dsh-emacs-server-ensure)
-  (dsh-emacs--rpc-async "workspace.create"
-                        `((path . ,(expand-file-name path)))
+  (dsh-emacs--rpc-async "workspace/create"
+                        `((request . ((path . ,(expand-file-name path)))))
                         (lambda (ok value)
                           (if ok
                               (progn
@@ -2018,8 +1907,7 @@ vertico, etc.)."
   (setq dsh-emacs--tool-calls (make-hash-table :test 'equal))
   (setq dsh-emacs--activity-groups (make-hash-table :test 'equal))
   (setq dsh-emacs--pending-user-messages nil
-        dsh-emacs--event-ready nil
-        dsh-emacs--event-history-loading nil)
+        dsh-emacs--event-ready nil)
   (dsh-emacs-events--watchdog-stop)
   (dsh-emacs-events--health-stop)
   (setq dsh-emacs--ws-last-event-time nil
@@ -3135,24 +3023,26 @@ inline immediately — the bytes are already local, no
     (dsh-emacs-render-event event)))
 
 (defun dsh-emacs-refresh ()
-  "Refresh the current chat buffer's session history.
-Only meaningful inside a chat buffer: the history must render into the
-buffer-local session's own buffer (`dsh-emacs--load-history' renders into
-the current buffer).  Outside one it refuses with a message, instead of
-injecting a transcript into an unrelated buffer (the old global
-`dsh-emacs--current-buffer' target hid this by always pointing at a chat
-buffer — the last-opened one, which mixed sessions)."
+  "Refresh the current chat buffer's event stream.
+Only meaningful inside a chat buffer: the stream must belong to the
+buffer-local session's own buffer.  Refreshing tears the `session/follow'
+connection down and reconnects, so the fresh snapshot reseeds whatever
+the previous stream missed (records carry original seqs; the
+`dsh-emacs--anchor-seq' gate renders only what is new).  Outside a chat
+buffer this refuses with a message instead of touching an unrelated
+buffer (the old global `dsh-emacs--current-buffer' target hid that bug by
+always pointing at the last-opened chat buffer, which mixed sessions)."
   (interactive)
   (dsh-emacs-server-ensure)
-  (let ((session-id (dsh-emacs--active-session-id)))
-    (cond
-     ((and (boundp 'dsh-emacs--buffer-session) dsh-emacs--buffer-session)
-      (dsh-emacs--load-history session-id))
-     (session-id
-      (message "Refresh works inside a chat buffer (last session: %s)"
-               session-id))
-     (t
-      (message "No session to refresh")))))
+  (cond
+   ((and (boundp 'dsh-emacs--buffer-session) dsh-emacs--buffer-session)
+    (dsh-emacs-events-disconnect)
+    (dsh-emacs-events-connect (current-buffer)))
+   ((dsh-emacs--active-session-id)
+    (message "Refresh works inside a chat buffer (last session: %s)"
+             (dsh-emacs--active-session-id)))
+   (t
+    (message "No session to refresh"))))
 
 (defun dsh-emacs-list-sessions-display ()
   "Display the session list buffer."
@@ -3242,58 +3132,71 @@ This is the main entry command of dsh-emacs."
 (defun dsh-emacs-health ()
   "Check the dsh web service status."
   (interactive)
-  (dsh-emacs--rpc-async "session.list" nil
+  (dsh-emacs--rpc-async "session/list" (dsh-emacs--session-list-args)
                         (lambda (ok value)
                           (if ok
                               (message "dsh service is running")
                             (message "dsh service unreachable: %S" value)))))
 
 ;; ---------------------------------------------------------------------------
-;;  用户提问（question/requested）应答
+;;  用户提问/审批 waterfall（$events）应答
 ;; ---------------------------------------------------------------------------
-;; dsh 的 `ask' 工具（AskUserQuestion）通过 mux 流推送 answerable 的
-;; `question/requested' 帧：客户端必须展示问题与选项、读取用户选择并
-;; 以 client-response 回 POST /api/respond（回声 rpcId）。逐字对齐宿主
-;; 的校验规则：单选用一个 label 或 custom（二选一），多用 label 集合
-;; + 可选 custom，无选项问题只能给 custom，且 answers 必须覆盖整帧。
+;; dsh 的 `ask' 工具与沙箱审批通过核心连接的 `$events' 流推送 waterfall
+;; 帧：`user-questions/request'（提问）与 `approval/request'（审批）。每个
+;; waterfall 带宿主分发的 `eventId'，客户端读取用户的选择/决定后以一元
+;; 端点 POST /api/$events/result 回 outcome（args {clientId, eventId,
+;; outcome}，clientId 来自 `$events' 的 ready 帧）。outcome.kind ∈
+;; result（携带 value）/ next（交给下一个接单者）/ rejected（携 error）。
+;;
+;; 提问 answer value = {answers: [{id, selected: string[], custom?}]}
+;; （selected 用 vector，custom-only 时为空数组）。逐字对齐宿主的校验规则：
+;; 单选用一个 label 或 custom（二选一），多用 label 集合 + 可选 custom，
+;; 无选项问题只能给 custom，且 answers 必须覆盖整帧。审批 answer value =
+;; ApprovalOutcome 字符串：`allowed-once' 或 `rejected'（拒绝是默认——C-g/
+;; ESC 也按拒绝应答，不回决定宿主会一直阻塞在 pending 审批上）。
 ;;
 ;; 交互方式：逐题在 MINIBUFFER 中选择——选项作为 completion 候选（带
 ;; 序号，按数字键即可选择），单/多选，候选末尾附「Type answer…」（空
-;; 输入回到选项）；提示语带 Question N/M 序号，全部答完一次性 respond。
+;; 输入回到选项）；提示语带 Question N/M 序号，全部答完一次性回 outcome。
 ;; 跳过某题只走 `dsh-emacs-question-skip-key' 快捷键 = 该题以空 selected
 ;; 覆盖（dsh web 的逐题 Skip），其余照答。C-g/ESC（或无选项问题的空输入）
-;; 放弃整组问题：以协议
-;; 保留的 cancelled 错误回执应答（ok:false + error.code=cancelled，与 dsh
-;; web 的 abandon 同一信号），宿主把该 ask 撤销为 cancelled 并广播
-;; `question/resolved'；ask 工具调用随之中止 —— 旧行为（完全不应答）会让
-;; 宿主永久 pending、回合卡死。
+;; 放弃整组问题：回 outcome.kind `rejected' 且携带 error body
+;; （name/message，镜像旧协议保留的 cancelled 意图）——宿主把该 ask 撤销、
+;; ask 工具调用随之中止；旧行为（完全不应答）会让宿主永久 pending、
+;; 回合卡死。
+;;
+;; 每个 waterfall 代（每次 $events 重连生成新的 ready/clientId）：本端在
+;; 新 ready 到达时把上一代 pending 的帧整体退役（不再应答——旧 clientId
+;; 的 result 是 no-op）；宿主取消一个 waterfall（cancel 帧或会话结束）时
+;; 按 eventId 退役未决帧。
 ;;
 ;; minibuffer 是全局唯一资源：多个会话同时活跃时，回答一帧的途中其它
-;; mux 流仍会继续到达 question/requested。帧进入全局 FIFO 队列，同一
-;; 时刻只回答一帧（否则嵌套 completing-read 会把不同会话的提示叠进
-;; 同一个 minibuffer、相互覆盖）；提示语带所属会话的标识（聊天缓冲名，
-;; 如 [dsh-<标题>]），让用户知道问题来自哪个会话。
+;; 流仍会继续到达 waterfall。帧进入全局 FIFO 队列，同一时刻只回答一帧
+;; （否则嵌套 completing-read 会把不同会话的提示叠进同一个 minibuffer、
+;; 相互覆盖）；提示语带所属会话的标识（聊天缓冲名，如 [dsh-<标题>]），
+;; 让用户知道问题来自哪个会话。
 
 (defvar dsh-emacs--question-queue nil
-  "Pending `question/requested' frames awaiting the single interactive
-answering slot; each entry is (CHAT RPC-ID SESSION-ID QUESTIONS).")
+  "Pending `user-questions/request' waterfalls awaiting the single
+interactive answering slot; each entry is (CHAT EVENT-ID SESSION-ID
+QUESTIONS).")
 
 (defvar dsh-emacs--question-active nil
-  "The `question/requested' frame currently occupying the interactive
-answering slot, or nil.  The slot is shared with the approval flow
-(`dsh-emacs--approval-active'): only one prompt may own the minibuffer
-at a time.")
+  "The `user-questions/request' waterfall currently occupying the
+interactive answering slot, or nil.  The slot is shared with the
+approval flow (`dsh-emacs--approval-active'): only one prompt may own
+the minibuffer at a time.")
 
 ;; Declared here — before `dsh-emacs--question-drain' references them in
 ;; the shared-slot handoff — because the byte-compiler reads the file
 ;; top-down; the answering logic itself lives in the approval section.
 (defvar dsh-emacs--approval-queue nil
-  "Pending `approval/requested' frames awaiting the single interactive
-answering slot; each entry is (CHAT RPC-ID SESSION-ID APPROVAL-ID
-TOOL-NAME REASON CALL-ID).")
+  "Pending `approval/request' waterfalls awaiting the single interactive
+answering slot; each entry is (CHAT EVENT-ID SESSION-ID TOOL-NAME
+REASON CALL-ID).")
 
 (defvar dsh-emacs--approval-active nil
-  "The `approval/requested' frame currently occupying the interactive
+  "The `approval/request' waterfall currently occupying the interactive
 answering slot, or nil.  The slot is shared with the question flow
 (`dsh-emacs--question-active'): only one prompt may own the minibuffer
 at a time.")
@@ -3316,6 +3219,20 @@ SESSION-ID (direct test calls) yields an empty label."
         (concat (substring label 0 37) "…")
       label)))
 
+(defun dsh-emacs--events-result-async (client-id event-id outcome callback)
+  "Answer a `$events' waterfall: send OUTCOME for EVENT-ID on CLIENT-ID.
+OUTCOME is the wire `outcome' object (an alist whose `kind' is
+`result' with a `value', `next', or `rejected' with an `error' body).
+The answer goes as a one-shot unary RPC to POST /api/$events/result with
+args {clientId, eventId, outcome} (rpc.md §3.3).  CALLBACK receives
+(ok-p . value-or-error) like `dsh-emacs--rpc-async'."
+  (dsh-emacs--rpc-async
+   "$events/result"
+   `((clientId . ,client-id)
+     (eventId . ,event-id)
+     (outcome . ,outcome))
+   callback))
+
 (defun dsh-emacs--question-drain ()
   "Answer queued question frames one at a time, in arrival order.
 Minibuffer answering is a single global slot
@@ -3325,13 +3242,15 @@ time): each frame is answered — or aborted — before the next one is
 presented, so prompts from different sessions never nest inside the
 same minibuffer.  Runs from whatever filter context delivered the
 current frame; queued frames are collected in their own chat buffer
-regardless of which stream they arrived on."
+regardless of which stream they arrived on.
+Each frame is keyed by its waterfall EVENT-ID; the answer goes to
+`$events/result' carrying the current `$events' generation's client-id."
   (while (and (null dsh-emacs--question-active)
               (null dsh-emacs--approval-active)
               dsh-emacs--question-queue)
     (let* ((frame (pop dsh-emacs--question-queue))
            (chat (nth 0 frame))
-           (rpc-id (nth 1 frame))
+           (event-id (nth 1 frame))
            (session-id (nth 2 frame))
            (questions (dsh-emacs--sequence-list (nth 3 frame))))
       (setq dsh-emacs--question-active frame)
@@ -3342,22 +3261,22 @@ regardless of which stream they arrived on."
                      (dsh-emacs--collect-question-answers
                       questions session-id)))))
             (if answers
-                (dsh-emacs--rpc-respond-async
-                 rpc-id
-                 `((sessionId . ,session-id)
-                   (answer . ((answers . ,answers))))
-                 (lambda (accepted reason)
-                   (if accepted
+                (dsh-emacs--events-result-async
+                 dsh-emacs-events--client-id
+                 event-id
+                 `((kind . "result")
+                   (value . ((answers . ,answers))))
+                 (lambda (ok value)
+                   (if ok
                        (message "Answered %d question(s)" (length answers))
-                     (message "Question response not accepted (%s)"
-                              reason))))
+                     (message "Question response not accepted (%s)" value))))
               ;; No choices collected (aborted via an empty no-option
-              ;; input, or the chat buffer died): cancel the whole frame
-              ;; with the protocol's `cancelled' receipt (dsh web's
-              ;; "abandon questions") so the ask aborts host-side and the
-              ;; run is never left blocked on an unanswered question.
-              (dsh-emacs--question-decline rpc-id)))
-        (quit (dsh-emacs--question-decline rpc-id))
+              ;; input, or the chat buffer died): abandon the whole
+              ;; waterfall — outcome kind `rejected' with an error body
+              ;; (dsh web's "abandon questions") so the ask aborts
+              ;; host-side and the run is never left blocked.
+              (dsh-emacs--question-decline event-id)))
+        (quit (dsh-emacs--question-decline event-id))
         (error (message "dsh question error: %S" err)))
       (setq dsh-emacs--question-active nil)))
   ;; The question answering slot just freed up: hand queued approvals over
@@ -3368,77 +3287,10 @@ regardless of which stream they arrived on."
              dsh-emacs--approval-queue)
     (dsh-emacs--approval-drain)))
 
-(defun dsh-emacs--respond-envelope-json (rpc-id payload)
-  "JSON body of the client-response answering server-request RPC-ID
-with PAYLOAD (the domain answer alist).  The receipt lives on
-POST /api/respond; rpcId echoes the requested frame."
-  (json-encode `((type . "client-response")
-                 (rpcId . ,rpc-id)
-                 (result . ((ok . t) (value . ,payload))))))
-
-(defun dsh-emacs--respond-cancel-envelope-json (rpc-id message)
-  "JSON body of the client-response that CANCELS server-request RPC-ID.
-The protocol's answer receipt carries an ok:false result whose error code
-is reserved `cancelled' (detail-less) — the same wire signal dsh web's
-\"abandon questions\" produces; the host resolves the pending question as
-cancelled and broadcasts `question/resolved'(\"cancelled\")."
-  (json-encode
-   `((type . "client-response")
-     (rpcId . ,rpc-id)
-     (result . ((ok . :json-false)
-                (error . ((code . "cancelled")
-                          (message . ,message)
-                          (details . ,(make-hash-table)))))))))
-
-(defun dsh-emacs--respond-post (json-data callback)
-  "POST the client-response envelope JSON-DATA to /api/respond.
-CALLBACK receives (accepted-p . reason): accepted-p non-nil on an
-accepted receipt; otherwise REASON is `not-pending' or `bad-response'
-(a transport failure calls it with nil)."
-  (let* ((url (format "%s/api/respond" dsh-emacs-base-url))
-         (url-request-method "POST")
-         (url-request-extra-headers '(("Content-Type" . "application/json")))
-         (url-request-data (encode-coding-string json-data 'utf-8))
-         (callback-buffer (current-buffer)))
-    (url-retrieve
-     url
-     (lambda (status)
-       (let ((gc-cons-threshold (* 64 1024 1024)))
-         (if (plist-get status :error)
-             (progn
-               (message "RPC respond error: %S%s" status
-                        (dsh-emacs--http-error-hint (plist-get status :error)))
-               (when (buffer-live-p callback-buffer)
-                 (with-current-buffer callback-buffer
-                   (condition-case nil
-                       (funcall callback nil 'transport)
-                     (quit nil)))))
-           (goto-char (point-min))
-           (re-search-forward "^$")
-           (delete-region (point) (point-min))
-           (dsh-emacs--decode-response-body)
-           (goto-char (point-min))
-           (let* ((response (json-read))
-                  (accepted (cdr (assq 'accepted response)))
-                  (reason (cdr (assq 'reason response))))
-             (kill-buffer)
-             (when (buffer-live-p callback-buffer)
-               (with-current-buffer callback-buffer
-                 (condition-case nil
-                     (funcall callback
-                              (and accepted (not (eq accepted :json-false)))
-                              reason)
-                   (quit nil))))))))
-     nil t)))
-
-(defun dsh-emacs--rpc-respond-async (rpc-id payload callback)
-  "Answer a server-request on POST /api/respond: client-response for
-RPC-ID with domain answer PAYLOAD.  CALLBACK receives (accepted-p . reason):
-accepted-p non-nil on an accepted receipt; otherwise REASON is
-`not-pending' or `bad-response' (a transport failure calls it with nil)."
-  (dsh-emacs--respond-post
-   (dsh-emacs--respond-envelope-json rpc-id payload)
-   callback))
+;; Forward declaration of the $events generation's client-id, owned by
+;; dsh-emacs-events.el.  The bare (defvar X) form asserts existence without
+;; binding a default, so the owner's own defvar is not shadowed.
+(defvar dsh-emacs-events--client-id)
 
 (defun dsh-emacs--question-option-labels (question)
   "Option labels of QUESTION (a decoded alist), in roster order."
@@ -3454,13 +3306,12 @@ exits the minibuffer, and `dsh-emacs--question-choice' matches it to
 cover that question as {id, selected: []} while the rest of the frame is
 answered normally.  No longer a visible candidate — the skip key is the
 only way to choose it.  Distinct from abandoning the whole group (C-g →
-cancelled receipt).")
+rejected-outcome decline).")
 
 (defconst dsh-emacs--question-type-label "Type answer…"
   "Sentinel candidate switching an option question to free-text answering:
 picked (or included in a multi question's selection) it reads the answer
-as the `custom' field of the client-response instead of a `selected'
-label.")
+as the `custom' field of the outcome value instead of a `selected' label.")
 
 (defun dsh-emacs--question-candidates (labels type-option)
   "Completion candidates for one question: each LABEL prefixed with its
@@ -3736,7 +3587,7 @@ options are the completion candidates (`dsh-emacs--question-choice',
 with its INDEX/TOTAL in the prompt), in frame order.  SESSION-ID (when
 given) labels every prompt with the owning session.  Returns the answer
 alists in frame order, or nil when the user aborted (C-g or an empty
-custom-only answer) — the caller then skips the respond."
+custom-only answer) — the caller then declines the waterfall."
   (let ((total (length questions))
         (answers nil)
         (n 0))
@@ -3748,38 +3599,37 @@ custom-only answer) — the caller then skips the respond."
             (push answer answers))))
       (reverse answers))))
 
-(defun dsh-emacs--question-requested (chat rpc-id session-id questions)
-  "Queue a `question/requested' frame for SESSION-ID in CHAT and answer it.
+(defun dsh-emacs--question-requested (chat event-id session-id questions)
+  "Queue a `user-questions/request' waterfall EVENT-ID of SESSION-ID and answer it.
 The minibuffer is one global resource: with several chat buffers open, a
-mux filter can deliver the next question while the previous frame is
+$events frame can deliver the next question while the previous one is
 still being answered interactively.  Nested `completing-read' calls
 would stack different sessions' prompts inside the same minibuffer, so
 frames are queued (FIFO) and drained one at a time by
 `dsh-emacs--question-drain'; each prompt carries the owning session's
 label (see `dsh-emacs--question-session-label').  All questions of the
-frame are then read one after another (options as completion candidates
-plus a \"Type answer…\" free-text choice) and answered with a single
-client-response echoing RPC-ID on POST /api/respond.  C-g (or an empty
-no-option input) cancels the whole frame with the protocol's reserved
-`cancelled' receipt — dsh web's \"abandon questions\" — so the host
+waterfall are then read one after another (options as completion
+candidates plus a \"Type answer…\" free-text choice) and answered with a
+single `$events/result' outcome (value = {answers: …}).  C-g (or an empty
+no-option input) abandons the whole waterfall with outcome kind
+`rejected' and an error body (dsh web's \"abandon questions\") so the host
 withdraws the ask and the run is never left blocked; the quit is caught
 here, so it cannot leak out of the process filter as \"error in process
 filter: Quit\".
-A frame whose RPC-ID is already pending (queued or active — the mux
-replays the same request) is dropped instead of asked twice, mirroring
-the approval flow."
+A waterfall whose EVENT-ID is already pending (queued or active) is
+dropped instead of asked twice, mirroring the approval flow."
   (unless (or (and (consp dsh-emacs--question-active)
-                   (equal rpc-id (nth 1 dsh-emacs--question-active)))
+                   (equal event-id (nth 1 dsh-emacs--question-active)))
               (cl-some (lambda (entry)
-                         (equal rpc-id (nth 1 entry)))
+                         (equal event-id (nth 1 entry)))
                        dsh-emacs--question-queue))
     (setq dsh-emacs--question-queue
           (nconc dsh-emacs--question-queue
-                 (list (list chat rpc-id session-id questions))))
+                 (list (list chat event-id session-id questions))))
     ;; Desktop notice, turn-finish style (`dsh-emacs-enable-notifications'):
     ;; the answering prompt may wait behind another session's prompt, so
     ;; announce a pending question even when the user is away from the
-    ;; chat.  Acceptance-gated: a replayed duplicate frame is dropped
+    ;; chat.  Acceptance-gated: a replayed duplicate waterfall is dropped
     ;; above and must never re-notify.
     (when (buffer-live-p chat)
       (let* ((qs (dsh-emacs--sequence-list questions))
@@ -3795,56 +3645,67 @@ the approval flow."
         (dsh-emacs-notify--post session-id body chat))))
   (dsh-emacs--question-drain))
 
-(defun dsh-emacs--question-decline (rpc-id)
-  "Cancel a whole `question/requested' frame and unblock its run.
-Answers the server-request with the protocol's reserved `cancelled'
-receipt (ok:false + error.code=cancelled) — the same wire signal dsh web's
-\"abandon questions\" produces: the host resolves the pending question as
-cancelled and broadcasts `question/resolved'(\"cancelled\"), and the ask
-tool call aborts, so the agent's turn is never left blocked on an
-unanswered question.  The quit is contained here so it cannot leak out of
-the process filter as \"error in process filter: Quit\"."
-  (dsh-emacs--respond-post
-   (dsh-emacs--respond-cancel-envelope-json
-    rpc-id "User abandoned the questions")
-   (lambda (accepted reason)
-     (if accepted
+(defun dsh-emacs--question-decline (event-id)
+  "Abandon a whole `user-questions/request' waterfall EVENT-ID.
+Answers with outcome kind `rejected' and an error body (name/message)
+mirroring the old protocol's reserved `cancelled' intent — the same wire
+signal dsh web's \"abandon questions\" produces: the host resolves the
+pending ask as cancelled and the ask tool call aborts, so the agent's
+turn is never left blocked on an unanswered question.  The quit is
+contained here so it cannot leak out of the process filter as \"error in
+process filter: Quit\"."
+  (dsh-emacs--events-result-async
+   dsh-emacs-events--client-id
+   event-id
+   `((kind . "rejected")
+     (error . ((name . "cancelled")
+               (message . "User abandoned the questions"))))
+   (lambda (ok value)
+     (if ok
          (message "Question cancelled")
-       (message "Question response not accepted (%s)" reason)))))
+       (message "Question response not accepted (%s)" value)))))
 
-(defun dsh-emacs--question-resolved (session-id rpc-id outcome)
-  "Handle a `question/resolved' push for RPC-ID of SESSION-ID.
-The OUTCOME (answered/cancelled/…) is echoed in *Messages*, and any queued
-frame for the same question is dropped, so a mux replay of
-requested→resolved never re-asks a finished question.  A question currently
-being prompted cannot be aborted from here; its stale answer is then refused
-server-side as not-pending."
-  (message "dsh question %s resolved: %s" rpc-id (or outcome "…"))
+(defun dsh-emacs--question-cancelled (event-id)
+  "Retire the queued `user-questions/request' waterfall EVENT-ID.
+A host `cancel' frame for EVENT-ID means the waterfall was withdrawn and
+no longer needs answering; drop any still-queued copy so a replay never
+re-asks a finished question.  A waterfall currently being prompted cannot
+be aborted from here; its stale answer is then refused server-side."
+  (message "dsh question %s cancelled" event-id)
   (setq dsh-emacs--question-queue
         (cl-remove-if (lambda (entry)
-                        (and (equal rpc-id (nth 1 entry))
-                             (equal session-id (nth 2 entry))))
+                        (equal event-id (nth 1 entry)))
                       dsh-emacs--question-queue)))
 
+(defun dsh-emacs--waterfall-generation-retired ()
+  "Retire all pending question/approval waterfalls of a dead generation.
+Each `$events' reconnect hands out a NEW client-id; answering the old
+generation's still-queued frames with it would be a no-op, so the pending
+frames are dropped (a waterfall currently being prompted cannot be
+aborted from here — its stale answer is likewise a no-op)."
+  (message "dsh: new $events generation — retiring %d queued question(s) and %d approval(s)"
+           (length dsh-emacs--question-queue)
+           (length dsh-emacs--approval-queue))
+  (setq dsh-emacs--question-queue nil
+        dsh-emacs--approval-queue nil))
+
 ;; ---------------------------------------------------------------------------
-;;  用户审批（approval/requested）应答
+;;  用户审批（approval/request）应答
 ;; ---------------------------------------------------------------------------
-;; 沙箱工具的越界请求通过 mux 流推送 answerable 的 `approval/requested'
-;; 帧（server-request，rpcId 稳定）：bash/fs 等工具要访问 workspace 之外
-;; 的文件时，宿主先征询用户的许可（dsh web 的 ApprovalPanel 同一协议）。
-;; 客户端必须展示请求（toolName + justification reason）、读取用户的
-;; approve/reject 决定，并以 client-response 回 POST /api/respond（回声
-;; rpcId；payload 即 ApprovalResponsePayload：sessionId + approvalId +
-;; outcome，客户端只能给 "allowed-once" | "rejected"）。宿主随后广播
-;; `approval/resolved' 帧（纯推送）并继续（或被拒后放弃）被阻塞的调用。
+;; 沙箱工具的越界请求通过核心连接的 `$events' 流推送 `approval/request'
+;; waterfall：bash/fs 等工具要访问 workspace 之外的文件时，宿主先征询
+;; 用户的许可（dsh web 的 ApprovalPanel 同一协议）。客户端必须展示请求
+;; （toolName + justification reason）、读取用户的 approve/reject 决定，
+;; 并以一元端点 POST /api/$events/result 回 outcome（value = ApprovalOutcome
+;; 字符串：客户端只给 "allowed-once" | "rejected"；wire 上没有 approvalId）。
 ;;
 ;; 交互方式：minibuffer y-or-n-p —— y/y 键 = 允许一次，n = 拒绝；C-g/ESC
 ;; 同样按拒绝应答（客户端不回决定，宿主就会一直阻塞在 pending 审批上；
-;; 若宿主已先 resolved 则 receipt 报 not-pending，静默丢弃）。minibuffer 是
-;; 全局唯一资源：审批与提问共用同一把锁（`dsh-emacs--approval-active' /
-;; `dsh-emacs--question-active'，见上面的 defvar），任一活跃时新帧入队
-;; 串行，两个 drain 在各自队列清空时互相接棒，绝不嵌套两个 minibuffer
-;; 提示。
+;; 宿主已先 cancel 的 waterfall 其 result 为 no-op，静默丢弃）。minibuffer
+;; 是全局唯一资源：审批与提问共用同一把锁
+;; （`dsh-emacs--approval-active' / `dsh-emacs--question-active'，见上面的
+;; defvar），任一活跃时新帧入队串行，两个 drain 在各自队列清空时互相
+;; 接棒，绝不嵌套两个 minibuffer 提示。
 
 (defun dsh-emacs--approval-command-line (call-id)
   "One-line summary of the tool call CALL-ID from the live transcript.
@@ -3869,29 +3730,28 @@ predates this window, or the approval replayed right after open)."
        (t nil)))))
 
 (defun dsh-emacs--approval-drain ()
-  "Answer queued approval frames one at a time, in arrival order.
+  "Answer queued approval waterfalls one at a time, in arrival order.
 The approval prompt owns the same single minibuffer slot as question
 answering: while `dsh-emacs--question-active' or
 `dsh-emacs--approval-active' is set, queued approvals wait.  Each frame
 is decided before the next one is presented — a quit (C-g/ESC) counts
 as a rejection so the host never stays blocked on a pending frame.
-The decision goes out as a client-response echoing the frame's RPC-ID with
-the `ApprovalResponsePayload' (sessionId + approvalId + outcome).  The
-prompt runs in the frame's chat buffer so the tool-call lookup
-(`dsh-emacs--approval-command-line') can read the buffer-local
-transcript state.  When the slot frees up, queued questions are handed
-back to `dsh-emacs--question-drain'."
+The decision goes out as a `$events/result' outcome (value =
+ApprovalOutcome string) carrying the current generation's client-id and
+the waterfall's EVENT-ID.  The prompt runs in the frame's chat buffer so
+the tool-call lookup (`dsh-emacs--approval-command-line') can read the
+buffer-local transcript state.  When the slot frees up, queued questions
+are handed back to `dsh-emacs--question-drain'."
   (while (and (null dsh-emacs--approval-active)
               (null dsh-emacs--question-active)
               dsh-emacs--approval-queue)
     (let* ((frame (pop dsh-emacs--approval-queue))
            (chat (nth 0 frame))
-           (rpc-id (nth 1 frame))
+           (event-id (nth 1 frame))
            (session-id (nth 2 frame))
-           (approval-id (nth 3 frame))
-           (tool-name (nth 4 frame))
-           (reason (nth 5 frame))
-           (call-id (nth 6 frame)))
+           (tool-name (nth 3 frame))
+           (reason (nth 4 frame))
+           (call-id (nth 5 frame)))
       (setq dsh-emacs--approval-active frame)
       (condition-case err
           (let ((allow (condition-case nil
@@ -3904,22 +3764,22 @@ back to `dsh-emacs--question-drain'."
                          ;; C-g/ESC 折叠为拒绝：宿主阻塞在 pending 审批上，
                          ;; 只有收到决定才能解除，留着不答只会永远卡住回合。
                          (quit (message "Approval %s quit — rejecting"
-                                        approval-id)
+                                        event-id)
                                nil))))
-            (dsh-emacs--rpc-respond-async
-             rpc-id
-             `((sessionId . ,session-id)
-               (approvalId . ,approval-id)
-               (outcome . ,(if allow "allowed-once" "rejected")))
-             (lambda (accepted rsn)
-               (if accepted
+            (dsh-emacs--events-result-async
+             dsh-emacs-events--client-id
+             event-id
+             `((kind . "result")
+               (value . ,(if allow "allowed-once" "rejected")))
+             (lambda (ok value)
+               (if ok
                    (message "%s %s for %s"
                             (if allow "Approved" "Rejected")
                             (or tool-name "tool") session-id)
-                 (message "Approval response not accepted (%s)" rsn)))))
+                 (message "Approval response not accepted (%s)" value)))))
         ;; Safety net: a quit from anywhere but the prompt still aborts the
         ;; frame without answering.
-        (quit (message "Approval %s cancelled" approval-id))
+        (quit (message "Approval %s cancelled" event-id))
         (error (message "dsh approval error: %S" err)))
       (setq dsh-emacs--approval-active nil)))
   ;; The approval answering slot just freed up: hand queued questions over
@@ -3986,26 +3846,27 @@ the same rejection (an unanswered frame would block the host forever)."
                  'point-entered #'dsh-emacs--avoid-minibuffer-prompt)))
       (y-or-n-p prompt))))
 
-(defun dsh-emacs--approval-requested (chat rpc-id session-id approval-id
-                                           tool-name reason call-id)
-  "Queue an `approval/requested' frame for SESSION-ID in CHAT and answer it.
+(defun dsh-emacs--approval-requested (chat event-id session-id tool-name
+                                             reason call-id)
+  "Queue an `approval/request' waterfall EVENT-ID of SESSION-ID and answer it.
 Mirrors `dsh-emacs--question-requested': the minibuffer is one global
 resource, so frames are queued (FIFO) and drained one at a time by
 `dsh-emacs--approval-drain', never nested inside another prompt.  A
-frame whose APPROVAL-ID is already pending (mux replay of the same
+waterfall whose EVENT-ID is already pending ($events replay of the same
 request) is dropped instead of asked twice.  The decision — allow once
-or reject — is sent as a single client-response echoing RPC-ID on POST
-/api/respond with the `ApprovalResponsePayload'; C-g answers the
-rejection too (default deny).  The quit is caught here so it cannot
-leak out of the process filter as \"error in process filter: Quit\"."
+or reject — is sent as a single `$events/result' outcome (value =
+ApprovalOutcome string) carrying the current generation's client-id and
+the EVENT-ID; C-g answers the rejection too (default deny).  The quit is
+caught here so it cannot leak out of the process filter as \"error in
+process filter: Quit\"."
   (unless (or (and dsh-emacs--approval-active
-                   (equal approval-id (nth 3 dsh-emacs--approval-active)))
+                   (equal event-id (nth 1 dsh-emacs--approval-active)))
               (cl-some (lambda (entry)
-                         (equal approval-id (nth 3 entry)))
+                         (equal event-id (nth 1 entry)))
                        dsh-emacs--approval-queue))
     (setq dsh-emacs--approval-queue
           (nconc dsh-emacs--approval-queue
-                 (list (list chat rpc-id session-id approval-id
+                 (list (list chat event-id session-id
                              tool-name reason call-id))))
     ;; Desktop notice, turn-finish style: the approval prompt may wait in
     ;; the queue while the user is in another buffer or app; the body
@@ -4026,18 +3887,16 @@ leak out of the process filter as \"error in process filter: Quit\"."
         (dsh-emacs-notify--post session-id body chat))))
   (dsh-emacs--approval-drain))
 
-(defun dsh-emacs--approval-resolved (session-id approval-id outcome)
-  "Handle an `approval/resolved' push for APPROVAL-ID of SESSION-ID.
-The outcome (allowed-once/rejected/cancelled/unavailable) is echoed in
-*Messages*, and any queued frame for the same approval is dropped so a
-mux replay of requested→resolved never re-asks a finished approval.  An
-approval currently being prompted cannot be aborted from here; its
-stale answer is then refused server-side as not-pending."
-  (message "dsh approval %s resolved: %s" approval-id (or outcome "…"))
+(defun dsh-emacs--approval-cancelled (event-id)
+  "Retire the queued `approval/request' waterfall EVENT-ID.
+A host `cancel' frame for EVENT-ID means the waterfall was withdrawn and
+no longer needs answering; drop any still-queued copy so a replay never
+re-asks a finished approval.  An approval currently being prompted cannot
+be aborted from here; its stale answer is then a no-op server-side."
+  (message "dsh approval %s cancelled" event-id)
   (setq dsh-emacs--approval-queue
         (cl-remove-if (lambda (entry)
-                        (and (equal approval-id (nth 3 entry))
-                             (equal session-id (nth 2 entry))))
+                        (equal event-id (nth 1 entry)))
                       dsh-emacs--approval-queue)))
 
 (provide 'dsh-emacs)

@@ -5,15 +5,18 @@
 
 ;;; Commentary:
 ;;
-;; dsh Web uses /api/events.mux as a long-lived WebSocket carrying
-;; server-request envelopes whose payload is session/event, an answerable
-;; ask-user interaction (question/requested), or an answerable sandbox
-;; approval (approval/requested — both answered via POST /api/respond,
-;; see `dsh-emacs--question-requested' / `dsh-emacs--approval-requested').
-;; Emacs does not ship a WebSocket client, so this module implements the
-;; small RFC 6455 client needed by that endpoint directly on top of
-;; `open-network-stream'.  HTTP `session.history' remains the bootstrap for
-;; opening a session; the mux stream is the only automatic delivery channel.
+;; dsh Web multiplexes all logical Remote streams over one long-lived
+;; WebSocket, `/api/remote.mux'.  A chat buffer opens a `session/follow'
+;; stream whose snapshot seeds the transcript and whose `event' items
+;; render live; a core connection (the session list's) opens
+;; `session/control' + `workspace/follow' + `$events'.  This module
+;; implements the small RFC 6455 client needed by those endpoints directly
+;; on top of `open-network-stream', then routes each decoded frame:
+;; follow items to the chat renderer, control/workspace frames to the
+;; shared caches, and `$events' frames to session-list updates plus the
+;; question / approval waterfalls (answered via `$events/result', see
+;; `dsh-emacs--question-requested' / `dsh-emacs--approval-requested' in
+;; dsh-emacs.el).
 
 ;;; Code:
 
@@ -23,7 +26,6 @@
 
 (defvar-local dsh-emacs--event-process nil)
 (defvar-local dsh-emacs--event-ready nil)
-(defvar-local dsh-emacs--event-history-loading nil)
 (defvar-local dsh-emacs--event-reconnect-timer nil)
 (defvar-local dsh-emacs--event-connect-timer nil)
 
@@ -34,21 +36,75 @@
 (defvar-local dsh-emacs--ws-probe-inflight nil)
 (defvar-local dsh-emacs--ws-watchdog-timer nil)
 
-;; The list view (`*dsh-sessions*') additionally subscribes to
-;; `/api/events.host', the dsh-wide host stream.  Unlike the per-chat mux
-;; it is scoped to the list buffer's lifecycle: workspace/session/archive
+(defun dsh-emacs-events--stream-id ()
+  "Return a fresh client stream id for a `/api/remote.mux' logical stream."
+  (format "emacs-%d-%d" (random 999999) (truncate (float-time))))
+
+(defun dsh-emacs-events--open-message (stream-id endpoint args)
+  "JSON text of a `/api/remote.mux' `open' message.
+Opens logical stream STREAM-ID at ENDPOINT (e.g. \"session/follow\")
+with ARGS, the content of the wire `args' object (an alist, or nil for
+no parameters) — the frame payload is exactly `{args: {...}}' (rpc.md
+§3.1/§3.2)."
+  (json-encode
+   `((type . "open")
+     (streamId . ,stream-id)
+     (endpoint . ,endpoint)
+     (payload . ,(list (cons 'args
+                             (or args (make-hash-table))))))))
+
+(defun dsh-emacs-events--cancel-message (stream-id)
+  "JSON text of a `/api/remote.mux' `cancel' message for STREAM-ID.
+Tells the host to close the logical stream STREAM-ID and stop sending its
+frames (rpc.md §3.1); the socket stays up for the other multiplexed
+streams.  Lets a caller retire one logical stream (e.g. the
+`workspace/follow' stream before it re-opens a fresh one for a re-baseline)
+without tearing down the whole core connection."
+  (json-encode `((type . "cancel") (streamId . ,stream-id))))
+
+(defun dsh-emacs-events--message-frame (json)
+  "Parse one `/api/remote.mux' text message JSON into a plist.
+Returns (:type TYPE :stream-id ID [:value VALUE] [:error ERROR])
+following the server frame vocabulary (`item' carries :value, `error'
+carries :error, `cancel'/`end'/`ready'/`emit'/`waterfall' their own
+fields), or nil when JSON is not an object.  Only the shared envelope
+keys are read; frame-specific payloads stay on the caller."
+  (let ((msg (condition-case nil (json-read-from-string json)
+               (error nil))))
+    (when (and msg (listp msg))
+      (let ((type (dsh-emacs-render--aget "type" msg))
+            (stream-id (dsh-emacs-render--aget "streamId" msg)))
+        (cond
+         ((null type) nil)
+         ((equal type "item")
+          (list :type type :stream-id stream-id
+                :value (dsh-emacs-render--aget "value" msg)))
+         ((equal type "error")
+          (list :type type :stream-id stream-id
+                :error (dsh-emacs-render--aget "error" msg)))
+         (t (list :type type :stream-id stream-id)))))))
+
+;; The list view (`*dsh-sessions*') additionally opens a core
+;; `/api/remote.mux' connection carrying `$events' + `session/control' +
+;; `workspace/follow' logical streams.  Unlike the per-chat follow stream it
+;; is scoped to the list buffer's lifecycle: workspace/session/archive
 ;; changes arrive there and refresh the caches and the list in place, so a
 ;; dsh web (or second client) editing a workspace shows up without `g'.
 (defvar-local dsh-emacs--host-process nil
-  "Live host-stream network process, or nil.")
+  "Live core-stream network process, or nil.")
 (defvar-local dsh-emacs--host-ready nil
-  "Non-nil once the host-stream handshake completed.")
+  "Non-nil once the core-stream handshake completed.")
 (defvar-local dsh-emacs--host-reconnect-timer nil
-  "Timer scheduling a host-stream reconnect after a drop.")
+  "Timer scheduling a core-stream reconnect after a drop.")
+
+(defvar dsh-emacs-events--client-id nil
+  "clientId of the current `$events' generation (from its `ready' frame).
+Answers to waterfalls must carry this id; each core reconnect yields a new
+generation and a new clientId.")
 
 ;; Refresh in-flight protection (mirrors dsh web's `refreshFrames'): a
-;; `session.list'/`workspace.list' response is a snapshot at request time.
-;; When the response is in flight, host/mux frames may already have advanced
+;; `session/list' response is a snapshot at request time.
+;; When the response is in flight, core/mux frames may already have advanced
 ;; the caches to a newer state (another client reordered/renamed/archived… );
 ;; blindly replacing the caches with the snapshot would roll them back.  The
 ;; frames arriving during the refresh are recorded here and replayed over the
@@ -94,19 +150,23 @@
 ;; own the values.
 (defvar dsh-emacs-base-url)
 (defvar dsh-emacs--buffer-session)
+(defvar dsh-emacs-history-window)
 (declare-function dsh-emacs--chat-session-item "dsh-emacs" (session-id))
+(declare-function dsh-emacs--seed-input-history "dsh-emacs" (events session-id))
 (declare-function dsh-emacs--chat-buffer-sync "dsh-emacs" (session-id))
-(declare-function dsh-emacs--question-requested "dsh-emacs" (chat rpc-id session-id questions))
-(declare-function dsh-emacs--question-resolved "dsh-emacs" (session-id rpc-id outcome))
-(declare-function dsh-emacs--approval-requested "dsh-emacs" (chat rpc-id session-id approval-id tool-name reason call-id))
-(declare-function dsh-emacs--approval-resolved "dsh-emacs" (session-id approval-id outcome))
+(declare-function dsh-emacs--question-requested "dsh-emacs" (chat event-id session-id questions))
+(declare-function dsh-emacs--question-cancelled "dsh-emacs" (event-id))
+(declare-function dsh-emacs--approval-requested "dsh-emacs" (chat event-id session-id tool-name reason call-id))
+(declare-function dsh-emacs--approval-cancelled "dsh-emacs" (event-id))
+(declare-function dsh-emacs--events-result-async "dsh-emacs" (client-id event-id outcome callback))
+(declare-function dsh-emacs--waterfall-generation-retired "dsh-emacs" ())
 (declare-function dsh-emacs-render--aget "dsh-emacs-render" (key alist))
-(declare-function dsh-emacs-render--json-bool "dsh-emacs-render" (value))
 (declare-function dsh-emacs-session--render "dsh-emacs-session" ())
 (declare-function dsh-emacs--normalize-archived "dsh-emacs" (archived))
 (declare-function dsh-emacs-modeline-set-context-snapshot "dsh-emacs-modeline" (pressure window))
 (declare-function dsh-emacs-queue-apply "dsh-emacs-queue" (chat process payload))
 (declare-function dsh-emacs-server--basic-auth-header "dsh-emacs-server" ())
+(declare-function dsh-emacs--server-auth-cookie-header "dsh-emacs-server" ())
 
 ;; Defined in dsh-emacs-modeline.el, which loads after this module.  Referenced
 ;; at runtime from teardown only.
@@ -114,9 +174,7 @@
 (declare-function dsh-emacs--ml-busy-set "dsh-emacs-modeline" (flag))
 (declare-function dsh-emacs--command-spinner-clear-all "dsh-emacs-render" ())
 (declare-function dsh-emacs--command-spinner-revive "dsh-emacs-render" ())
-;; Runtime dependencies defined in dsh-emacs.el / dsh-emacs-render.el; used
-;; by the stream-health watchdog only.
-(declare-function dsh-emacs--rpc-async "dsh-emacs" (method params callback))
+;; Runtime dependencies defined in dsh-emacs.el / dsh-emacs-render.el.
 (declare-function dsh-emacs--sequence-list "dsh-emacs" (value))
 (declare-function dsh-emacs-render-history-events "dsh-emacs-render" (events stream))
 (declare-function dsh-emacs-render--consume-pending-user-message "dsh-emacs-render" (event))
@@ -130,8 +188,10 @@
 
 (defun dsh-emacs-events--send-handshake (process)
   "Send the WebSocket upgrade request for PROCESS.
-The path defaults to `/api/events.mux'; the host stream (list-scoped)
-overrides it via the `dsh-emacs-event-path' process property."
+Every logical Remote stream is multiplexed over one `/api/remote.mux'
+socket; the caller opens its specific stream (a chat's
+`session/follow', the session list's `session/control' +
+`workspace/follow' + `$events') right after the handshake."
   (let* ((url (url-generic-parse-url dsh-emacs-base-url))
          (host (url-host url))
          (port (or (url-port url)
@@ -142,8 +202,7 @@ overrides it via the `dsh-emacs-event-path' process property."
          (seed (format "%s-%s-%s" (float-time) (random) (emacs-pid)))
          (key (base64-encode-string
                (substring (secure-hash 'sha1 seed nil nil t) 0 16) t))
-         (path (or (process-get process 'dsh-emacs-event-path)
-                   "/api/events.mux"))
+         (path "/api/remote.mux")
          (origin (format "%s://%s%s"
                          (url-type url) host
                          (if (and port (not (memq port '(80 443))))
@@ -151,12 +210,16 @@ overrides it via the `dsh-emacs-event-path' process property."
                            ""))))
     (let* ((auth (and (fboundp 'dsh-emacs-server--basic-auth-header)
                       (dsh-emacs-server--basic-auth-header)))
+           (cookie (and (fboundp 'dsh-emacs--server-auth-cookie-header)
+                        (dsh-emacs--server-auth-cookie-header)))
            (request (concat
                      (format "GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\nOrigin: %s\r\n"
                              path host-header key origin)
                      ;; nginx basic auth 下握手必须带认证头，否则 401 拒绝、
                      ;; 实时事件流（mux/host）全部断连。
                      (if auth (format "%s: %s\r\n" (car auth) (cdr auth)) "")
+                     ;; 0.1.2-rc.1+ 的浏览器会话认证：握手必须带 dsh-auth-* cookie。
+                     (if cookie (format "Cookie: %s\r\n" cookie) "")
                      "\r\n")))
       (process-send-string process request))))
 
@@ -169,7 +232,7 @@ overrides it via the `dsh-emacs-event-path' process property."
   "Encode client WebSocket PAYLOAD with OPCODE."
   (let* ((payload (or payload ""))
          (payload (if (multibyte-string-p payload)
-                      (encode-coding-string payload 'utf-8 t)
+                      (string-to-unibyte (encode-coding-string payload 'utf-8))
                     payload))
          (length (length payload))
          (mask (dsh-emacs-events--random-mask))
@@ -272,7 +335,7 @@ overrides it via the `dsh-emacs-event-path' process property."
   "Update the mode-line ctx% for SESSION-ID from a `contextPressure' projection VALUE.
 VALUE is the projection's wire view: an alist with symbol/string keys for
 `projectedTokens', `pressureTokens' and `contextWindow' (the same shape
-`session.list' projections carry, aligned with dsh web's ctx meter which
+`session/list' projections carry, aligned with dsh web's ctx meter which
 reads projectedTokens ?? pressureTokens).  Only the session's live chat
 buffer is touched; the mode-line snapshot setter lands the pair in one go.
 
@@ -301,17 +364,16 @@ lands the genuine pair."
 
 (defun dsh-emacs-events--dispatch-event (chat event)
   "Dispatch EVENT received for CHAT, respecting seq and optimistic input.
-The seq gate is the dedup line: the mux replays the ENTIRE global event
-stream to every new connection (the protocol has no baseline-sync
-parameter — see `dsh-emacs-events--dispatch-json'), and that includes
-MID-SESSION reconnects, not just the initial open.  `dsh-emacs--anchor-seq'
-tracks the newest event this buffer has rendered or consumed, so a
-replayed frame — which carries its ORIGINAL seq — is already on screen
-and must be dropped: without the gate a reconnect painted the whole
-transcript a second time (doubled user messages and assistant replies,
-interleaved by the second pass).  Events that arrived while the socket
-was down carry seq > anchor and render here as the catch-up, exactly like
-`dsh-emacs-render-history-events' gates its re-fetch windows."
+The seq gate is the dedup line: a `session/follow' reconnect re-seeds the
+transcript with a fresh snapshot (see `dsh-emacs-events--dispatch-json'),
+whose records carry their ORIGINAL seq — and that includes MID-SESSION
+reconnects, not just the initial open.  `dsh-emacs--anchor-seq' tracks the
+newest event this buffer has rendered or consumed, so a replayed record —
+already on screen — must be dropped: without the gate a reconnect painted
+the whole transcript a second time (doubled user messages and assistant
+replies, interleaved by the second pass).  Events that arrived while the
+socket was down carry seq > anchor and render here as the catch-up, exactly
+like the follow snapshot's reseed is anchor-gated."
   (when (and (buffer-live-p chat) (listp event))
     (with-current-buffer chat
       (let ((seq (dsh-emacs-render--event-seq event)))
@@ -330,133 +392,146 @@ was down carry seq > anchor and render here as the catch-up, exactly like
       (setq dsh-emacs--ws-last-event-time (float-time))))
 
 (defun dsh-emacs-events--dispatch-json (process json)
-  "Handle one decoded WebSocket JSON envelope from PROCESS.
-Host-stream frames (list-scoped workspace/session/archive changes) are
-routed to `dsh-emacs-events--host-dispatch'; the mux stream (per-chat
-session/event envelopes) goes to the transcript path below, and
-answerable `question/requested' frames are presented and answered
-interactively (they are NOT gated on history loading — pending
-questions replay on mux open; answering is queued one frame at a time,
-since the minibuffer is a single global resource).
-While the initial history is loading, the mux replay of the ENTIRE global
-backlog is dropped UNPARSED: big sessions alone replay 500k+ raw events, and
-queueing + sorting + flushing them (historically the multi-second freeze on
-every open) was pure waste, since the history page's anchor already sits at
-the newest seq once the page renders.  The gap this drop opens is closed by
-one bounded re-fetch (`dsh-emacs--load-history'), and live events resume
-through the normal path once loading completes."
+  "Route one decoded WebSocket text message from PROCESS.
+A process flagged `dsh-emacs-host-stream' (the core connection) routes to
+`dsh-emacs-events--host-dispatch'.  A chat process's `/api/remote.mux'
+messages all carry a top-level `streamId' — its `session/follow' frames
+go to `dsh-emacs-events--dispatch-follow'.  Anything else (a chat socket
+message without a streamId) is not a frame the migrated protocol sends
+and is dropped."
   (condition-case err
       (if (and (processp process)
                (process-get process 'dsh-emacs-host-stream))
           (dsh-emacs-events--host-dispatch process json)
-        (let ((chat (dsh-emacs-events--chat process)))
-          (when (buffer-live-p chat)
-            (let* ((message (json-read-from-string json))
-                   (payload (dsh-emacs-render--aget "payload" message))
-                   (rpc-id (dsh-emacs-render--aget "rpcId" message))
-                   (type (dsh-emacs-render--aget "type" payload))
-                   (session-id (dsh-emacs-render--aget "sessionId" payload))
-                   (event (dsh-emacs-render--aget "event" payload)))
-              (cond
-               ;; answerable ask-user interaction (`ask' tool): show the
-               ;; question card and read the answers now.  Pending questions
-               ;; REPLAY on mux open — possibly while history is still loading
-               ;; — so this branch must not be gated on the loading flag.
-               ((equal type "question/requested")
-                (when (and rpc-id
-                           (equal session-id
-                                  (buffer-local-value
-                                   'dsh-emacs--buffer-session chat)))
-                  (dsh-emacs--question-requested
-                   chat rpc-id session-id
-                   (dsh-emacs-render--aget "questions" payload))))
-               ;; answerable sandbox/approval interaction: a tool (bash/fs…)
-               ;; that needs to step outside the workspace asks for the user's
-               ;; permission.  Answerable like question/requested (stable
-               ;; rpcId echoed on POST /api/respond), so it is never gated on
-               ;; history loading either — pending approvals REPLAY on mux open
-               ;; and must not be dropped with the backlog.
-               ((equal type "approval/requested")
-                (when (and rpc-id
-                           (equal session-id
-                                  (buffer-local-value
-                                   'dsh-emacs--buffer-session chat)))
-                  (dsh-emacs--approval-requested
-                   chat rpc-id session-id
-                   (dsh-emacs-render--aget "approvalId" payload)
-                   (dsh-emacs-render--aget "toolName" payload)
-                   (dsh-emacs-render--aget "reason" payload)
-                   (dsh-emacs-render--aget "callId" payload))))
-               ;; Pure push: the question was resolved (answered/withdrawn)
-               ;; host-side.  No answer is expected — just retire any
-               ;; still-queued frame for the same rpcId so a replay never
-               ;; re-asks a finished question.
-               ((equal type "question/resolved")
-                (dsh-emacs--question-resolved
-                 session-id
-                 (dsh-emacs-render--aget "questionRpcId" payload)
-                 (dsh-emacs-render--aget "outcome" payload)))
-               ;; Pure push: the approval was decided (allowed-once/rejected)
-               ;; or withdrawn host-side (cancelled/unavailable).  No answer
-               ;; is expected — just retire any still-queued frame for the
-               ;; same approval so a replay never re-asks a finished one.
-               ((equal type "approval/resolved")
-                (dsh-emacs--approval-resolved
-                 session-id
-                 (dsh-emacs-render--aget "approvalId" payload)
-                 (dsh-emacs-render--aget "outcome" payload)))
-               ;; host 推送的投影帧：会话上下文占用（contextPressure）随
-               ;; 事件流实时更新（对齐 dsh web 的 session-projection 推送
-               ;; 模型，免去全量 session.list 拉取）。value 是投影的 wire
-               ;; view：{projectedTokens, pressureTokens, contextWindow}。
-               ;; 投影是 per-session 实时状态，不依赖 history 加载门控。
-               ;; host 推送的收件箱快照帧：会话排队/引导输入的权威镜像
-               ;; （每次 inbox splice 全量推送；连接建立时对有积压的会话
-               ;; 也推一次）。与投影一样是 per-session 实时状态，不依赖
-               ;; history 加载门控——首个连接快照正是打开会话时获取积压
-               ;; 队列的唯一途径。仅处理本会话的帧。
-               ((equal type "session/queue")
-                (when (equal session-id
-                             (buffer-local-value
-                              'dsh-emacs--buffer-session chat))
-                  (dsh-emacs-queue-apply chat process payload)))
-               ((equal type "session/projection")
-                (when (equal (dsh-emacs-render--aget "key" payload)
-                             "contextPressure")
-                  (dsh-emacs--events-apply-context-projection
-                   session-id
-                   (dsh-emacs-render--aget "value" payload))))
-               ;; Server auto-renames a session after its first turns (summary
-               ;; title) and `session.rename' also lands here: both surface as
-               ;; a `session/title' event.  Titles are per-session metadata, not
-               ;; transcript content, so apply them for ANY session (the buffer
-               ;; name and the list row must track dsh web in real time) and
-               ;; only render transcript events for the session this chat buffer
-               ;; is attached to.  The whole bulk is gated on history loading:
-               ;; the mux replay of the ENTIRE backlog is dropped UNPARSED
-               ;; during it (see the docstring), and the gap closes on the
-               ;; bounded re-fetch once the page renders.
-               ((equal type "session/event")
-                (when (not (with-current-buffer chat
-                             dsh-emacs--event-history-loading))
-                  (when (and event
-                             (equal (dsh-emacs-render--aget "type" event)
-                                    "session/title"))
-                    (let ((title (dsh-emacs-render--aget "title"
-                                                         (dsh-emacs-render--aget "data" event))))
-                      (dsh-emacs-events--apply-title chat session-id title)
-                      ;; A refresh snapshot arriving after this title would roll
-                      ;; the row back to an old title: record it for replay too.
-                      (dsh-emacs-events--host-frame-record
-                       (list :apply-title session-id title))))
-                  (when (and event
-                             (equal session-id
-                                    (buffer-local-value
-                                     'dsh-emacs--buffer-session chat)))
-                    (dsh-emacs-events--dispatch-event chat event))))
-               ;; 其余 mux 帧（session/subscribed 等）当前不处理。
-               (t nil))))))
+        (let* ((message (condition-case nil (json-read-from-string json)
+                          (error nil)))
+               (stream-id (and (listp message)
+                               (dsh-emacs-render--aget "streamId" message))))
+          (when stream-id
+            (dsh-emacs-events--dispatch-follow process message))))
     (error (message "dsh event decode error: %S" err))))
+
+(defun dsh-emacs-events--follow-open (process)
+  "Send the `session/follow' open frame for PROCESS's chat stream.
+The follow endpoint needs the session the chat buffer is attached to
+(process property `dsh-emacs-follow-session', set at connect).  No-op for
+connections without a session (the core list connection opens
+`session/control' + `workspace/follow' + `$events' instead)."
+  (let ((session-id (process-get process 'dsh-emacs-follow-session)))
+    (when (and session-id (process-live-p process))
+      (let* ((stream-id (or (process-get process 'dsh-emacs-follow-stream-id)
+                            (let ((id (dsh-emacs-events--stream-id)))
+                              (process-put process 'dsh-emacs-follow-stream-id id)
+                              id)))
+             (request `((address . ((kind . "session")
+                                    (sessionId . ,session-id)))))
+             (request (if (bound-and-true-p dsh-emacs-history-window)
+                          (append request
+                                  `((maxMessages . ,dsh-emacs-history-window)))
+                        request))
+             (json (dsh-emacs-events--open-message
+                    stream-id "session/follow"
+                    `((request . ,request)))))
+        (process-send-string process (dsh-emacs-events--frame 1 json))))))
+
+(defun dsh-emacs-events--dispatch-follow (process message)
+  "Dispatch one `session/follow' stream message on PROCESS.
+Only messages for the stream this connection opened (process property
+`dsh-emacs-follow-stream-id') are consumed: `item' frames carry the
+snapshot/event values, `error' and `end' close the stream and reconnect."
+  (when (equal (dsh-emacs-render--aget "streamId" message)
+               (process-get process 'dsh-emacs-follow-stream-id))
+    (pcase (dsh-emacs-render--aget "type" message)
+      ("item"
+       (let ((chat (dsh-emacs-events--chat process)))
+         (when (buffer-live-p chat)
+           (dsh-emacs-events--follow-item
+            chat (dsh-emacs-render--aget "value" message)))))
+      ("error"
+       (message "dsh follow stream error: %S"
+                (dsh-emacs-render--aget "error" message))
+       (dsh-emacs-events--lost process))
+      ("end"
+       ;; The server closed the stream: reconnect so a fresh follow
+       ;; snapshot reseeds the transcript (the seq anchor dedups).
+       (dsh-emacs-events--lost process)))))
+
+(defun dsh-emacs-events--follow-item (chat value)
+  "Consume one `session/follow' item VALUE on the stream of CHAT.
+`snapshot' frames seed the transcript; `event' frames feed the live
+event path."
+  (pcase (dsh-emacs-render--aget "type" value)
+    ("snapshot" (dsh-emacs-events--follow-snapshot chat value))
+    ("event" (dsh-emacs-events--follow-event
+              chat (dsh-emacs-render--aget "event" value)))
+    (_ nil)))
+
+(defun dsh-emacs-events--follow-event (chat event)
+  "Handle one live follow EVENT for CHAT.
+`session/title' events update the session cache and buffer name for any
+session; transcript events render into CHAT's own buffer."
+  (when (and (buffer-live-p chat) (listp event))
+    (let ((session-id (with-current-buffer chat
+                        dsh-emacs--buffer-session)))
+      (when (equal (dsh-emacs-render--aget "type" event) "session/title")
+        (let ((title (dsh-emacs-render--aget "title"
+                                             (dsh-emacs-render--aget "data" event))))
+          (dsh-emacs-events--apply-title chat session-id title)
+          (dsh-emacs-events--host-frame-record
+           (list :apply-title session-id title))))
+      (dsh-emacs-events--dispatch-event chat event))))
+
+(defun dsh-emacs-events--follow-snapshot (chat value)
+  "Seed CHAT's transcript from a `session/follow' snapshot VALUE.
+Renders the message-aligned `records' tail — `chunks' packed rows are
+skipped, raw `assistant/chunk' deltas too (the completed
+`assistant/message' events render the content) — then advances
+`dsh-emacs--anchor-seq' to the snapshot CURSOR and applies snapshot
+projections (title/contextPressure).  The snapshot is the opening history
+tail; no separate history fetch precedes the connect."
+  (when (buffer-live-p chat)
+    (with-current-buffer chat
+      (let* ((session-id dsh-emacs--buffer-session)
+             (cursor (dsh-emacs-render--aget "cursor" value))
+             (records (let ((r (dsh-emacs-render--aget "records" value)))
+                        (cond ((vectorp r) (append r nil))
+                              ((listp r) r)
+                              (t nil))))
+             (entries (delq nil
+                            (mapcar (lambda (rec)
+                                      (and (equal (dsh-emacs-render--aget
+                                                   "type" rec)
+                                                  "event")
+                                           rec))
+                                    records))))
+        (when entries
+          (dsh-emacs-render-history-events entries nil)
+          (when (fboundp 'dsh-emacs--seed-input-history)
+            (dsh-emacs--seed-input-history entries session-id)))
+        (when (integerp cursor)
+          (setq dsh-emacs--anchor-seq
+                (max (or dsh-emacs--anchor-seq 0) cursor)))
+        (dsh-emacs-events--apply-snapshot-projections
+         session-id (dsh-emacs-render--aget "projections" value))
+        (setq dsh-emacs--ws-last-event-time (float-time))))))
+
+(defun dsh-emacs-events--apply-snapshot-projections (session-id projections)
+  "Apply a follow snapshot's PROJECTIONS block (`{asOfSeq, values}').
+`title' feeds the session cache/buffer name, `contextPressure' the
+mode-line ctx% — the same consumers as the `session/control' projection
+increment frames use."
+  (let ((values (and (listp projections)
+                     (dsh-emacs-render--aget "values" projections))))
+    (when (listp values)
+      (let ((title (dsh-emacs-render--aget "title" values)))
+        (when (and title (not (string-empty-p title)))
+          (dsh-emacs-events--apply-title nil session-id title)
+          (dsh-emacs-events--host-frame-record
+           (list :apply-title session-id title))))
+      (let ((pressure (dsh-emacs-render--aget "contextPressure" values)))
+        (when (listp pressure)
+          (dsh-emacs--events-apply-context-projection session-id pressure))))))
+
 
 (defun dsh-emacs-events--consume-frames (process)
   "Consume complete WebSocket frames buffered for PROCESS."
@@ -506,19 +581,25 @@ through the normal path once loading completes."
                     (process-put process 'dsh-emacs-event-input
                                  (substring input (+ header-end 4)))
                     (if (process-get process 'dsh-emacs-host-stream)
-                        ;; Host stream has no chat buffer to mark ready; the
-                        ;; flag lives on the owning list buffer.
+                        ;; Core stream has no chat buffer to mark ready; the
+                        ;; flag lives on the owning list buffer, then the
+                        ;; `session/control' + `workspace/follow' + `$events'
+                        ;; logical streams are opened on the socket.
                         (let ((buffer (process-get process
                                                    'dsh-emacs-host-buffer)))
                           (when (buffer-live-p buffer)
                             (with-current-buffer buffer
-                              (setq dsh-emacs--host-ready t))))
+                              (setq dsh-emacs--host-ready t)))
+                          (dsh-emacs-events--host-open process))
                       (let ((chat (dsh-emacs-events--chat process)))
                         (when (buffer-live-p chat)
                           (with-current-buffer chat
                             (setq dsh-emacs--event-ready t)
                             (setq dsh-emacs--ws-last-event-time (float-time))
-                            (dsh-emacs-events--health-stop)))))
+                            (dsh-emacs-events--health-stop)))
+                        ;; 0.1.2: open the chat's `session/follow' logical
+                        ;; stream once the socket upgrade completed.
+                        (dsh-emacs-events--follow-open process)))
                     (dsh-emacs-events--consume-frames process))
                 (delete-process process)))))))))
 
@@ -565,15 +646,16 @@ never stack parallel reconnect timers."
   "Confirm the event stream is actually delivering while a turn runs.
 The dsh mux can leave a socket open-but-unread (bytes pile up in the kernel
 queue while Emacs never invokes the process filter), making the stream look
-alive although nothing renders.  A cheap `session.history' fetch both renders
-whatever the stream missed (anchor-diffed, so re-delivery is harmless) and
-reveals the stall: if the anchor advanced although the stream had been silent
-for > 3s, kill the socket so the sentinel reconnects.  Self-stops outside an
-active turn.  BUFFER is the chat buffer this
-watchdog was armed for: the timer is buffer-local but timers fire with no
-buffer context, so the owning buffer is passed explicitly (with several
-session buffers open, the global `dsh-emacs--current-buffer' would point at
-the last-opened one and the watchdog would probe the wrong stream)."
+alive although nothing renders.  When the stream stays silent for > 3s
+mid-turn the socket is killed so the sentinel reconnects; the fresh
+`session/follow' snapshot then reseeds whatever was missed (records carry
+original seqs, the anchor gate renders only the new tail) — no history
+probe RPC is needed anymore.  Self-stops outside an active turn.  BUFFER is
+the chat buffer this watchdog was armed for: the timer is buffer-local but
+timers fire with no buffer context, so the owning buffer is passed
+explicitly (with several session buffers open, the global
+`dsh-emacs--current-buffer' would point at the last-opened one and the
+watchdog would check the wrong stream)."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (if (and (bound-and-true-p dsh-emacs--ml-busy)
@@ -584,30 +666,12 @@ the last-opened one and the watchdog would probe the wrong stream)."
                        (or (null dsh-emacs--ws-last-event-time)
                            (> (- now dsh-emacs--ws-last-event-time) 3.0))
                        (> (- now (or dsh-emacs--ws-last-probe-time 0)) 3.0))
-              (setq dsh-emacs--ws-last-probe-time now)
-              (setq dsh-emacs--ws-probe-inflight t)
-              (let ((before dsh-emacs--anchor-seq)
-                    (buffer (current-buffer)))
-                (dsh-emacs--rpc-async
-                 "session.history"
-                 `((sessionId . ,(or (and (boundp 'dsh-emacs--buffer-session)
-                                           dsh-emacs--buffer-session)
-                                      dsh-emacs--current-session))
-                   (maxMessages . 50))
-                 (lambda (ok value)
-                   (when (buffer-live-p buffer)
-                     (with-current-buffer buffer
-                       (setq dsh-emacs--ws-probe-inflight nil)
-                       (when ok
-                         (let ((events (dsh-emacs--sequence-list
-                                        (cdr (assq 'events value)))))
-                           (dsh-emacs-render-history-events events t)
-                           (when (> dsh-emacs--anchor-seq before)
-                             ;; New content existed that the stream failed to
-                             ;; deliver: it is stalled.  Kill it; the sentinel
-                             ;; will reconnect and resume delivery.
-                             (when (process-live-p dsh-emacs--event-process)
-                               (delete-process dsh-emacs--event-process))))))))))))
+              ;; The stream is stalled mid-turn: reconnect; the fresh follow
+              ;; snapshot catches the stream up (anchor-diffed rendering).
+              (when (process-live-p dsh-emacs--event-process)
+                (setq dsh-emacs--ws-probe-inflight t)
+                (setq dsh-emacs--ws-last-probe-time now)
+                (delete-process dsh-emacs--event-process))))
         ;; No turn in progress: stop.
         (dsh-emacs-events--watchdog-stop)))))
 
@@ -664,7 +728,7 @@ wedged with no recovery scheduled — the exact limbo observed on this build."
   (setq-local dsh-emacs--event-connect-timer nil))
 
 (defun dsh-emacs-events-connect (chat)
-  "Connect CHAT to dsh's `/api/events.mux' WebSocket stream.
+  "Connect CHAT to dsh's `/api/remote.mux' WebSocket stream.
 
 Socket creation is failure-contained: `open-network-stream' can signal
 synchronously (unresolvable host, malformed `dsh-emacs-base-url'); the
@@ -709,6 +773,10 @@ reconnect is re-armed and another connect scheduled."
               (set-process-coding-system process 'no-conversion
                                          'no-conversion)
               (process-put process 'dsh-emacs-chat-buffer chat)
+               ;; The chat's `session/follow' stream needs the session id at
+               ;; handshake completion (see `dsh-emacs-events--follow-open').
+               (process-put process 'dsh-emacs-follow-session
+                            (buffer-local-value 'dsh-emacs--buffer-session chat))
               (process-put process 'dsh-emacs-event-input "")
               (process-put process 'dsh-emacs-event-ready nil)
               ;; Install the bytecode delegates, not the native subrs directly:
@@ -783,7 +851,8 @@ reconnect is re-armed and another connect scheduled."
           (dsh-emacs--command-spinner-clear-all))))))
 
 ;;; ---------------------------------------------------------------------------
-;;; Host stream (`/api/events.host') — workspace/session/archive changes
+;;; Core connection (`session/control' + `workspace/follow' + `$events')
+;;; --- workspace/session/archive changes
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-events--host-repaint ()
@@ -830,8 +899,7 @@ drained through recorded frames before being installed."
           (:set-archived
            (dsh-emacs-events--host-set-archived (cadr frame)))
           (:session-added
-           (dsh-emacs-events--host-session-added
-            (cadr frame) (car (cddr frame)) (cadr (cddr frame))))
+           (dsh-emacs-events--host-session-added (cadr frame)))
           (:session-removed
            (dsh-emacs-events--host-session-removed (cadr frame)))
           (:session-status
@@ -843,8 +911,8 @@ drained through recorded frames before being installed."
 
 (defun dsh-emacs-events--host-upsert-workspace (workspace)
   "Insert or replace WORKSPACE (a protocol struct) in the cache.
-The host stream is authoritative for workspace membership, so the cached
-workspace (including its `session-ids') is replaced wholesale."
+The `workspace/follow' stream is authoritative for workspace membership, so
+the cached workspace (including its `session-ids') is replaced wholesale."
   (let* ((id (dsh-protocol-workspace-workspace-id workspace))
          (found nil)
          (result nil))
@@ -870,7 +938,7 @@ workspace (including its `session-ids') is replaced wholesale."
 (defun dsh-emacs-events--host-reorder-workspaces (workspace-ids)
   "Reorder the cached workspaces to match the server order WORKSPACE-IDS.
 Unknown trailing ids (a workspace appearing in the payload before its
-`host/workspace-changed' settles) are appended in cache order."
+`workspace/follow' `order' frame settles) are appended in cache order."
   (let ((rest nil))
     (dolist (ws dsh-emacs--workspaces)
       (unless (member (dsh-protocol-workspace-workspace-id ws)
@@ -893,21 +961,19 @@ Unknown trailing ids (a workspace appearing in the payload before its
         (dsh-emacs--normalize-archived archived-ids))
   (dsh-emacs-events--host-repaint))
 
-(defun dsh-emacs-events--host-session-added (session-id _blank cwd)
-  "Cache a freshly created SESSION-ID reported by the host stream.
-Mirrors `dsh-emacs--cache-new-session' but without workspace attachment:
-the host stream reports `host/workspace-changed' separately for the
-workspace membership update, so the session row must only appear (blank)
-until titles arrive via mux.  Idempotent: a session already cached (from a
-`session.create' callback) is left untouched."
-  (when (and session-id
-             (not (dsh-emacs--chat-session-item session-id)))
-    (push (dsh-protocol-session--from-alist
-           (list (cons 'sessionId session-id)
-                 (cons 'blank t)
-                 (cons 'cwd cwd)))
-          dsh-emacs--sessions)
-    (dsh-emacs-events--host-repaint)))
+(defun dsh-emacs-events--host-session-added (summary)
+  "Cache a freshly visible session from an `api-session/added' SUMMARY.
+The summary is the `SessionSummary' wire alist (sessionId, running,
+blank, cwd, projections...); the row is only inserted when not already
+cached (a `session/create' callback may have raced ahead).  Workspace
+membership is reported separately by `workspace/follow' frames."
+  (let ((session-id (and (listp summary)
+                         (dsh-emacs-render--aget "sessionId" summary))))
+    (when (and session-id
+               (not (dsh-emacs--chat-session-item session-id)))
+      (push (dsh-protocol-session--from-alist summary)
+            dsh-emacs--sessions)
+      (dsh-emacs-events--host-repaint))))
 
 (defun dsh-emacs-events--host-session-removed (session-id)
   "Drop SESSION-ID from the cached session list."
@@ -927,63 +993,238 @@ until titles arrive via mux.  Idempotent: a session already cached (from a
             (and running (not (eq running :json-false))))))
   (dsh-emacs-events--host-repaint))
 
-(defun dsh-emacs-events--host-dispatch (_process json)
-  "Handle one decoded host-stream JSON envelope from PROCESS.
-Updates the shared caches (`dsh-emacs--workspaces', `dsh-emacs--sessions',
-`dsh-emacs--archived-sessions') in place from the wire payload and repaints
-the session list, mirroring dsh web's live workspace browser.  While a
-list refresh is in flight the frame is ALSO recorded (like dsh web's
-`refreshFrames'); the refresh response snapshot is replayed through the
-recorded frames so a stale snapshot never rolls the caches back."
+(defun dsh-emacs-events--host-dispatch (process json)
+  "Route one decoded `/api/remote.mux' message from PROCESS.
+The list-scoped core connection multiplexes the `session/control',
+`workspace/follow' and `$events' logical streams.  Server frames arrive as
+`item' (value = a control/workspace/$events logical frame), `error' or
+`end'; the logical frame `type' routes to the shared caches and chat
+buffers (see `dsh-emacs-events--host-item')."
   (condition-case err
-      (let* ((message (json-read-from-string json))
-             (payload (dsh-emacs-render--aget "payload" message))
-             (type (dsh-emacs-render--aget "type" payload)))
-        (cond
-         ((equal type "host/workspace-changed")
-          (let ((ws (dsh-emacs-render--aget "workspace" payload)))
-            (when ws
-              (let ((struct (dsh-protocol-workspace--from-alist ws)))
-                (dsh-emacs-events--host-upsert-workspace struct)
-                (dsh-emacs-events--host-frame-record
-                 (list :upsert-workspace struct))))))
-         ((equal type "host/workspace-removed")
-          (let ((id (dsh-emacs-render--aget "workspaceId" payload)))
-            (dsh-emacs-events--host-remove-workspace id)
-            (dsh-emacs-events--host-frame-record
-             (list :remove-workspace id))))
-         ((equal type "host/workspace-order-changed")
-          (let ((ids (dsh-emacs--sequence-list
-                      (dsh-emacs-render--aget "workspaceIds" payload))))
-            (dsh-emacs-events--host-reorder-workspaces ids)
-            (dsh-emacs-events--host-frame-record
-             (list :reorder-workspaces ids))))
-         ((equal type "host/archived-sessions-changed")
-          (let ((ids (dsh-emacs--sequence-list
-                      (dsh-emacs-render--aget "archivedSessionIds" payload))))
-            (dsh-emacs-events--host-set-archived ids)
-            (dsh-emacs-events--host-frame-record
-             (list :set-archived ids))))
-         ((equal type "host/session-added")
-          (let ((sid (dsh-emacs-render--aget "sessionId" payload))
-                (blank (dsh-emacs-render--aget "blank" payload))
-                (cwd (dsh-emacs-render--aget "cwd" payload)))
-            (dsh-emacs-events--host-session-added sid blank cwd)
-            (dsh-emacs-events--host-frame-record
-             (list :session-added sid blank cwd))))
-         ((equal type "host/session-removed")
-          (let ((sid (dsh-emacs-render--aget "sessionId" payload)))
+      (let* ((frame (dsh-emacs-events--message-frame json))
+             (type (plist-get frame :type)))
+        (pcase type
+          ("item" (dsh-emacs-events--host-item
+                   process (plist-get frame :value)))
+          ("error"
+           (message "dsh core stream error: %S" (plist-get frame :error)))
+          ("end" (dsh-emacs-events--host-lost process))
+          (_ nil)))
+    (error (message "dsh core event decode error: %S" err))))
+
+(defun dsh-emacs-events--host-item (process value)
+  "Consume one logical core frame VALUE arriving on PROCESS.
+`session/control' frames feed queue mirrors and projections,
+`workspace/follow' frames mutate the workspace caches, `$events' frames
+carry the session list's live changes and the question/approval
+waterfalls: `ready' captures the generation `clientId', `emit' delivers
+`api-session/*' events, `waterfall' routes an approval/question request
+to its chat buffer (auto-answering `next' when no live chat), and `cancel'
+retires a pending waterfall by `eventId'."
+  (pcase (dsh-emacs-render--aget "type" value)
+    ("baseline"
+     ;; Baseline frames differ from the incremental ones (`upsert'/`order'/
+     ;; `queue'/`projection' put their fields directly on the frame), the
+     ;; payload is nested one level deeper: the logical baseline frame is
+     ;; `{type:'baseline', value:{...}}' (workspace/follow: `items' +
+     ;; `archivedSessionIds'; session/control: `queues'/`jobs'/`projections').
+     ;; Unwrap that inner `value' before routing and hand each handler its
+     ;; own payload shape — otherwise the check below sees no `items' at the
+     ;; frame level and every baseline is misrouted to session/control,
+     ;; leaving `dsh-emacs--workspaces' never seeded (session list ungrouped).
+     (let ((payload (dsh-emacs-render--aget "value" value)))
+       (if (dsh-emacs-render--aget "items" payload)
+           ;; workspace/follow baseline: authoritative workspace + archive set.
+           (dsh-emacs-events--host-workspace-baseline payload)
+         ;; session/control baseline: seed queue mirrors + projections.
+         (dsh-emacs-events--host-control-baseline process payload))))
+    ("queue"
+     (let ((sid (dsh-emacs-render--aget "sessionId" value)))
+       (when sid
+         (dsh-emacs-queue-apply
+          (or (dsh-emacs-events--chat-buffer sid) (current-buffer))
+          process value))))
+    ("projection"
+     (dsh-emacs-events--host-apply-projection
+      (dsh-emacs-render--aget "sessionId" value)
+      (dsh-emacs-render--aget "key" value)
+      (dsh-emacs-render--aget "value" value)))
+    ("upsert"
+     (let ((ws (dsh-emacs-render--aget "workspace" value)))
+       (when ws
+         (let ((struct (dsh-protocol-workspace--from-alist ws)))
+           (dsh-emacs-events--host-upsert-workspace struct)
+           (dsh-emacs-events--host-frame-record
+            (list :upsert-workspace struct))))))
+    ("remove"
+     (let ((id (dsh-emacs-render--aget "workspaceId" value)))
+       (dsh-emacs-events--host-remove-workspace id)
+       (dsh-emacs-events--host-frame-record (list :remove-workspace id))))
+    ("order"
+     (let ((ids (dsh-emacs--sequence-list
+                 (dsh-emacs-render--aget "workspaceIds" value))))
+       (dsh-emacs-events--host-reorder-workspaces ids)
+       (dsh-emacs-events--host-frame-record
+        (list :reorder-workspaces ids))))
+    ("archived"
+     (let ((ids (dsh-emacs--sequence-list
+                 (dsh-emacs-render--aget "archivedSessionIds" value))))
+       (dsh-emacs-events--host-set-archived ids)
+       (dsh-emacs-events--host-frame-record (list :set-archived ids))))
+    ("ready"
+     ;; $events ready: this generation's clientId.  Each reconnect yields a
+     ;; new generation/clientId; the old generation's still-queued waterfalls
+     ;; can no longer be answered meaningfully, so retire them.
+     (let ((client-id (dsh-emacs-render--aget "clientId" value)))
+       (when client-id
+         (when (and dsh-emacs-events--client-id
+                    (not (equal client-id dsh-emacs-events--client-id)))
+           (dsh-emacs--waterfall-generation-retired))
+         (setq dsh-emacs-events--client-id client-id))))
+    ("emit"
+     (let* ((name (dsh-emacs-render--aget "event" value))
+            (args (dsh-emacs--sequence-list
+                   (dsh-emacs-render--aget "args" value))))
+       (pcase name
+         ("api-session/added"
+          (let ((summary (car args)))
+            (when (listp summary)
+              (dsh-emacs-events--host-session-added summary)
+              (dsh-emacs-events--host-frame-record
+               (list :session-added summary)))))
+         ("api-session/removed"
+          (let ((sid (car args)))
             (dsh-emacs-events--host-session-removed sid)
             (dsh-emacs-events--host-frame-record
              (list :session-removed sid))))
-         ((equal type "host/session-status")
-          (let ((sid (dsh-emacs-render--aget "sessionId" payload))
-                (running (dsh-emacs-render--aget "running" payload)))
-            (dsh-emacs-events--host-session-status sid running)
-            (dsh-emacs-events--host-frame-record
-             (list :session-status sid running))))
-         (t nil)))
-    (error (message "dsh host event decode error: %S" err))))
+         ("api-session/status"
+          (let ((sid (nth 0 args)))
+            (when sid
+              (dsh-emacs-events--host-session-status sid (nth 1 args))
+              (dsh-emacs-events--host-frame-record
+               (list :session-status sid (nth 1 args))))))
+         ("api-session/activity"
+          ;; Re-sort the cached list by the reported updatedAt; the summary
+          ;; ordering mirrors `session/list' (updatedAt desc).
+          (let ((sid (nth 0 args)))
+            (when sid
+              (dsh-emacs-events--host-session-activity sid (nth 1 args)))))
+         (_ nil))))
+    ("waterfall"
+     ;; Approval / question waterfalls arrive on `$events' and are answered
+     ;; via POST /api/$events/result (see `dsh-emacs--events-result-async' in
+     ;; dsh-emacs.el).  VALUE carries {type, event, eventId, agentId,
+     ;; request}; the target chat buffer is resolved by agentId.
+     (let* ((event-name (dsh-emacs-render--aget "event" value))
+            (event-id (dsh-emacs-render--aget "eventId" value))
+            (agent-id (dsh-emacs-render--aget "agentId" value))
+            (request (dsh-emacs-render--aget "request" value))
+            (chat (and agent-id
+                       (dsh-emacs-events--chat-buffer agent-id))))
+       (if (not (and event-id (buffer-live-p chat)))
+           ;; No open chat for the asking agent (or no event id): this client
+           ;; is not the waterfall's claimant — hand it on so the host does
+           ;; not wait on us.
+           (when (and event-id dsh-emacs-events--client-id)
+             (dsh-emacs--events-result-async
+              dsh-emacs-events--client-id event-id '((kind . "next"))
+              (lambda (_ok _value) nil)))
+         (pcase event-name
+           ("approval/request"
+            (dsh-emacs--approval-requested
+             chat event-id agent-id
+             (dsh-emacs-render--aget "toolName" request)
+             (dsh-emacs-render--aget "reason" request)
+             (dsh-emacs-render--aget "callId" request)))
+           ("user-questions/request"
+            (dsh-emacs--question-requested
+             chat event-id agent-id
+             (dsh-emacs--sequence-list
+              (dsh-emacs-render--aget "questions" request))))
+           (_ nil)))))
+    ("cancel"
+     ;; Waterfall retirement: drop any still-queued question/approval frame
+     ;; for EVENT-ID (replay of the same waterfall never re-asks it).
+     (let ((event-id (dsh-emacs-render--aget "eventId" value)))
+       (when event-id
+         (dsh-emacs--question-cancelled event-id)
+         (dsh-emacs--approval-cancelled event-id))))
+    ;; Accepted no-op kinds (no UI consumes them yet): `session/control'
+    ;; `jobs' frames/records (background-task mirror), the `api-session/error'
+    ;; emit, and any other host frame type we do not render.  Intentionally
+    ;; dropped, not wire-parity work — revisit when a jobs/task or error
+    ;; surface is added.
+    (_ nil)))
+
+(defun dsh-emacs-events--chat-buffer (session-id)
+  "Live chat buffer of SESSION-ID, or nil."
+  (and (hash-table-p dsh-emacs--chat-buffers)
+       (gethash session-id dsh-emacs--chat-buffers)))
+
+(defun dsh-emacs-events--host-workspace-baseline (value)
+  "Seed the workspace/archive caches from a `workspace/follow' baseline."
+  (let* ((items (dsh-emacs--sequence-list
+                 (dsh-emacs-render--aget "items" value)))
+         (archived (dsh-emacs--sequence-list
+                    (dsh-emacs-render--aget "archivedSessionIds" value))))
+    (setq dsh-emacs--workspaces
+          (mapcar #'dsh-protocol-workspace--from-alist items))
+    (dsh-emacs-events--host-set-archived archived)
+    (dsh-emacs-events--host-repaint)))
+
+(defun dsh-emacs-events--host-control-baseline (process value)
+  "Seed chat queue mirrors and projections from a `session/control'
+baseline VALUE (whole-host queues/jobs/projections records).  The `jobs'
+record is intentionally not read — no background-task UI consumes it yet
+(see the accepted no-op kinds in `dsh-emacs-events--host-item')."
+  (let* ((queues (dsh-emacs-render--aget "queues" value))
+         (projections (dsh-emacs-render--aget "projections" value)))
+    (dolist (pair (if (vectorp queues) (append queues nil)
+                    (and (listp queues) queues)))
+      (when (and (listp pair) (cdr pair))
+        (let ((sid (car pair))
+              (items (dsh-emacs--sequence-list (cdr pair))))
+          (when (and sid (buffer-live-p (dsh-emacs-events--chat-buffer sid)))
+            (dsh-emacs-queue-apply
+             (dsh-emacs-events--chat-buffer sid)
+             process
+             (list (cons 'sessionId sid) (cons 'items items)))))))
+    ;; Projection baseline: Record<sessionId, SessionProjectionBaseline>.
+    (dolist (pair (if (vectorp projections) (append projections nil)
+                    (and (listp projections) projections)))
+      (when (and (listp pair) (cdr pair))
+        (let* ((sid (car pair))
+               (baseline (cdr pair))
+               (values (dsh-emacs-render--aget "values" baseline)))
+          (dolist (kv (if (vectorp values) (append values nil)
+                        (and (listp values) values)))
+            (when (and (listp kv) (cdr kv))
+              (dsh-emacs-events--host-apply-projection
+               sid (car kv) (cdr kv)))))))))
+
+(defun dsh-emacs-events--host-apply-projection (session-id key value)
+  "Apply one projection cell (KEY . VALUE) of SESSION-ID locally.
+`contextPressure' feeds the mode-line ctx%, `title' the session cache and
+chat buffer name; other keys are reserved for later milestones."
+  (when session-id
+    (pcase key
+      ("contextPressure"
+       (when (listp value)
+         (dsh-emacs--events-apply-context-projection session-id value)))
+      ("title"
+       (when (and value (not (string-empty-p value)))
+         (dsh-emacs-events--apply-title nil session-id value)
+         (dsh-emacs-events--host-frame-record
+          (list :apply-title session-id value))))
+      (_ nil))))
+
+(defun dsh-emacs-events--host-session-activity (session-id _updated-at)
+  "Bump SESSION-ID to the front of the cached session list (recent first)."
+  (let ((item (dsh-emacs--chat-session-item session-id)))
+    (when (and item (listp dsh-emacs--sessions))
+      (setq dsh-emacs--sessions
+            (cons item (delq item dsh-emacs--sessions)))
+      (dsh-emacs-events--host-repaint))))
 
 (defun dsh-emacs-events--host-lost (process)
   "Handle a closed host-stream PROCESS: reset and schedule reconnect."
@@ -1005,11 +1246,13 @@ recorded frames so a stale snapshot never rolls the caches back."
                              buffer)))))))
 
 (defun dsh-emacs-events-host-connect ()
-  "Connect BUFFER's host stream to dsh's `/api/events.host'.
-The host stream is scoped to the session-list buffer (owned by
-`dsh-emacs-session-mode'): it repaints the list on workspace/session/
-archive changes while the list is open, and everything tears down with the
-buffer."
+  "Connect BUFFER's core stream to dsh's `/api/remote.mux'.
+The core connection is scoped to the session-list buffer (owned by
+`dsh-emacs-session-mode'): it opens the `session/control',
+`workspace/follow' and `$events' logical streams after the handshake
+(`dsh-emacs-events--host-open') and repaints the list on workspace/
+session/archive/queue/projection changes while the list is open;
+everything tears down with the buffer."
   (when (buffer-live-p (current-buffer))
     (dsh-emacs-events-host-disconnect)
     (when (and (bound-and-true-p dsh-emacs-base-url)
@@ -1041,21 +1284,68 @@ buffer."
                 (set-process-coding-system process 'no-conversion
                                            'no-conversion)
                 (process-put process 'dsh-emacs-host-stream t)
-                (process-put process 'dsh-emacs-event-path
-                             "/api/events.host")
                 (process-put process 'dsh-emacs-event-input "")
                 (process-put process 'dsh-emacs-event-ready nil)
                 (process-put process 'dsh-emacs-host-buffer buffer)
                 ;; Reuse the mux sentinel: it routes by the host-stream property
                 ;; to `dsh-emacs-events--host-lost', and the handshake path is
-                ;; taken from the process property (set above).  Bytecode
-                ;; delegates, as with the mux (native subrs are not reliably
-                ;; invoked as `:nowait' filters on this build).
+                ;; taken from the process property (defaults to
+                ;; /api/remote.mux).  Bytecode delegates, as with the mux
+                ;; (native subrs are not reliably invoked as `:nowait' filters
+                ;; on this build).
                 (set-process-filter process dsh-emacs-events--filter-fn)
                 (set-process-sentinel process dsh-emacs-events--sentinel-fn)
                 (with-current-buffer buffer
                   (setq dsh-emacs--host-process process
                         dsh-emacs--host-ready nil))))))))))
+
+(defun dsh-emacs-events--host-open (process)
+  "Open the core logical streams on PROCESS after its handshake.
+`session/control' and `workspace/follow' carry the whole-host control and
+workspace state; `$events' broadcasts host events and (later milestone)
+waterfalls.  Each stream uses a fresh stream id; the `workspace/follow'
+stream id is recorded on PROCESS so a later re-baseline
+(`dsh-emacs-events--core-workspace-rebaseline') can retire it before
+re-opening (never two live workspace streams on one socket)."
+  (when (process-live-p process)
+    (dolist (endpoint '("session/control" "workspace/follow" "$events"))
+      (let* ((stream-id (dsh-emacs-events--stream-id))
+             (json (dsh-emacs-events--open-message stream-id endpoint nil)))
+        (when (equal endpoint "workspace/follow")
+          (process-put process 'dsh-emacs-host-ws-stream-id stream-id))
+        (process-send-string process
+                             (dsh-emacs-events--frame 1 json))))))
+
+(defun dsh-emacs-events--core-workspace-rebaseline ()
+  "Ask the core connection to resend the `workspace/follow' baseline.
+The 0.1.2 protocol has no `workspace/list' RPC: a re-baseline re-opens the
+`workspace/follow' stream on the live core socket, whose fresh baseline
+seeds the workspace/archive caches.  Because `dsh-emacs-events--host-item'
+dispatches on logical frame type and ignores `streamId', a second live
+`workspace/follow' stream would feed the same caches as the one opened at
+connect — a stale `order'/'remove' from the retired stream could revert a
+newer reorder.  The prior stream is therefore cancelled first (its frames
+are dropped once the host closes it), then a fresh one is opened and its
+id recorded.  Returns non-nil when a core process existed and the request
+was sent."
+  (let* ((list-buf (and (boundp 'dsh-emacs-sessions-buffer)
+                        (get-buffer dsh-emacs-sessions-buffer)))
+         (proc (and list-buf
+                    (buffer-local-value 'dsh-emacs--host-process list-buf))))
+    (when (and (processp proc) (process-live-p proc))
+      ;; Retire the workspace/follow stream opened at connect (or by the last
+      ;; re-baseline) so exactly one live workspace stream feeds the caches.
+      (let ((old (process-get proc 'dsh-emacs-host-ws-stream-id)))
+        (when old
+          (process-send-string
+           proc (dsh-emacs-events--frame
+                 1 (dsh-emacs-events--cancel-message old)))))
+      (let* ((stream-id (dsh-emacs-events--stream-id))
+             (json (dsh-emacs-events--open-message
+                    stream-id "workspace/follow" nil)))
+        (process-put proc 'dsh-emacs-host-ws-stream-id stream-id)
+        (process-send-string proc (dsh-emacs-events--frame 1 json)))
+      t)))
 
 (defun dsh-emacs-events-host-disconnect ()
   "Disconnect the current buffer's host stream, if any."
