@@ -1791,11 +1791,6 @@ repaints)."
     map)
   "Keymap for chat mode.")
 
-(defvar corfu-auto-trigger ""
-  "Corfu's auto-completion trigger characters (defined by corfu when loaded).
-Chat buffers append \"/\" buffer-locally so typing a slash pops the
-slash-command list via corfu's own mechanism; the stub keeps
-byte-compilation clean when corfu is absent.")
 
 (defun dsh-emacs--chat-buffer-clear-modified ()
   "`kill-buffer-query-functions' hook: drop the modified flag so killing a
@@ -1863,6 +1858,12 @@ vertico, etc.)."
   ;; 输入区以 "/" 开头时，TAB 补全 slash 命令名（见 dsh-emacs-command.el）
   (setq-local completion-at-point-functions
               '(dsh-emacs-command-completion-at-point))
+  ;; Cooperative slash auto-trigger (see `dsh-emacs-command-auto-trigger-setup'):
+  ;; dsh-emacs never enables a completion front-end's auto mode itself — it only
+  ;; contributes "/" to a front-end the user already turned on, and that
+  ;; front-end pops the list (corfu-auto / company idle).  Stock *Completions* /
+  ;; vertico / icomplete have no auto channel and trigger on TAB only.
+  (dsh-emacs-command-auto-trigger-setup)
 
   ;; imenu: 按 user message 索引，M-x imenu 可跳转到任意历史输入
   (setq-local imenu-create-index-function #'dsh-emacs-imenu-create-user-index)
@@ -1882,28 +1883,6 @@ vertico, etc.)."
   (add-hook 'pre-command-hook #'dsh-emacs--route-typing-to-input nil t)
   ;; 输入时立即滚动到输入区
   (add-hook 'post-command-hook #'dsh-emacs--reveal-input-when-typing nil t)
-  ;; 输入区出现 "/name" 前缀时自动弹出 slash 命令补全（内容驱动；
-  ;; corfu 用户的自动弹由 corfu-auto 接管，见下）
-  (add-hook 'post-command-hook #'dsh-emacs--slash-auto-complete nil t)
-  ;; corfu 用户的 slash 补全：把 "/" 加进 `corfu-auto-trigger'，输入 "/" 时
-  ;; corfu 立即（无视 corfu-auto-prefix）查询 capf 并弹命令列表——官方机制、
-  ;; 零自建定时器，popup 开启后继续输入由 corfu 自己过滤。corfu 未加载或
-  ;; corfu-auto 未安装的环境（stock *Completions* 等）由上面的
-  ;; `dsh-emacs--slash-auto-complete' 走 completion-at-point 兜底——因此这里
-  ;; 必须用 `require' 返回值把关：装了 corfu 但没装 corfu-auto 时既不能把
-  ;; `corfu-auto' 置为 t（否则上面的兜底被禁用、弹出彻底失效），也不能挂
-  ;; 未定义的 `corfu-auto--post-command'（void-function）。
-  (when (and dsh-emacs-slash-auto-complete (boundp 'corfu-mode)
-             (require 'corfu-auto nil t)
-             (fboundp 'corfu-auto--post-command))
-    (setq-local corfu-auto t)
-    ;; 保留用户自定的 trigger 字符，追加 "/"
-    (setq-local corfu-auto-trigger
-                (concat (if (stringp corfu-auto-trigger)
-                            corfu-auto-trigger
-                          "")
-                        "/"))
-    (add-hook 'post-command-hook #'corfu-auto--post-command 10 t))
   (setq dsh-emacs--tool-calls (make-hash-table :test 'equal))
   (setq dsh-emacs--activity-groups (make-hash-table :test 'equal))
   (setq dsh-emacs--pending-user-messages nil
@@ -2065,59 +2044,6 @@ via the `session/queue' stream; `\\[dsh-emacs-interrupt-turn]'
       (delete-region dsh-emacs--input-marker (dsh-emacs--input-end))
       (goto-char dsh-emacs--input-marker))))
 
-(defvar-local dsh-emacs--slash-pop-token nil
-  "The /NAME token that last triggered the automatic completion popup.
-Content-driven de-dup: the popup is re-triggered only after the token
-text changes, so every keystroke while a command prefix is in progress
-refreshes the candidate list (web-style live filtering).")
-
-(defun dsh-emacs--slash-token ()
-  "Return the in-progress /NAME token in the input area, or nil.
-The token is the text from the `❯ ' prompt up to point when it is
-\"/\" followed by zero or more `[a-z0-9_-]' — the web-style trigger
-shape — and nil otherwise (transcript, other prefixes, a completed
-token with trailing space)."
-  (when (and dsh-emacs--input-marker
-             (marker-buffer dsh-emacs--input-marker)
-             (>= (point) dsh-emacs--input-marker))
-    (let ((case-fold-search nil)
-          (txt (buffer-substring-no-properties
-                dsh-emacs--input-marker (point))))
-      (when (string-match-p "\\`/[a-z0-9_-]*\\'" txt)
-        txt))))
-
-(defun dsh-emacs--slash-auto-complete ()
-  "Pop the slash-command completion list whenever a /NAME token is in progress.
-`post-command-hook' entry, content-driven (no key-event dependency):
-typing \"/\" at the start of the input area immediately opens the
-command catalog, and each keystroke that extends the token re-triggers
-it so the list live-filters (/go narrows to /goal …).  The actual
-`completion-at-point' runs on a short idle delay and re-checks the
-token, so stale timers from fast typing are dropped; the completion UI
-(corfu popup, stock *Completions* list, vertico in-region) renders the
-candidates.  Messages that merely start with \"/\" (e.g.
-\"/usr/local/...\") filter the list to nothing and keep typing
-uninterrupted.
-
-No-op when corfu auto-completion has taken over for this buffer
-(`corfu-auto' is buffer-locally t): corfu's own trigger handles the
-popup then, so this fallback only serves non-corfu setups."
-  (when (and dsh-emacs-slash-auto-complete
-             (not (and (boundp 'corfu-auto) corfu-auto))
-             (let ((token (dsh-emacs--slash-token)))
-               (and token (not (string= token dsh-emacs--slash-pop-token)))))
-    (setq dsh-emacs--slash-pop-token (dsh-emacs--slash-token))
-    (let ((buf (current-buffer)))
-      (run-with-idle-timer
-       0.1 nil
-       (lambda ()
-         (when (and (buffer-live-p buf)
-                    (get-buffer-window buf)
-                    (with-current-buffer buf
-                      (equal (dsh-emacs--slash-token)
-                             dsh-emacs--slash-pop-token)))
-           (with-current-buffer buf
-             (completion-at-point))))))))
 
 (defun dsh-emacs--valid-iana-time-zone-p (zone)
   "Return non-nil when ZONE names an installed IANA timezone."

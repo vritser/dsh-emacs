@@ -8431,33 +8431,6 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (setq dsh-emacs--command-catalogs old)
     (kill-buffer buf)))
 
-;; 内容驱动的自动补全触发器：dsh-emacs--slash-token 判定输入区 /NAME 前缀
-(let ((buf (generate-new-buffer " *dsh-slash-token*")))
-  (unwind-protect
-      (with-current-buffer buf
-        (dsh-emacs-mode)
-        ;; 输入区恰为 "/" → token "/"（web 的 trigger 形态）
-        (goto-char dsh-emacs--input-marker)
-        (insert "/")
-        (when (string= "/" (dsh-emacs--slash-token))
-          (dsh-test-pass "slash-token-on-bare-slash"))
-        ;; 继续输入 "/go" → token 变长
-        (insert "go")
-        (when (string= "/go" (dsh-emacs--slash-token))
-          (dsh-test-pass "slash-token-grows-with-input"))
-        ;; 非 / 开头 → nil；带空格（已完成）→ nil
-        (goto-char dsh-emacs--input-marker)
-        (delete-region dsh-emacs--input-marker (dsh-emacs--input-end))
-        (insert "hello")
-        (when (null (dsh-emacs--slash-token))
-          (dsh-test-pass "slash-token-off-plain-message"))
-        (goto-char dsh-emacs--input-marker)
-        (delete-region dsh-emacs--input-marker (dsh-emacs--input-end))
-        (insert "/goal ")
-        (when (null (dsh-emacs--slash-token))
-          (dsh-test-pass "slash-token-off-completed-token")))
-    (kill-buffer buf)))
-
 ;; 目录未缓存时，首次触发也同步补齐（否则输入 "/" 弹空列表）
 (let ((buf (generate-new-buffer " *dsh-capf-sync*"))
       (old dsh-emacs--command-catalogs)
@@ -8488,66 +8461,68 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
           #'completion-at-point)
   (dsh-test-pass "chat-mode-tab-bound-to-completion-at-point"))
 
-;; corfu 用户：dsh-emacs-mode 把 "/" 接进 corfu-auto-trigger（官方自动弹机制）。
-;; corfu-auto 可用时（require 成功 + hook 函数已定义）才接线。
-(let ((buf (generate-new-buffer " *dsh-corfu-wire*")))
+;; Cooperative "/" auto-trigger: dsh-emacs-mode adds "/" to the buffer-local
+;; `corfu-auto-trigger' only when the user already enabled corfu-auto, letting
+;; corfu's own engine pop the list.  dsh-emacs never enables corfu-auto itself
+;; and never hooks corfu-auto--post-command into post-command-hook (that hook is
+;; corfu-mode's job when corfu-auto is on; dsh-emacs only contributes a trigger).
+(let ((buf (generate-new-buffer " *dsh-corfu-coop*")))
   (unwind-protect
       (with-current-buffer buf
-        (defvar corfu-mode nil)
-        (defvar corfu-auto nil)
-        (defvar corfu-auto-trigger "")
+        (defvar corfu-auto)
+        (defvar corfu-auto-trigger)
+        (setq corfu-auto t
+              corfu-auto-trigger "")
         (cl-letf (((symbol-function 'require) (lambda (&rest _) t)))
-          (defalias 'corfu-auto--post-command #'ignore)
           (dsh-emacs-mode)
-          (when (and (buffer-local-value 'corfu-auto buf)
-                     (string-match-p "/" (buffer-local-value
-                                          'corfu-auto-trigger buf))
-                     (memq 'corfu-auto--post-command
-                           (buffer-local-value 'post-command-hook buf)))
-            (dsh-test-pass "corfu-slash-auto-wired"))))
+          (dsh-test-assert "slash-auto-corfu-coop-trigger-added"
+            (string= "/" (buffer-local-value 'corfu-auto-trigger buf))
+            (not (memq 'corfu-auto--post-command
+                       (buffer-local-value 'post-command-hook buf))))))
     (kill-buffer buf)))
 
-;; corfu 装了但 corfu-auto 未安装：不接 trigger/hook——否则内置兜底
-;; 被 `corfu-auto' 置 t 禁用、且往 post-command-hook 挂 void-function。
-(let ((buf (generate-new-buffer " *dsh-corfu-guard*")))
+;; corfu-auto off (user did not enable auto): no trigger contributed (TAB-only)
+(let ((buf (generate-new-buffer " *dsh-corfu-coop-off*")))
   (unwind-protect
       (with-current-buffer buf
-        (defvar corfu-mode nil)
-        (defvar corfu-auto nil)
-        (cl-letf (((symbol-function 'require) (lambda (&rest _) nil)))
+        (defvar corfu-auto)
+        (defvar corfu-auto-trigger)
+        (setq corfu-auto nil
+              corfu-auto-trigger "")
+        (cl-letf (((symbol-function 'require) (lambda (&rest _) t)))
           (dsh-emacs-mode)
-          (when (and (not (buffer-local-value 'corfu-auto buf))
-                     (not (memq 'corfu-auto--post-command
-                                (buffer-local-value 'post-command-hook buf))))
-            (dsh-test-pass "corfu-auto-missing-no-wiring"))))
+          (dsh-test-assert "slash-auto-corfu-coop-off-no-trigger"
+            (string= "" (buffer-local-value 'corfu-auto-trigger buf)))))
     (kill-buffer buf)))
 
-;; corfu auto 已接管时，dsh-emacs 的自触发不再动作（避免双弹）
-(let ((buf (generate-new-buffer " *dsh-corfu-skip*")))
+;; dsh-emacs-slash-auto-complete off: nothing contributed even when corfu-auto is on
+(let ((buf (generate-new-buffer " *dsh-corfu-coop-offopt*")))
   (unwind-protect
       (with-current-buffer buf
-        (dsh-emacs-mode)
-        (setq-local dsh-emacs--slash-pop-token "old")
-        (goto-char dsh-emacs--input-marker)
-        (insert "/")
-        (let ((corfu-auto t))          ; 模拟 corfu-auto 已开启
-          (dsh-emacs--slash-auto-complete)
-          (when (string= "old" dsh-emacs--slash-pop-token)
-            (dsh-test-pass "slash-auto-complete-skipped-when-corfu-auto"))))
+        (defvar corfu-auto)
+        (defvar corfu-auto-trigger)
+        (setq corfu-auto t
+              corfu-auto-trigger "")
+        (cl-letf (((symbol-function 'require) (lambda (&rest _) t))
+                  (dsh-emacs-slash-auto-complete nil))
+          (dsh-emacs-mode)
+          (dsh-test-assert "slash-auto-corfu-coop-off-when-option-off"
+            (string= "" (buffer-local-value 'corfu-auto-trigger buf)))))
     (kill-buffer buf)))
 
-;; 开关 dsh-emacs-slash-auto-complete 关闭时，自触发静默
-(let ((buf (generate-new-buffer " *dsh-slash-off*")))
+;; idempotent: running setup again does not append "/" twice
+(let ((buf (generate-new-buffer " *dsh-corfu-coop-idem*")))
   (unwind-protect
       (with-current-buffer buf
-        (dsh-emacs-mode)
-        (setq-local dsh-emacs--slash-pop-token "old")
-        (goto-char dsh-emacs--input-marker)
-        (insert "/")
-        (let ((dsh-emacs-slash-auto-complete nil))
-          (dsh-emacs--slash-auto-complete)
-          (when (string= "old" dsh-emacs--slash-pop-token)
-            (dsh-test-pass "slash-auto-complete-off-when-disabled"))))
+        (defvar corfu-auto)
+        (defvar corfu-auto-trigger)
+        (setq corfu-auto t
+              corfu-auto-trigger "")
+        (cl-letf (((symbol-function 'require) (lambda (&rest _) t)))
+          (dsh-emacs-command-auto-trigger-setup)
+          (dsh-emacs-command-auto-trigger-setup)
+          (dsh-test-assert "slash-auto-corfu-coop-idempotent"
+            (string= "/" (buffer-local-value 'corfu-auto-trigger buf)))))
     (kill-buffer buf)))
 
 ;; --- 测试 101: todo 计划行 —— 解析 / 每事件一行（像 tool 卡）/ 折叠 ---

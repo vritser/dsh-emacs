@@ -31,6 +31,21 @@ minor) and stay undated until the release is cut.
   load-gap backfill option exists.  Saved customizations of the removed
   option are silently dropped on upgrade
   (rationale: postmortem/009).
+- **Slash-command auto-pop now goes through the user's own completion
+  front-end instead of dsh-emacs driving one**: typing `/` no longer opens
+  the command list via dsh-emacs' own content-driven `post-command` trigger
+  (which called `completion-at-point` on a short timer to force a popup for
+  stock `*Completions*` / vertico / ivy — and, for corfu users, buffer-locally
+  force-enabled `corfu-auto` and hooked `corfu-auto--post-command`).  That
+  self-driven path is removed.  dsh-emacs is a completion *backend*: it
+  registers `completion-at-point-functions` in chat buffers, and contributes
+  `/` to the auto trigger of a front-end only when that front-end's own auto
+  mode is already on — corfu (`/` added to `corfu-auto-trigger` when
+  `corfu-auto` is enabled) and company (works through `company-capf` / its own
+  idle delay).  Stock `*Completions*` / vertico / icomplete have no auto
+  channel and stay `TAB`-only.  The option `dsh-emacs-slash-auto-complete`
+  (default `t`) now controls whether that `/` trigger is contributed at all
+  (rationale: postmortem/011).
 
 ### Added
 
@@ -68,6 +83,12 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **The `commands.list` catalog prefetch stays live while the assistant is
+  replying**: the prefetch was armed on an idle timer, and idle timers do not
+  fire while subprocess output is pending — the event stream keeps delivering
+  while a reply streams, so the catalog could stay uncached until the reply
+  paused and the first `/` or TAB then hit a blocking synchronous fetch inside
+  the completion backend.  The prefetch now arms a plain one-shot timer.
 - **Sending non-ASCII (Chinese) messages works again**: the browser-session
   cookie was captured with `match-string` from a network response buffer, so
   even its pure-ASCII content carried the multibyte string flag.  Emacs'

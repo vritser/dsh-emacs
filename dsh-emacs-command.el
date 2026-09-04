@@ -25,6 +25,9 @@
 ;;   - `dsh-emacs-command-completion-at-point'
 ;;                                     `completion-at-point-functions' 入口：
 ;;                                     输入区以 "/" 开头时补全 "/name "
+;;   - `dsh-emacs-slash-auto-complete' / `dsh-emacs-command-auto-trigger-setup'
+;;                                     cooperative "/" auto-trigger: contributes a
+;;                                     trigger, never enables a front-end
 ;;
 ;; 发送路径（`dsh-emacs--submit-prompt'）把形如 "/name" 的行交给
 ;; `commands/execute'，未命中注册表（admission miss）时按普通消息发回 —
@@ -41,25 +44,39 @@
 (declare-function dsh-emacs--active-session-id "dsh-emacs.el" ())
 (declare-function dsh-emacs-server-ensure "dsh-emacs-server.el" ())
 
+;; Optional completion-frontend variables: corfu-auto-trigger is defined by
+;; corfu-auto.el and only matters when the user enables corfu's auto.  These
+;; forward declarations only keep byte-compilation quiet; at runtime we gate on
+;; `bound-and-true-p' / `boundp', so absent corfu reads nil / is skipped.
+(defvar corfu-auto)
+(defvar corfu-auto-trigger)
+
 (defgroup dsh-emacs-command nil
   "Slash commands (commands/list / commands/execute)."
   :group 'dsh-emacs)
 
 (defcustom dsh-emacs-slash-auto-complete t
-  "Whether typing \"/\" in the input area automatically opens the
-slash-command completion list (web-style trigger).
-
-For corfu users this is wired through corfu's own auto-completion
-(`corfu-auto' + \"/\" in `corfu-auto-trigger', buffer-local to chat
-buffers); for other setups dsh-emacs falls back to a post-command
-`completion-at-point' trigger.  TAB always completes, and
-`M-x dsh-emacs-command' always works, regardless of this option."
+  "Whether typing \"/\" auto-pops the slash-command completion list.
+dsh-emacs is a completion backend only — it never enables a completion
+front-end's auto mode by itself.  When this is non-nil it contributes
+\"/\" to the auto trigger of whichever front-end already has its own
+auto mode turned on:
+- corfu: with `corfu-auto' enabled, \"/\" is added buffer-locally to
+  `corfu-auto-trigger', so corfu's own engine pops on \"/\" (ignoring
+  `corfu-auto-prefix');
+- company: no action needed — company reaches this buffer's capf via
+  `company-capf' and auto-shows by its own idle delay (subject to
+  `company-minimum-prefix-length');
+- stock `*Completions*' / vertico / icomplete: no auto channel exists,
+  so nothing is contributed and \"/\" completes on TAB only.
+When this is nil no trigger is contributed anywhere.  TAB and
+`M-x dsh-emacs-command' always work regardless."
   :type 'boolean
   :group 'dsh-emacs-command)
 
 (defcustom dsh-emacs-command-prefetch t
   "Whether opening a session pre-fetches its `commands/list' catalog.
-The fetch runs on a short idle timer after the chat buffer opens, so
+The fetch runs on a short timer after the chat buffer opens, so
 the catalog is already cached by the time the first \"/\" or TAB is
 typed — no synchronous round trip on the first completion.  The
 prefetch is a no-op when the catalog is already cached."
@@ -67,9 +84,11 @@ prefetch is a no-op when the catalog is already cached."
   :group 'dsh-emacs-command)
 
 (defcustom dsh-emacs-command-prefetch-delay 0.5
-  "Idle delay (seconds) before the `commands/list' pre-fetch runs.
+  "Delay (seconds) before the `commands/list' pre-fetch runs.
 Keeps the prefetch from racing the session-history load that also
-starts when the chat buffer opens."
+starts when the chat buffer opens.  A plain timer is used (not an idle
+one), so the catalog still lands while a reply streams — an idle timer
+would be starved by the pending event-stream output."
   :type 'number
   :group 'dsh-emacs-command)
 
@@ -205,7 +224,7 @@ Returns the item list, or nil on failure (a message is emitted)."
 (defun dsh-emacs-command-catalog-prefetch (session-id)
   "Pre-fetch the `commands/list' catalog of SESSION-ID lazily.
 Called when a chat buffer opens: the catalog is fetched on a short
-idle timer (see `dsh-emacs-command-prefetch-delay') so the first
+timer (see `dsh-emacs-command-prefetch-delay') so the first
 \"/\" completion does not block on the network.  No-op unless
 `dsh-emacs-command-prefetch' is enabled, the catalog is not yet
 cached and no fetch is already in flight.  Returns the timer, or nil."
@@ -213,7 +232,7 @@ cached and no fetch is already in flight.  Returns the timer, or nil."
              session-id
              (not (dsh-emacs-command-catalog session-id)))
     (unless (member session-id dsh-emacs--command-fetch-inflight)
-      (run-with-idle-timer
+      (run-at-time
        dsh-emacs-command-prefetch-delay nil
        (lambda (sid)
          (dsh-emacs-command-catalog-fetch sid))
@@ -350,6 +369,27 @@ rows that overflow the popup width."
                   (list marker pos candidates
                         :annotation-function describe
                         :company-kind kind))))))))))
+
+(defun dsh-emacs-command-auto-trigger-setup ()
+  "Make slash-command completion auto-pop in the current buffer.
+`dsh-emacs-mode' calls this when a chat buffer opens.  dsh-emacs never
+enables a completion front-end's auto mode itself; it only contributes
+\"/\" to the auto trigger of a front-end the user has already turned on,
+and that front-end's own engine pops the command list when \"/\" is
+typed.  Currently that is corfu only: when `corfu-auto' is enabled,
+\"/\" is added buffer-locally to `corfu-auto-trigger' so corfu's own
+engine pops immediately on \"/\" (ignoring `corfu-auto-prefix') — without
+setting `corfu-auto'/`corfu-mode' or hooking corfu's post-command.
+company needs no contribution (it reaches this buffer's capf via
+`company-capf' and auto-shows on its own idle delay), and stock
+`*Completions*' / vertico / icomplete have no auto channel.  See
+`dsh-emacs-slash-auto-complete'.  No-op unless that option is non-nil."
+  (when (and dsh-emacs-slash-auto-complete
+             (bound-and-true-p corfu-auto)
+             (require 'corfu-auto nil t)
+             (boundp 'corfu-auto-trigger)
+             (not (string-match-p "/" corfu-auto-trigger)))
+    (setq-local corfu-auto-trigger (concat corfu-auto-trigger "/"))))
 
 (provide 'dsh-emacs-command)
 

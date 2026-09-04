@@ -43,17 +43,6 @@ server version; dsh-emacs reads it live from `commands.list`):
   transport fails the line is restored into the input (only while it is still
   empty) so you can retry. The outcome renders when the `command/done` event
   arrives.
-- **Trigger popup**: typing `/` as the first character of the input area pops
-  the command list immediately (web-style). With corfu (loaded), chat buffers
-  buffer-locally enable `corfu-auto` and put `/` into `corfu-auto-trigger`, so
-  corfu itself fires the popup on the `/` keypress — no timers involved; other
-  setups fall back to a post-command `completion-at-point` trigger (stock
-  `*Completions*` list, vertico in-region). Either way the list live-filters
-  as you keep typing (`/go` narrows to `/goal`…), and a message that merely
-  starts with `/` (e.g. `/usr/local/...`) dismisses the list by just continuing
-  to type. The whole auto-pop can be disabled with
-  `dsh-emacs-slash-auto-complete` (`TAB` and `M-x dsh-emacs-command` still
-  work).
 - **Menu**: `M-x dsh-emacs-command` — reads the live catalog
   (`commands.list`, cached per session), shows command + description in
   `completing-read`, and prompts for the argument when the command declares an
@@ -61,17 +50,30 @@ server version; dsh-emacs reads it live from `commands.list`):
 - **Completion**: `TAB` in the input area completes the `/name` token over the
   cached catalog (a bare `/` lists everything). Candidates already include a
   trailing space, so `TAB` directly after `/goal` lets you type its arguments.
-  `TAB` is bound to `completion-at-point` in chat buffers.
+  `TAB` is bound to `completion-at-point` in chat buffers. dsh-emacs is only a
+  completion *backend* — it registers `completion-at-point-functions` and never
+  drives a popup itself. When `dsh-emacs-slash-auto-complete` is on (default),
+  dsh-emacs instead contributes `/` to whichever front-end already has its own
+  auto mode turned on, and that front-end auto-pops the command list where it
+  supports auto (the active front-end is read when the chat buffer opens, so
+  turn the front-end's auto on before opening a session):
+    - **corfu** (`corfu-auto` enabled): `/` is added buffer-locally to
+      `corfu-auto-trigger`, so corfu's engine pops immediately on `/`;
+    - **company**: nothing to wire — company reaches this buffer's capf via
+      `company-capf` and auto-shows on its own idle delay, once the `/go…` prefix
+      reaches `company-minimum-prefix-length`;
+    - **stock `*Completions*` / vertico / icomplete**: no auto channel exists, so
+      `/` completes on `TAB` only.
 
 ## Catalog prefetch
 
-The catalog is **pre-fetched**: opening a session starts a short idle-time fetch
-of `commands.list`, so the first `/` or `TAB` is served from cache instead of
-blocking on a synchronous round trip (disable with `dsh-emacs-command-prefetch`;
-tune the idle gap with `dsh-emacs-command-prefetch-delay`). If the host
-registers new commands while a session stays open, run
-`M-x dsh-emacs-command-catalog-refresh` to re-fetch and re-cache the catalog on
-demand.
+The catalog is **pre-fetched**: opening a session starts a short timer-based
+fetch of `commands.list`, so the first `/` or `TAB` is served from cache instead
+of blocking on a synchronous round trip (disable with
+`dsh-emacs-command-prefetch`; tune the delay with
+`dsh-emacs-command-prefetch-delay`). If the host registers new commands while a
+session stays open, run `M-x dsh-emacs-command-catalog-refresh` to re-fetch and
+re-cache the catalog on demand.
 
 Commands that accept inline images (`goal`/`plan` declare `images: true`)
 receive the empty image array from dsh-emacs; image-bearing command input is not
