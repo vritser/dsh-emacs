@@ -1,4 +1,4 @@
-;;; dsh-emacs-command.el --- Slash commands via commands.list / commands.execute -*- lexical-binding: t; -*-
+;;; dsh-emacs-command.el --- Slash commands via commands/list / commands/execute -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025 vritser
 
@@ -9,13 +9,13 @@
 
 ;;; Commentary:
 
-;; dsh 的 slash command 是 host 侧注册表（`commands.list' /
-;; `commands.execute'，typert Remote，HTTP 路径为 /api/commands/list、
+;; dsh 的 slash command 是 host 侧注册表（`commands/list' /
+;; `commands/execute'，typert Remote，HTTP 路径为 /api/commands/list、
 ;; /api/commands/execute，payload 是 {args: {...}}）。本文件提供：
 ;;
 ;;   - `dsh-emacs-command-parse'      按与 dsh 注册表相同的语法判定一行
 ;;                                     输入是否为 slash 命令（纯函数）
-;;   - `dsh-emacs-command-execute'     向 `commands.execute' 提交一行命令
+;;   - `dsh-emacs-command-execute'     向 `commands/execute' 提交一行命令
 ;;   - `dsh-emacs-command-catalog'     按会话缓存的命令目录（读取）
 ;;   - `dsh-emacs-command-catalog-fetch' / `dsh-emacs-command-catalog-sync'
 ;;                                     异步 / 同步拉取并缓存目录
@@ -27,7 +27,7 @@
 ;;                                     输入区以 "/" 开头时补全 "/name "
 ;;
 ;; 发送路径（`dsh-emacs--submit-prompt'）把形如 "/name" 的行交给
-;; `commands.execute'，未命中注册表（admission miss）时按普通消息发回 —
+;; `commands/execute'，未命中注册表（admission miss）时按普通消息发回 —
 ;; 与 dsh web 的行为一致。执行结果由 `command/run' + `command/done'
 ;; 会话事件渲染（见 dsh-emacs-render.el 的 `dsh-emacs-render-command'）。
 
@@ -42,7 +42,7 @@
 (declare-function dsh-emacs-server-ensure "dsh-emacs-server.el" ())
 
 (defgroup dsh-emacs-command nil
-  "Slash commands (commands.list / commands.execute)."
+  "Slash commands (commands/list / commands/execute)."
   :group 'dsh-emacs)
 
 (defcustom dsh-emacs-slash-auto-complete t
@@ -58,7 +58,7 @@ buffers); for other setups dsh-emacs falls back to a post-command
   :group 'dsh-emacs-command)
 
 (defcustom dsh-emacs-command-prefetch t
-  "Whether opening a session pre-fetches its `commands.list' catalog.
+  "Whether opening a session pre-fetches its `commands/list' catalog.
 The fetch runs on a short idle timer after the chat buffer opens, so
 the catalog is already cached by the time the first \"/\" or TAB is
 typed — no synchronous round trip on the first completion.  The
@@ -67,19 +67,19 @@ prefetch is a no-op when the catalog is already cached."
   :group 'dsh-emacs-command)
 
 (defcustom dsh-emacs-command-prefetch-delay 0.5
-  "Idle delay (seconds) before the `commands.list' pre-fetch runs.
+  "Idle delay (seconds) before the `commands/list' pre-fetch runs.
 Keeps the prefetch from racing the session-history load that also
 starts when the chat buffer opens."
   :type 'number
   :group 'dsh-emacs-command)
 
 (defvar dsh-emacs--command-catalogs nil
-  "Alist of (SESSION-ID . ITEMS) caching `commands.list' catalogs.
+  "Alist of (SESSION-ID . ITEMS) caching `commands/list' catalogs.
 ITEMS is a list of `dsh-protocol-command' structs, name-sorted by the
 host.  Reset per session reload; entries stay until the session closes.")
 
 (defvar dsh-emacs--command-fetch-inflight nil
-  "List of SESSION-IDs whose `commands.list' fetch is still in flight.
+  "List of SESSION-IDs whose `commands/list' fetch is still in flight.
 Guards the completion warm-up so repeated TAB presses do not stack
 requests; drained by the fetch callback.")
 
@@ -109,7 +109,7 @@ kept, nil when the line is exactly \"/NAME\")."
 (defun dsh-emacs-command-execute (session-id line &optional images on-done)
   "Execute slash-command LINE (e.g. \"/compact\") in SESSION-ID.
 
-Line goes to `commands.execute' — the host admits only registered
+Line goes to `commands/execute' — the host admits only registered
 commands.  IMAGES, when given, is a list of wire-ready image alists
 \((mediaType . M) (data . B64) (name . N)); text-only commands pass an
 empty array (the wire field is required).
@@ -122,9 +122,9 @@ and ERR is the raw RPC error value on failure (nil otherwise).  Runs
 asynchronously; returns nil."
   (dsh-emacs--rpc-async
    "commands/execute"
-   `((args . ((agentId . ,session-id)
-              (line . ,line)
-              (images . ,(or images [])))))
+   `((agentId . ,session-id)
+     (line . ,line)
+     (images . ,(or images [])))
    (lambda (ok value)
      (let ((execution (and ok value
                            (dsh-protocol-command-execution--from-alist
@@ -136,7 +136,7 @@ asynchronously; returns nil."
            (quit nil)))))))
 
 ;; ---------------------------------------------------------------------------
-;; 命令目录（commands.list）
+;; 命令目录（commands/list）
 ;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-command-catalog (&optional session-id)
@@ -162,7 +162,7 @@ server restart."
         (delete session-id dsh-emacs--command-fetch-inflight)))
 
 (defun dsh-emacs-command-catalog-fetch (session-id &optional callback)
-  "Fetch the `commands.list' catalog of SESSION-ID asynchronously.
+  "Fetch the `commands/list' catalog of SESSION-ID asynchronously.
 Caches the result; CALLBACK (optional) receives the item list (nil on
 failure — the error is already reported).  A fetch already in flight
 for SESSION-ID is not duplicated."
@@ -171,7 +171,7 @@ for SESSION-ID is not duplicated."
           (cons session-id dsh-emacs--command-fetch-inflight))
     (dsh-emacs--rpc-async
      "commands/list"
-     `((args . ((agentId . ,session-id))))
+     `((agentId . ,session-id))
      (lambda (ok value)
        (setq dsh-emacs--command-fetch-inflight
              (delete session-id dsh-emacs--command-fetch-inflight))
@@ -186,12 +186,12 @@ for SESSION-ID is not duplicated."
              (quit nil))))))))
 
 (defun dsh-emacs-command-catalog-sync (session-id)
-  "Fetch and cache the `commands.list' catalog of SESSION-ID synchronously.
+  "Fetch and cache the `commands/list' catalog of SESSION-ID synchronously.
 Returns the item list, or nil on failure (a message is emitted)."
   (or (dsh-emacs-command-catalog session-id)
       (let* ((res (dsh-emacs--rpc-request
                    "commands/list"
-                   `((args . ((agentId . ,session-id))))))
+                   `((agentId . ,session-id))))
              (items (and (car res)
                          (mapcar #'dsh-protocol-command--from-alist
                                  (dsh-protocol--list (cdr res))))))
@@ -203,7 +203,7 @@ Returns the item list, or nil on failure (a message is emitted)."
           nil))))
 
 (defun dsh-emacs-command-catalog-prefetch (session-id)
-  "Pre-fetch the `commands.list' catalog of SESSION-ID lazily.
+  "Pre-fetch the `commands/list' catalog of SESSION-ID lazily.
 Called when a chat buffer opens: the catalog is fetched on a short
 idle timer (see `dsh-emacs-command-prefetch-delay') so the first
 \"/\" completion does not block on the network.  No-op unless
@@ -220,7 +220,7 @@ cached and no fetch is already in flight.  Returns the timer, or nil."
        session-id))))
 
 (defun dsh-emacs-command-catalog-refresh (&optional session-id)
-  "Re-fetch and re-cache the `commands.list' catalog, then report.
+  "Re-fetch and re-cache the `commands/list' catalog, then report.
 Refreshes SESSION-ID (default: the active session), which is useful
 after the host has registered new commands while a session stays
 open.  Runs asynchronously; the result is shown via message."
@@ -248,10 +248,10 @@ open.  Runs asynchronously; the result is shown via message."
 (defun dsh-emacs-command ()
   "Pick a slash command from the live catalog and run it.
 
-Reads the `commands.list' catalog of the current session, offers the
+Reads the `commands/list' catalog of the current session, offers the
 commands (name + description) via `completing-read', prompts for the
 argument text when the command declares an input hint, then submits
-the line to `commands.execute'.  Requires a running server."
+the line to `commands/execute'.  Requires a running server."
   (interactive)
   (dsh-emacs-server-ensure)
   (let ((session-id (dsh-emacs--active-session-id)))

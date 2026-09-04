@@ -60,7 +60,6 @@
 (declare-function dsh-emacs-rename-workspace "dsh-emacs" (workspace-id new-title))
 (declare-function dsh-emacs-delete-workspace "dsh-emacs" (workspace-id))
 (declare-function dsh-emacs-move-workspace "dsh-emacs" (workspace-id before-workspace-id))
-(declare-function dsh-emacs--rpc-async "dsh-emacs" (method params callback))
 (declare-function dsh-emacs-events-host-connect "dsh-emacs-events" ())
 (declare-function dsh-emacs-events-host-disconnect "dsh-emacs-events" ())
 
@@ -599,7 +598,7 @@ Uses projections data when available, falls back to running flag."
 (defun dsh-emacs-move-workspace-at-point ()
   "Move the workspace under point to another position in the list.
 Prompts for the workspace to insert BEFORE (or append to the end), then
-calls `workspace.insertBefore' — dsh web's drag-to-reorder persisted via
+calls `workspace/insertBefore' — dsh web's drag-to-reorder persisted via
 RPC rather than by mouse."
   (interactive)
   (dsh-emacs-server-ensure)
@@ -630,9 +629,10 @@ RPC rather than by mouse."
 
 (defun dsh-emacs-session-show-info ()
   "Show detailed info for session at point in minibuffer.
-The base line (status, title, cwd, time, preset) shows immediately; the
-live model for the session is fetched once (`session.models') and appended
-when it arrives."
+The base line (status, title, cwd, time, preset, kind) shows immediately;
+when the session row carries a `modelSelection' projection the last-used
+model is appended to the message (no extra RPC — the projection rides the
+session list and the follow/control projection frames)."
   (interactive)
   (dsh-emacs-server-ensure)
   (let* ((session (dsh-emacs-session-at-point))
@@ -666,22 +666,11 @@ when it arrives."
                            (if preset preset session-id)
                            kind)))
         (message "%s" info)
-        ;; The session-list item carries no model field, so query the live
-                ;; catalog once per `i' press (never per list row — that would be
-        ;; N+1 requests).
-        (dsh-emacs--rpc-async "session.models"
-                              `((sessionId . ,session-id))
-                              (lambda (ok value)
-                                (when ok
-                                  (let ((current (and (listp value)
-                                                      (dsh-protocol-model-directory-current
-                                                       (dsh-protocol-model-directory--from-alist
-                                                        value)))))
-                                    (when current
-                                      (message "%s | Model: %s (%s)"
-                                               info
-                                               (dsh-protocol-model-selection-model current)
-                                               (dsh-protocol-model-selection-provider current)))))))))))
+        (when-let* ((selection (dsh-protocol-session-model-selection session))
+                    (sel (dsh-protocol-model-selection--from-alist selection))
+                    (model (dsh-protocol-model-selection-model sel)))
+          (message "%s | Model: %s (%s)" info model
+                   (or (dsh-protocol-model-selection-provider sel) "")))))))
 (defun dsh-emacs-session--shorten-cwd (cwd)
   "Shorten CWD path for display."
   (let ((home (expand-file-name "~")))

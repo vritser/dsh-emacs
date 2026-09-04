@@ -16,11 +16,13 @@
 ;;
 ;; 结构概览（对应端到协议）：
 ;;
-;;   session.list   → dsh-protocol-session             (sessionId title cwd
+;;   session/list   → dsh-protocol-session             (sessionId title cwd
 ;;                                                       agentPreset updatedAt)
-;;   workspace.list → dsh-protocol-workspace           (workspaceId sessionIds
-;;                                                       title path)
-;;   session.models → dsh-protocol-model-directory     (current . groups)
+;;   workspace/follow baseline → dsh-protocol-workspace-list (items
+;;                                                       archivedSessionIds)
+;;                     ├─ dsh-protocol-workspace      (workspaceId sessionIds
+;;                     │                               title path)
+;;   session/modelCatalog → dsh-protocol-model-directory     (current . groups)
 ;;                     ├─ dsh-protocol-model-selection (provider model
 ;;                     │                                 reasoningEffort)
 ;;                     └─ dsh-protocol-provider-group  (id name models)
@@ -30,7 +32,7 @@
 ;;                                    defaultEffort)
 ;;                                    └─ dsh-protocol-effort (id name
 ;;                                         description)
-;;   agentPreset.list → dsh-protocol-agent-preset-list (presets
+;;   agentPresets/list → dsh-protocol-agent-preset-list (presets
 ;;                       authorable has-document)
 ;;                        └─ dsh-protocol-agent-preset (id trust
 ;;                             is-default name description broken)
@@ -55,7 +57,7 @@
         (t nil)))
 
 ;; ---------------------------------------------------------------------------
-;; session.list / workspace.list
+;; session/list / workspace/follow baseline
 ;; ---------------------------------------------------------------------------
 
 (cl-defstruct (dsh-protocol-session
@@ -116,8 +118,18 @@
                                       (v (and p (cdr (assq 'values p))))
                                       (cp (and v
                                                (cdr (assq 'contextPressure v)))))
-                                 (and cp (cdr (assq 'projectedTokens cp))))))))
-  "One `session.list' item."
+                                 (and cp (cdr (assq 'projectedTokens cp)))))
+                              ;; projections.values.modelSelection.lastUsed ——
+                              ;; 会话最后用过的 (provider, model,
+                              ;; reasoningEffort?) 三元组（mode-line 的权威
+                              ;; current 来源；§9 modelSelection 投影）。
+                              (model-selection
+                               (let* ((p (cdr (assq 'projections alist)))
+                                      (v (and p (cdr (assq 'values p))))
+                                      (ms (and v
+                                               (cdr (assq 'modelSelection v)))))
+                                 (and ms (cdr (assq 'lastUsed ms))))))))
+  "One `session/list' item."
   session-id
   title
   cwd
@@ -131,7 +143,8 @@
   pending-interaction
   context-pressure
   context-window
-  context-projected)
+  context-projected
+  model-selection)
 
 (cl-defstruct (dsh-protocol-workspace
                (:constructor dsh-protocol-workspace--from-alist
@@ -144,7 +157,8 @@
                               (path (cdr (assq 'path alist)))
                               (created-at (cdr (assq 'createdAt alist)))
                               (updated-at (cdr (assq 'updatedAt alist))))))
-  "One workspace row of `workspace.list' (the `WorkspaceView' shape)."
+  "One workspace row of the `workspace/follow' baseline (the
+`WorkspaceView' shape)."
   workspace-id
   session-ids
   title
@@ -162,7 +176,7 @@
                               (archived-session-ids
                                (dsh-protocol--list
                                 (cdr (assq 'archivedSessionIds alist)))))))
-  "The `workspace.list' response value: ITEMS plus the ARCHIVED-SESSION-IDS."
+  "The `workspace/follow' baseline value: ITEMS plus the ARCHIVED-SESSION-IDS."
   items
   archived-session-ids)
 
@@ -174,8 +188,8 @@
                                               (dsh-protocol-workspace--from-alist
                                                (cdr (assq 'workspace alist)))))
                               (created (cdr (assq 'created alist))))))
-  "A workspace mutation response: `workspace.create' (WORKSPACE + CREATED
-flag), `workspace.rename' and `workspace.insertSessionBefore' (WORKSPACE
+  "A workspace mutation response: `workspace/create' (WORKSPACE + CREATED
+flag), `workspace/rename' and `workspace/insertBefore' (WORKSPACE
 only; CREATED is nil there)."
   workspace
   created)
@@ -187,11 +201,11 @@ only; CREATED is nil there)."
                               (archived-session-ids
                                (dsh-protocol--list
                                 (cdr (assq 'archivedSessionIds alist)))))))
-  "The `workspace.archiveSession' response value: the full updated archive set."
+  "The `workspace/archiveSession' response value: the full updated archive set."
   archived-session-ids)
 
 ;; ---------------------------------------------------------------------------
-;; session.models
+;; session/modelCatalog
 ;; ---------------------------------------------------------------------------
 
 (cl-defstruct (dsh-protocol-effort
@@ -272,32 +286,37 @@ only; CREATED is nil there)."
                               (selected (and (cdr (assq 'selected alist))
                                              (dsh-protocol-model-selection--from-alist
                                               (cdr (assq 'selected alist))))))))
-  "The `session.selectModel' response value (the SELECTED selection)."
+  "The `session/selectModel' response value (the SELECTED selection)."
   selected)
 
 (cl-defstruct (dsh-protocol-model-directory
                (:constructor dsh-protocol-model-directory--from-alist
                              (alist
                               &aux
-                              (current (and (cdr (assq 'current alist))
-                                            (dsh-protocol-model-selection--from-alist
-                                             (cdr (assq 'current alist)))))
-                              (routable (cdr (assq 'routable alist)))
+                              ;; `session/modelCatalog' has no session-scoped
+                              ;; `current'; its host `default' selection folds
+                              ;; into CURRENT so the picker can keep treating
+                              ;; it as the reference model.
+                              (current (let ((c (or (cdr (assq 'current alist))
+                                                    (cdr (assq 'default alist)))))
+                                         (and c
+                                              (dsh-protocol-model-selection--from-alist
+                                               c))))
                               (groups
                                (mapcar #'dsh-protocol-provider-group--from-alist
                                        (dsh-protocol--list
                                         (cdr (assq 'groups alist)))))
                               (failures
                                (dsh-protocol--list (cdr (assq 'failures alist)))))))
-  "A `session.models' response value: CURRENT selection, ROUTABLE flag,
-GROUPS by provider and unknown FAILURES."
+  "A `session/modelCatalog' (or legacy directory) value: CURRENT/`default'
+selection, GROUPS by provider and unknown FAILURES.  The wire's
+`routableProviders' list is deliberately not carried — no consumer reads it."
   current
-  routable
   groups
   failures)
 
 ;; ---------------------------------------------------------------------------
-;; agentPreset.list
+;; agentPresets/list
 ;; ---------------------------------------------------------------------------
 
 (cl-defstruct (dsh-protocol-agent-preset
@@ -310,7 +329,7 @@ GROUPS by provider and unknown FAILURES."
                               (name (cdr (assq 'name alist)))
                               (description (cdr (assq 'description alist)))
                               (broken (cdr (assq 'broken alist))))))
-  "One `agentPreset.list' entry."
+  "One `agentPresets/list' entry."
   id
   trust
   is-default
@@ -327,7 +346,7 @@ GROUPS by provider and unknown FAILURES."
                                                 (cdr (assq 'presets alist)))))
                               (authorable (cdr (assq 'authorable alist)))
                               (has-document (cdr (assq 'hasDocument alist))))))
-  "The `agentPreset.list' response value: the PRESETS roster plus the
+  "The `agentPresets/list' response value: the PRESETS roster plus the
 AUTHORABLE / HAS-DOCUMENT flags the management UI needs."
   presets
   authorable

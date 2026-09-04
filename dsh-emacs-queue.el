@@ -10,12 +10,12 @@
 ;;; Commentary:
 
 ;; Client-side mirror of the dsh agent inbox: input sent while a turn is
-;; running either queues as the next turn (`session.prompt' mode "queue")
+;; running either queues as the next turn (`session/prompt' mode "queue")
 ;; or steers the running agent before its next step (mode "steer").  The
-;; host publishes the authoritative snapshot as `session/queue' mux frames
-;; (on every inbox splice, plus once per connection for sessions with
-;; pending items), so this module only mirrors frames — there is no fetch
-;; RPC and no local bookkeeping that could drift.
+;; host publishes the authoritative snapshot as `session/queue' frames on
+;; the core connection's `session/control' logical stream (a baseline once
+;; per connection, then on every inbox splice), so this module only mirrors
+;; frames — there is no fetch RPC and no local bookkeeping that could drift.
 
 ;; Emacs-native interaction (no panels, no overlays):
 ;;   - mode line shows `[Q2 S1]' while items are pending (`context'
@@ -69,7 +69,7 @@ A frame from a different process means a fresh connection whose first
 without enqueue/steer/consumption echoes.")
 
 (defvar-local dsh-emacs--queue-deleted nil
-  "Item ids this client deleted via `session.updateQueue'.
+  "Item ids this client deleted via `session/updateQueue'.
 Their disappearance from the next frame is the delete being confirmed,
 not a consumption, so the `running' feedback is suppressed.  Ids are
 pruned once the confirming frame arrives.")
@@ -426,7 +426,7 @@ drop any pending burst repaint, so our own actions stay instantaneous."
   (dsh-emacs-queue--paint-after-burst))
 
 ;;; ---------------------------------------------------------------------------
-;;; RPC：session.updateQueue（edit / remove / steer）
+;;; RPC：session/updateQueue（edit / remove / steer）
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-queue--session-id ()
@@ -435,21 +435,21 @@ drop any pending burst repaint, so our own actions stay instantaneous."
       (user-error "No session is open")))
 
 (defun dsh-emacs-queue--update (item-id action &optional on-error on-success)
-  "Send one `session.updateQueue' call for ITEM-ID with ACTION.
+  "Send one `session/updateQueue' call for ITEM-ID with ACTION.
 ACTION is the wire action alist (e.g. ((kind . \"remove\"))).  ON-ERROR
 runs in the chat buffer when the call fails; ON-SUCCESS when it
 succeeds — both with the chat buffer current.  The mirror is normally
-confirmed by the following `session/queue' frame; ON-SUCCESS is where
-this client applies our own actions OPTIMISTICALLY, so steer / delete /
-edit update the next-preview hint and the mode-line the instant the
-RPC succeeds, without waiting for the frame round-trip."
+confirmed by the following `session/control' `queue' frame; ON-SUCCESS
+is where this client applies our own actions OPTIMISTICALLY, so steer /
+delete / edit update the next-preview hint and the mode-line the instant
+the RPC succeeds, without waiting for the frame round-trip."
   (let ((session-id (dsh-emacs-queue--session-id))
         (buf (current-buffer)))
     (dsh-emacs--rpc-async
-     "session.updateQueue"
-     `((sessionId . ,session-id)
-       (itemId . ,item-id)
-       (action . ,action))
+     "session/updateQueue"
+     `((request . ((sessionId . ,session-id)
+                   (itemId . ,item-id)
+                   (action . ,action))))
      (lambda (ok value)
        (when (buffer-live-p buf)
          (with-current-buffer buf
@@ -459,7 +459,7 @@ RPC succeeds, without waiting for the frame round-trip."
              (message "Queue update failed: %S" value))))))))
 
 (defun dsh-emacs-queue--delete (item)
-  "Delete ITEM via `session.updateQueue' (kind remove)."
+  "Delete ITEM via `session/updateQueue' (kind remove)."
   (let ((id (dsh-protocol-queue-item-id item)))
     (push id dsh-emacs--queue-deleted)
     (dsh-emacs-queue--update
@@ -539,10 +539,10 @@ with its text preserved."
              (buf (current-buffer)))
         (push id dsh-emacs--queue-deleted) ; 发送即删除：确认帧不当作消费
         (dsh-emacs--rpc-async
-         "session.updateQueue"
-         `((sessionId . ,session-id)
-           (itemId . ,id)
-           (action . ((kind . "remove"))))
+         "session/updateQueue"
+         `((request . ((sessionId . ,session-id)
+                       (itemId . ,id)
+                       (action . ((kind . "remove"))))))
          (lambda (ok value)
            (when (buffer-live-p buf)
              (with-current-buffer buf

@@ -1075,7 +1075,7 @@ used as a fallback when no deltas were received."
   (dsh-emacs-render--event-seq event))
 
 ;;; ---------------------------------------------------------------------------
-;;; 渲染器：内联图片附件（session.attachment）
+;;; 渲染器：内联图片附件（session/attachment）
 ;;; ---------------------------------------------------------------------------
 
 (defvar dsh-emacs-render--image-keymap
@@ -1140,7 +1140,7 @@ display cannot render images (terminal Emacs keeps the placeholder)."
 (defun dsh-emacs-render--image-open ()
   "Open the image under point in its own buffer.
 Uses the bytes stashed on the placeholder when present, otherwise
-re-fetches them via `session.attachment'."
+re-fetches them via `session/attachment'."
   (interactive)
   (let* ((data (get-text-property (point) 'dsh-emacs-image-data))
          (attachment-id (get-text-property (point) 'dsh-emacs-attachment-id))
@@ -1159,13 +1159,13 @@ re-fetches them via `session.attachment'."
 
 (defun dsh-emacs-render--request-attachment (session-id attachment-id on-bytes)
   "Fetch image bytes for ATTACHMENT-ID from SESSION-ID via
-`session.attachment'.  ON-BYTES receives the decoded unibyte string,
+`session/attachment'.  ON-BYTES receives the decoded unibyte string,
 or nil when the RPC fails or the payload is malformed."
   (when (and session-id attachment-id (fboundp 'dsh-emacs--rpc-async))
     (dsh-emacs--rpc-async
-     "session.attachment"
-     `((sessionId . ,session-id)
-       (attachmentId . ,attachment-id))
+     "session/attachment"
+     `((request . ((sessionId . ,session-id)
+                   (attachmentId . ,attachment-id))))
      (lambda (ok value)
        ;; 回调可能运行在 process filter 里：吞掉 C-g 的 quit。
        (condition-case nil
@@ -1198,7 +1198,7 @@ missing placeholder (re-render, trimmed buffer) is a no-op."
   "Fill the `[image …]' placeholder tagged ID with BLOCK's picture.
 Inline base64 applies immediately (no round-trip — the bytes are
 already in the event); an attachment ref is fetched via
-`session.attachment' and applied when the RPC settles."
+`session/attachment' and applied when the RPC settles."
   (let* ((buffer (current-buffer))
          (media-type (dsh-emacs-render--image-block-field block "mediaType"))
          (data-b64 (dsh-emacs-render--image-block-field block "data"))
@@ -1237,7 +1237,7 @@ The block gets one blank line before and after (see
 `dsh-emacs-render--insert-chat-message' and `dsh-emacs-ui--blank-above-preserve').
 Image content blocks render as `[image …]' placeholders on their own
 line below the text; inline base64 shows immediately, attachment refs
-fill in when `session.attachment' settles (see
+fill in when `session/attachment' settles (see
 `dsh-emacs-render--show-attachment')."
   (let* ((seq (dsh-emacs-render--event-seq event))
          (data (dsh-emacs-render--event-data event))
@@ -2169,11 +2169,11 @@ Deletes the earliest content while preserving the input prompt area."
 (defun dsh-emacs-render-history-events (events &optional stream)
   "Render EVENTS in seq order, optionally processing live STREAM chunks.
 EVENTS is a vector/sequence of {\"event\": alist} entries.  Renders only
-entries with seq > `dsh-emacs--anchor-seq'.  During an initial history load,
-STREAM should be nil: completed `assistant/message' snapshots are sufficient
-and avoid replaying thousands of old deltas.  The load-gap re-fetch and the
-watchdog probe pass STREAM non-nil to render new `assistant/chunk' events as
-they arrive.
+entries with seq > `dsh-emacs--anchor-seq'.  Called from the follow
+snapshot reseed with STREAM nil: completed `assistant/message' snapshots
+are sufficient and avoid replaying thousands of old deltas (STREAM is a
+legacy option retained for the shared renderer, not used by the follow
+path).
 The loop yields to the input queue every 5 events so that user keystrokes
 interrupt the batch and keep the UI responsive."
   (let ((rendered 0)

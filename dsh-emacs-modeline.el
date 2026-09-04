@@ -144,7 +144,7 @@ after a model switch.")
   "Server-reported current context occupancy (tokens), or nil.
 Fed from the `contextPressure' projection (projectedTokens ?? pressureTokens,
 dsh web's ctx-meter口径) — live via `session/projection' frames, and seeded
-from the `session.list' snapshot when a chat buffer opens.  Pairs with
+from the `session/list' snapshot when a chat buffer opens.  Pairs with
 `dsh-emacs--modeline-context-window-server'.  Nil hides the ctx segment.")
 
 (defvar-local dsh-emacs--modeline-usage nil
@@ -443,11 +443,9 @@ data rides the `session/projection' frames, not this event."
 
 (defun dsh-emacs-modeline-note-header (event)
   "Pick the model id and reasoning effort off a `request/header' EVENT.
-dsh 0.1.1-rc.1 emits `request/header' (data.header.config) instead of (or
-before) the rc.2 `request/context', and — unlike `request/context' — the
-event survives the windowed `session.history' response, so this is what
-actually reaches the mode-line when a session is opened.  Consuming it makes
-the model and effort segments live on open."
+`request/header' carries the model config (data.header.config) when a run
+starts; consuming it makes the model, effort and provider segments live on
+open, before any later context data arrives."
   (let* ((data (dsh-emacs--alist-state event "data"))
          (header (and data (dsh-emacs--alist-state data "header")))
          (config (and header (dsh-emacs--alist-state header "config"))))

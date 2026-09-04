@@ -156,7 +156,7 @@ When `dsh-emacs-new-session' starts a session outside any workspace
 context, it detects the project root of the working directory and
 creates the session in the workspace registered for that root instead of
 the Ungrouped CWD bucket.  The workspace is created server-side on first
-use (`workspace.create' is idempotent by canonical path, so re-runs
+use (`workspace/create' is idempotent by canonical path, so re-runs
 resolve the existing registration).
 
 Detection prefers project.el (`project-current' / `project-root',
@@ -177,10 +177,10 @@ Set to nil to keep the old behavior (sessions always start in CWD)."
   "Default agent preset (agentPreset id) for new sessions.
 
 nil lets the host pick its own default preset (no `agentPreset' field is
-sent to `session.create').  Known values are the built-in preset ids
+sent to `session/create').  Known values are the built-in preset ids
 \"standard\" (Standard mode), \"minimal\" (Minimal mode), \"code\" (PTC
 mode) and \"cordis\" (Creator mode), or the id of a user preset listed
-by `agentPreset.list'.  Interactively, `dsh-emacs-new-session' with a
+by `agentPresets/list'.  Interactively, `dsh-emacs-new-session' with a
 prefix argument asks for the preset instead of using this value."
   :type '(choice (const :tag "Host default" nil) string)
   :group 'dsh-emacs)
@@ -257,7 +257,7 @@ renaming by session ID.")
   "Cache of the workspace list.")
 
 (defvar dsh-emacs--agent-presets nil
-  "Cached `agentPreset.list' response (a `dsh-protocol-agent-preset-list'
+  "Cached `agentPresets/list' response (a `dsh-protocol-agent-preset-list'
 struct), used by the new-session preset picker.  Refreshed lazily by
 `dsh-emacs--agent-presets-refresh'; nil before the first successful
 fetch falls back to the built-in preset ids.")
@@ -349,23 +349,39 @@ Buffer-local alongside `dsh-emacs--input-history-pos'.")
 
 (defun dsh-emacs--wrap-request (method params)
   "Wrap METHOD and PARAMS into the DSH RPC envelope.
-Returns a JSON string."
+PARAMS is the *content of the wire `args' object* (the method parameter
+fields, e.g. ((request . ((sessionId . S)))) or ((agentId . A))); the
+envelope always carries payload {args: {...}}, so nil PARAMS becomes
+`{}'.  METHOD must equal the HTTP endpoint (`<namespace>/<method>', e.g.
+\"session/list\" — `dsh-emacs--rpc-request'/`dsh-emacs--rpc-async'
+build the /api/ URL from it).  Returns a JSON string."
   (let ((envelope `((type . "client-request")
                     (rpcId . ,(dsh-emacs--rpc-id))
                     (method . ,method)
-                    ;; dsh expects an object even for methods without params.
-                    ;; An empty Elisp list is encoded as JSON null, so use an
-                    ;; empty hash table to produce JSON {} instead.
-                    (payload . ,(or params (make-hash-table))))))
+                    ;; The payload must be exactly an object `args' whose
+                    ;; fields are the method parameter names.  An empty
+                    ;; Elisp list encodes as JSON null, so use an empty hash
+                    ;; table to produce {} for parameter-less methods.
+                    (payload . ,(list (cons 'args
+                                            (or params (make-hash-table))))))))
     (json-encode envelope)))
+
+(defun dsh-emacs--session-list-args ()
+  "Wire `args' content for the `session/list' Remote method.
+The 0.1.2-rc.1 `session/list' descriptor declares a single parameter
+literally named `_request' (a reserved, usually-empty list request object) —
+not `request' like the other session methods.  Its value must be an object
+(`{}' for the unfiltered list), so the args alist carries `_request' whose
+value is an empty hash table (an empty Elisp list would encode as JSON
+`null' and fail boundary validation)."
+  (list (cons '_request (make-hash-table))))
 
 (defun dsh-emacs--unwrap-response (response)
   "Unwrap a DSH RPC RESPONSE, returning (ok-p . value-or-error).
 RESPONSE is the parsed JSON object from the server."
   (let* ((result (cdr (assq 'result response)))
          (ok (cdr (assq 'ok result))))
-    ;; `json-read' represents JSON false as :json-false, which is non-nil
-    ;; in Elisp.  Test the boolean explicitly instead of using `if ok'.
+    ;; `json-read' represents JSON false as :json-false, which is non-nil    ;; in Elisp.  Test the boolean explicitly instead of using `if ok'.
     (if (and ok (not (eq ok :json-false)))
         (cons t (cdr (assq 'value result)))
       ;; Not an ok envelope: prefer the envelope's error, then a provider
@@ -557,7 +573,7 @@ is unavailable does `dsh-emacs-default-cwd' apply."
     (and item (dsh-emacs-session--display-title item))))
 
 (defun dsh-emacs--chat-cwd (session-id)
-  "Directory of SESSION-ID: the session's `cwd' from session.list.
+  "Directory of SESSION-ID: the session's `cwd' from session/list.
 Falls back to the path of the workspace that accounts for the session
 (a freshly created workspace session may not be in the session cache yet
 but is already in `dsh-emacs--workspaces').  Returns nil when the session
@@ -619,11 +635,13 @@ A numeric suffix is appended when another buffer already holds the name."
 (defun dsh-emacs--chat-buffers-sync-all ()
   "Re-sync every live chat buffer after the session cache changed.
 Updates the mode-line name (list title), the workspace directory, and
-feeds each buffer's mode-line stats the server `contextPressure' snapshot (ctx%
-segment) so it matches the freshly fetched list."
+feeds each buffer's mode-line stats the server `contextPressure' snapshot
+(ctx% segment) and the `modelSelection' projection (model segment) so the
+mode line matches the freshly fetched list."
   (maphash (lambda (session-id buf)
              (dsh-emacs--chat-buffer-sync session-id)
-             (dsh-emacs--chat-buffer-context-sync session-id buf))
+             (dsh-emacs--chat-buffer-context-sync session-id buf)
+             (dsh-emacs--chat-buffer-model-sync session-id buf))
            dsh-emacs--chat-buffers))
 
 (defun dsh-emacs--chat-buffer-context-sync (session-id buf)
@@ -631,7 +649,7 @@ segment) so it matches the freshly fetched list."
 Pulled from the cached session struct (protocol accessors), so the same
 projection pair (pressure, window) always lands together — the ctx% stays
 consistent across model switches.
-The row is only trusted when it carries a COMPLETE pair: `session.list`'s
+The row is only trusted when it carries a COMPLETE pair: `session/list`'s
 projection column is explicitly partial (missing cells and
 not-yet-materialized rows are served without `contextPressure'), and a
 failed model run can leave the cell without `contextWindow'.  Wiping the
@@ -650,40 +668,45 @@ fetch there re-runs this sync and fills the snapshot in)."
             (with-current-buffer buf
               (dsh-emacs-modeline-set-context-snapshot pressure window))))))))
 
+(defun dsh-emacs--session-model-selection (session-id)
+  "The cached `modelSelection' struct for SESSION-ID, or nil.
+Reads the session row's `modelSelection' projection (`lastUsed') and wraps
+it in `dsh-protocol-model-selection' so business code reads
+`provider'/'model'/'reasoning-effort' through accessors (the wire
+`lastUsed' alist keys stay inside the protocol layer).  Nil when the row
+is unknown or has no projection yet (fresh session before its first run)."
+  (let ((item (dsh-emacs--chat-session-item session-id)))
+    (when item
+      (let ((selection (dsh-protocol-session-model-selection item)))
+        (and selection
+             (dsh-protocol-model-selection--from-alist selection))))))
+
 (defun dsh-emacs--chat-buffer-model-sync (session-id buf)
   "Feed BUF's mode-line model/effort/provider for SESSION-ID.
-The session list carries no model field, so the only authoritative source
-is `session.models': its `current' is the live (provider, model,
-reasoningEffort) triple.  Seeding the mode-line with
-`dsh-emacs-default-model' instead used to show the wrong model for every
-session not running that default (the guess stuck whenever the history
-window held no `request/header' to correct it).  Until the RPC lands the
-model segment keeps rendering whatever it has — `dsh-emacs-default-model'
-remains the segment-level fallback, which is genuinely right for a
-session just created with it."
-  (dsh-emacs--rpc-async "session.models"
-                        `((sessionId . ,session-id))
-                        (lambda (ok value)
-                          (when (and ok (buffer-live-p buf))
-                            (with-current-buffer buf
-                              (when (equal session-id dsh-emacs--buffer-session)
-                                (let ((current (and (listp value)
-                                                    (dsh-protocol-model-directory-current
-                                                     (dsh-protocol-model-directory--from-alist
-                                                      value)))))
-                                  (when current
-                                    (dsh-emacs-modeline-set-model
-                                     (dsh-protocol-model-selection-model current))
-                                    (dsh-emacs-modeline-set-provider
-                                     (dsh-protocol-model-selection-provider current))
-                                    (dsh-emacs-modeline-set-effort
-                                     (dsh-protocol-model-selection-reasoning-effort
-                                      current))))))))))
+The authoritative (provider, model, reasoningEffort) triple comes from
+the cached session row's `modelSelection' projection (`lastUsed'); the
+row may not carry one yet (fresh session before its first run), in which
+case nothing is touched and `dsh-emacs-default-model' remains the
+segment-level fallback — genuinely right for a session just created
+with it.  The projection rides `session/list' rows and the follow/control
+projection frames, so the feed is re-run by
+`dsh-emacs--chat-buffers-sync-all' whenever the cache refreshes."
+  (when (and (buffer-live-p buf)
+             (equal session-id
+                    (buffer-local-value 'dsh-emacs--buffer-session buf)))
+    (when-let* ((sel (dsh-emacs--session-model-selection session-id)))
+      (let ((model (dsh-protocol-model-selection-model sel))
+            (provider (dsh-protocol-model-selection-provider sel))
+            (effort (dsh-protocol-model-selection-reasoning-effort sel)))
+        (with-current-buffer buf
+          (when model (dsh-emacs-modeline-set-model model))
+          (when provider (dsh-emacs-modeline-set-provider provider))
+          (dsh-emacs-modeline-set-effort effort))))))
 
 ;;;###autoload
 (defun dsh-emacs-list-sessions--fetch ()
   "Fetch the session list via RPC and populate `dsh-emacs--sessions'."
-  (dsh-emacs--rpc-async "session.list" nil
+  (dsh-emacs--rpc-async "session/list" (dsh-emacs--session-list-args)
                         (lambda (ok value)
                           (unwind-protect
                               (if ok
@@ -768,7 +791,7 @@ machinery).  Any failure in the chain yields nil (no detection)."
                       (vc-root-dir dir))
                     (locate-dominating-file dir ".git"))))
         ;; project.el may hand back an unexpanded `~' form; the canonical
-        ;; spellings downstream (workspace matching, `workspace.create')
+        ;; spellings downstream (workspace matching, `workspace/create')
         ;; expect an absolute path without a trailing slash.
         (and root (directory-file-name (expand-file-name root))))
     (error nil)))
@@ -803,13 +826,13 @@ matches the workspace registered for it under any spelling."
 
 (defun dsh-emacs--workspace-create-resolve (dir)
   "Resolve the workspace for DIR, creating it server-side when missing.
-`workspace.create' is idempotent by canonical path, so this single call
+`workspace/create' is idempotent by canonical path, so this single call
 both finds an existing registration and registers a new one; the returned
 workspace is upserted into `dsh-emacs--workspaces' so the new session
 groups into it immediately.  Returns the workspace struct, or nil when
 the RPC failed."
   (let ((resp (dsh-emacs--rpc-request
-               "workspace.create" `((path . ,dir)))))
+               "workspace/create" `((request . ((path . ,dir)))))))
     (when (car resp)
       (let* ((result (dsh-protocol-workspace-result--from-alist (cdr resp)))
              (ws (dsh-protocol-workspace-result-workspace result)))
@@ -836,7 +859,7 @@ Else nil (the session keeps plain cwd semantics)."
 (defun dsh-emacs-new-session (&optional cwd workspace-id preset)
   "Create a new session.
 CWD is the working directory; with WORKSPACE-ID the session is created
-inside that workspace (`session.create' takes workspaceId rather than
+inside that workspace (`session/create' takes workspaceId rather than
 cwd).  PRESET is the agentPreset id the session starts on; nil lets the
 host pick its default preset.
 
@@ -850,7 +873,7 @@ Emacs project, in which case the session goes into the workspace
 registered for the project root (created on first use; disable with
 `dsh-emacs-new-session-auto-project').  With a
 prefix argument, first choose the agent preset from the live
-`agentPreset.list' roster (falling back to the built-in presets before
+`agentPresets/list' roster (falling back to the built-in presets before
 the first roster arrives); without one the session uses
 `dsh-emacs-default-preset'."
   (interactive
@@ -863,12 +886,12 @@ the first roster arrives); without one the session uses
   (let* ((dir (dsh-emacs--absolute-cwd cwd))
          (ws (or workspace-id
                  (dsh-emacs--new-session-project-workspace dir))))
-    (dsh-emacs--rpc-async "session.create"
-                          (append (if ws
-                                      `((workspaceId . ,ws))
-                                    `((cwd . ,dir)))
-                                  `((model . ,dsh-emacs-default-model))
-                                  (and preset `((agentPreset . ,preset))))
+    (dsh-emacs--rpc-async
+     "session/create"
+     `((request . ,(append (if ws
+                               `((workspaceId . ,ws))
+                             `((cwd . ,dir)))
+                           (and preset `((agentPreset . ,preset))))))
                           (lambda (ok value)
                             (if ok
                                 (let ((session-id (cdr (assq 'sessionId value))))
@@ -881,7 +904,7 @@ the first roster arrives); without one the session uses
                                    session-id ws
                                    (cdr (assq 'agentPreset value)))
                                   (dsh-emacs-open-session session-id)
-                                  ;; 新建的 workspace 会话尚未进入 session.list
+                                  ;; 新建的 workspace 会话尚未进入 session/list
                                   ;; 缓存（事件流不携带该信息），`--chat-buffer-sync'
                                   ;; 因此取不到 cwd；立即用 workspace 的 path 对齐
                                   ;; default-directory，magit-status 等按此定位项目。
@@ -919,17 +942,17 @@ creation."
 
 (defun dsh-emacs--cache-new-session (session-id &optional workspace-id preset)
   "Cache the freshly created SESSION-ID so grouping and title updates work
-before the next `session.list' refresh: insert a placeholder row (blank,
+before the next `session/list' refresh: insert a placeholder row (blank,
 \"New Session\", PRESET when given) into `dsh-emacs--sessions' and, with
 WORKSPACE-ID, append SESSION-ID to that workspace's `session-ids' (the
 group renderer assigns sessions to workspaces from those ids).  Repaints
 the session list.
 
 The workspace attachment is deliberately INDEPENDENT of the session-row
-insert: the host stream (`host/session-added') may deliver the new session
-before the `session.create' RPC callback runs, so guarding both actions
-behind the same not-yet-cached check would skip the attach and leave the
-session in the Ungrouped bucket until a later `workspace-changed' frame
+insert: the core `$events' stream (`api-session/added') may deliver the new
+session before the `session/create' RPC callback runs, so guarding both
+actions behind the same not-yet-cached check would skip the attach and leave
+the session in the Ungrouped bucket until a later `workspace/follow' frame
 arrives."
   (let ((ws (and workspace-id
                  (cl-find-if (lambda (w)
@@ -967,10 +990,10 @@ arrives."
 ;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs--agent-presets-refresh ()
-  "Refresh `dsh-emacs--agent-presets' from `agentPreset.list'.
+  "Refresh `dsh-emacs--agent-presets' from `agentPresets/list'.
 Async: the response lands in the cache when it arrives; a failed RPC
 leaves the previous cache (when any) untouched.  Returns nothing."
-  (dsh-emacs--rpc-async "agentPreset.list" nil
+  (dsh-emacs--rpc-async "agentPresets/list" nil
                         (lambda (ok value)
                           (when ok
                             (setq dsh-emacs--agent-presets
@@ -986,7 +1009,7 @@ leaves the previous cache (when any) untouched.  Returns nothing."
 
 The dsh web resolves these presets' option labels through exactly this
 built-in key map (`presetDisplayText' in the web's agent-preset UI) —
-`agentPreset.list' carries no `name' for them.  The picker mirrors the
+`agentPresets/list' carries no `name' for them.  The picker mirrors the
 mapping so the Emacs choices read the same as the web's.")
 
 (defun dsh-emacs--preset-display-name (preset)
@@ -1006,7 +1029,7 @@ its published `name', falling back to the id.  PRESET is a
 
 (defun dsh-emacs--preset-choices ()
   "((DISPLAY . ID) ...) preset choices for the new-session picker.
-From the cached `agentPreset.list' roster (broken entries excluded),
+From the cached `agentPresets/list' roster (broken entries excluded),
 each DISPLAY matches what the dsh web shows for that preset — the web
 name for the shipped system presets (\"Standard mode\" …), the
 published `name' (or the id) for everything else.  Before the first
@@ -1043,7 +1066,7 @@ valid choice; otherwise the roster's `isDefault' preset; otherwise nil
 
 (defun dsh-emacs--read-preset (&optional default)
   "Read an agent preset id for a new session; nil keeps the host default.
-Choices come from the cached `agentPreset.list' roster (the built-in
+Choices come from the cached `agentPresets/list' roster (the built-in
 presets with their web names before the first fetch); a background
 refresh is kicked off so the next pick sees fresh entries.  Pre-selects
 DEFAULT (the configured `dsh-emacs-default-preset') when it is a valid
@@ -1194,8 +1217,8 @@ realtime)."
       (dsh-emacs-mode)
       (dsh-emacs-modeline-setup)
       ;; 默认模型只作段级兜底立即显示；权威的 (provider, model, effort)
-      ;; 由 session.models 异步落地 —— 盲信默认值曾是 mode-line 显示错
-      ;; 模型的根因（见 `dsh-emacs--chat-buffer-model-sync'）。
+      ;; 来自会话行的 modelSelection 投影（`dsh-emacs--chat-buffer-model-sync'，
+      ;; 随列表/投影帧到达）——盲信默认值曾是 mode-line 显示错模型的根因。
       (dsh-emacs-modeline-set-model dsh-emacs-default-model)
       (dsh-emacs--chat-buffer-model-sync session-id buf)
       ;; 打开即把服务器 contextPressure 快照喂给 mode-line 段。必须在
@@ -1537,19 +1560,19 @@ always the session id."
 ;;;###autoload
 (defun dsh-emacs-fork-session (session-id)
   "Fork SESSION-ID into a new child session that inherits its history.
-The child starts from the session's latest state (`session.fork' without
+The child starts from the session's latest state (`session/fork' without
 an explicit seq); after the RPC confirms, the list refreshes and the child
 buffer opens with the same workspace path."
   (interactive (list (dsh-emacs--completing-session-id "Fork session: ")))
   (dsh-emacs-server-ensure)
-  (dsh-emacs--rpc-async "session.fork"
-                        `((sessionId . ,session-id))
+  (dsh-emacs--rpc-async "session/fork"
+                        `((request . ((sessionId . ,session-id))))
                         (lambda (ok value)
                           (if (not ok)
                               (message "Failed to fork session: %S" value)
                             (let ((child-id (cdr (assq 'sessionId value))))
                               (unless child-id
-                                (user-error "session.fork returned no sessionId"))
+                                (user-error "session/fork returned no sessionId"))
                               (dsh-emacs-list-sessions)
                               (message "Forked %s -> %s" session-id child-id)
                               (dsh-emacs-open-session child-id))))))
@@ -1564,7 +1587,7 @@ buffer opens with the same workspace path."
 (defun dsh-emacs--link-session-preset (session-id)
   "Fill the mode-line agent preset for SESSION-ID.
 Uses the cached session list when possible; otherwise refreshes
-`session.list' once and picks the preset from the response.  SAFE outside a
+`session/list' once and picks the preset from the response.  SAFE outside a
 chat buffer (the RPC callback runs in the buffer that called this).
 The lazy fetch also covers the ctx% snapshot on first open: a session
 missing from `dsh-emacs--sessions' has no `contextPressure' to feed the
@@ -1575,7 +1598,7 @@ preset, context snapshot, title and workspace in one round trip."
         (have-item (dsh-emacs--chat-session-item session-id)))
     (if (and preset have-item)
         (dsh-emacs-modeline-set-preset preset)
-      (dsh-emacs--rpc-async "session.list" nil
+      (dsh-emacs--rpc-async "session/list" (dsh-emacs--session-list-args)
                             (lambda (ok value)
                               (when ok
                                 (let ((items (mapcar
@@ -1710,9 +1733,9 @@ the session list on success."
            (read-string "New title: "
                         (or (and item (dsh-emacs-session--title item)) "")))))
   (dsh-emacs-server-ensure)
-  (dsh-emacs--rpc-async "session.rename"
-                        `((sessionId . ,session-id)
-                          (title . ,new-title))
+  (dsh-emacs--rpc-async "session/rename"
+                        `((request . ((sessionId . ,session-id)
+                                      (title . ,new-title))))
                         (lambda (ok value)
                           (if ok
                               (progn
@@ -1778,9 +1801,9 @@ the session list on success."
    (list (read-string "Workspace id: ")
          (read-string "New workspace title: ")))
   (dsh-emacs-server-ensure)
-  (dsh-emacs--rpc-async "workspace.rename"
-                        `((workspaceId . ,workspace-id)
-                          (title . ,new-title))
+  (dsh-emacs--rpc-async "workspace/rename"
+                        `((request . ((workspaceId . ,workspace-id)
+                                      (title . ,new-title))))
                         (lambda (ok value)
                           (if ok
                               (progn
@@ -1797,8 +1820,8 @@ the session list on success."
          (list id)
        (keyboard-quit))))
   (dsh-emacs-server-ensure)
-  (dsh-emacs--rpc-async "workspace.delete"
-                        `((workspaceId . ,workspace-id))
+  (dsh-emacs--rpc-async "workspace/delete"
+                        `((request . ((workspaceId . ,workspace-id))))
                         (lambda (ok value)
                           (if ok
                               (progn
@@ -1810,19 +1833,20 @@ the session list on success."
 (defun dsh-emacs-move-workspace (workspace-id before-workspace-id)
   "Move WORKSPACE-ID before BEFORE-WORKSPACE-ID in the workspace order.
 With nil BEFORE-WORKSPACE-ID the workspace moves to the end.
-Mirrors dsh web's drag ordering (`workspace.insertBefore'): the response
+Mirrors dsh web's drag ordering (`workspace/insertBefore'): the response
 carries the authoritative workspaceIds, which reorder the local cache so
-the session list regroups immediately (the host stream also repaints)."
+the session list regroups immediately (the `workspace/follow' stream also
+repaints)."
   (interactive
    (list (read-string "Move workspace id: ")
          (let ((s (read-string "Insert before workspace id (blank for end): " nil nil t)))
            (and (not (string-empty-p s)) s))))
   (dsh-emacs-server-ensure)
-  (dsh-emacs--rpc-async "workspace.insertBefore"
+  (dsh-emacs--rpc-async "workspace/insertBefore"
                         (if before-workspace-id
-                            `((workspaceId . ,workspace-id)
-                              (beforeWorkspaceId . ,before-workspace-id))
-                          `((workspaceId . ,workspace-id)))
+                            `((request . ((workspaceId . ,workspace-id)
+                                          (beforeWorkspaceId . ,before-workspace-id))))
+                          `((request . ((workspaceId . ,workspace-id)))))
                         (lambda (ok value)
                           (if ok
                               (progn
@@ -2064,7 +2088,7 @@ Consults the same buffer-local flag that drives the mode-line spinner."
   (and (boundp 'dsh-emacs--ml-busy) dsh-emacs--ml-busy))
 
 (defun dsh-emacs-interrupt-turn ()
-  "Interrupt the running turn via `session.cancel'.
+  "Interrupt the running turn via `session/cancel'.
 
 The server stops the agent mid-flight; the partial reply stays in the
 transcript and `turn/end' arrives normally, which clears the spinner.
@@ -2073,8 +2097,8 @@ until the next wake (see `dsh-emacs-list-queue')."
   (let ((session-id (dsh-emacs--active-session-id)))
     (when (null session-id)
       (user-error "No session is open"))
-    (dsh-emacs--rpc-async "session.cancel"
-                          `((sessionId . ,session-id))
+    (dsh-emacs--rpc-async "session/cancel"
+                          `((request . ((sessionId . ,session-id))))
                           (lambda (ok value)
                             (if ok
                                 (progn
@@ -2091,7 +2115,7 @@ until the next wake (see `dsh-emacs-list-queue')."
 When idle, the text after the `❯ ' prompt is submitted.  While a turn is
 executing (the mode-line spinner is lit) the input is delivered per
 `dsh-emacs-busy-enter-behavior': `queue' lines it up as the next turn,
-`steer' wakes the running agent, `stop' issues `session.cancel' (the old
+`steer' wakes the running agent, `stop' issues `session/cancel' (the old
 interrupt behavior).  With `queue'/`steer' and an EMPTY input the turn is
 interrupted, so stopping stays one key away, and `C-u' flips queue and
 steer for one send.  Success feedback (queued / steering reports) arrives
@@ -2315,7 +2339,7 @@ line as an ordinary message (the same semantics as dsh web).  Other
 lines go through `dsh-emacs--submit-plain' unchanged.  IMAGES, when
 given, is a list of wire-ready attachment alists
 \((mediaType . M) (data . B64) (name . N)); they are appended to the
-`content' array of `session.prompt' as `{type: \"image\"}' parts so
+`content' array of `session/prompt' as `{type: \"image\"}' parts so
 the model sees them immediately."
   (if (or mode
           (and (dsh-emacs--busy-p)
@@ -2368,7 +2392,7 @@ the model sees them immediately."
   "Submit MESSAGE into the running turn's inbox as MODE.
 MODE is `queue' (line up as the next turn) or `steer' (wake the running
 agent before its next step); nil means resolve from
-`dsh-emacs-busy-enter-behavior'.  The wire call is `session.prompt' with
+`dsh-emacs-busy-enter-behavior'.  The wire call is `session/prompt' with
 the mode field.  Unlike `dsh-emacs--submit-plain' this renders NO
 optimistic transcript card and does not touch the spinner: the item is
 not part of the conversation until the host claims it (the durable
@@ -2392,10 +2416,11 @@ against); genuinely parked items keep their feedback."
                            (mapcar (lambda (attachment)
                                      (cons '(type . "image") attachment))
                                    images)))
-         (payload `((sessionId . ,session-id)
-                    (mode . ,mode)
-                    (content . ,content)
-                    (clientTimeZone . ,(dsh-emacs--client-time-zone)))))
+         (payload `((request . ((requestId . ,(dsh-emacs--rpc-id))
+                                (sessionId . ,session-id)
+                                (mode . ,mode)
+                                (content . ,content)
+                                (clientTimeZone . ,(dsh-emacs--client-time-zone)))))))
     ;; Same web-style feel as the immediate path: the draft leaves the
     ;; input area and lands in history right away, before the RPC settles.
     (dsh-emacs--push-input-history message)
@@ -2411,7 +2436,7 @@ against); genuinely parked items keep their feedback."
     ;; already covers (see `dsh-emacs-queue--mark-submit-suppress').
     (when (null (dsh-emacs-queue-items))
       (dsh-emacs-queue--mark-submit-suppress))
-    (dsh-emacs--rpc-async "session.prompt" payload
+    (dsh-emacs--rpc-async "session/prompt" payload
                           (lambda (ok value)
                             (if ok
                                 ;; Enqueue/steer feedback arrives via the
@@ -2465,10 +2490,11 @@ still empty (a newer draft typed meanwhile is left alone)."
                            (mapcar (lambda (attachment)
                                      (cons '(type . "image") attachment))
                                    images)))
-         (payload `((sessionId . ,session-id)
-                    (mode . "queue")
-                    (content . ,content)
-                    (clientTimeZone . ,(dsh-emacs--client-time-zone)))))
+         (payload `((request . ((requestId . ,(dsh-emacs--rpc-id))
+                                (sessionId . ,session-id)
+                                (mode . "queue")
+                                (content . ,content)
+                                (clientTimeZone . ,(dsh-emacs--client-time-zone)))))))
     ;; Track the optimistic echo BEFORE the RPC round-trip: the mux may
     ;; deliver the canonical `user/message' at any moment — even before the
     ;; HTTP response is processed — and `dsh-emacs-render--consume-pending-user-message'
@@ -2499,7 +2525,7 @@ still empty (a newer draft typed meanwhile is left alone)."
     (when (buffer-live-p input-buffer)
       (with-current-buffer input-buffer
         (dsh-emacs--clear-input)))
-    (dsh-emacs--rpc-async "session.prompt" payload
+    (dsh-emacs--rpc-async "session/prompt" payload
                           (lambda (ok value)
                             (if ok
                                 (progn
@@ -2575,7 +2601,7 @@ still empty (a newer draft typed meanwhile is left alone)."
 (defun dsh-emacs--file-attachment (file)
   "Read FILE into a wire-ready image attachment alist, or nil.
 
-The dsh host accepts base64 image uploads inline in `session.prompt'
+The dsh host accepts base64 image uploads inline in `session/prompt'
 (media type, bytes and pixel limits are enforced server-side).  The
 base64 is emitted without line breaks: the wire field is validated as
 one continuous base64 run."
@@ -2631,26 +2657,26 @@ Only the media types in `dsh-emacs-attach-media-types' are sent."
            attachments))))))
 
 (defun dsh-emacs--model-candidates (value)
-  "Flatten a `session.models' VALUE into per-model entries, sorted.
+  "Flatten a `session/modelCatalog' VALUE into per-model entries, sorted.
 
 The list is sorted by provider display name then model id
 (case-insensitive), so the model picker shows a stable, predictable
 order regardless of the host's own group/model ordering.
 
 Each entry is (ID PROVIDER PROVIDER-NAME NAME REASONING):
-  ID            — the model id, sent as `session.selectModel' model.
+  ID            — the model id, sent as `session/selectModel' model.
   PROVIDER      — the owning group's id; the live host resolves
                   `current.provider' to exactly this value (the provider
-                  `session.selectModel' expects for the model).
+                  `session/selectModel' expects for the model).
   PROVIDER-NAME — the group's display name (may equal PROVIDER).
   NAME          — the model's display name (may equal ID).
   REASONING     — the model's reasoning metadata
                   (a `dsh-protocol-reasoning' struct), or nil when the
                   model offers no reasoning-effort options.
 
-VALUE is the raw `session.models' response alist — it is normalized to
-a `dsh-protocol-model-directory' struct first, so all field access lives
-in dsh-emacs-protocol.el."
+VALUE is the raw `session/modelCatalog' (or legacy directory) response
+alist — it is normalized to a `dsh-protocol-model-directory' struct
+first, so all field access lives in dsh-emacs-protocol.el."
   (let* ((dir (dsh-protocol-model-directory--from-alist value))
          (groups (dsh-protocol-model-directory-groups dir)))
     (sort (cl-loop for g in groups
@@ -2875,9 +2901,9 @@ the stock long separator lines inside the picker only)."
 ;;;###autoload
 (defun dsh-emacs-select-model ()
   "Choose a model for the current session from the live model catalog.
-Lists the models the host can route to (`session.models'), shows each
+Lists the models the host can route to (`session/modelCatalog'), shows each
 under its provider as its id, reads one with `completing-read'
-and switches via `session.selectModel'.  Each row's key carries its
+and switches via `session/selectModel'.  Each row's key carries its
 provider (hidden from display), and the provider display name is part
 of the key too, so provider names stay searchable while filtering.
 Modern vertico draws sticky provider group headers from the table's
@@ -2890,8 +2916,12 @@ immediately."
   (dsh-emacs-server-ensure)
   (let ((session-id (dsh-emacs--active-session-id)))
     (unless session-id (user-error "Open or select a session first"))
-    (dsh-emacs--rpc-async "session.models"
-                          `((sessionId . ,session-id))
+    ;; `session/modelCatalog' is session-agnostic (args {}), so its only
+    ;; "current"-ish value is the host `default'.  The session's real
+    ;; running model lives in the cached row's `modelSelection' projection
+    ;; (`lastUsed'), and is resolved inside `dsh-emacs--select-model-prompt'
+    ;; (falling back to the catalog default only when the row has none yet).
+    (dsh-emacs--rpc-async "session/modelCatalog" nil
                           (lambda (ok value)
                             (if (not ok)
                                 (message "Failed to list models: %S" value)
@@ -2899,10 +2929,10 @@ immediately."
                                session-id value))))))
 
 (defun dsh-emacs--select-model-prompt (session-id value)
-  "Read a model choice for SESSION-ID from a `session.models' VALUE.
+  "Read a model choice for SESSION-ID from a `session/modelCatalog' VALUE.
 Each candidate is a provider header or an indented model row showing
 the model id; the provider
-actually sent to `session.selectModel' is the owning group's id (the host
+actually sent to `session/selectModel' is the owning group's id (the host
 resolves `current.provider' to exactly that).  Row keys carry the
 provider hidden behind a `display' property, so `assoc' always resolves
 to the row the user picked, even when the same id is offered by
@@ -2919,9 +2949,13 @@ provider suffix on their rows.
 When the chosen model declares reasoning-effort options (`reasoning'),
 a second reader asks for the effort: re-picking the current model
 pre-selects its live `reasoningEffort', other models pre-select their
-`defaultEffort', and the id is sent as `session.selectModel'
-`reasoningEffort'.  Models without reasoning options send no effort
-field at all.
+`defaultEffort', and the id is sent as `session/selectModel'
+`reasoningEffort'.  The \"current model\" is the session's real running
+model from its cached `modelSelection' projection (`lastUsed') — the same
+authoritative source the mode-line uses — and only falls back to the
+catalog host `default' when the session row carries no projection yet
+(a session just created, or never yet run).  Models without reasoning
+options send no effort field at all.
 
 No completing-read default is passed on purpose: vertico moves the default
 row to the top of the candidate list, which would pull the current model
@@ -2936,7 +2970,11 @@ Runs inside the async RPC callback (a process filter), so C-g during
 the filter as \"error in process filter: Quit\"."
   (condition-case nil
       (let* ((dir (dsh-protocol-model-directory--from-alist value))
-             (current (dsh-protocol-model-directory-current dir))
+             ;; The reference model: the session's live `modelSelection'
+             ;; projection when present, else the catalog host default
+             ;; (folded into `dsh-protocol-model-directory-current').
+             (current (or (dsh-emacs--session-model-selection session-id)
+                          (dsh-protocol-model-directory-current dir)))
              (current-model (and current
                                  (dsh-protocol-model-selection-model current)))
              (candidates (dsh-emacs--model-candidates value))
@@ -3000,11 +3038,11 @@ the filter as \"error in process filter: Quit\"."
                                    (and (equal model current-model)
                                         (dsh-protocol-model-selection-reasoning-effort
                                          current)))))))
-            (dsh-emacs--rpc-async "session.selectModel"
-              `((sessionId . ,session-id)
-                (provider . ,provider)
-                (model . ,model)
-                ,@(and effort-id `((reasoningEffort . ,effort-id))))
+            (dsh-emacs--rpc-async "session/selectModel"
+              `((request . ((sessionId . ,session-id)
+                            (provider . ,provider)
+                            (model . ,model)
+                            ,@(and effort-id `((reasoningEffort . ,effort-id))))))
               (lambda (ok2 value2)
                 (if ok2
                     (progn
@@ -3087,7 +3125,7 @@ prompts when `dsh-emacs-input-history-cross-session' is nil."
 IMAGES is a list of wire-ready attachment alists; they become
 `{type: \"image\"}' content blocks so the renderer displays them
 inline immediately — the bytes are already local, no
-`session.attachment' round-trip is needed."
+`session/attachment' round-trip is needed."
   (let ((event `((type . "user/message")
                  (data . ((content . ,(vconcat
                                        `(((type . "text") (text . ,message)))
