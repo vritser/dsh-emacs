@@ -123,6 +123,17 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **The mode-line shows the session's agent preset again**: the dsh 0.1.2 wire
+  migration moved `agentPreset` from a top-level `session/list` row field to a
+  session projection (`projections.values.agentPreset`), but the client kept
+  reading only the old top-level field — so a real server row yielded no preset
+  and the mode-line `preset` segment never appeared (model/effort already read
+  their `modelSelection` projection).  The session protocol struct now parses
+  the projection, keeping the top-level field only for the optimistic
+  `session/create` cache row.  The preset is also re-fed on every session-cache
+  refresh (`session/list` / workspace re-sync), the same cadence as the model
+  and ctx segments, so it stays current instead of only being set on open.
+
 - **Questions and approvals close when answered in another client**:
   receiving the waterfall's `cancel` frame now dismisses its active
   minibuffer prompt as well as removing queued copies, without sending a

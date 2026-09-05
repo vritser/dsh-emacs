@@ -621,12 +621,14 @@ A numeric suffix is appended when another buffer already holds the name."
   "Re-sync every live chat buffer after the session cache changed.
 Updates the mode-line name (list title), the workspace directory, and
 feeds each buffer's mode-line stats the server `contextPressure' snapshot
-(ctx% segment) and the `modelSelection' projection (model segment) so the
-mode line matches the freshly fetched list."
+(ctx% segment), the `modelSelection' projection (model/effort/provider) and
+the `agentPreset' projection (preset segment) so the mode line matches the
+freshly fetched list."
   (maphash (lambda (session-id buf)
              (dsh-emacs--chat-buffer-sync session-id)
              (dsh-emacs--chat-buffer-context-sync session-id buf)
-             (dsh-emacs--chat-buffer-model-sync session-id buf))
+             (dsh-emacs--chat-buffer-model-sync session-id buf)
+             (dsh-emacs--chat-buffer-preset-sync session-id buf))
            dsh-emacs--chat-buffers))
 
 (defun dsh-emacs--chat-buffer-context-sync (session-id buf)
@@ -687,6 +689,22 @@ projection frames, so the feed is re-run by
           (when model (dsh-emacs-modeline-set-model model))
           (when provider (dsh-emacs-modeline-set-provider provider))
           (dsh-emacs-modeline-set-effort effort))))))
+
+(defun dsh-emacs--chat-buffer-preset-sync (session-id buf)
+  "Feed BUF's mode-line agent preset for SESSION-ID from the cached row.
+The authoritative agent preset is the session's `agentPreset' projection
+(the same live source `dsh-emacs--chat-buffer-model-sync' reads for
+model/effort/provider).  No-op unless BUF is SESSION-ID's live chat buffer
+or the cached row carries no preset yet — mirroring the model sync, a row
+without the projection leaves the mode-line untouched rather than wiping a
+known value."
+  (when (and (buffer-live-p buf)
+             (equal session-id
+                    (buffer-local-value 'dsh-emacs--buffer-session buf)))
+    (let ((preset (dsh-emacs--session-preset session-id)))
+      (when (and preset (not (string-empty-p preset)))
+        (with-current-buffer buf
+          (dsh-emacs-modeline-set-preset preset))))))
 
 ;;;###autoload
 (defun dsh-emacs-list-sessions--fetch ()
@@ -1651,38 +1669,33 @@ buffer opens with the same workspace path."
 (defun dsh-emacs--link-session-preset (session-id)
   "Fill the mode-line agent preset for SESSION-ID.
 Uses the cached session list when possible; otherwise refreshes
-`session/list' once and picks the preset from the response.  SAFE outside a
-chat buffer (the RPC callback runs in the buffer that called this).
-The lazy fetch also covers the ctx% snapshot on first open: a session
+`session/list' once and lets the sync feed the preset from the response.
+SAFE outside a chat buffer (the RPC callback runs in the buffer that called
+this).  The lazy fetch also covers the ctx% snapshot on first open: a session
 missing from `dsh-emacs--sessions' has no `contextPressure' to feed the
 mode-line either (see `dsh-emacs--chat-buffer-context-sync'), so the same
 fetch — whose callback calls `dsh-emacs--chat-buffers-sync-all' — brings
 preset, context snapshot, title and workspace in one round trip."
-  (let ((preset (dsh-emacs--session-preset session-id))
-        (have-item (dsh-emacs--chat-session-item session-id)))
-    (if (and preset have-item)
-        (dsh-emacs-modeline-set-preset preset)
-      (dsh-emacs--rpc-async "session/list" (dsh-emacs--session-list-args)
-                            (lambda (ok value)
-                              (when ok
-                                (let ((items (mapcar
-                                              #'dsh-protocol-session--from-alist
-                                              (dsh-emacs--sequence-list
-                                               (cdr (assq 'items value))))))
-                                  ;; 新会话首次打开时缓存里没有该会话：顺带
-                                  ;; 更新整个缓存，让缓冲名（`dsh-<标题>'）
-                                  ;; 与工作区（default-directory）也一并取得。
-                                  (setq dsh-emacs--sessions items)
-                                  (dsh-emacs--chat-buffers-sync-all)
-                                  (catch 'found
-                                    (dolist (item items)
-                                      (when (equal session-id
-                                                   (dsh-protocol-session-session-id
-                                                    item))
-                                        (dsh-emacs-modeline-set-preset
-                                         (dsh-protocol-session-agent-preset
-                                          item))
-                                        (throw 'found t)))))))))))
+  (if (and (dsh-emacs--chat-session-item session-id)
+           (dsh-emacs--session-preset session-id))
+      ;; Cached row already carries the `agentPreset' projection: feed the
+      ;; mode line through the shared sync (same source the cache refresh
+      ;; uses for model/ctx), so the preset and its siblings stay consistent.
+      (dsh-emacs--chat-buffer-preset-sync session-id (current-buffer))
+    (dsh-emacs--rpc-async "session/list" (dsh-emacs--session-list-args)
+                          (lambda (ok value)
+                            (when ok
+                              (let ((items (mapcar
+                                            #'dsh-protocol-session--from-alist
+                                            (dsh-emacs--sequence-list
+                                             (cdr (assq 'items value))))))
+                                ;; 新会话首次打开时缓存里没有该会话：顺带
+                                ;; 更新整个缓存，让缓冲名（`dsh-<标题>'）
+                                ;; 与工作区（default-directory）也一并取得；
+                                ;; `dsh-emacs--chat-buffers-sync-all' 现在也
+                                ;; 把 preset 一并喂给已打开的聊天缓冲。
+                                (setq dsh-emacs--sessions items)
+                                (dsh-emacs--chat-buffers-sync-all)))))))
 
 (defun dsh-emacs-archive-session (session-id)
   "Archive SESSION-ID: remove it from its workspace view.

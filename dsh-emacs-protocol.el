@@ -67,7 +67,16 @@
                               (session-id (cdr (assq 'sessionId alist)))
                               (title (cdr (assq 'title alist)))
                               (cwd (cdr (assq 'cwd alist)))
-                              (agent-preset (cdr (assq 'agentPreset alist)))
+                              ;; agentPreset 在 dsh 0.1.2 是会话投影
+                              ;; （projections.values.agentPreset），随 session/list
+                              ;; 行与 follow/control 投影帧到达 —— 顶层 `agentPreset'
+                              ;; 只出现在 session/create 的乐观占位行（见
+                              ;; `dsh-emacs--cache-new-session'）。
+                              (agent-preset
+                               (or (let* ((p (cdr (assq 'projections alist)))
+                                          (v (and p (cdr (assq 'values p)))))
+                                     (and v (cdr (assq 'agentPreset v))))
+                                   (cdr (assq 'agentPreset alist))))
                               (updated-at (cdr (assq 'updatedAt alist)))
                               (blank (cdr (assq 'blank alist)))
                               (running (cdr (assq 'running alist)))

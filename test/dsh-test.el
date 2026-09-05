@@ -313,6 +313,74 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
              "chat-buffer-model-sync-ignores-foreign-session"))))
     (setq dsh-emacs--sessions old-sessions)
     (when (buffer-live-p buf) (kill-buffer buf))))
+;; --- 回归: mode-line preset 段读会话的 agentPreset 投影 ---
+;; dsh 0.1.2 把 agentPreset 从 session 行顶层字段改为投影
+;; (projections.values.agentPreset)。协议曾只读顶层 → 真实服务器行没有该字段,
+;; preset 段永远不显示; 现在必须从投影读取(同时保留 session/create 乐观占位行的
+;; 顶层回退)。
+(let* ((old-sessions dsh-emacs--sessions)
+       (buf (get-buffer-create " *t5f3-chat*"))
+       (item (dsh-protocol-session--from-alist
+              '((sessionId . "sess-presetproj")
+                (projections . ((values . ((agentPreset . "code")))))))))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs--sessions (list item))
+        (with-current-buffer buf
+          (setq-local dsh-emacs--buffer-session "sess-presetproj")
+          (setq dsh-emacs--modeline-preset nil)
+          (dsh-emacs--link-session-preset "sess-presetproj")
+          (when (equal "code" dsh-emacs--modeline-preset)
+            (dsh-test-pass "link-session-preset-reads-agentpreset-projection"))))
+    (setq dsh-emacs--sessions old-sessions)
+    (when (buffer-live-p buf) (kill-buffer buf))))
+;; 协议层: 投影与乐观占位(顶层)两条来源都解析为 agent-preset
+(let ((proj (dsh-protocol-session--from-alist
+             '((sessionId . "s1")
+               (projections . ((values . ((agentPreset . "minimal"))))))))
+      (top (dsh-protocol-session--from-alist
+            '((sessionId . "s2") (agentPreset . "standard")))))
+  (when (and (equal "minimal" (dsh-protocol-session-agent-preset proj))
+             (equal "standard" (dsh-protocol-session-agent-preset top)))
+    (dsh-test-pass "session-agent-preset-projection-and-top-level")))
+;; --- 测试: 缓存刷新把 agentPreset 投影同步进 mode-line preset（与 model 同口径）---
+;; `dsh-emacs--chat-buffers-sync-all' 现按 session.list 刷新重新喂 preset 段，
+;; 与 model/ctx 同一套缓冲同步——已打开的会话不再只在 open 时取一次 preset。
+(let* ((old-sessions dsh-emacs--sessions)
+       (buf (get-buffer-create " *t5f4-chat*"))
+       (item (dsh-protocol-session--from-alist
+              '((sessionId . "sess-presetsync")
+                (projections . ((values . ((agentPreset . "code")))))))))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs--sessions (list item))
+        (with-current-buffer buf
+          (setq-local dsh-emacs--buffer-session "sess-presetsync")
+          (setq dsh-emacs--modeline-preset nil))
+        (dsh-emacs--chat-buffer-preset-sync "sess-presetsync" buf)
+        (with-current-buffer buf
+          (when (equal "code" dsh-emacs--modeline-preset)
+            (dsh-test-pass "chat-buffer-preset-sync-lands-from-projection"))))
+    (setq dsh-emacs--sessions old-sessions)
+    (when (buffer-live-p buf) (kill-buffer buf))))
+;; 会话不匹配（同步目标行属于别的会话）不得落入该缓冲（防串台）
+(let* ((old-sessions dsh-emacs--sessions)
+       (buf (get-buffer-create " *t5f5-chat*"))
+       (item (dsh-protocol-session--from-alist
+              '((sessionId . "sess-presetsync")
+                (projections . ((values . ((agentPreset . "code")))))))))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs--sessions (list item))
+        (with-current-buffer buf
+          (setq-local dsh-emacs--buffer-session "sess-other")
+          (setq dsh-emacs--modeline-preset nil))
+        (dsh-emacs--chat-buffer-preset-sync "sess-presetsync" buf)
+        (with-current-buffer buf
+          (when (null dsh-emacs--modeline-preset)
+            (dsh-test-pass "chat-buffer-preset-sync-ignores-foreign-session"))))
+    (setq dsh-emacs--sessions old-sessions)
+    (when (buffer-live-p buf) (kill-buffer buf))))
 ;; tooltip 携带 provider（同 id 跨 provider 时 model 段消歧）
 (let ((dsh-emacs-modeline-format-spec '(:separator " " :segments (model))))
   (setq dsh-emacs--modeline-model "m1"
