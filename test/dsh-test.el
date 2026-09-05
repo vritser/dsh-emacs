@@ -8121,6 +8121,17 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
           (= 7 dsh-emacs--anchor-seq)))
     (when (buffer-live-p chat) (kill-buffer chat))))
 
+;; --- 回归: host 把发送的 canonical 会话 mention 规范化为 `@label' 回显时,
+;; optimistic 待消费条目仍应被消费（否则同一句消息渲染两遍, 一遍 canonical 一遍 label）
+(let ((canon "@[实现dsh web的@指令](dsh-session:InNlc3Npb24tYWU0NGZlYTUtYmY2Ny00YmE5LWIzZGEtNTk5OTAzODMyOTMzIg)")
+      (echo "@实现dsh web的@指令 summary"))
+  (let ((dsh-emacs--pending-user-messages (list (concat canon " summary"))))
+    (dsh-test-assert "consume-pending-matches-normalized-session-echo"
+      (and (dsh-emacs-render--consume-pending-user-message
+            `((type . "user/message")
+              (data . ((content . [((type . "text") (text . ,echo))])))))
+           (null dsh-emacs--pending-user-messages)))))
+
 (defun dsh-emacs-test--input-text ()
   "Return the current editable input text (or \"\" when no input area)."
   (condition-case nil

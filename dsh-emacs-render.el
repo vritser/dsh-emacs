@@ -2143,7 +2143,14 @@ Returns the event seq."
     seq))
 
 (defun dsh-emacs-render--consume-pending-user-message (event)
-  "Consume one optimistic user message matching EVENT, if present."
+  "Consume one optimistic user message matching EVENT, if present.
+The optimistic entry is the exact text dsh-emacs submitted (session references
+kept in their canonical `@[label](dsh-session:…)' form), but the host echoes
+that user message with references already normalized to their readable `@label'
+(no id).  So an entry also matches when its display form (`dsh-emacs-reference-fontify'
+collapsing canonical mentions to `@label') equals the echoed text — otherwise
+the optimistic copy would survive next to the echoed one and the message would
+render twice."
   (when (and (boundp 'dsh-emacs--pending-user-messages)
              (equal (dsh-emacs-render--aget "type" event) "user/message"))
     (let* ((data (dsh-emacs-render--event-data event))
@@ -2153,7 +2160,11 @@ Returns the event seq."
            (matched nil)
            remaining)
       (dolist (message pending)
-        (if (and (not matched) (equal message text))
+        (if (and (not matched)
+                 (or (equal message text)
+                     (equal (substring-no-properties
+                             (dsh-emacs-reference-fontify message))
+                            text)))
             (setq matched t)
           (push message remaining)))
       (when matched
