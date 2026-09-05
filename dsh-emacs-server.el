@@ -95,7 +95,12 @@ the TOKEN (the `token=' value from the printed URL) only when pointing at a
 server dsh-emacs did not start, so its own token is not available to
 parse.  When nil and dsh-emacs points at an already-running external server
 that requires the cookie, it asks you for the token interactively
-rather than showing a Basic username/password prompt.  The token changes on
+rather than showing a Basic username/password prompt.  A token that
+successfully authenticates an external server is remembered here
+automatically (saved with `customize-save-variable'), so the next session
+reuses it instead of prompting again; only a stale token — one that fails
+validation after a server restart — re-prompts, pre-filled for easy edit.
+The token changes on
 every server restart, so a manually-maintained value goes stale whenever the
 server is restarted."
   :type '(choice (const :tag "None (auto-capture from managed server)" nil)
@@ -559,6 +564,19 @@ no `url' machinery (and no username/password prompt) is involved."
       (kill-buffer buf))
     result))
 
+(defun dsh-emacs--server-auth-remember-token (token)
+  "Persist TOKEN as the configured `dsh-emacs-server-auth-token'.
+Called after an interactively-entered launch token successfully minted a cookie
+for an external server, so later sessions reuse it instead of prompting again.
+Sets the option and saves it with `customize-save-variable' (survives an Emacs
+restart); the value is only written when it differs from the current one (no
+churn).  A server dsh-emacs manages itself never reaches here (its token is
+auto-captured per process and would be stale once pinned)."
+  (when (and (stringp token) (not (string-empty-p token))
+             (not (string= token (or dsh-emacs-server-auth-token ""))))
+    (setq dsh-emacs-server-auth-token token)
+    (customize-save-variable 'dsh-emacs-server-auth-token token)))
+
 (defun dsh-emacs--server-auth-ensure-interactive ()
   "Ensure an auth cookie is ready before talking to a live external server.
 For a server dsh-emacs manages itself, the launch token is auto-captured from
@@ -595,15 +613,22 @@ to prompt again."
      ((not (dsh-emacs--server-auth-required-p)) t)
      ;; A failed attempt aborts this command; the next command can retry.
      (t
-      (let ((token (read-string
-                    (format "dsh server %s requires a launch token (paste the `token=' value from the `dsh web:' URL it printed): "
-                            (dsh-emacs--server-base-url)))))
+      (let* ((default (dsh-emacs--server-auth-token))
+             (prompt (format "dsh server %s requires a launch token%s (paste the `token=' value from the `dsh web:' URL it printed): "
+                             (dsh-emacs--server-base-url)
+                             (if default " (last used token pre-filled)" "")))
+             ;; Pre-fill the last-known token so a stale value is easy to edit
+             ;; and retry; with no known token prompt plainly.
+             (token (if default (read-string prompt default) (read-string prompt))))
         (if (string-empty-p token)
             (user-error (concat "No launch token given.  Set `dsh-emacs-server-auth-token' "
                                 "(or put `?token=' in `dsh-emacs-base-url') to authenticate "
                                 "to the external dsh server"))
           (unless (dsh-emacs--server-auth-ensure token)
-            (user-error "dsh token exchange failed; the token may be stale or the URL wrong — check `C-h v dsh-emacs-server-auth-token'"))))
+            (user-error "dsh token exchange failed; the token may be stale or the URL wrong — check `C-h v dsh-emacs-server-auth-token'"))
+          ;; The exchange succeeded: remember the working token so the next
+          ;; session reuses it instead of re-prompting.
+          (dsh-emacs--server-auth-remember-token token)))
       t))))
 
 ;;; ---------------------------------------------------------------------------

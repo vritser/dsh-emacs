@@ -126,6 +126,13 @@ minor) and stay undated until the release is cut.
 - **Model-picker prompt names the current provider too**: `C-c C-m` now prompts
   `Select model (current <provider>/<model>):` instead of only the model, so a
   model id that several providers offer is unambiguous at a glance.
+- **The external-server launch token is remembered**: a token that successfully
+  authenticates an external dsh server is saved into
+  `dsh-emacs-server-auth-token`, so the next session reuses it instead of
+  prompting again.  The stored token is validated (token→cookie exchange) on
+  each connect; only when that fails (the server restarted and minted a new
+  token) do you get the prompt again, pre-filled with the last value for easy
+  editing.
 
 ### Fixed
 

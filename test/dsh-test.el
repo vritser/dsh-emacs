@@ -7065,6 +7065,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
       (asked 0))
   (cl-letf (((symbol-function 'dsh-emacs--server-auth-required-p)
              (lambda () t))
+            ((symbol-function 'customize-save-variable)
+             (lambda (&rest _) nil))
             ((symbol-function 'read-string)
              (lambda (_prompt) (setq asked (1+ asked)) "UserTok"))
             ((symbol-function 'open-network-stream)
@@ -7084,7 +7086,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (dsh-emacs--server-auth-ensure-interactive))
   (dsh-test-assert "auth-gate-external-auth-asks-and-mints"
     (and (= 1 asked)
-         (equal "dsh-auth-USERT=v1.sig" dsh-emacs--server-auth-cookie)))
+         (equal "dsh-auth-USERT=v1.sig" dsh-emacs--server-auth-cookie)
+         (equal dsh-emacs-server-auth-token "UserTok"))) ; remembered for reuse
   (setq dsh-emacs--server-auth-cookie nil
         dsh-emacs-server-auth-token nil))
 
@@ -7118,6 +7121,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                (lambda () nil))
               ((symbol-function 'dsh-emacs--server-auth-required-p)
                (lambda () t))
+              ((symbol-function 'customize-save-variable)
+               (lambda (&rest _) nil))
               ((symbol-function 'read-string)
                (lambda (&rest _)
                  (setq asked (1+ asked))
@@ -7158,6 +7163,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
       (filter nil))
   (cl-letf (((symbol-function 'dsh-emacs--server-auth-required-p)
              (lambda () t))
+            ((symbol-function 'customize-save-variable)
+             (lambda (&rest _) nil))
             ((symbol-function 'read-string)
              (lambda (_prompt) (setq asked (1+ asked)) "TokA"))
             ((symbol-function 'open-network-stream)
@@ -7179,9 +7186,24 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (dsh-emacs--server-auth-ensure-interactive))
   (dsh-test-assert "auth-gate-cookie-cached-skips-repeat-ask"
     (and (= 1 asked)
-         (equal "dsh-auth-A=v1.sig" dsh-emacs--server-auth-cookie)))
+         (equal "dsh-auth-A=v1.sig" dsh-emacs--server-auth-cookie)
+         (equal dsh-emacs-server-auth-token "TokA"))) ; remembered for reuse
   (setq dsh-emacs--server-auth-cookie nil
         dsh-emacs-server-auth-token nil))
+
+;; --- 测试 93d9b: 记住的 token 只在该值变化时才持久化（防 churn） ---
+(let ((dsh-emacs-server-auth-token nil) (saved nil))
+  (cl-letf (((symbol-function 'customize-save-variable)
+             (lambda (var val) (push (list var val) saved))))
+    (dsh-emacs--server-auth-remember-token "tokX")
+    (let ((after-first saved))
+      (dsh-emacs--server-auth-remember-token "tokX")
+      (dsh-test-assert "auth-remember-saves-and-skips-churn"
+        (and (equal dsh-emacs-server-auth-token "tokX")
+             (equal after-first
+                    (list (list 'dsh-emacs-server-auth-token "tokX")))
+             (equal saved after-first)))))
+  (setq dsh-emacs-server-auth-token nil))
 
 ;; --- 测试 93e: WebSocket 握手携带浏览器会话 cookie ---
 (let ((dsh-emacs-base-url "http://127.0.0.1:3080")
