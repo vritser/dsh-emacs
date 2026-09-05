@@ -126,6 +126,9 @@ minor) and stay undated until the release is cut.
 - **Model-picker prompt names the current provider too**: `C-c C-m` now prompts
   `Select model (current <provider>/<model>):` instead of only the model, so a
   model id that several providers offer is unambiguous at a glance.
+- **Session-list keys for archive and workspace delete are clearer**: deleting a
+  workspace is now `D` (matching the other workspace keys `W`/`R`/`M`, was `u`),
+  and archiving a session moved to `d` (was `D`).
 - **The external-server launch token is remembered**: a token that successfully
   authenticates an external dsh server is saved into
   `dsh-emacs-server-auth-token`, so the next session reuses it instead of
