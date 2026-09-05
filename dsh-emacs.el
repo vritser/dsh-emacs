@@ -3185,6 +3185,24 @@ answering slot, or nil.  The slot is shared with the question flow
 (`dsh-emacs--question-active'): only one prompt may own the minibuffer
 at a time.")
 
+(defvar dsh-emacs--waterfall-cancelled-event-id nil
+  "Waterfall event id cancelled while its minibuffer was active.
+The drain that owns the id clears it and sends no stale outcome.")
+
+(defvar dsh-emacs--waterfall-prompt-event-id nil
+  "Event id owning the dynamically active waterfall minibuffer.")
+
+(defun dsh-emacs--waterfall-cancel-active (event-id active)
+  "Cancel the active waterfall when EVENT-ID matches ACTIVE.
+ACTIVE is a question or approval frame whose event id is its second
+element.  Mark the id before leaving the minibuffer so its drain can
+distinguish remote resolution from the user's `C-g'."
+  (when (and (consp active) (equal event-id (nth 1 active)))
+    (setq dsh-emacs--waterfall-cancelled-event-id event-id)
+    (when (and (equal event-id dsh-emacs--waterfall-prompt-event-id)
+               (active-minibuffer-window))
+      (abort-recursive-edit))))
+
 (defun dsh-emacs--question-session-label (session-id)
   "Label identifying SESSION-ID in question prompts.
 Prefers the live chat buffer's name (the title-based \"dsh-<title>\"
@@ -3238,13 +3256,17 @@ Each frame is keyed by its waterfall EVENT-ID; the answer goes to
            (session-id (nth 2 frame))
            (questions (dsh-emacs--sequence-list (nth 3 frame))))
       (setq dsh-emacs--question-active frame)
-      (condition-case err
-          (let ((answers
-                 (when (buffer-live-p chat)
-                   (with-current-buffer chat
-                     (dsh-emacs--collect-question-answers
-                      questions session-id)))))
-            (if answers
+      (let ((dsh-emacs--waterfall-prompt-event-id event-id))
+        (condition-case err
+            (let ((answers
+                   (when (buffer-live-p chat)
+                     (with-current-buffer chat
+                       (dsh-emacs--collect-question-answers
+                        questions session-id)))))
+              (cond
+               ((equal event-id dsh-emacs--waterfall-cancelled-event-id)
+                (message "Question was answered elsewhere"))
+               (answers
                 (dsh-emacs--events-result-async
                  dsh-emacs-events--client-id
                  event-id
@@ -3253,15 +3275,20 @@ Each frame is keyed by its waterfall EVENT-ID; the answer goes to
                  (lambda (ok value)
                    (if ok
                        (message "Answered %d question(s)" (length answers))
-                     (message "Question response not accepted (%s)" value))))
-              ;; No choices collected (aborted via an empty no-option
-              ;; input, or the chat buffer died): abandon the whole
-              ;; waterfall — outcome kind `rejected' with an error body
-              ;; (dsh web's "abandon questions") so the ask aborts
-              ;; host-side and the run is never left blocked.
-              (dsh-emacs--question-decline event-id)))
-        (quit (dsh-emacs--question-decline event-id))
-        (error (message "dsh question error: %S" err)))
+                     (message "Question response not accepted (%s)" value)))))
+               (t
+                ;; No choices collected (aborted via an empty no-option
+                ;; input, or the chat buffer died): abandon the whole
+                ;; waterfall — outcome kind `rejected' with an error body
+                ;; (dsh web's "abandon questions") so the ask aborts
+                ;; host-side and the run is never left blocked.
+                (dsh-emacs--question-decline event-id))))
+          (quit
+           (unless (equal event-id dsh-emacs--waterfall-cancelled-event-id)
+             (dsh-emacs--question-decline event-id)))
+          (error (message "dsh question error: %S" err))))
+      (when (equal event-id dsh-emacs--waterfall-cancelled-event-id)
+        (setq dsh-emacs--waterfall-cancelled-event-id nil))
       (setq dsh-emacs--question-active nil)))
   ;; The question answering slot just freed up: hand queued approvals over
   ;; to their drain (which hands back when it is done, so the two never
@@ -3653,13 +3680,14 @@ process filter: Quit\"."
   "Retire the queued `user-questions/request' waterfall EVENT-ID.
 A host `cancel' frame for EVENT-ID means the waterfall was withdrawn and
 no longer needs answering; drop any still-queued copy so a replay never
-re-asks a finished question.  A waterfall currently being prompted cannot
-be aborted from here; its stale answer is then refused server-side."
-  (message "dsh question %s cancelled" event-id)
+re-asks a finished question.  When the matching waterfall owns the active
+minibuffer, close it and let its drain retire without sending an outcome."
   (setq dsh-emacs--question-queue
         (cl-remove-if (lambda (entry)
                         (equal event-id (nth 1 entry)))
-                      dsh-emacs--question-queue)))
+                      dsh-emacs--question-queue))
+  (dsh-emacs--waterfall-cancel-active
+   event-id dsh-emacs--question-active))
 
 (defun dsh-emacs--waterfall-generation-retired ()
   "Retire all pending question/approval waterfalls of a dead generation.
@@ -3737,34 +3765,45 @@ are handed back to `dsh-emacs--question-drain'."
            (reason (nth 4 frame))
            (call-id (nth 5 frame)))
       (setq dsh-emacs--approval-active frame)
-      (condition-case err
-          (let ((allow (condition-case nil
-                           (if (buffer-live-p chat)
-                               (with-current-buffer chat
-                                 (dsh-emacs--approval-prompt
-                                  session-id tool-name reason call-id))
+      (let ((dsh-emacs--waterfall-prompt-event-id event-id))
+        (condition-case err
+            (let ((allow
+                   (condition-case nil
+                       (if (buffer-live-p chat)
+                           (with-current-buffer chat
                              (dsh-emacs--approval-prompt
                               session-id tool-name reason call-id))
-                         ;; C-g/ESC 折叠为拒绝：宿主阻塞在 pending 审批上，
-                         ;; 只有收到决定才能解除，留着不答只会永远卡住回合。
-                         (quit (message "Approval %s quit — rejecting"
-                                        event-id)
-                               nil))))
-            (dsh-emacs--events-result-async
-             dsh-emacs-events--client-id
-             event-id
-             `((kind . "result")
-               (value . ,(if allow "allowed-once" "rejected")))
-             (lambda (ok value)
-               (if ok
-                   (message "%s %s for %s"
-                            (if allow "Approved" "Rejected")
-                            (or tool-name "tool") session-id)
-                 (message "Approval response not accepted (%s)" value)))))
-        ;; Safety net: a quit from anywhere but the prompt still aborts the
-        ;; frame without answering.
-        (quit (message "Approval %s cancelled" event-id))
-        (error (message "dsh approval error: %S" err)))
+                         (dsh-emacs--approval-prompt
+                          session-id tool-name reason call-id))
+                     ;; A remote cancel must reach the outer handler without
+                     ;; becoming the user's default rejection.
+                     (quit
+                      (if (equal event-id
+                                 dsh-emacs--waterfall-cancelled-event-id)
+                          (signal 'quit nil)
+                        (message "Approval %s quit — rejecting" event-id)
+                        nil)))))
+              (if (equal event-id dsh-emacs--waterfall-cancelled-event-id)
+                  (message "Approval was answered elsewhere")
+                (dsh-emacs--events-result-async
+                 dsh-emacs-events--client-id
+                 event-id
+                 `((kind . "result")
+                   (value . ,(if allow "allowed-once" "rejected")))
+                 (lambda (ok value)
+                   (if ok
+                       (message "%s %s for %s"
+                                (if allow "Approved" "Rejected")
+                                (or tool-name "tool") session-id)
+                     (message "Approval response not accepted (%s)"
+                              value))))))
+          ;; Remote cancellation exits the prompt without answering again.
+          (quit
+           (unless (equal event-id dsh-emacs--waterfall-cancelled-event-id)
+             (message "Approval %s cancelled" event-id)))
+          (error (message "dsh approval error: %S" err))))
+      (when (equal event-id dsh-emacs--waterfall-cancelled-event-id)
+        (setq dsh-emacs--waterfall-cancelled-event-id nil))
       (setq dsh-emacs--approval-active nil)))
   ;; The approval answering slot just freed up: hand queued questions over
   ;; to their drain (which hands back when it is done).
@@ -3875,13 +3914,14 @@ process filter: Quit\"."
   "Retire the queued `approval/request' waterfall EVENT-ID.
 A host `cancel' frame for EVENT-ID means the waterfall was withdrawn and
 no longer needs answering; drop any still-queued copy so a replay never
-re-asks a finished approval.  An approval currently being prompted cannot
-be aborted from here; its stale answer is then a no-op server-side."
-  (message "dsh approval %s cancelled" event-id)
+re-asks a finished approval.  When the matching waterfall owns the active
+minibuffer, close it and let its drain retire without sending an outcome."
   (setq dsh-emacs--approval-queue
         (cl-remove-if (lambda (entry)
                         (equal event-id (nth 1 entry)))
-                      dsh-emacs--approval-queue)))
+                      dsh-emacs--approval-queue))
+  (dsh-emacs--waterfall-cancel-active
+   event-id dsh-emacs--approval-active))
 
 (provide 'dsh-emacs)
 

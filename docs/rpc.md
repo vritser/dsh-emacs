@@ -225,7 +225,8 @@ dsh-emacs 迁移清单（按此文档 §4–§9 逐条改 `dsh-emacs.el` / `dsh-
   `outcome.kind` ∈ `result`（携带 value）/ `next`（交给下一个接单者）/
   `rejected`（`{error:{name,message,code?,details?}}`）。`$events/result` 的应答是
   `{ok:true}`（value 缺省）。宿主收到取消（`cancel` 帧或会话结束）后，未决
-  waterfall 不再需要回答。
+  waterfall 不再需要回答。dsh-emacs 按 `eventId` 删除排队项；若对应的提问或
+  审批正在 minibuffer 显示，则立即关闭它，且不发送 stale outcome。
 - `approval/request` waterfall 的 `request`（agent/signal 剥除后）= `{toolName,
   callId?, reason?}`；回答 value = `ApprovalOutcome` 字符串：`"allowed-once" |
   "rejected" | "cancelled" | "unavailable"`（web 接单者通常只回 allowed-once /

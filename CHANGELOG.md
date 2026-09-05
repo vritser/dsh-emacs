@@ -123,6 +123,11 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Questions and approvals close when answered in another client**:
+  receiving the waterfall's `cancel` frame now dismisses its active
+  minibuffer prompt as well as removing queued copies, without sending a
+  second answer or rejection.
+
 - **`C-u C-c C-c` consistently steers a message**: while a turn is running,
   the prefix now selects `steer` regardless of whether the default busy-enter
   behavior is `queue`, `steer`, or `stop` (rationale: postmortem/014).

@@ -6065,6 +6065,38 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (and responds (equal "rpc-ap2" (nth 1 (car responds)))))))
     (when (buffer-live-p chat) (kill-buffer chat))))
 
+;; --- 测试 78a1: cancel 关闭正在显示的问题，不回 stale outcome ---
+(let ((chat (get-buffer-create " *dsh-test-question-active-cancel*"))
+      (responds nil)
+      (aborted nil))
+  (unwind-protect
+      (let ((dsh-emacs--question-queue nil)
+            (dsh-emacs--question-active nil)
+            (dsh-emacs--approval-queue nil)
+            (dsh-emacs--approval-active nil)
+            (dsh-emacs--waterfall-cancelled-event-id nil)
+            (dsh-emacs-enable-notifications nil))
+        (cl-letf (((symbol-function 'dsh-emacs--events-result-async)
+                   (lambda (&rest args) (push args responds)))
+                  ((symbol-function 'active-minibuffer-window)
+                   (lambda () t))
+                  ((symbol-function 'abort-recursive-edit)
+                   (lambda () (setq aborted t) (signal 'quit nil)))
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _)
+                     (dsh-emacs--question-cancelled "wf-active-q")
+                     "Yes")))
+          (dsh-emacs--question-requested
+           chat "wf-active-q" "sess-q"
+           '(((id . "q1") (question . "Proceed?")
+              (options . (((label . "Yes")))))))
+          (dsh-test-assert "question-active-cancel-closes-without-response"
+            aborted
+            (null responds)
+            (null dsh-emacs--question-active)
+            (null dsh-emacs--waterfall-cancelled-event-id))))
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
 ;; --- 测试 78b: 审批 allow-once / reject 决定 → $events/result outcome ---
 (let* ((chat (get-buffer-create " *dsh-test-approval-decision*"))
        (responds nil))
@@ -6202,6 +6234,36 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                    (equal "wf-e2" (nth 1 (car dsh-emacs--approval-queue))))
           (dsh-test-pass "approval-cancel-drops-only-matching-frame")))
     (setq dsh-emacs--approval-queue nil)
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
+;; --- 测试 78e1: cancel 关闭正在显示的审批，不回 stale reject ---
+(let ((chat (get-buffer-create " *dsh-test-approval-active-cancel*"))
+      (responds nil)
+      (aborted nil))
+  (unwind-protect
+      (let ((dsh-emacs--question-queue nil)
+            (dsh-emacs--question-active nil)
+            (dsh-emacs--approval-queue nil)
+            (dsh-emacs--approval-active nil)
+            (dsh-emacs--waterfall-cancelled-event-id nil)
+            (dsh-emacs-enable-notifications nil))
+        (cl-letf (((symbol-function 'dsh-emacs--events-result-async)
+                   (lambda (&rest args) (push args responds)))
+                  ((symbol-function 'active-minibuffer-window)
+                   (lambda () t))
+                  ((symbol-function 'abort-recursive-edit)
+                   (lambda () (setq aborted t) (signal 'quit nil)))
+                  ((symbol-function 'dsh-emacs--approval-prompt)
+                   (lambda (&rest _)
+                     (dsh-emacs--approval-cancelled "wf-active-a")
+                     t)))
+          (dsh-emacs--approval-requested
+           chat "wf-active-a" "sess-a" "bash" "reason" nil)
+          (dsh-test-assert "approval-active-cancel-closes-without-response"
+            aborted
+            (null responds)
+            (null dsh-emacs--approval-active)
+            (null dsh-emacs--waterfall-cancelled-event-id))))
     (when (buffer-live-p chat) (kill-buffer chat))))
 
 ;; --- 测试 78f: 审批与提问共享同一 minibuffer 槽（提问优先 → 审批排队接棒） ---
