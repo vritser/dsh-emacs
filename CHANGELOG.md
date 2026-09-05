@@ -58,6 +58,15 @@ minor) and stay undated until the release is cut.
   to that session's chat buffer, a file opens it under the session's working
   directory.  The buffer still carries the raw canonical text, so the wire to
   the host is unchanged (rationale: postmortem/012).
+- **A completed session mention is an atomic chip in the composer**: picking a
+  session from the `@` menu inserts it as one unbreakable unit — the buffer
+  keeps the canonical `@[label](dsh-session:…)` text (the wire is unchanged)
+  but the composer displays only `@label`. Editing treats it as a whole:
+  backspace removes the entire mention, and typing on it hops the cursor past
+  it rather than splitting the canonical text. RET or mouse-1 on the chip
+  jumps to that session's chat buffer. Completed file picks are equally atomic
+  chips that display their own `@path` — a backspace removes the whole mention
+  — and RET/mouse-1 opens the file (rationale: postmortem/012).
 - **Browser-session authentication for dsh web (0.1.2-rc.1+)**: recent dsh
   servers return `401` on every RPC and WebSocket stream unless the request
   carries a `dsh-auth-*` browser cookie minted from the per-process launch

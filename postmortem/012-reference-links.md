@@ -1,6 +1,6 @@
-# 012 — Rendered @ references as clickable links (transcript first)
+# 012 — Rendered @ references as clickable links (transcript + composer chip)
 
-_Status: In progress (Slice 1 of 2). Slice 2 = composer atomic chip._
+_Status: Complete._
 
 ## Background
 
@@ -72,4 +72,15 @@ layer; see Known limitations).
 - File "open" resolves a local path under the session cwd; it assumes the dsh
   server shares this filesystem (true for the localhost setup). A remote host
   needs a content-fetch RPC, which does not exist in the client today.
-- Slice 2 (the editable composer) is still pending.
+
+Slice 2 (composer): a completed session mention is inserted with its canonical
+text kept in the buffer and a `display` property collapsing it to `@label`.
+Editing safety comes from a buffer-local pre-command guard (an edit whose
+point sits on the collapsed span first hops to its end, so the canonical
+mention is never split) plus delete-command advice that removes the whole
+span at a boundary; because the buffer text stays canonical, sending is
+unchanged. Completed file picks are atomic chips too (they display their own
+`@path`), so a whole file mention is removed in one backspace; a mid-drill
+directory token stays plain. Accepted limits: the guard covers the common edit
+commands; killing a selection that overlaps a chip can still truncate it (an
+explicit delete).

@@ -681,39 +681,39 @@ for tests."
    cands))
 
 (defun dsh-emacs-reference--exit (cand _status rows)
-  "Rewrite a picked session row CAND into its canonical mention.
-The completion UI has already inserted the row text (`@label', with a
-` #n' suffix for repeated labels) and ROWS is the (ROW . MENTION)
-alist of the capf call that produced the popup.  The row is replaced
-in place by the canonical `@[label](dsh-session:...)' mention, so the
-message wire always carries the reference text — and a label
-containing spaces (`@My Talk') would otherwise fail the unquoted
-@-token grammar and re-open the menu.  File/directory rows are their
-own mention already: no ROWS entry, nothing to do.  STATUS is ignored;
-the row text is final in every completion state."
+  "Finish a picked @ candidate CAND in the composer.
+The completion UI already inserted CAND's row text; ROWS maps session rows to
+their canonical mention.  A session row is rewritten to the canonical
+`@[label](dsh-session:…)' mention and wrapped as an atomic composer chip
+(buffer keeps canonical, display shows `@label'); a file row stays editable
+but is styled as a composer link (RET/mouse opens it); a directory row keeps
+its `@dir/' token and its children are fetched so drilling can continue.  The
+wire text always carries the canonical reference.  STATUS is ignored."
   (let* ((entry (dsh-emacs-reference--entry-for cand))
          (props (cdr entry))
-         (mention (cdr (assoc cand rows))))
-    ;; A picked directory already ends in "/".  Fetch that directory's
-    ;; children now, then the settled callback re-enters Corfu's native path
-    ;; with the active @dir/ token so drilling does not require another slash.
-    (when (eq (plist-get props :kind) 'directory)
-      (setq dsh-emacs--reference-requested
-            (concat (plist-get props :path) "/")
-            ;; A directory candidate can itself have come from this exact
-            ;; query.  Picking it is still an explicit refresh boundary, so
-            ;; do not let the cache-equality fast path suppress the request.
-            dsh-emacs--reference-query nil)
-      (dsh-emacs-reference--fetch-query
-       (dsh-emacs--active-session-id)
-       dsh-emacs--reference-requested))
-    (when mention
-      (let ((start (- (point) (length cand))))
-        (when (and (>= start (point-min))
-                   (string= (buffer-substring-no-properties start (point))
-                            cand))
-          (delete-region start (point))
-          (insert mention))))))
+         (mention (cdr (assoc cand rows)))
+         (start (- (point) (length cand))))
+    (when (and (>= start (point-min))
+               (string= (buffer-substring-no-properties start (point)) cand))
+      ;; A picked directory already ends in "/".  Fetch its children now, so
+      ;; the settled callback re-enters the active @dir/ token for the next
+      ;; level without another slash.
+      (when (eq (plist-get props :kind) 'directory)
+        (setq dsh-emacs--reference-requested
+              (concat (plist-get props :path) "/")
+              dsh-emacs--reference-query nil)
+        (dsh-emacs-reference--fetch-query
+         (dsh-emacs--active-session-id) dsh-emacs--reference-requested))
+      (if mention
+          (progn
+            (delete-region start (point))
+            (insert mention)
+            ;; Session mention -> atomic chip (canonical kept, display @label).
+            (dsh-emacs-reference--chipify (- (point) (length mention))))
+        ;; File pick: keep its text, style it as an editable composer link.
+        (when (eq (plist-get props :kind) 'file)
+          (dsh-emacs-reference--composer-file-chip
+           start (point) (plist-get props :path)))))))
 
 (defun dsh-emacs-reference-completion-at-point ()
   "`completion-at-point-functions' entry for @ file/session references.
@@ -844,7 +844,8 @@ group 2 the opaque session id.")
   "\\(?:^\\|[ \t\r\n\f]\\)\\(@\"[^\"]*\"\\|@[^ \t\r\n\f@]+\\)"
   "Regexp matching a file reference `@path' or `@\"quoted path\"'.
 The `@' must start the string or follow whitespace (group 1 is the token,
-its left boundary is group 0) so prose like `mail@example' is not linked.")
+its left boundary is group 0) and be followed by at least one non-space
+character, so a lone `@' and prose like `mail@example' are not linked.")
 
 (defun dsh-emacs-reference--unescape-label (raw)
   "Unescape a raw session-label interior RAW into its display text.
@@ -874,18 +875,18 @@ prefix) are not matched as files."
         (let* ((b (match-beginning 1))
                (e (match-end 1))
                (tok (match-string 1 string))
+               (quoted (string-prefix-p "@\"" tok))
+               (path (if quoted (substring tok 2 -1) (substring tok 1)))
                (containing
                 (cl-some (lambda (s)
                            (and (<= (nth 0 s) b) (>= (nth 1 s) e) s))
                          spans)))
-          (if containing
-              (setq pos (nth 1 containing))
-            (push (list b e 'file
-                        (if (string-prefix-p "@\"" tok)
-                            (substring tok 2 -1)
-                          (substring tok 1)))
-                  spans)
-            (setq pos e)))))
+          (cond
+           (containing
+            (setq pos (nth 1 containing)))
+           (t
+            (push (list b e 'file path) spans)
+            (setq pos e))))))
     (sort spans (lambda (a b) (< (nth 0 a) (nth 0 b))))))
 
 (defun dsh-emacs-reference--propertize-span (text kind value)
@@ -956,15 +957,168 @@ in the buffer / on the wire."
          (user-error "Reference file not found locally: %s"
                      (or value "")))))))
 
+(defun dsh-emacs-reference--mention-label-id (text)
+  "Return (LABEL . ID) of canonical session mention TEXT, else nil."
+  (let ((m dsh-emacs-reference--session-mention-re))
+    (and (string-match (concat "\\`" m "\\'") text)
+         (cons (dsh-emacs-reference--unescape-label (match-string 1 text))
+               (match-string 2 text)))))
+
 (defun dsh-emacs-reference-open-at-point ()
   "Open the @ reference under point: jump to its session or open its file.
 The reference data rides the `dsh-emacs-reference-ref' text property set by
-`dsh-emacs-reference-fontify'.  RET / mouse-1 on the span call this."
+`dsh-emacs-reference-fontify' / `dsh-emacs-reference--make-chip'.  RET /
+mouse-1 on the span call this."
   (interactive)
   (let ((ref (get-text-property (point) 'dsh-emacs-reference-ref)))
     (if (null ref)
         (user-error "No @ reference here")
       (dsh-emacs-reference--open-ref (car ref) (cdr ref)))))
+
+;; ---------------------------------------------------------------------------
+;; Composer 原子 chip：完成的 session mention 显示为 `@label'，buffer 仍存
+;; canonical 原文（上发不变）。用 `display' 属性折叠，编辑时 chip 当整体。
+;; ---------------------------------------------------------------------------
+
+(defun dsh-emacs-reference--make-chip (start end)
+  "Wrap the canonical session mention in START..END as a composer chip.
+The buffer keeps the canonical text; a `display' property collapses it to
+`@label'.  Marks the span with `dsh-emacs-reference-chip' (editing guard),
+a link face / RET-mouse binding and the session id.  `rear-nonsticky' keeps
+the display/face/keymap from bleeding onto text typed right after the chip.
+No-op unless the region is a complete session mention."
+  (let* ((canonical (buffer-substring-no-properties start end))
+         (li (dsh-emacs-reference--mention-label-id canonical)))
+    (when li
+      (add-text-properties
+       start end
+       (list 'display (concat "@" (car li))
+             'face 'dsh-emacs-reference-face
+             'mouse-face 'highlight
+             'follow-link t
+             'keymap dsh-emacs-reference--mention-keymap
+             'help-echo "RET/mouse-1: open this session"
+             'dsh-emacs-reference-ref (cons 'session (cdr li))
+             'dsh-emacs-reference-chip t
+             'rear-nonsticky
+             '(face mouse-face keymap display follow-link help-echo
+                    dsh-emacs-reference-ref dsh-emacs-reference-chip)))
+      (dsh-emacs-reference--chip-guard-install)
+      t)))
+
+(defun dsh-emacs-reference--chipify (start)
+  "Wrap the canonical session mention ending at point into a chip.
+START is the mention's first character.  Returns non-nil when a chip was
+made."
+  (and (< start (point))
+       (dsh-emacs-reference--make-chip start (point))))
+
+(defun dsh-emacs-reference--chip-region (pos)
+  "Chip (START . END) that POS sits on or immediately after; else nil.
+POS on a chip character returns that chip; POS one past a chip's last
+character also returns it, so backspace there can delete the whole chip."
+  (cond
+   ((get-text-property pos 'dsh-emacs-reference-chip)
+    (cons (or (previous-single-property-change (1+ pos) 'dsh-emacs-reference-chip)
+              (point-min))
+          (or (next-single-property-change pos 'dsh-emacs-reference-chip)
+              (point-max))))
+   ((and (> pos (point-min))
+         (get-text-property (1- pos) 'dsh-emacs-reference-chip))
+    (cons (or (previous-single-property-change pos 'dsh-emacs-reference-chip)
+              (point-min))
+          pos))))
+
+(defun dsh-emacs-reference--editing-command-p (cmd)
+  "Whether CMD edits the buffer (and must never split a chip's canonical)."
+  (memq cmd '(self-insert-command quoted-insert
+              delete-backward-char backward-delete-char
+              backward-delete-char-untabify delete-char
+              kill-line kill-region yank yank-pop transpose-chars)))
+
+(defun dsh-emacs-reference--chip-guard-before ()
+  "Prevent a chip's canonical mention from being edited in the middle.
+If point rests on a chip character and THIS-COMMAND would edit, hop to the
+chip's end first so the edit lands after it and the wire text stays a valid
+mention.  Deleting at a chip boundary removes the whole chip (handled by
+`dsh-emacs-reference--chip-delete-guard')."
+  (let ((pt (point)))
+    (when (and (dsh-emacs-reference--editing-command-p this-command)
+               (get-text-property pt 'dsh-emacs-reference-chip))
+      (let ((chip (dsh-emacs-reference--chip-region pt)))
+        (when (and chip (< pt (cdr chip)))
+          (goto-char (cdr chip)))))))
+
+(defun dsh-emacs-reference--delete-chip-at-boundary ()
+  "Delete the composer chip at whose boundary point sits; return non-nil.
+Covers both the trailing edge (backspace deletes the whole chip) and the
+leading edge (forward-delete removes it).  Independent of the calling delete
+command (does not read `this-command'), so it works interactively and from
+calls."
+  (let* ((region (dsh-emacs-reference--chip-region (point)))
+         (trailing (and region (= (point) (cdr region))))
+         (leading (and region (= (point) (car region))
+                       (get-text-property (point) 'dsh-emacs-reference-chip)
+                       (not (get-text-property (1- (point))
+                                               'dsh-emacs-reference-chip)))))
+    (when (or trailing leading)
+      (delete-region (car region) (cdr region))
+      t)))
+
+(defun dsh-emacs-reference--chip-delete-backward (orig &optional arg killflag)
+  "`delete-backward-char' advice: backspace at a chip deletes the whole chip."
+  (if (dsh-emacs-reference--delete-chip-at-boundary)
+      nil
+    (funcall orig arg killflag)))
+
+(defun dsh-emacs-reference--chip-delete-forward (orig &optional arg killflag)
+  "`delete-char' advice: forward-delete at a chip deletes the whole chip."
+  (if (dsh-emacs-reference--delete-chip-at-boundary)
+      nil
+    (funcall orig arg killflag)))
+
+(defvar dsh-emacs-reference--chip-delete-guard-installed nil
+  "Non-nil once the global delete-command advice has been added once.")
+
+(defun dsh-emacs-reference--chip-guard-install ()
+  "Install the composer chip editing guards (buffer-local, idempotent)."
+  (add-hook 'pre-command-hook #'dsh-emacs-reference--chip-guard-before nil t)
+  (unless dsh-emacs-reference--chip-delete-guard-installed
+    (setq dsh-emacs-reference--chip-delete-guard-installed t)
+    (advice-add 'delete-backward-char :around #'dsh-emacs-reference--chip-delete-backward)
+    (advice-add 'delete-char :around #'dsh-emacs-reference--chip-delete-forward)))
+
+(defun dsh-emacs-reference--composer-file-chip (start end path)
+  "Wrap a completed file mention START..END as a composer chip.
+Like a session chip it is one atomic unit: the buffer keeps the file's own
+`@path' text (no `display' collapse — the path already is the wire text), a
+backspace at its boundary removes the whole mention, typing on it hops the
+cursor past it, and RET/mouse opens the file.  `rear-nonsticky' stops the
+style from bleeding onto following typed text."
+  (add-text-properties
+   start end
+   (list 'face 'dsh-emacs-reference-face
+         'mouse-face 'highlight
+         'follow-link t
+         'keymap dsh-emacs-reference--mention-keymap
+         'help-echo "RET/mouse-1: open this file"
+         'dsh-emacs-reference-ref (cons 'file path)
+         'dsh-emacs-reference-chip t
+         'rear-nonsticky
+         '(face mouse-face keymap follow-link help-echo
+                dsh-emacs-reference-ref dsh-emacs-reference-chip)))
+  (dsh-emacs-reference--chip-guard-install)
+  t)
+
+(defun dsh-emacs-reference--mention-relpath (text)
+  "Relative path of a file/dir mention TEXT, else nil.
+`@path' -> \"path\", `@\"quoted\"' -> \"quoted\", `@dir/' -> \"dir\"."
+  (let ((p (cond ((string-prefix-p "@\"" text) (substring text 2 -1))
+                 ((string-prefix-p "@" text) (substring text 1))
+                 (t nil))))
+    (and (stringp p) (> (length p) 0)
+         (if (string-suffix-p "/" p) (substring p 0 -1) p))))
+
 
 ;; ---------------------------------------------------------------------------
 ;; M-x 入口
@@ -999,7 +1153,16 @@ the input area first."
                         (- (point) (length (nth 0 token)))
                       (point))))
         (delete-region start (point))
-        (insert mention)))))
+        (insert mention)
+        (let ((ins-start (- (point) (length mention))))
+          (if (dsh-emacs-reference--chipify ins-start)
+              ;; session chip made
+              nil
+            ;; file/directory mention: editable composer link (not a chip)
+            (let ((path (dsh-emacs-reference--mention-relpath mention)))
+              (and path
+                   (dsh-emacs-reference--composer-file-chip
+                    ins-start (point) path)))))))))
 
 (defun dsh-emacs-reference ()
   "Insert an @ file or session reference into the chat input, at point.

@@ -88,7 +88,16 @@ appears in the popup, only in the sent message.
 A **completed session mention is atomic**: once `@[label](dsh-session:…)`
 sits in the input it is no longer completion-active, so typing after it never
 re-opens the menu and `M-x dsh-emacs-reference` will not swallow it (the web
-renders the same mention as an atomic chip).
+renders the same mention as an atomic chip). In the composer the completed
+session mention renders as an **atomic chip**: the buffer keeps the canonical
+text (so the wire is unchanged) while the display collapses to just `@label`,
+the whole mention is treated as one unit for editing (backspace removes it
+all; typing on it hops the cursor past it rather than splitting the mention),
+and RET/mouse-1 jumps to that session. Completed file picks are equally
+atomic chips that display their own `@path` (no collapse needed — the path is
+the wire text): a backspace removes the whole mention and RET/mouse-1 opens
+the file. A mid-drill directory token (`@dir/`) is left plain so typing can
+descend further.
 
 ## Caching (stale-while-revalidate)
 
@@ -122,7 +131,10 @@ host.
 > Note: on the transcript, a *user* message that echoes a completed `@`
 > reference renders it as a clickable link instead of the raw text — a session
 > mention shows just its `@label` (the opaque id is never displayed), a file or
-> directory mention keeps its `@path`. RET or mouse-1 opens the reference: a
+> directory mention keeps its `@path`. Any boundary `@word` is treated as a
+> file reference (so extensionless files like `@LICENSE` link too); only
+> obvious non-references are skipped — a `@` inside a word such as an email
+> (`mail@example`) and a lone `@`. RET or mouse-1 opens the reference: a
 > session jumps to that session's chat buffer, a file opens under the session's
 > working directory (`find-file` of `cwd + path`). The buffer still holds the
 > canonical text, so the wire is unchanged. Assistant bodies render via the

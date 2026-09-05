@@ -10691,7 +10691,15 @@ candidates as the UI would via `all-completions', not by destructuring."
                    spans)
            '((file "src/a.ts") (session "ab1_-2"))))
   (dsh-test-assert "link-spans-not-email"
-    (null (dsh-emacs-reference--link-spans "contact mail@example.com now"))))
+    (null (dsh-emacs-reference--link-spans "contact mail@example.com now")))
+  ;; 裸 @word（含无扩展名文件如 @LICENSE）都当文件引用链；只排除邮箱与孤立 @
+  (dsh-test-assert "link-spans-bare-atword-is-file"
+    (equal (mapcar (lambda (s) (nth 3 s))
+                   (dsh-emacs-reference--link-spans
+                    "note @LICENSE and @src/a.ts and @README.md"))
+           '("LICENSE" "src/a.ts" "README.md")))
+  (dsh-test-assert "link-spans-lone-at-not-file"
+    (null (dsh-emacs-reference--link-spans "an @ alone and @ here"))))
 
 (let ((out (dsh-emacs-reference-fontify
             "see @src/ui/button.tsx then @[My Talk](dsh-session:ab1_-2), mail@example ok")))
@@ -10728,6 +10736,53 @@ candidates as the UI would via `all-completions', not by destructuring."
         (dsh-test-assert "open-at-point-jumps-to-session"
           (equal opened "target1")))
     (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; --- composer 原子 chip：buffer 存 canonical，display 折叠成 @label，编辑当整体
+(let ((canon "@[My Talk](dsh-session:ab12_CD)"))
+  (with-temp-buffer
+    (insert canon)
+    (dsh-test-assert "chip-keeps-canonical-in-buffer"
+      (and (dsh-emacs-reference--chipify (- (point) (length canon)))
+           (string= (buffer-substring-no-properties (point-min) (point-max))
+                    canon)))
+    (let ((s (point-min)))
+      (dsh-test-assert "chip-displays-label-and-carries-session"
+        (and (string= (get-text-property s 'display) "@My Talk")
+             (equal (get-text-property s 'dsh-emacs-reference-ref)
+                    '(session . "ab12_CD"))
+             (get-text-property s 'dsh-emacs-reference-chip))
+        (equal (dsh-emacs-reference--chip-region (point-max))
+               (cons (point-min) (point-max)))))
+    ;; self-insert while point sits on the chip hops to its end first
+    (goto-char (+ (point-min) 5))
+    (let ((this-command 'self-insert-command))
+      (dsh-emacs-reference--chip-guard-before))
+    (dsh-test-assert "chip-guard-hops-out-of-interior"
+      (= (point) (point-max)))
+    ;; backspace at the trailing edge deletes the whole chip (atomic unit)
+    (goto-char (point-max))
+    (delete-backward-char 1)
+    (dsh-test-assert "chip-backspace-deletes-whole-span"
+      (string= (buffer-substring-no-properties (point-min) (point-max)) ""))
+    ;; typing after the chip must not inherit its link/display style
+    (insert canon)
+    (dsh-emacs-reference--chipify (- (point) (length canon)))
+    (insert " tail")
+    (dsh-test-assert "chip-typed-after-stays-plain"
+      (let ((p (- (point) 5)))
+        (and (null (get-text-property p 'face))
+             (null (get-text-property p 'dsh-emacs-reference-chip)))))))
+
+;; --- composer 文件引用：保留可编辑，但带链接样式与跳转
+(with-temp-buffer
+  (insert "@src/a.ts")
+  (let ((e (point)))
+    (dsh-emacs-reference--composer-file-chip (- e 9) e "src/a.ts")
+    (dsh-test-assert "composer-file-chip-styled"
+      (equal (get-text-property (- e 9) 'dsh-emacs-reference-ref)
+             '(file . "src/a.ts")))
+    (dsh-test-assert "composer-file-chip-is-atomic"
+      (get-text-property (- e 9) 'dsh-emacs-reference-chip))))
 
 ;; --- active-token / capf：输入区令牌 → 补全区域与候选 ---
 (let ((buf (generate-new-buffer " *t-ref-capf*")))
