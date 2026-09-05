@@ -1,144 +1,200 @@
-;;; dsh-e2e.el --- dsh-emacs 端到端测试（需要真实 dsh 服务） -*- lexical-binding: t; -*-
-(setq debug-on-error t)
-(add-to-list 'load-path (expand-file-name ".." (file-name-directory load-file-name)))
+;;; dsh-e2e.el --- End-to-end tests against a real dsh server -*- lexical-binding: t; -*-
 
+;; Copyright (C) 2025-2026
+
+;; Author: dsh-emacs contributors
+;; Keywords: tools
+;; Package-Requires: ((emacs "27.1"))
+
+;;; Commentary:
+
+;; Run with:
+;;
+;;   emacs -Q --batch -L . -l test/dsh-e2e.el
+;;
+;; DSH_E2E_URL may override the default server URL.  A URL containing a
+;; launch token is accepted.  The test creates one session, exercises the
+;; real event stream, and archives the session during cleanup because dsh
+;; does not expose a session deletion RPC.
+
+;;; Code:
+
+(setq debug-on-error t)
+(add-to-list 'load-path
+             (expand-file-name ".." (file-name-directory load-file-name)))
+
+(require 'cl-lib)
 (require 'dsh-emacs)
 
-(defvar dsh-e2e-results '())
+(defvar dsh-e2e--results nil)
+(defvar dsh-e2e--session-id nil)
+(defvar dsh-e2e--chat nil)
 
-(defun e2e-pass (name)
-  (push (cons name t) dsh-e2e-results)
+(setq dsh-emacs-base-url
+      (or (getenv "DSH_E2E_URL") dsh-emacs-base-url)
+      dsh-emacs-enable-notifications nil
+      dsh-emacs-new-session-auto-project nil)
+
+(defun dsh-e2e--pass (name)
+  (push (list name t nil) dsh-e2e--results)
   (princ (format "PASS: %s\n" name)))
 
-(defun e2e-fail (name detail)
-  (push (cons name nil) dsh-e2e-results)
+(defun dsh-e2e--fail (name detail)
+  (push (list name nil detail) dsh-e2e--results)
   (princ (format "FAIL: %s -- %s\n" name detail)))
 
-(defun e2e-wait (timeout-seconds)
-  "等待 TIMEOUT-SECONDS 秒或直到 RPC 完成。"
-  (let ((elapsed 0))
-    (while (and (< elapsed (* timeout-seconds 10))
-                (bound-and-true-p dsh-emacs--rpc-inflight)
-                (> dsh-emacs--rpc-inflight 0))
-      (accept-process-output nil 0.1)
-      (sit-for 0.1)
-      (setq elapsed (1+ elapsed)))))
+(defun dsh-e2e--check (name value &optional detail)
+  (if value
+      (dsh-e2e--pass name)
+    (dsh-e2e--fail name (or detail "check returned nil")))
+  value)
 
-;; --- 测试 1: 健康检查 ---
-(dsh-emacs-health
- (lambda (healthy-p)
-   (if healthy-p
-       (e2e-pass "health-check")
-     (e2e-fail "health-check" "dsh 服务不可达，跳过后续测试"))))
-(e2e-wait 5)
+(defun dsh-e2e--wait-until (predicate timeout)
+  (let ((deadline (+ (float-time) timeout)))
+    (while (and (not (funcall predicate))
+                (< (float-time) deadline))
+      (accept-process-output nil 0.05)
+      (sit-for 0.05))
+    (funcall predicate)))
 
-;; --- 测试 2: 新建会话 ---
-(defvar e2e-session-id nil)
-(when (cdr (assq 'health-check dsh-e2e-results))
-  (dsh-emacs-new-session
-   (expand-file-name "~")
-   (lambda (session-id error)
-     (if error
-         (e2e-fail "new-session" (format "错误: %S" error))
-       (setq e2e-session-id session-id)
-       (if session-id
-           (e2e-pass "new-session")
-         (e2e-fail "new-session" "未返回 session-id"))))))
-(e2e-wait 5)
+(defun dsh-e2e--rpc (method args)
+  (pcase-let ((`(,ok-p . ,value) (dsh-emacs--rpc-request method args)))
+    (if ok-p
+        value
+      (error "%s failed: %S" method value))))
 
-;; --- 测试 3: 打开会话 ---
-(when e2e-session-id
-  (dsh-emacs-open-session
-   e2e-session-id
-   (lambda (success error)
-     (if success
-         (e2e-pass "open-session")
-       (e2e-fail "open-session" (format "错误: %S" error))))))
-(e2e-wait 5)
+(defun dsh-e2e--session-cached-p ()
+  (cl-some (lambda (session)
+             (equal (dsh-protocol-session-session-id session)
+                    dsh-e2e--session-id))
+           dsh-emacs--sessions))
 
-;; --- 测试 4: 检查对话缓冲 ---
-(when (and e2e-session-id dsh-emacs--current-buffer)
-  (with-current-buffer dsh-emacs--current-buffer
-    (when (eq major-mode 'dsh-emacs-mode)
-      (e2e-pass "conversation-buffer_mode"))
-    (when dsh-emacs--input-marker
-      (e2e-pass "input_area_created"))
-    (when (dsh-emacs-footer-format)
-      (e2e-pass "footer_rendered"))))
+(unwind-protect
+    (condition-case error-data
+        (progn
+          (dsh-e2e--rpc "session/list" (dsh-emacs--session-list-args))
+          (dsh-e2e--pass "health-check")
 
-;; --- 测试 5: 发送消息 ---
-(when e2e-session-id
-  (with-current-buffer dsh-emacs--current-buffer
-    ;; 在输入区域插入文本
-    (goto-char dsh-emacs--input-marker)
-    (insert "测试消息")
-    (dsh-emacs-send-or-stop)
-    (e2e-wait 5)
-    ;; 检查是否渲染了用户消息
-    (let ((buf-str (buffer-string)))
-      (if (string-match-p "测试消息" buf-str)
-          (e2e-pass "send-message")
-        (e2e-fail "send-message" "未渲染用户消息")))))
+          (let* ((preset (getenv "DSH_E2E_PRESET"))
+                 (request `((cwd . ,(expand-file-name default-directory))))
+                 (request (if (and preset (not (string-empty-p preset)))
+                              (append request `((agentPreset . ,preset)))
+                            request))
+                 (response (dsh-e2e--rpc
+                            "session/create"
+                            `((request . ,request))))
+                 (session (dsh-protocol--struct
+                           #'dsh-protocol-session-p
+                           #'dsh-protocol-session--from-alist
+                           response)))
+            (setq dsh-e2e--session-id
+                  (dsh-protocol-session-session-id session))
+            (dsh-e2e--check "new-session" dsh-e2e--session-id
+                            "session/create returned no session id")
+            (dsh-emacs--cache-new-session
+             dsh-e2e--session-id
+             nil
+             preset))
 
-;; --- 测试 6: 会话列表 ---
-(dsh-emacs-list-sessions-display)
-(when (get-buffer dsh-emacs-sessions-buffer)
-  (with-current-buffer dsh-emacs-sessions-buffer
-    (when (eq major-mode 'dsh-emacs-session-mode)
-      (e2e-pass "session_list_mode"))
-    (when (string-match-p "Sessions" (buffer-string))
-      (e2e-pass "session_list_rendered"))))
+          (dsh-emacs-open-session dsh-e2e--session-id)
+          (setq dsh-e2e--chat dsh-emacs--current-buffer)
+          (dsh-e2e--check
+           "open-session"
+           (dsh-e2e--wait-until
+            (lambda ()
+              (and (buffer-live-p dsh-e2e--chat)
+                   (buffer-local-value 'dsh-emacs--event-ready
+                                       dsh-e2e--chat)))
+            10)
+           "session/follow did not become ready")
 
-;; --- 测试 7: Footer 更新 ---
-(when (and dsh-emacs--current-buffer
-           (buffer-live-p dsh-emacs--current-buffer))
-  (with-current-buffer dsh-emacs--current-buffer
-    (let ((usage (dsh-emacs-make-usage 1000 500 0 0 0.05)))
-      (dsh-emacs-footer-set-usage usage)
-      (let ((footer (dsh-emacs-footer-format)))
-        (if (and (stringp footer) (string-match-p "1.0k" footer))
-            (e2e-pass "footer_update")
-          (e2e-fail "footer_update" (format "footer: %S" footer)))))))
+          (with-current-buffer dsh-e2e--chat
+            (dsh-e2e--check "conversation-buffer-mode"
+                            (eq major-mode 'dsh-emacs-mode))
+            (dsh-e2e--check "input-area-created"
+                            (markerp dsh-emacs--input-marker))
+            (dsh-e2e--check "modeline-rendered"
+                            (not (string-empty-p
+                                  (dsh-emacs-modeline-format))))
 
-;; --- 测试 8: Footer 切换 ---
-(when (and dsh-emacs--current-buffer
-           (buffer-live-p dsh-emacs--current-buffer))
-  (with-current-buffer dsh-emacs--current-buffer
-    (let ((was-enabled dsh-emacs-footer-enabled))
-      (dsh-emacs-footer-toggle)
-      (if (eq dsh-emacs-footer-enabled (not was-enabled))
-          (e2e-pass "footer_toggle")
-        (e2e-fail "footer_toggle" "未成功切换"))
-      ;; 恢复
-      (when (eq dsh-emacs-footer-enabled was-enabled)
-        (dsh-emacs-footer-toggle)))))
+            (let ((message (format "dsh-emacs e2e transport probe %s"
+                                   (float-time))))
+              (goto-char dsh-emacs--input-marker)
+              (insert message)
+              (dsh-emacs-send-or-stop)
+              (dsh-e2e--check
+               "send-message-confirmed"
+               (dsh-e2e--wait-until
+                (lambda () (null dsh-emacs--pending-user-messages))
+                10)
+               "server did not confirm the optimistic user message")
+              (dsh-e2e--check "send-message-rendered"
+                              (string-match-p (regexp-quote message)
+                                              (buffer-string))))
 
-;; --- 测试 9: 复制转录 ---
-(when (and dsh-emacs--current-buffer
-           (buffer-live-p dsh-emacs--current-buffer))
-  (with-current-buffer dsh-emacs--current-buffer
-    (dsh-emacs-copy-transcript)
-    (if (not (string-empty-p (current-kill 0)))
-        (e2e-pass "copy_transcript")
-      (e2e-fail "copy_transcript" "剪贴板为空"))))
+            (dsh-e2e--rpc
+             "session/cancel"
+             `((request . ((sessionId . ,dsh-e2e--session-id)))))
+            (dsh-e2e--pass "cancel-session")
 
-;; --- 测试 10: 清理（删除测试会话） ---
-(when e2e-session-id
-  (dsh-emacs-delete-session
-   e2e-session-id
-   (lambda (success error)
-     (if success
-         (e2e-pass "delete-session")
-       (e2e-fail "delete-session" (format "错误: %S" error))))))
-(e2e-wait 5)
+            (let ((dsh-emacs-modeline-format-spec
+                   '(:separator " " :segments (tokens))))
+              (dsh-emacs-modeline-set-usage
+               (dsh-emacs-make-usage 1000 500 0 0 0.05))
+              (dsh-e2e--check "modeline-update"
+                              (string-match-p
+                               "1\\.0k" (dsh-emacs-modeline-format))))
 
-;; --- 总结 ---
-(princ "\n===== E2E 测试总结 =====\n")
-(let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-e2e-results))
-      (fail (cl-count-if (lambda (r) (not (cdr r))) dsh-e2e-results)))
-  (princ (format "通过 %d 项，失败 %d 项\n" pass fail))
-  (when (> fail 0)
-    (princ "失败的测试:\n")
-    (dolist (r (nreverse dsh-e2e-results))
-      (unless (cdr r)
-        (princ (format "  - %s: %s\n" (car r) (cdr r)))))))
+            (let ((was-enabled dsh-emacs-modeline-enabled))
+              (dsh-emacs-modeline-toggle)
+              (dsh-e2e--check "modeline-toggle"
+                              (eq dsh-emacs-modeline-enabled
+                                  (not was-enabled)))
+              (unless (eq dsh-emacs-modeline-enabled was-enabled)
+                (dsh-emacs-modeline-toggle)))
+
+            (dsh-emacs-copy-transcript)
+            (dsh-e2e--check "copy-transcript"
+                            (not (string-empty-p (current-kill 0)))))
+
+          (dsh-emacs-list-sessions-display)
+          (dsh-e2e--check
+           "session-list-loaded"
+           (dsh-e2e--wait-until #'dsh-e2e--session-cached-p 10)
+           "created session did not appear in the session cache")
+          (with-current-buffer dsh-emacs-sessions-buffer
+            (dsh-e2e--check "session-list-mode"
+                            (eq major-mode 'dsh-emacs-session-mode))
+            (dsh-e2e--check "session-list-rendered"
+                            (string-match-p "Sessions" (buffer-string)))))
+      (error
+       (dsh-e2e--fail "unexpected-error"
+                      (error-message-string error-data))))
+  (when (buffer-live-p dsh-e2e--chat)
+    (dsh-emacs-events-disconnect dsh-e2e--chat))
+  (when-let* ((list-buffer (get-buffer dsh-emacs-sessions-buffer)))
+    (with-current-buffer list-buffer
+      (dsh-emacs-events-host-disconnect)))
+  (when dsh-e2e--session-id
+    (condition-case error-data
+        (progn
+          (dsh-e2e--rpc
+           "workspace/archiveSession"
+           `((request . ((sessionId . ,dsh-e2e--session-id)))))
+          (dsh-e2e--pass "archive-test-session"))
+      (error
+       (dsh-e2e--fail "archive-test-session"
+                      (error-message-string error-data))))))
+
+(princ "\n===== E2E summary =====\n")
+(let ((passed (cl-count-if #'cadr dsh-e2e--results))
+      (failed (cl-count-if-not #'cadr dsh-e2e--results)))
+  (princ (format "Passed %d, failed %d\n" passed failed))
+  (when (> failed 0)
+    (princ "Failures:\n")
+    (dolist (result (nreverse dsh-e2e--results))
+      (unless (cadr result)
+        (princ (format "  - %s: %s\n" (car result) (nth 2 result)))))
+    (kill-emacs 1)))
+
+;;; dsh-e2e.el ends here
