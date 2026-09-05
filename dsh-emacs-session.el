@@ -95,7 +95,6 @@ Interactively resolve command targets through `dsh-emacs--active-session-id'
     (define-key map "r" #'dsh-emacs-rename-session-at-point)
     (define-key map "d" #'dsh-emacs-archive-session-at-point)
     (define-key map "f" #'dsh-emacs-fork-session-at-point)
-    (define-key map "/" #'dsh-emacs-session-search)
     (define-key map "w" #'dsh-emacs-session-filter-workspace)
     (define-key map "i" #'dsh-emacs-session-show-info)
     (define-key map "W" #'dsh-emacs-create-workspace)
@@ -712,22 +711,6 @@ rows except the currently-open session."
                    (or (dsh-protocol-session-parent-session-id session) "-")
                    (or (dsh-emacs-session--title session) "Untitled")))))
     (message "Ungrouped: %d session(s), dsh web keeps the non-blank ones" shown)))
-
-(defun dsh-emacs-session-search ()
-  "Search sessions by title or ID."
-  (interactive)
-  (let* ((query (read-string "Search: "))
-         (matches (cl-remove-if-not
-                   (lambda (session)
-                     (let ((title (dsh-emacs-session--title session)))
-                       (or (and title (string-match-p query title))
-                           (string-match-p query (or (dsh-protocol-session-session-id session) "")))))
-                   dsh-emacs--sessions)))
-    (if matches
-        (progn
-          (setq dsh-emacs--sessions matches)
-          (dsh-emacs-session--render))
-      (message "No sessions match '%s'" query))))
 
 (provide 'dsh-emacs-session)
 

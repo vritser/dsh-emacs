@@ -129,6 +129,9 @@ minor) and stay undated until the release is cut.
 - **Session-list keys for archive and workspace delete are clearer**: deleting a
   workspace is now `D` (matching the other workspace keys `W`/`R`/`M`, was `u`),
   and archiving a session moved to `d` (was `D`).
+- **The session list no longer has a `/` text search**: narrowing by title/ID
+  duplicated the workspace filter and the existing by-name session switchers,
+  so `/` (and `dsh-emacs-session-search`) were removed.
 - **The external-server launch token is remembered**: a token that successfully
   authenticates an external dsh server is saved into
   `dsh-emacs-server-auth-token`, so the next session reuses it instead of
