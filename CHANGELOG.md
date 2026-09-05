@@ -49,6 +49,15 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Rendered @ references in the transcript are clickable links**: a user
+  message that echoes a completed `@` mention shows it as an accent-colored,
+  underlined link instead of raw text — a session mention
+  (`@[label](dsh-session:…)`) renders as just `@label` (the opaque id never
+  shown), and file/directory mentions (`@path`, `@"path with spaces"`) keep
+  their path.  RET or mouse-1 on the link opens the reference: a session jumps
+  to that session's chat buffer, a file opens it under the session's working
+  directory.  The buffer still carries the raw canonical text, so the wire to
+  the host is unchanged (rationale: postmortem/012).
 - **Browser-session authentication for dsh web (0.1.2-rc.1+)**: recent dsh
   servers return `401` on every RPC and WebSocket stream unless the request
   carries a `dsh-auth-*` browser cookie minted from the per-process launch

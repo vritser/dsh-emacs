@@ -10683,6 +10683,52 @@ candidates as the UI would via `all-completions', not by destructuring."
              '(("@a.ts" "file " "")
                ("@sub/" "directory " ""))))))
 
+;; --- 渲染：完成的 @ 引用 → 彩色可点击链接（session 折叠为 @label）---
+(let ((spans (dsh-emacs-reference--link-spans
+              "see @src/a.ts and @[My Talk](dsh-session:ab1_-2) done")))
+  (dsh-test-assert "link-spans-file-and-session"
+    (equal (mapcar (lambda (s) (list (nth 2 s) (nth 3 s)))
+                   spans)
+           '((file "src/a.ts") (session "ab1_-2"))))
+  (dsh-test-assert "link-spans-not-email"
+    (null (dsh-emacs-reference--link-spans "contact mail@example.com now"))))
+
+(let ((out (dsh-emacs-reference-fontify
+            "see @src/ui/button.tsx then @[My Talk](dsh-session:ab1_-2), mail@example ok")))
+  (dsh-test-assert "fontify-session-collapses-to-label"
+    (string= (substring-no-properties out)
+             "see @src/ui/button.tsx then @My Talk, mail@example ok"))
+  (dsh-test-assert "fontify-spans-carry-session-id"
+    (equal (get-text-property (string-match "@My Talk" out)
+                              'dsh-emacs-reference-ref out)
+           '(session . "ab1_-2"))))
+
+(let ((out (dsh-emacs-reference-fontify "note @\"my dir/a.ts\" here")))
+  (dsh-test-assert "fontify-quoted-file-path-linked"
+    (let ((i (string-match "@\"my dir/a.ts\"" out)))
+      (equal (get-text-property i 'dsh-emacs-reference-ref out)
+             '(file . "my dir/a.ts")))))
+
+;; 会话 mention 的 `@[label' 前缀不当作 file 链接
+(let ((out (dsh-emacs-reference-fontify
+            "@[T](dsh-session:xyz) @[Q](dsh-session:uvw)")))
+  (dsh-test-assert "fontify-two-sessions-and-no-file-prefix"
+    (string= (substring-no-properties out) "@T @Q")))
+
+;; RET/mouse 打开：session 引用跳 `dsh-emacs-open-session'
+(let ((opened nil) (buf (generate-new-buffer " *t-ref-open*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (insert (dsh-emacs-reference-fontify
+                 "@[Sess](dsh-session:target1)"))
+        (goto-char (point-min))
+        (cl-letf (((symbol-function 'dsh-emacs-open-session)
+                   (lambda (id) (setq opened id))))
+          (dsh-emacs-reference-open-at-point))
+        (dsh-test-assert "open-at-point-jumps-to-session"
+          (equal opened "target1")))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
 ;; --- active-token / capf：输入区令牌 → 补全区域与候选 ---
 (let ((buf (generate-new-buffer " *t-ref-capf*")))
   (unwind-protect

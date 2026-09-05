@@ -817,6 +817,156 @@ nil outside the input area or when the token is not an @ reference."
                                             cand status rows)))))))))))))))
 
 ;; ---------------------------------------------------------------------------
+;; @ 引用渲染：transcript / 输入行把完成的 mention 显示成彩色可点击链接
+;; (canonical mention 仍是 buffer/上发的原文，这里只加显示与跳转属性)。
+;; ---------------------------------------------------------------------------
+
+(defvar dsh-emacs-reference--mention-keymap
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'dsh-emacs-reference-open-at-point)
+    (define-key map [return] #'dsh-emacs-reference-open-at-point)
+    (define-key map [follow-link] #'dsh-emacs-reference-open-at-point)
+    (define-key map [mouse-1] #'dsh-emacs-reference-open-at-point)
+    (define-key map [mouse-2] #'dsh-emacs-reference-open-at-point)
+    map)
+  "Keymap on a rendered @ reference span: RET / mouse-1 / mouse-2 open it.
+`[follow-link]' is bound so the `follow-link' text property resolves to this
+command; without it a click would fall back to `mouse-yank-primary' and hit
+the read-only transcript (`insert-for-yank: Text is read-only').")
+
+(defconst dsh-emacs-reference--session-mention-re
+  "@\\[\\(\\(?:\\\\.\\|[^]\\\\]\\)*\\)\\](dsh-session:\\([A-Za-z0-9_-]+\\))"
+  "Regexp matching a completed session mention `@[label](dsh-session:…)'.
+Group 1 is the raw label interior (possibly carrying `\\]' / `\\\\' escapes),
+group 2 the opaque session id.")
+
+(defconst dsh-emacs-reference--file-mention-re
+  "\\(?:^\\|[ \t\r\n\f]\\)\\(@\"[^\"]*\"\\|@[^ \t\r\n\f@]+\\)"
+  "Regexp matching a file reference `@path' or `@\"quoted path\"'.
+The `@' must start the string or follow whitespace (group 1 is the token,
+its left boundary is group 0) so prose like `mail@example' is not linked.")
+
+(defun dsh-emacs-reference--unescape-label (raw)
+  "Unescape a raw session-label interior RAW into its display text.
+Decodes the `\\\\X' escapes the host emits (`\\\\]' → `]', `\\\\\\\\' → `\\')."
+  (replace-regexp-in-string
+   "\\\\\\(.\\)" "\\1" raw t t))
+
+(defun dsh-emacs-reference--link-spans (string)
+  "Reference spans (BEG END KIND VALUE) in STRING, non-overlapping, by start.
+KIND is `session' or `file'; VALUE is the session id or the relative file
+path (quotes/`@' stripped).  A session mention's span covers the whole
+`@[label](dsh-session:…)' text (labels may contain spaces); a file span the
+`@…' token.  File tokens falling inside a session mention (its `@[label'
+prefix) are not matched as files."
+  (let ((spans '())
+        (limit (length string))
+        (sm dsh-emacs-reference--session-mention-re))
+    (let ((pos 0))
+      (while (and (<= pos limit) (string-match sm string pos))
+        (push (list (match-beginning 0) (match-end 0) 'session
+                    (match-string 2 string))
+              spans)
+        (setq pos (match-end 0))))
+    (let ((m dsh-emacs-reference--file-mention-re)
+          (pos 0))
+      (while (and (<= pos limit) (string-match m string pos))
+        (let* ((b (match-beginning 1))
+               (e (match-end 1))
+               (tok (match-string 1 string))
+               (containing
+                (cl-some (lambda (s)
+                           (and (<= (nth 0 s) b) (>= (nth 1 s) e) s))
+                         spans)))
+          (if containing
+              (setq pos (nth 1 containing))
+            (push (list b e 'file
+                        (if (string-prefix-p "@\"" tok)
+                            (substring tok 2 -1)
+                          (substring tok 1)))
+                  spans)
+            (setq pos e)))))
+    (sort spans (lambda (a b) (< (nth 0 a) (nth 0 b))))))
+
+(defun dsh-emacs-reference--propertize-span (text kind value)
+  "Return TEXT propertized as a clickable reference of KIND for VALUE."
+  (let ((str (copy-sequence text)))
+    (add-text-properties
+     0 (length str)
+     (list 'face 'dsh-emacs-reference-face
+           'mouse-face 'highlight
+           'follow-link t
+           'keymap dsh-emacs-reference--mention-keymap
+           'help-echo (if (eq kind 'session)
+                          "RET/mouse-1: open this session"
+                        "RET/mouse-1: open this file")
+           'dsh-emacs-reference-ref (cons kind value))
+     str)
+    str))
+
+(defun dsh-emacs-reference-fontify (string)
+  "Return a copy of STRING with completed @ references made clickable.
+A session mention (`@[label](dsh-session:…)') is rewritten to display just
+`@label' (the opaque id never shown) carrying its id; a file reference
+(`@path' / `@\"quoted path\"') keeps its text.  Both gain
+`dsh-emacs-reference-face', RET/mouse bindings and a
+`dsh-emacs-reference-ref' property that `dsh-emacs-reference-open-at-point'
+reads.  Non-matching text and any pre-existing properties are preserved.
+The returned text is for display only — callers keep the raw canonical text
+in the buffer / on the wire."
+  (let ((out '())
+        (pos 0))
+    (dolist (s (dsh-emacs-reference--link-spans string))
+      (let ((beg (nth 0 s)) (end (nth 1 s))
+            (kind (nth 2 s)) (value (nth 3 s)))
+        (push (substring string pos beg) out)
+        (push (dsh-emacs-reference--propertize-span
+               (if (eq kind 'session)
+                   (concat "@" (dsh-emacs-reference--session-label-at string beg))
+                 (substring string beg end))
+               kind value)
+              out)
+        (setq pos end)))
+    (push (substring string pos) out)
+    (apply #'concat (nreverse out))))
+
+(defun dsh-emacs-reference--session-label-at (string beg)
+  "Label display text of the session mention in STRING starting at BEG."
+  (let ((m dsh-emacs-reference--session-mention-re))
+    (and (string-match m string beg)
+         (= (match-beginning 0) beg)
+         (dsh-emacs-reference--unescape-label (match-string 1 string)))))
+
+(defun dsh-emacs-reference--open-ref (kind value)
+  "Open reference KIND (`session' / `file') with VALUE."
+  (declare-function dsh-emacs-open-session "dsh-emacs.el" (session-id))
+  (declare-function dsh-emacs--chat-cwd "dsh-emacs.el" (session-id))
+  (pcase kind
+    ('session
+     (if (and value (fboundp 'dsh-emacs-open-session))
+         (dsh-emacs-open-session value)
+       (user-error "No session id to open")))
+    ('file
+     (let* ((sid (dsh-emacs--active-session-id))
+            (cwd (and sid (fboundp 'dsh-emacs--chat-cwd)
+                      (dsh-emacs--chat-cwd sid)))
+            (abs (and cwd value (expand-file-name value cwd))))
+       (if (and abs (file-exists-p abs))
+           (find-file abs)
+         (user-error "Reference file not found locally: %s"
+                     (or value "")))))))
+
+(defun dsh-emacs-reference-open-at-point ()
+  "Open the @ reference under point: jump to its session or open its file.
+The reference data rides the `dsh-emacs-reference-ref' text property set by
+`dsh-emacs-reference-fontify'.  RET / mouse-1 on the span call this."
+  (interactive)
+  (let ((ref (get-text-property (point) 'dsh-emacs-reference-ref)))
+    (if (null ref)
+        (user-error "No @ reference here")
+      (dsh-emacs-reference--open-ref (car ref) (cdr ref)))))
+
+;; ---------------------------------------------------------------------------
 ;; M-x 入口
 ;; ---------------------------------------------------------------------------
 

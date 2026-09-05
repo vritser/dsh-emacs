@@ -28,6 +28,10 @@
 (require 'dsh-emacs-tokens)
 (require 'dsh-emacs-markdown)
 
+;; Defined in dsh-emacs-reference.el, loaded by dsh-emacs.el.  Turns completed
+;; @ file/session mentions in a user message into clickable colored links.
+(declare-function dsh-emacs-reference-fontify "dsh-emacs-reference" (string))
+
 ;; Defined in dsh-emacs-modeline.el, which loads via dsh-emacs.el after this
 ;; module.  Called at runtime from turn/end handling and event dispatch.
 (declare-function dsh-emacs--ml-busy-set "dsh-emacs-modeline" (flag))
@@ -1243,7 +1247,8 @@ fill in when `session/attachment' settles (see
          (data (dsh-emacs-render--event-data event))
          (kind (dsh-emacs-render--aget "kind" (dsh-emacs-render--aget "source" data)))
          (content (dsh-emacs-render--aget "content" data))
-         (text (dsh-emacs-render--text-from-content content))
+         (text (dsh-emacs-reference-fontify
+                (dsh-emacs-render--text-from-content content)))
          (images (dsh-emacs-render--image-blocks content))
          (insert-point (dsh-emacs-render--input-insert-point))
          (block-id (dsh-emacs-render--make-block-id event))

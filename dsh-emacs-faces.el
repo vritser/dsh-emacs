@@ -234,6 +234,15 @@
 	"Assistant message body (no background, matches default)."
 	:group 'dsh-emacs-faces)
 
+(defface dsh-emacs-reference-face
+	`((((background light)) :foreground ,dsh-emacs-color-accent :underline t)
+		(((background dark))  :foreground ,dsh-emacs-color-accent-dark :underline t)
+		(t :underline t))
+	"Clickable @ reference (file / session mention): shows the mention text
+underlined in the accent color.  RET or mouse-1 opens it (see
+`dsh-emacs-reference-open-at-point')."
+	:group 'dsh-emacs-faces)
+
 ;;; ---------------------------------------------------------------------------
 ;;; 工具卡（pending / success / error 三态）
 ;;; ---------------------------------------------------------------------------

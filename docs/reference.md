@@ -119,6 +119,11 @@ repeats them — and target compaction folds it like any other history. Up to
 three references per message, each independently size-capped, enforced by the
 host.
 
-> Note: the transcript renders the canonical `@[label](dsh-session:…)` text
-> as-is (inline code styling via the markdown layer); the compact "recall
-> context" row the web shows is part of web's chat rendering, not of the wire.
+> Note: on the transcript, a *user* message that echoes a completed `@`
+> reference renders it as a clickable link instead of the raw text — a session
+> mention shows just its `@label` (the opaque id is never displayed), a file or
+> directory mention keeps its `@path`. RET or mouse-1 opens the reference: a
+> session jumps to that session's chat buffer, a file opens under the session's
+> working directory (`find-file` of `cwd + path`). The buffer still holds the
+> canonical text, so the wire is unchanged. Assistant bodies render via the
+> markdown layer and are not linkified.
