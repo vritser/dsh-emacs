@@ -10575,6 +10575,33 @@ candidates as the UI would via `all-completions', not by destructuring."
           (dsh-emacs-reference--require-cache "sess" "F2")
           (= (length rpc-requests) stale-len))))))
 
+;; --- 完成引用后（fetch 状态已 reset）再输 @：不再吃窄化缓存，重新全量拉取。
+;; 否则下一次 @ 只会看到上一次查询留下的单个候选。
+(let ((rpc-requests nil))
+  (with-temp-buffer
+    (dsh-test-reference-reset)
+    ;; 模拟"刚完成一个引用"：query/requested 已被 reset 清空，但缓存还留着
+    ;; 上次窄化查询的结果（就一个刚选中的候选）。
+    (setq-local dsh-emacs--reference-query nil
+                dsh-emacs--reference-requested nil
+                dsh-emacs--reference-candidates
+                (list (cons "@just-picked.ts"
+                            '(:kind file :path "just-picked.ts"))))
+    (cl-letf (((symbol-function 'dsh-emacs--rpc-request)
+               (lambda (method _params)
+                 (push method rpc-requests)
+                 (cond
+                  ((string= method "fileReferences/list")
+                   (cons t [((path . "a.ts") (kind . "file"))
+                            ((path . "b.ts") (kind . "file"))]))
+                  ((string= method "sessionReferenceResolver/candidates")
+                   (cons t []))
+                  (t (cons nil nil))))))
+      (dsh-test-assert "post-completion-reopen-refetches-full-list"
+        (dsh-emacs-reference--require-cache "sess" "")
+        (equal (mapcar #'car dsh-emacs--reference-candidates)
+               '("@a.ts" "@b.ts"))))))
+
 ;; --- require-cache：in-flight 期间陈旧缓存照常应答（弹层不消失） ---
 (let ((rpc-requests nil))
   (with-temp-buffer
@@ -10784,6 +10811,24 @@ candidates as the UI would via `all-completions', not by destructuring."
     (dsh-test-assert "composer-file-chip-is-atomic"
       (get-text-property (- e 9) 'dsh-emacs-reference-chip))))
 
+;; 完成的 file 引用是 chip：光标在它末尾时不应被当作新的 active @ token
+;; （否则数据 watcher 会按该路径重拉、把候选缓存重新窄化 —— 下一次 @ 只剩
+;; 上一个的候选）。光标移开再空格 + @ 才是新 token。
+(let ((buf (generate-new-buffer " *t-ref-active-chip*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (setq-local dsh-emacs--input-marker (point-min-marker))
+        (insert "@src/a.ts")
+        (dsh-emacs-reference--composer-file-chip
+         (- (point) (length "@src/a.ts")) (point) "src/a.ts")
+        (dsh-test-assert "active-token-ignores-completed-file-chip"
+          (null (dsh-emacs-reference--active-token)))
+        (insert " @x")
+        (dsh-test-assert "active-token-after-space-and-at-is-new"
+          (equal (dsh-emacs-reference--active-token)
+                 '("@x" "x" nil))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
 ;; --- active-token / capf：输入区令牌 → 补全区域与候选 ---
 (let ((buf (generate-new-buffer " *t-ref-capf*")))
   (unwind-protect
@@ -10864,7 +10909,11 @@ candidates as the UI would via `all-completions', not by destructuring."
                   (funcall exit "@My Talk" 'finished)
                   (string= (buffer-substring-no-properties
                             (point-min) (point-max))
-                           "hi @[My Talk](dsh-session:cyJpZCI6InMxIn0)")))))))
+                           "hi @[My Talk](dsh-session:cyJpZCI6InMxIn0)")))
+              ;; 完成即消费该 @ token：清掉窄化的 fetch 状态，下一次 @ 恢复全量
+              (dsh-test-assert "capf-exit-resets-fetch-state"
+                (and (null dsh-emacs--reference-query)
+                     (null dsh-emacs--reference-requested)))))))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
 ;; --- 目录候选：选中后立即请求下一层，Corfu 可继续展开 ---

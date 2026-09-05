@@ -479,6 +479,15 @@ QUOTED), see `dsh-emacs-reference--at-token'."
            (not (string-match-p
                  "\\`@\\[\\(?:\\\\.\\|[^]\\\\]\\)*\\](dsh-session:[A-Za-z0-9_-]+)\\'"
                  (nth 0 token)))
+           ;; 完成的 file 引用是 buffer 里的原子 chip：它没有 session 那种
+           ;; canonical 形态可排除，但其文本 `@path' 仍会被 @-token grammar 认成
+           ;; active token。若 token 起点落在 chip 上说明是"已完成引用"，不是新
+           ;; 在敲的 token —— 否则光标回到上个引用旁就会触发 watcher 按该引用
+           ;; 的路径重新拉取、把候选缓存再次窄化（下一次 @ 只剩上个的候选）。
+           (not (and (>= (point) (length (nth 0 token)))
+                     (get-text-property
+                      (- (point) (length (nth 0 token)))
+                      'dsh-emacs-reference-chip)))
            token))))
 
 (defun dsh-emacs-reference--auto-complete ()
@@ -680,6 +689,19 @@ for tests."
     cands (dsh-emacs-reference--session-rows))
    cands))
 
+(defun dsh-emacs-reference--reset-fetch ()
+  "Forget the last @ reference fetch so the next trigger starts fresh.
+Called after a completed (non-drilling) reference is inserted.  Without it a
+later bare `@' answers from the previous host query's cache — which typing
+narrowed (often to the single just-picked item) — and corfu never widens that
+already-open popup (it only re-opens for directory drills), so the next `@'
+looks like it lost all but the previous candidate until the popup is
+dismissed and retriggered."
+  (setq dsh-emacs--reference-requested nil
+        dsh-emacs--reference-query nil
+        dsh-emacs--reference-inflight nil
+        dsh-emacs--reference-pop-token nil))
+
 (defun dsh-emacs-reference--exit (cand _status rows)
   "Finish a picked @ candidate CAND in the composer.
 The completion UI already inserted CAND's row text; ROWS maps session rows to
@@ -709,11 +731,15 @@ wire text always carries the canonical reference.  STATUS is ignored."
             (delete-region start (point))
             (insert mention)
             ;; Session mention -> atomic chip (canonical kept, display @label).
-            (dsh-emacs-reference--chipify (- (point) (length mention))))
-        ;; File pick: keep its text, style it as an editable composer link.
+            (dsh-emacs-reference--chipify (- (point) (length mention)))
+            ;; This mention consumed the @ token; forget the narrowed fetch so
+            ;; the next `@' re-broadens to the full list.
+            (dsh-emacs-reference--reset-fetch))
+        ;; File pick: keep its text, style it as an atomic composer chip.
         (when (eq (plist-get props :kind) 'file)
           (dsh-emacs-reference--composer-file-chip
-           start (point) (plist-get props :path)))))))
+           start (point) (plist-get props :path))
+          (dsh-emacs-reference--reset-fetch))))))
 
 (defun dsh-emacs-reference-completion-at-point ()
   "`completion-at-point-functions' entry for @ file/session references.
@@ -1158,11 +1184,14 @@ the input area first."
           (if (dsh-emacs-reference--chipify ins-start)
               ;; session chip made
               nil
-            ;; file/directory mention: editable composer link (not a chip)
+            ;; file/directory mention: editable composer chip (not collapsed)
             (let ((path (dsh-emacs-reference--mention-relpath mention)))
               (and path
                    (dsh-emacs-reference--composer-file-chip
-                    ins-start (point) path)))))))))
+                    ins-start (point) path))))
+          ;; This pick consumed the @ token: forget the narrowed fetch so the
+          ;; next `@' opens the full list again.
+          (dsh-emacs-reference--reset-fetch))))))
 
 (defun dsh-emacs-reference ()
   "Insert an @ file or session reference into the chat input, at point.

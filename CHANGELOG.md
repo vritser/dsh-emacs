@@ -120,6 +120,17 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **The `@` menu reopens with the full list after a completed reference**:
+  completing an `@` pick left the candidate cache pinned to the previous host
+  query (which typing had narrowed, often to the single just-picked item), so
+  the next bare `@` answered from that stale cache and the already-open corfu
+  popup never widened it — you only got everyone back after deleting and
+  retyping `@`.  A completed *file* reference was the worst case: its `@path`
+  still parsed as an active `@` token, so the data-fetch watcher re-fetched
+  that path and re-narrowed the cache the moment your cursor sat next to it.
+  Inserting a completed reference now clears the fetch state, and a completed
+  reference rendered as a chip is no longer treated as a fresh active token —
+  so the next `@` re-fetches the full list.
 - **`@` completion rows keep their type icon while a background fetch is
   refreshing the list**: the icon column reverse-looked-up each shown row in
   the mutable candidate cache, so once a fetch for a narrower query replaced
