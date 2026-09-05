@@ -2918,7 +2918,25 @@ the filter as \"error in process filter: Quit\"."
                           (dsh-protocol-model-directory-current dir)))
              (current-model (and current
                                  (dsh-protocol-model-selection-model current)))
+             ;; Same-model-id-across-providers disambiguation in the prompt:
+             ;; prefix the current model with its owning provider id, matching
+             ;; the mode-line/tooltip convention (the provider is only shown
+             ;; when the session row knows it).
+             (current-provider (and current
+                                    (dsh-protocol-model-selection-provider current)))
              (candidates (dsh-emacs--model-candidates value))
+             ;; The prompt's provider must match the picker's group headers,
+             ;; which show the provider DISPLAY name, not its id.  Resolve the
+             ;; current provider id to the display name from the catalog (the
+             ;; first row of that provider carries it); a current provider
+             ;; missing from the catalog falls back to its id.
+             (current-provider-label
+              (or (and current-provider
+                       (cl-some (lambda (c)
+                                  (and (equal (nth 1 c) current-provider)
+                                       (nth 2 c)))
+                                candidates))
+                  current-provider))
              ;; 现代 vertico（≥2.0）原生支持 group-function 元数据：每次
              ;; 输入都重算分组并重绘粘性组头（无需 vertico-group.el/group-mode）
              ;; → 走元数据分组路径；否则用候选头行 + 重复行后缀兜底
@@ -2943,12 +2961,18 @@ the filter as \"error in process filter: Quit\"."
                          ;; 不传 DEF：vertico 会把默认项搬到列表最前，当前模型就会
                          ;; 脱离自己的分组、永远占首行。空 RET 由下方 "" 分支处理
                          ;; （保持当前模型），乱输入由 assoc 校验兜底。
-                         (completing-read
-                          (format "Select model%s: "
-                                  (if current-model
-                                      (format " (current %s)" current-model)
-                                    ""))
-                          collection nil nil nil nil nil)))
+                          (completing-read
+                           (format "Select model%s: "
+                                   (if current-model
+                                       (format " (current %s)"
+                                               (if (and current-provider-label
+                                                        (not (string-empty-p
+                                                              current-provider-label)))
+                                                   (concat current-provider-label "/"
+                                                           current-model)
+                                                 current-model))
+                                     ""))
+                           collection nil nil nil nil nil)))
              (empty (not (and picked (stringp picked)
                               (not (string-empty-p picked))))))
         (cond

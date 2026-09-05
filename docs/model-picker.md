@@ -7,9 +7,14 @@ inside the row key, so it stays searchable while filtering); duplicates of the
 same id across providers keep their provider visible in the suffix.
 
 - **Reference model**: the catalog's `default` selection (host default) is
-  folded into the picker's "current model" prompt; the session's actual
+  folded into the picker's "current" reference; the session's actual
   last-used model rides the `modelSelection` projection (list rows / follow &
   control projection frames) and is what the mode-line model segment shows.
+  The prompt shows the running selection as **`provider/model`**, where
+  `provider` is the same display name used for the group headers (so the
+  prompt and the list agree), e.g.
+  `Select model (current DeepSeek/deepseek-v4-flash-0731):`; empty RET keeps
+  it.
 - **Sticky provider groups**: the table carries a `group-function` in its
   completion metadata. Modern vertico (and Emacs 27+ `*Completions*` buffers)
   draw one sticky header per provider, recomputed on every filter input, so

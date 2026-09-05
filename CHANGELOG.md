@@ -121,6 +121,12 @@ minor) and stay undated until the release is cut.
   `dsh-emacs-reference-*` options are covered in
   [docs/reference.md](docs/reference.md) (rationale: postmortem/010).
 
+### Changed
+
+- **Model-picker prompt names the current provider too**: `C-c C-m` now prompts
+  `Select model (current <provider>/<model>):` instead of only the model, so a
+  model id that several providers offer is unambiguous at a glance.
+
 ### Fixed
 
 - **The mode-line shows the session's agent preset again**: the dsh 0.1.2 wire
