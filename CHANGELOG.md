@@ -165,14 +165,19 @@ minor) and stay undated until the release is cut.
   referencing message with its adjacent recall event, re-links the readable
   `@label` as a real session chip (real id, still file-linking plain `@file`
   mentions), and RET/mouse jumps to that session.
-- **C-k clears the whole composer input line**: `C-k` (`kill-line`) in the
-  chat input now clears the entire input (prompt onward) in one press, no
-  matter where the cursor sits — previously it did Emacs' forward line-kill,
-  so with only a chip (or a chip at the end) it deleted just the trailing chip
-  (or, at the very end, the input area's structural newline, dropping the
-  cursor below the input line where it could not be recovered). Clearing the
-  input never touches that structural newline and leaves the cursor on the
-  input line.
+- **`C-k` on a composer `@` chip removes the whole chip**: the chip editing
+  guard used to hop the cursor to the chip's end before any edit, so a `C-k`
+  that started on a chip killed only what followed it and the chip could never
+  be deleted by `C-k`.  A `C-k` starting on a chip now pulls the cursor back to
+  the chip's start and removes the whole chip (plus anything after it) as one
+  atomic unit, matching the backspace behaviour.
+- **`C-k` in the chat input keeps standard `kill-line` semantics**: `C-k`
+  kills only from the cursor to the end of the input line, never the whole
+  input ahead of the cursor and never the input area's structural separator
+  newline.  (An earlier iteration cleared the whole input on every `C-k`,
+  which was surprising; the structural-newline protection is kept, so `C-k`
+  with the cursor at the very end is a no-op rather than dropping the cursor
+  below the input line.)
 - **A forward word/character delete at the input's end no longer drops the
   cursor below the input line**: `M-d`/`kill-word` (and region kills, which
   route through `kill-region`) or `C-d`/`delete-forward-char` with the cursor

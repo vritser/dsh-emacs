@@ -93,13 +93,13 @@ mention as an atomic chip). In the composer the completed session mention
 renders as an **atomic chip**: the buffer keeps the short `@label` text you
 picked, with the canonical `@[label](dsh-session:…)` text stored in a text
 property, and the whole short span is treated as one unit for editing
-(backspace removes it all; typing on it hops the cursor past it rather than
-splitting the mention) and RET/mouse-1 jumps to that session. Sending (and the
+(backspace removes it all; `C-k` on the chip removes it too; typing on it hops
+the cursor past it rather than splitting the mention) and RET/mouse-1 jumps to that session. Sending (and the
 history copy) expands the short label back to the canonical mention, so the
 wire is unchanged — no `display` folding hides a long text behind the label,
 the buffer text is exactly what you see. Completed file picks are equally
 atomic chips that keep their own `@path` (already the wire text): a backspace
-removes the whole mention and RET/mouse-1 opens the file. A mid-drill
+(or `C-k` on it) removes the whole mention and RET/mouse-1 opens the file. A mid-drill
 directory token (`@dir/`) is left plain so typing can descend further.
 
 ## Caching (stale-while-revalidate)

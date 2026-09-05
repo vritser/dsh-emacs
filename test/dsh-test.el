@@ -313,11 +313,13 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
              "chat-buffer-model-sync-ignores-foreign-session"))))
     (setq dsh-emacs--sessions old-sessions)
     (when (buffer-live-p buf) (kill-buffer buf))))
-;; --- 回归: mode-line preset 段读会话的 agentPreset 投影 ---
-;; dsh 0.1.2 把 agentPreset 从 session 行顶层字段改为投影
-;; (projections.values.agentPreset)。协议曾只读顶层 → 真实服务器行没有该字段,
-;; preset 段永远不显示; 现在必须从投影读取(同时保留 session/create 乐观占位行的
-;; 顶层回退)。
+;; --- Regression: the mode-line preset segment reads the session's agentPreset
+;; projection ---
+;; dsh 0.1.2 moved agentPreset from a top-level session-row field to a
+;; projection (projections.values.agentPreset).  The protocol used to read only
+;; the top-level field, so a real server row yielded no preset and the preset
+;; segment never appeared; it must now be read from the projection (keeping the
+;; top-level field as the optimistic session/create fallback).
 (let* ((old-sessions dsh-emacs--sessions)
        (buf (get-buffer-create " *t5f3-chat*"))
        (item (dsh-protocol-session--from-alist
@@ -334,7 +336,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (dsh-test-pass "link-session-preset-reads-agentpreset-projection"))))
     (setq dsh-emacs--sessions old-sessions)
     (when (buffer-live-p buf) (kill-buffer buf))))
-;; 协议层: 投影与乐观占位(顶层)两条来源都解析为 agent-preset
+;; Protocol layer: both sources (the projection and the optimistic top-level
+;; cache row) parse into agent-preset.
 (let ((proj (dsh-protocol-session--from-alist
              '((sessionId . "s1")
                (projections . ((values . ((agentPreset . "minimal"))))))))
@@ -343,9 +346,11 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
   (when (and (equal "minimal" (dsh-protocol-session-agent-preset proj))
              (equal "standard" (dsh-protocol-session-agent-preset top)))
     (dsh-test-pass "session-agent-preset-projection-and-top-level")))
-;; --- 测试: 缓存刷新把 agentPreset 投影同步进 mode-line preset（与 model 同口径）---
-;; `dsh-emacs--chat-buffers-sync-all' 现按 session.list 刷新重新喂 preset 段，
-;; 与 model/ctx 同一套缓冲同步——已打开的会话不再只在 open 时取一次 preset。
+;; --- Test: a cache refresh syncs the agentPreset projection into the mode-line
+;; preset (the same cadence as model) ---
+;; `dsh-emacs--chat-buffers-sync-all' now re-feeds the preset segment on a
+;; session.list refresh through the same per-buffer sync as model/ctx, so an
+;; already-open session no longer captures its preset only once at open.
 (let* ((old-sessions dsh-emacs--sessions)
        (buf (get-buffer-create " *t5f4-chat*"))
        (item (dsh-protocol-session--from-alist
@@ -363,7 +368,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (dsh-test-pass "chat-buffer-preset-sync-lands-from-projection"))))
     (setq dsh-emacs--sessions old-sessions)
     (when (buffer-live-p buf) (kill-buffer buf))))
-;; 会话不匹配（同步目标行属于别的会话）不得落入该缓冲（防串台）
+;; The synced session does not match this buffer's session -> the preset must
+;; not land in it (guard against cross-session leakage).
 (let* ((old-sessions dsh-emacs--sessions)
        (buf (get-buffer-create " *t5f5-chat*"))
        (item (dsh-protocol-session--from-alist
@@ -11059,44 +11065,86 @@ candidates as the UI would via `all-completions', not by destructuring."
         (and (null (get-text-property p 'face))
              (null (get-text-property p 'dsh-emacs-reference-chip)))))))
 
-;; --- C-k (kill-line) 在输入区 = 清空整行输入：删内容、绝不删结构性换行/坠光标
+;; --- C-k on a chip deletes the whole chip atomically (not just its tail) ---
+;; Regression: the chip guard used to hop every edit that started on a chip
+;; character to the chip's end, so C-k starting on the chip's leading edge or
+;; interior only killed what followed it and the chip itself could never be
+;; deleted.  Now kill-line on a chip pulls the cursor back to the chip's start
+;; so C-k removes the whole chip as one atomic unit.
 (let ((canon "@[My Talk](dsh-session:ab12_CD)"))
-  (dsh-emacs--composer-kill-line-guard-install)
+  (with-temp-buffer
+    (setq-local dsh-emacs--input-marker (point-min-marker))
+    (insert "@My Talk tail")
+    (dsh-emacs-reference--session-chip (point-min) (+ (point-min) 8) canon)
+    ;; cursor on the chip's leading edge -> C-k deletes the whole chip + tail
+    (goto-char (point-min))
+    (let ((this-command 'kill-line))
+      (dsh-emacs-reference--chip-guard-before))
+    (kill-line)
+    (dsh-test-assert "kill-line-on-chip-removes-whole-chip"
+      (string-empty-p
+       (buffer-substring-no-properties (point-min) (point-max))))
+    ;; cursor on plain text AFTER the chip -> only the tail is killed, chip kept
+    (insert "@My Talk tail")
+    (dsh-emacs-reference--session-chip (point-min) (+ (point-min) 8) canon)
+    (goto-char (+ (point-min) 9))
+    (let ((this-command 'kill-line))
+      (dsh-emacs-reference--chip-guard-before))
+    (kill-line)
+    (dsh-test-assert "kill-line-after-chip-keeps-chip"
+      (string= (buffer-substring-no-properties (point-min) (point-max))
+               "@My Talk "))))
+
+;; --- C-k (kill-line) in the input keeps standard semantics: only deletes
+;; after point, never the structural newline ---
+;; Regression: C-k was once made to clear the whole input regardless of point,
+;; which is not Emacs semantics.  Now C-k only deletes from point to the end of
+;; the input; with the cursor at the end there is nothing to delete (and the
+;; structural newline / cursor stranding are not touched) — the separator is
+;; held by the composer `kill-region' boundary guard (kill-line routes through
+;; kill-region; see `dsh-emacs--composer-delete-guard-install').
+(dsh-emacs--composer-delete-guard-install)
+(let ((canon "@[My Talk](dsh-session:ab12_CD)"))
   (with-temp-buffer
     (setq-local dsh-emacs--input-marker (point-min-marker))
     (setq-local dsh-emacs--modeline-overlay nil)
-    ;; 只有一个 chip、光标在它尾端（选中后静止位）：C-k 清空整行输入
+    ;; Cursor at the input end: nothing to delete, so input and chip stay and
+    ;; the separator newline survives
     (insert "@My Talk")
     (dsh-emacs-reference--session-chip (point-min) (point) canon)
-    (insert "\n")                   ; 结构性分隔换行（mode-line separator）
+    (insert "\n")                   ; structural separator newline (mode-line)
     (goto-char (1- (point-max)))
     (kill-line)
-    (dsh-test-assert "composer-kill-line-clears-sole-chip"
+    (dsh-test-assert "kill-line-at-input-end-deletes-nothing"
       (and (string= (buffer-substring-no-properties (point-min) (point-max))
-                    "\n")          ; 结构性换行保留、chip 删除
-           (null (get-text-property (point-min) 'dsh-emacs-reference-chip))
-           (= (point) (point-min)))) ; 光标回输入区首，不坠到 input line 下
-    ;; 光标在输入中段：C-k 删除整行内容（不止一个 chip / 不止前方文本）
+                    "@My Talk\n")
+           (get-text-property (point-min) 'dsh-emacs-reference-chip)))
+    ;; Cursor mid-input: C-k deletes only after point ("ay @My Talk"), keeping
+    ;; the "s" before the cursor
     (erase-buffer)
     (insert "say ")
     (let ((chip-start (point)))
       (insert "@My Talk")
       (dsh-emacs-reference--session-chip chip-start (point) canon))
     (insert "\n")
-    (goto-char (1+ (point-min)))    ; 光标在 "say " 内部
+    (goto-char (1+ (point-min)))    ; cursor inside "say " (after 's')
     (kill-line)
-    (dsh-test-assert "composer-kill-line-clears-whole-input"
+    (dsh-test-assert "kill-line-at-input-middle-keeps-point-prefix"
       (and (string= (buffer-substring-no-properties (point-min) (point-max))
-                    "\n")
-           (= (point) (point-min))))))
+                    "s\n")
+           (eq (char-before (point-max)) ?\n)))))
 
-;; --- M-d (kill-word) / C-d 在输入区末尾不得吃掉结构性分隔换行 ---
-;; 根因：输入行末的结构性换行（modeline separator）是可删文本，用户在输入末尾
-;; 做 forward `kill-word' / `C-d' 时把它删掉 → input-end 回退到 point-max，幻影行
-;; 成为"可编辑末端"，below-clamp 失效，光标坠到 input line 之下无法恢复。
-;; `dsh-emacs--composer-delete-guard-install' 把前向删除夹在输入边界上（kill-region
-;; 裁剪 / delete-forward-char 封顶），删除命令在此边界即停，换行永不被删。
-;; 不变量：输入末尾的 forward 词/字删除绝不删除分隔换行，光标 lock 回输入行。
+;; --- M-d (kill-word) / C-d at the input end must not eat the structural
+;; separator newline ---
+;; Root cause: the structural newline at the input's end is deletable text; a
+;; forward `kill-word' / `C-d' at the end removed it, input-end fell back to
+;; point-max, the phantom line became the "editable end", the below-clamp
+;; stopped working and the cursor was stranded below the input line.
+;; `dsh-emacs--composer-delete-guard-install' clips forward deletes at the
+;; input boundary (kill-region clip / delete-forward-char cap), so no delete
+;; command crosses the newline.
+;; Invariant: a forward word/char delete at the input end never removes the
+;; separator newline and the cursor locks back onto the input line.
 (with-temp-buffer
   (dsh-emacs-mode)
   (dsh-emacs-modeline-setup)

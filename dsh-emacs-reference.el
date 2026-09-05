@@ -1147,13 +1147,21 @@ character also returns it, so backspace there can delete the whole chip."
 If point rests on a chip character and THIS-COMMAND would edit, hop to the
 chip's end first so the edit lands after it and the wire text stays a valid
 mention.  Deleting at a chip boundary removes the whole chip (handled by
-`dsh-emacs-reference--chip-delete-guard')."
+`dsh-emacs-reference--chip-delete-guard').
+
+A forward `kill-line' (C-k) that starts on a chip is different: it kills to
+the end of the input, which normally covers the whole chip, so hopping to the
+chip's end would leave the chip behind and C-k would appear unable to delete
+it.  Instead point is pulled back to the chip's START, making C-k remove the
+whole chip as one atomic unit (plus any trailing text) — never a fragment."
   (let ((pt (point)))
     (when (and (dsh-emacs-reference--editing-command-p this-command)
                (get-text-property pt 'dsh-emacs-reference-chip))
       (let ((chip (dsh-emacs-reference--chip-region pt)))
         (when (and chip (< pt (cdr chip)))
-          (goto-char (cdr chip)))))))
+          (goto-char (if (eq this-command 'kill-line)
+                         (car chip)
+                       (cdr chip))))))))
 
 (defun dsh-emacs-reference--delete-chip-at-boundary ()
   "Delete the composer chip at whose boundary point sits; return non-nil.

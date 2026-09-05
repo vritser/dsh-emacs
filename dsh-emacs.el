@@ -1188,32 +1188,6 @@ When the input line is not visible because the window was scrolled up to\nread h
           (goto-char input-pos)
           (recenter -1))))))
 
-(defun dsh-emacs--composer-kill-line (orig &rest args)
-  "`kill-line' advice: C-k clears the whole composer input line.
-The chat input is a single logical line ended by a structural newline that the
-mode-line separator owns.  While point is inside the editable input, C-k
-clears the whole input (prompt onward) instead of Emacs' forward line-kill,
-which at the trailing end would delete that structural newline and strand the
-cursor below the input line.  Outside the editable input ORIG runs unchanged."
-  (if (and dsh-emacs--input-marker
-           (markerp dsh-emacs--input-marker)
-           (eq (marker-buffer dsh-emacs--input-marker) (current-buffer))
-           (>= (point) (marker-position dsh-emacs--input-marker))
-           (<= (point) (dsh-emacs--input-end)))
-      (progn
-        (dsh-emacs--clear-input)
-        nil)
-    (apply orig args)))
-
-(defvar dsh-emacs--composer-kill-line-guard-installed nil
-  "Non-nil once the composer `kill-line' advice has been added once.")
-
-(defun dsh-emacs--composer-kill-line-guard-install ()
-  "Install the C-k-clears-composer-input advice (global, idempotent)."
-  (unless dsh-emacs--composer-kill-line-guard-installed
-    (setq dsh-emacs--composer-kill-line-guard-installed t)
-    (advice-add 'kill-line :around #'dsh-emacs--composer-kill-line)))
-
 (defun dsh-emacs--composer-boundary ()
   "Return the editable input's end for the current chat buffer, or nil.
 A valid live input marker in the current buffer marks a composer context; the
@@ -1228,13 +1202,15 @@ removes that newline (see `dsh-emacs--composer-kill-region' and
 
 (defun dsh-emacs--composer-kill-region (orig start end &rest args)
   "`kill-region' advice: never kill across the composer's structural newline.
-A forward kill that reaches the input's end — a trailing `kill-word'/`M-d', a
-kill-sentence, or a selected region extended past the input — would remove the
-structural newline the mode-line separator owns and strand the cursor below
-the input line (the same breakage `dsh-emacs--composer-kill-line' guards C-k
-against).  The kill region is clipped at the input boundary: a region wholly
-at/after it deletes nothing, one crossing it keeps only the editable part.
-Regions fully inside the input and kills in non-chat buffers run unchanged."
+A forward kill that reaches the input's end — `C-k'/`kill-line', a trailing
+`kill-word'/`M-d', a kill-sentence, or a selected region extended past the
+input — would remove the structural newline the mode-line separator owns and
+strand the cursor below the input line.  The kill region is clipped at the
+input boundary: a region wholly at/after it deletes nothing, one crossing it
+keeps only the editable part.  Regions fully inside the input and kills in
+non-chat buffers run unchanged.  `kill-line' keeps its normal Emacs semantics
+here (kills from point to the end of the input, never the whole input or the
+separator)."
   (if-let* ((boundary (dsh-emacs--composer-boundary)))
       (cond ((<= end boundary) (apply orig start end args))
             ((< start boundary) (apply orig start boundary args))
@@ -1259,10 +1235,11 @@ line.  Deletions are capped at the input boundary."
 
 (defun dsh-emacs--composer-delete-guard-install ()
   "Install the composer forward-delete boundary guards (global, idempotent).
-Advises the deletion commands (`kill-region', which `kill-word'/region kills
-route through, and `delete-forward-char'/`C-d') rather than the `delete-region'
-primitive, because a native-compiled caller can bypass advice on the primitive
-while the interactive command symbols are always reached through advice."
+Advises the deletion commands (`kill-region', which `C-k'/`kill-line' and
+`kill-word'/region kills route through, and `delete-forward-char'/`C-d')
+rather than the `delete-region' primitive, because a native-compiled caller
+can bypass advice on the primitive while the interactive command symbols are
+always reached through advice."
   (unless dsh-emacs--composer-delete-guard-installed
     (setq dsh-emacs--composer-delete-guard-installed t)
     (advice-add 'kill-region :around #'dsh-emacs--composer-kill-region)
@@ -1689,11 +1666,12 @@ preset, context snapshot, title and workspace in one round trip."
                                             #'dsh-protocol-session--from-alist
                                             (dsh-emacs--sequence-list
                                              (cdr (assq 'items value))))))
-                                ;; 新会话首次打开时缓存里没有该会话：顺带
-                                ;; 更新整个缓存，让缓冲名（`dsh-<标题>'）
-                                ;; 与工作区（default-directory）也一并取得；
-                                ;; `dsh-emacs--chat-buffers-sync-all' 现在也
-                                ;; 把 preset 一并喂给已打开的聊天缓冲。
+                                ;; A brand-new session on first open is missing
+                                ;; from the cache: refresh the whole cache so
+                                ;; the buffer name (`dsh-<title>') and the
+                                ;; workspace (default-directory) come along
+                                ;; too; `dsh-emacs--chat-buffers-sync-all' now
+                                ;; also feeds the preset to open chat buffers.
                                 (setq dsh-emacs--sessions items)
                                 (dsh-emacs--chat-buffers-sync-all)))))))
 
@@ -2000,9 +1978,10 @@ vertico, etc.)."
   (add-hook 'pre-command-hook #'dsh-emacs--route-typing-to-input nil t)
   ;; 输入时立即滚动到输入区
   (add-hook 'post-command-hook #'dsh-emacs--reveal-input-when-typing nil t)
-  ;; C-k 在输入区 = 清空整行输入（不删结构性换行、不坠到 input line 下）
-  (dsh-emacs--composer-kill-line-guard-install)
-  ;; 前向删除（M-d/kill-region、C-d）不得越过输入区末尾的结构性换行
+  ;; Forward deletes (`C-k'/kill-line, `M-d'/kill-word, kill-region, `C-d')
+  ;; must never cross the input area's trailing structural newline; `C-k'
+  ;; keeps standard semantics (only deletes after point) and the guard holds
+  ;; the separator line in place.
   (dsh-emacs--composer-delete-guard-install)
   (setq dsh-emacs--tool-calls (make-hash-table :test 'equal))
   (setq dsh-emacs--activity-groups (make-hash-table :test 'equal))
