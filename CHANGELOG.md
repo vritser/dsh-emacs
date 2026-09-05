@@ -123,6 +123,17 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **A server-returned `@session` mention in the transcript links again**: dsh
+  persists a user message that references another session with its canonical
+  `@[label](dsh-session:…)` already collapsed to the readable `@label` (id
+  stripped), and delivers the real `sessionId`/`label` in the immediately
+  following `session-reference` recall context.  When that history was
+  re-rendered (reopen / follow reseed), the readable `@label` fell through to
+  the file-link matcher and had no session id, so the label rendered wrong and
+  RET/mouse could not jump to the session.  The reseed renderer now pairs each
+  referencing message with its adjacent recall event, re-links the readable
+  `@label` as a real session chip (real id, still file-linking plain `@file`
+  mentions), and RET/mouse jumps to that session.
 - **C-k clears the whole composer input line**: `C-k` (`kill-line`) in the
   chat input now clears the entire input (prompt onward) in one press, no
   matter where the cursor sits — previously it did Emacs' forward line-kill,

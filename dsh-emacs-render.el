@@ -30,7 +30,8 @@
 
 ;; Defined in dsh-emacs-reference.el, loaded by dsh-emacs.el.  Turns completed
 ;; @ file/session mentions in a user message into clickable colored links.
-(declare-function dsh-emacs-reference-fontify "dsh-emacs-reference" (string))
+(declare-function dsh-emacs-reference-fontify "dsh-emacs-reference"
+                  (string &optional references))
 
 ;; Defined in dsh-emacs-modeline.el, which loads via dsh-emacs.el after this
 ;; module.  Called at runtime from turn/end handling and event dispatch.
@@ -1235,20 +1236,25 @@ already in the event); an attachment ref is fetched via
 ;;; 渲染器：用户消息
 ;;; ---------------------------------------------------------------------------
 
-(defun dsh-emacs-render-user-message (event)
+(defun dsh-emacs-render-user-message (event &optional references)
   "Render a `user/message' event with a user-specific background color.
 The block gets one blank line before and after (see
 `dsh-emacs-render--insert-chat-message' and `dsh-emacs-ui--blank-above-preserve').
 Image content blocks render as `[image …]' placeholders on their own
 line below the text; inline base64 shows immediately, attachment refs
 fill in when `session/attachment' settles (see
-`dsh-emacs-render--show-attachment')."
+`dsh-emacs-render--show-attachment').
+Optional REFERENCES (list of (LABEL . SESSION-ID)) from the immediately
+following `session-reference' recall event lets the readable `@label'
+session tokens the server persisted (canonical id stripped) render as real
+session chips; see `dsh-emacs-reference-fontify'."
   (let* ((seq (dsh-emacs-render--event-seq event))
          (data (dsh-emacs-render--event-data event))
          (kind (dsh-emacs-render--aget "kind" (dsh-emacs-render--aget "source" data)))
          (content (dsh-emacs-render--aget "content" data))
          (text (dsh-emacs-reference-fontify
-                (dsh-emacs-render--text-from-content content)))
+                (dsh-emacs-render--text-from-content content)
+                references))
          (images (dsh-emacs-render--image-blocks content))
          (insert-point (dsh-emacs-render--input-insert-point))
          (block-id (dsh-emacs-render--make-block-id event))
@@ -2182,6 +2188,47 @@ Deletes the earliest content while preserving the input prompt area."
         (let ((inhibit-read-only t))
           (delete-region (point-min) trim-to))))))
 
+(defun dsh-emacs-render--session-refs-from-event (event)
+  "References list of a `session-reference' EVENT, or nil.
+A recall context `user/message' (source.kind = \"session-reference\")
+carries the real session id + label for the message that cited it in
+`data.source.references' (a vector of {sessionId, label, …}); dsh persists
+that citing message with only the readable `@label' text, so this is the
+sole place its id+label survive.  Returns a list of (LABEL . SESSION-ID) in
+citation order."
+  (let* ((data (dsh-emacs-render--event-data event))
+         (source (dsh-emacs-render--aget "source" data))
+         (refs (dsh-emacs-render--aget "references" source)))
+    (when (and (equal (dsh-emacs-render--aget "kind" source) "session-reference")
+               refs)
+      (delq nil
+            (mapcar
+             (lambda (r)
+               (when (consp r)
+                 (let ((sid (dsh-emacs-render--aget "sessionId" r))
+                       (label (dsh-emacs-render--aget "label" r)))
+                   (and (stringp sid) (stringp label) (not (string-empty-p sid))
+                        (cons label sid)))))
+             (append refs nil))))))
+
+(defun dsh-emacs-render--recall-refs-by-message-seq (events)
+  "Map referencing message seq -> its session references in EVENTS.
+EVENTS is the [{event: …}] history batch.  dsh web associates each
+`session-reference' recall context with the user message that cited it and
+immediately precedes it (recall at seq N decorates the message at seq N-1),
+so a recall's references are keyed by `recall.seq - 1'.  Returns an alist
+(SEQ . REFERENCES)."
+  (let ((map '()))
+    (dolist (entry events)
+      (let* ((ev (and entry (dsh-emacs-render--aget "event" entry)))
+             (seq (and ev (dsh-emacs-render--event-seq ev))))
+        (when (and ev (integerp seq)
+                   (equal (dsh-emacs-render--aget "type" ev) "user/message"))
+          (let ((refs (dsh-emacs-render--session-refs-from-event ev)))
+            (when refs
+              (push (cons (- seq 1) refs) map))))))
+    map))
+
 (defun dsh-emacs-render-history-events (events &optional stream)
   "Render EVENTS in seq order, optionally processing live STREAM chunks.
 EVENTS is a vector/sequence of {\"event\": alist} entries.  Renders only
@@ -2190,15 +2237,25 @@ snapshot reseed with STREAM nil: completed `assistant/message' snapshots
 are sufficient and avoid replaying thousands of old deltas (STREAM is a
 legacy option retained for the shared renderer, not used by the follow
 path).
+A reseeded user message that references another session arrives with its
+session mention collapsed to the readable `@label' (the id stripped), and
+the real id+label is delivered by the immediately-following `session-reference'
+recall context.  Before rendering, the batch is scanned once to key each
+citing message's seq to those references, so the message's `@label' renders
+as a real session chip.
 The loop yields to the input queue every 5 events so that user keystrokes
 interrupt the batch and keep the UI responsive."
   (let ((rendered 0)
         (entries (if (vectorp events) (append events nil) events))
+        (refs-map (and (null stream)
+                       (dsh-emacs-render--recall-refs-by-message-seq events)))
         (counter 0))
     (while-no-input
       (dolist (entry entries)
         (let* ((ev (dsh-emacs-render--aget "event" entry))
-               (seq (and ev (dsh-emacs-render--event-seq ev))))
+               (seq (and ev (dsh-emacs-render--event-seq ev)))
+               (refs (and (integerp seq)
+                          (cdr (assq seq refs-map)))))
           (when (and ev
                      (> (or seq 0) (or dsh-emacs--anchor-seq 0))
                      (or stream
@@ -2209,8 +2266,18 @@ interrupt the batch and keep the UI responsive."
                 ;; anchor so this canonical event is not processed repeatedly.
                 (when (integerp seq)
                   (setq dsh-emacs--anchor-seq seq))
-              (when (dsh-emacs-render-event ev)
-                (setq rendered (1+ rendered)))))
+              (if (and refs
+                       (equal (dsh-emacs-render--aget "type" ev)
+                              "user/message"))
+                  ;; Render the citing message with the recall's real session
+                  ;; refs so its readable @label is a jumpable session chip.
+                  (when (dsh-emacs-render-user-message ev refs)
+                    (when (integerp seq)
+                      (setq dsh-emacs--anchor-seq
+                            (max (or dsh-emacs--anchor-seq 0) seq)))
+                    (setq rendered (1+ rendered)))
+                (when (dsh-emacs-render-event ev)
+                  (setq rendered (1+ rendered))))))
           ;; Yield every 5 events so the user can interrupt and see progress.
           (cl-incf counter)
           (when (and (>= counter 5) (sit-for 0))

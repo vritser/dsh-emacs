@@ -884,22 +884,39 @@ Decodes the `\\\\X' escapes the host emits (`\\\\]' → `]', `\\\\\\\\' → `\\'
   (replace-regexp-in-string
    "\\\\\\(.\\)" "\\1" raw t t))
 
-(defun dsh-emacs-reference--link-spans (string)
+(defun dsh-emacs-reference--link-spans (string &optional references)
   "Reference spans (BEG END KIND VALUE) in STRING, non-overlapping, by start.
 KIND is `session' or `file'; VALUE is the session id or the relative file
 path (quotes/`@' stripped).  A session mention's span covers the whole
 `@[label](dsh-session:…)' text (labels may contain spaces); a file span the
 `@…' token.  File tokens falling inside a session mention (its `@[label'
-prefix) are not matched as files."
+prefix) are not matched as files.
+Optional REFERENCES (list of (LABEL . SESSION-ID)) additionally marks
+readable `@LABEL' session tokens — dsh persists a referencing message with
+its canonical mention collapsed to readable `@label' (id stripped) and
+delivers the real id+label in the adjacent recall event, so the readable
+token must be re-linked as a session (and must NOT fall through to the file
+matcher)."
   (let ((spans '())
         (limit (length string))
         (sm dsh-emacs-reference--session-mention-re))
+    ;; Canonical `@[label](dsh-session:…)' mentions.
     (let ((pos 0))
       (while (and (<= pos limit) (string-match sm string pos))
         (push (list (match-beginning 0) (match-end 0) 'session
                     (match-string 2 string))
               spans)
         (setq pos (match-end 0))))
+    ;; Readable `@label' session tokens recovered from the recall event.
+    (when references
+      (let ((readable (dsh-emacs-reference--reseed-session-spans string references)))
+        (dolist (s readable)
+          (unless (cl-some (lambda (x)
+                             (and (eq (nth 2 x) 'session)
+                                  (< (nth 0 s) (nth 1 x))
+                                  (> (nth 1 s) (nth 0 x))))
+                           spans)
+            (push s spans)))))
     (let ((m dsh-emacs-reference--file-mention-re)
           (pos 0))
       (while (and (<= pos limit) (string-match m string pos))
@@ -936,7 +953,7 @@ prefix) are not matched as files."
      str)
     str))
 
-(defun dsh-emacs-reference-fontify (string)
+(defun dsh-emacs-reference-fontify (string &optional references)
   "Return a copy of STRING with completed @ references made clickable.
 A session mention (`@[label](dsh-session:…)') is rewritten to display just
 `@label' (the opaque id never shown) carrying its id; a file reference
@@ -945,22 +962,60 @@ A session mention (`@[label](dsh-session:…)') is rewritten to display just
 `dsh-emacs-reference-ref' property that `dsh-emacs-reference-open-at-point'
 reads.  Non-matching text and any pre-existing properties are preserved.
 The returned text is for display only — callers keep the raw canonical text
-in the buffer / on the wire."
+in the buffer / on the wire.
+Optional REFERENCES (list of (LABEL . SESSION-ID)) from a `session-reference'
+recall event lets a readable `@label' token (a server-persisted mention whose
+canonical id was stripped) be re-linked as a session chip carrying its real
+SESSION-ID."
   (let ((out '())
         (pos 0))
-    (dolist (s (dsh-emacs-reference--link-spans string))
+    (dolist (s (dsh-emacs-reference--link-spans string references))
       (let ((beg (nth 0 s)) (end (nth 1 s))
             (kind (nth 2 s)) (value (nth 3 s)))
         (push (substring string pos beg) out)
         (push (dsh-emacs-reference--propertize-span
-               (if (eq kind 'session)
+               (if (and (eq kind 'session)
+                        (dsh-emacs-reference--session-label-at string beg))
+                   ;; Canonical `@[label](dsh-session:…)': collapse to `@label'.
                    (concat "@" (dsh-emacs-reference--session-label-at string beg))
+                 ;; File reference, or a readable `@label' session token the
+                 ;; server persisted with the canonical id stripped — keep the
+                 ;; text as-is, only add the link/id properties.
                  (substring string beg end))
                kind value)
               out)
         (setq pos end)))
     (push (substring string pos) out)
     (apply #'concat (nreverse out))))
+
+(defun dsh-emacs-reference--reseed-session-spans (string references)
+  "Session spans (BEG END 'session SESSION-ID) in STRING for REFERENCES.
+REFERENCES is a list of (LABEL . SESSION-ID) recovered from the adjacent
+`session-reference' recall event.  dsh web persists a referencing user
+message with its canonical session mention collapsed to the readable
+`@LABEL' text (the id stripped), and delivers the real `{sessionId,
+label}' pair only in the immediately-following recall event — so the
+message text alone cannot be re-linked.  This locates each `@LABEL'
+occurrence (longest label first, non-overlapping) and returns it as a
+session span carrying the real SESSION-ID."
+  (let ((spans '()))
+    (dolist (ref (sort (copy-sequence references)
+                       (lambda (a b) (> (length (car a)) (length (car b))))))
+      (let* ((token (concat "@" (car ref)))
+             (id (cdr ref))
+             (pos 0))
+        (when (> (length token) 0)
+          (while (string-match (regexp-quote token) string pos)
+            (let ((b (match-beginning 0))
+                  (e (match-end 0))
+                  (overlap
+                   (cl-some (lambda (s)
+                              (and (< b (nth 1 s)) (> e (nth 0 s))))
+                            spans)))
+              (unless overlap
+                (push (list b e 'session id) spans))
+              (setq pos e))))))
+    (sort spans (lambda (a b) (< (nth 0 a) (nth 0 b))))))
 
 (defun dsh-emacs-reference--session-label-at (string beg)
   "Label display text of the session mention in STRING starting at BEG."

@@ -141,4 +141,9 @@ host.
 > session jumps to that session's chat buffer, a file opens under the session's
 > working directory (`find-file` of `cwd + path`). The buffer still holds the
 > canonical text, so the wire is unchanged. Assistant bodies render via the
-> markdown layer and are not linkified.
+> markdown layer and are not linkified. When history is re-seeded on reopen,
+> dsh may already have collapsed a sent session mention to its readable
+> `@label` (the canonical id is not in the message text); the real
+> `sessionId`/`label` then arrive in the immediately-following
+> `session-reference` recall context, and the reseed renderer pairs them so
+> the `@label` still links and jumps correctly.

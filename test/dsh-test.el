@@ -10775,6 +10775,89 @@ candidates as the UI would via `all-completions', not by destructuring."
           (equal opened "target1")))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
+;; --- reseed/reopen: 服务端持久化引用消息时把 canonical mention 折叠成可读
+;; @label（id 被剥掉），真实 sessionId+label 只在紧随其后的 session-reference
+;; recall 事件里 —— 渲染时带上 REFERENCES ((LABEL . SESSION-ID)) 才能把可读
+;; @label 还原成带真实 id 的会话 chip，普通 @file 仍照常链接。
+(let ((out (dsh-emacs-reference-fontify
+            "see @dsh-emacs如何通过转发接入Codex与Claude 和 @src/a.ts"
+            '(("dsh-emacs如何通过转发接入Codex与Claude" . "session-abc-123")))))
+  (let ((label-pos (string-match "@dsh-emacs如何通过转发接入Codex与Claude" out))
+        (file-pos (string-match "@src/a.ts" out)))
+    (dsh-test-assert "reseed-readable-label-links-as-session-with-real-id"
+      (and label-pos file-pos
+           (equal (get-text-property label-pos 'dsh-emacs-reference-ref out)
+                  '(session . "session-abc-123"))
+           (equal (get-text-property file-pos 'dsh-emacs-reference-ref out)
+                  '(file . "src/a.ts")))))
+  (dsh-test-assert "reseed-readable-label-text-preserved"
+    (string= (substring-no-properties out)
+             "see @dsh-emacs如何通过转发接入Codex与Claude 和 @src/a.ts")))
+;; 可读 @label 还原 chip 后仍可跳转真实 session
+(let ((opened nil) (buf (generate-new-buffer " *t-reseed-open*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (insert (dsh-emacs-reference-fontify
+                 "关于 @dsh-emacs如何通过转发接入Codex与Claude 的事"
+                 '(("dsh-emacs如何通过转发接入Codex与Claude" . "session-abc-123"))))
+        (goto-char (1+ (string-match "@dsh-emacs" (buffer-string))))
+        (cl-letf (((symbol-function 'dsh-emacs-open-session)
+                   (lambda (id) (setq opened id))))
+          (dsh-emacs-reference-open-at-point))
+        (dsh-test-assert "reseed-label-open-jumps-to-real-session"
+          (equal opened "session-abc-123")))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+;; 不匹配 references 的可读 @word 仍走 file 链接（不受污染）
+(let ((out (dsh-emacs-reference-fontify
+            "mention @unrelated now"
+            '(("known-label" . "session-k")))))
+  (dsh-test-assert "reseed-nonmatching-label-stays-file"
+    (equal (get-text-property (string-match "@unrelated" out)
+                              'dsh-emacs-reference-ref out)
+           '(file . "unrelated"))))
+
+;; --- reseed/reopen: 引用消息 + 紧随其后的 session-reference recall 事件 ---
+;; 服务端把引用消息存成可读 @label（id 剥掉），真实 sessionId+label 只在
+;; 紧随其后的 session-reference recall 事件里。history reseed 一次性批量渲染
+;; 这两条 user/message 时，render-history-events 应把 recall 的 references
+;; 关联回前一条消息的 seq，把 @label 渲染成可跳转的会话 chip。
+
+(let ((buf (generate-new-buffer " *dsh-reseed-session-ref*"))
+      (opened nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-modeline-setup)
+        (setq dsh-emacs--buffer-session "sess-reseed")
+        (let* ((label "实现dsh web的@指令")
+               (sid "session-ae44fea5-bf67-4ba9-b3da-599903832933")
+               (ref-msg
+                (json-read-from-string
+                 (concat "{\"type\":\"user/message\",\"seq\":40,"
+                         "\"data\":{\"source\":{\"kind\":\"user\"},"
+                         "\"content\":[{\"type\":\"text\","
+                         "\"text\":\"from @实现dsh web的@指令 please look\"}]}}")))
+               (recall
+                (json-read-from-string
+                 (concat "{\"type\":\"user/message\",\"seq\":41,"
+                         "\"data\":{\"source\":{\"kind\":\"session-reference\","
+                         "\"form\":\"recall\","
+                         "\"references\":[{\"sessionId\":\"session-ae44fea5-bf67-4ba9-b3da-599903832933\","
+                         "\"label\":\"实现dsh web的@指令\"}]},"
+                         "\"content\":[{\"type\":\"text\",\"text\":\"# refs\"}]}}")))
+               (label-token (concat "@" label)))
+          (dsh-emacs-render-history-events
+           (list (list (cons "event" ref-msg))
+                 (list (cons "event" recall)))
+           nil)
+          (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
+                 (pos (string-match label-token text))
+                 (prop (buffer-substring (point-min) (point-max)))
+                 (ref (and pos (get-text-property pos 'dsh-emacs-reference-ref prop))))
+            (dsh-test-assert "reseed-render-links-readable-label-to-session"
+              (and pos (equal ref (cons 'session sid)))))))
+    (kill-buffer buf)))
+
 ;; --- composer 原子 chip：buffer 存短 @label + canonical 文本属性，发送展开回完整 mention
 (let ((canon "@[My Talk](dsh-session:ab12_CD)"))
   (with-temp-buffer
