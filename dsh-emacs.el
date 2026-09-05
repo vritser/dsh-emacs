@@ -1196,6 +1196,60 @@ cursor below the input line.  Outside the editable input ORIG runs unchanged."
     (setq dsh-emacs--composer-kill-line-guard-installed t)
     (advice-add 'kill-line :around #'dsh-emacs--composer-kill-line)))
 
+(defun dsh-emacs--composer-boundary ()
+  "Return the editable input's end for the current chat buffer, or nil.
+A valid live input marker in the current buffer marks a composer context; the
+returned boundary is the position right before the structural newline the
+mode-line separator owns.  Deletion guards use it so a forward kill never
+removes that newline (see `dsh-emacs--composer-kill-region' and
+`dsh-emacs--composer-delete-forward')."
+  (when (and dsh-emacs--input-marker
+             (markerp dsh-emacs--input-marker)
+             (eq (marker-buffer dsh-emacs--input-marker) (current-buffer)))
+    (dsh-emacs--input-end)))
+
+(defun dsh-emacs--composer-kill-region (orig start end &rest args)
+  "`kill-region' advice: never kill across the composer's structural newline.
+A forward kill that reaches the input's end — a trailing `kill-word'/`M-d', a
+kill-sentence, or a selected region extended past the input — would remove the
+structural newline the mode-line separator owns and strand the cursor below
+the input line (the same breakage `dsh-emacs--composer-kill-line' guards C-k
+against).  The kill region is clipped at the input boundary: a region wholly
+at/after it deletes nothing, one crossing it keeps only the editable part.
+Regions fully inside the input and kills in non-chat buffers run unchanged."
+  (if-let* ((boundary (dsh-emacs--composer-boundary)))
+      (cond ((<= end boundary) (apply orig start end args))
+            ((< start boundary) (apply orig start boundary args))
+            (t nil))
+    (apply orig start end args)))
+
+(defun dsh-emacs--composer-delete-forward (orig &optional arg)
+  "`delete-forward-char' advice: stop at the composer's structural newline.
+`C-d' at the very end of the input would otherwise delete the separator
+newline (a plain buffer's `C-d' at end-of-line joins lines; here the newline is
+structural and there is nothing to join), stranding the cursor below the input
+line.  Deletions are capped at the input boundary."
+  (let* ((arg (or arg 1))
+         (boundary (dsh-emacs--composer-boundary))
+         (effective (and boundary (min arg (max 0 (- boundary (point)))))))
+    (cond ((and boundary (<= effective 0)) nil)
+          ((null boundary) (funcall orig arg))
+          (t (funcall orig effective)))))
+
+(defvar dsh-emacs--composer-delete-guard-installed nil
+  "Non-nil once the composer forward-delete guards have been added once.")
+
+(defun dsh-emacs--composer-delete-guard-install ()
+  "Install the composer forward-delete boundary guards (global, idempotent).
+Advises the deletion commands (`kill-region', which `kill-word'/region kills
+route through, and `delete-forward-char'/`C-d') rather than the `delete-region'
+primitive, because a native-compiled caller can bypass advice on the primitive
+while the interactive command symbols are always reached through advice."
+  (unless dsh-emacs--composer-delete-guard-installed
+    (setq dsh-emacs--composer-delete-guard-installed t)
+    (advice-add 'kill-region :around #'dsh-emacs--composer-kill-region)
+    (advice-add 'delete-forward-char :around #'dsh-emacs--composer-delete-forward)))
+
 
 ;;;###autoload
 (defun dsh-emacs-open-session (session-id)
@@ -1935,6 +1989,8 @@ vertico, etc.)."
   (add-hook 'post-command-hook #'dsh-emacs--reveal-input-when-typing nil t)
   ;; C-k 在输入区 = 清空整行输入（不删结构性换行、不坠到 input line 下）
   (dsh-emacs--composer-kill-line-guard-install)
+  ;; 前向删除（M-d/kill-region、C-d）不得越过输入区末尾的结构性换行
+  (dsh-emacs--composer-delete-guard-install)
   (setq dsh-emacs--tool-calls (make-hash-table :test 'equal))
   (setq dsh-emacs--activity-groups (make-hash-table :test 'equal))
   (setq dsh-emacs--pending-user-messages nil

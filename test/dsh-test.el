@@ -11022,6 +11022,40 @@ candidates as the UI would via `all-completions', not by destructuring."
                     "\n")
            (= (point) (point-min))))))
 
+;; --- M-d (kill-word) / C-d 在输入区末尾不得吃掉结构性分隔换行 ---
+;; 根因：输入行末的结构性换行（modeline separator）是可删文本，用户在输入末尾
+;; 做 forward `kill-word' / `C-d' 时把它删掉 → input-end 回退到 point-max，幻影行
+;; 成为"可编辑末端"，below-clamp 失效，光标坠到 input line 之下无法恢复。
+;; `dsh-emacs--composer-delete-guard-install' 把前向删除夹在输入边界上（kill-region
+;; 裁剪 / delete-forward-char 封顶），删除命令在此边界即停，换行永不被删。
+;; 不变量：输入末尾的 forward 词/字删除绝不删除分隔换行，光标 lock 回输入行。
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (goto-char dsh-emacs--input-marker)
+  (insert "hello world")
+  (let ((assert-end (lambda (label)
+                      (let ((sep (eq (char-before (point-max)) ?\n)))
+                        (dsh-emacs--lock-cursor-to-input)
+                        (dsh-test-assert label
+                          (and sep
+                               (= (point) (dsh-emacs--input-end))))))))
+    (goto-char (dsh-emacs--input-end))
+    (condition-case nil (kill-word 1) (error nil))
+    (funcall assert-end "word-kill-at-input-end-keeps-separator")
+    (goto-char (dsh-emacs--input-end))
+    (condition-case nil (delete-forward-char 1) (error nil))
+    (funcall assert-end "delete-forward-at-input-end-keeps-separator")
+    ;; normal editing still works: forward kill-word from the start of the last
+    ;; word must delete only that word and leave the separator newline intact.
+    (goto-char (- (dsh-emacs--input-end) (length "world")))
+    (kill-word 1)
+    (dsh-test-assert "word-kill-mid-last-word-keeps-separator"
+      (and (string= (buffer-substring-no-properties
+                     (marker-position dsh-emacs--input-marker) (point-max))
+                    "hello \n")
+           (eq (char-before (point-max)) ?\n)))))
+
 ;; --- composer 文件引用：保留可编辑，但带链接样式与跳转
 (with-temp-buffer
   (insert "@src/a.ts")

@@ -156,6 +156,14 @@ minor) and stay undated until the release is cut.
   cursor below the input line where it could not be recovered). Clearing the
   input never touches that structural newline and leaves the cursor on the
   input line.
+- **A forward word/character delete at the input's end no longer drops the
+  cursor below the input line**: `M-d`/`kill-word` (and region kills, which
+  route through `kill-region`) or `C-d`/`delete-forward-char` with the cursor
+  at the very end of the chat input used to delete the input area's structural
+  separator newline — the same stranding the C-k guard already blocked, but
+  reachable through any forward delete.  Forward deletions are now clipped at
+  the input boundary, so the structural newline survives and the cursor stays
+  on the input line.
 - **The `@` menu reopens with the full list after a completed reference**:
   completing an `@` pick left the candidate cache pinned to the previous host
   query (which typing had narrowed, often to the single just-picked item), so
