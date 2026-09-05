@@ -123,6 +123,11 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **External server token entry can be retried**: after empty input, an
+  incorrect token, or cancellation with `C-g`, running `dsh-emacs` again
+  prompts for the launch token. Successful authentication still caches the
+  cookie and skips further prompts.
+
 - **A server-returned `@session` mention in the transcript links again**: dsh
   persists a user message that references another session with its canonical
   `@[label](dsh-session:…)` already collapsed to the readable `@label` (id

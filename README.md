@@ -79,7 +79,10 @@ authentication cookie — nothing to configure.  For a **server you start
 yourself** (external/remote), you can tell dsh-emacs the token once per
 server start, or let it ask you: if no token is configured, dsh-emacs
 prompts for it interactively (a single question on first connect) instead
-of a Basic username/password box.  To set it yourself:
+of a Basic username/password box.  If you submit an empty token, enter an
+incorrect token, or cancel with `C-g`, run `M-x dsh-emacs` again to retry.
+After authentication succeeds, the cached cookie avoids further prompts.
+To set it yourself:
 
 - set `dsh-emacs-server-auth-token` to the `token=` value from the URL dsh
   prints (`dsh web: …/?token=…`), or

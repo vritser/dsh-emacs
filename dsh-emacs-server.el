@@ -94,7 +94,7 @@ token is captured automatically from the `*dsh-server*' output.  Set it to
 the TOKEN (the `token=' value from the printed URL) only when pointing at a
 server dsh-emacs did not start, so its own token is not available to
 parse.  When nil and dsh-emacs points at an already-running external server
-that requires the cookie, it asks you for the token interactively (once)
+that requires the cookie, it asks you for the token interactively
 rather than showing a Basic username/password prompt.  The token changes on
 every server restart, so a manually-maintained value goes stale whenever the
 server is restarted."
@@ -344,21 +344,19 @@ next authenticated call re-mints from the fresh token."
   (setq dsh-emacs--server-auth-cookie nil))
 
 (defun dsh-emacs--server-auth-maybe-expire ()
-  "Drop a stale cookie after an HTTP 401, and clear the ask-once memory.
+  "Drop a stale cookie after an HTTP 401.
 An out-of-band (user-managed) `dsh web' mints a NEW per-process token on
 every restart, which invalidates the cookie this client cached from the
 previous process — but nothing tells the client the token changed, so it
 keeps sending the dead cookie and every RPC 401s until Emacs restarts.
 Call this when a request that carried our cookie came back HTTP 401: clear
 the cookie (so the next authenticated call re-mints from a fresh capture
-or configured token) and forget `dsh-emacs--server-auth-ask-base' (so a
-server that really is unauthenticated re-prompts instead of short-circuiting
-to the stale \"already asked\" user-error).  Re-minting from a still-stale
+or configured token, or the next interactive command prompts again).
+Re-minting from a still-stale
 configured token simply 401s again, which is the correct, non-silent
 outcome (the hint points the user at the config)."
   (when dsh-emacs--server-auth-cookie
-    (setq dsh-emacs--server-auth-cookie nil
-          dsh-emacs--server-auth-ask-base nil)))
+    (setq dsh-emacs--server-auth-cookie nil)))
 
 (defun dsh-emacs--server-auth-http-401-p (err)
   "Non-nil when ERR is the `url' HTTP 401 error (`(error http 401)')."
@@ -504,11 +502,6 @@ layers share the single mint/cache path."
     (when cookie
       (list (cons "Cookie" cookie)))))
 
-(defvar dsh-emacs--server-auth-ask-base nil
-  "Base URL this Emacs session already asked the user for a launch token.
-Prevents re-prompting on every server-touching command after the user
-declined once; cleared when the base URL or the token changes.")
-
 (defun dsh-emacs--server-auth-required-p ()
   "Return non-nil when the live server demands the browser-session cookie.
 A bare `GET /' that answers HTTP 401 means the server is a dsh 0.1.2-rc.1+
@@ -574,13 +567,16 @@ no-op: a cookie that is not yet minted just means the `token=' line has not
 reached `*dsh-server*' yet, and the RPC/WS layers re-mint lazily on demand.
 For an already-running (external) server that demands the browser-session
 cookie but whose token is not configured, ask the user for the launch token
-ONCE per session, mint the cookie from it, and cache it — instead of letting
+on each command until authentication succeeds, then cache the cookie.
+This avoids letting
 the first unauthenticated RPC come back 401 and pop `url''s Basic
 username/password box.
 
 Interactive only (no-op in batch, so the mocked-RPC suite never prompts).
 When the user declines or the mint fails, signals `user-error' with actionable
-instructions rather than proceeding to an unauthenticated request."
+instructions rather than proceeding to an unauthenticated request.
+Empty input, a failed exchange, or quitting leaves the next command free
+to prompt again."
   (when (not noninteractive)
     (cond
      ;; A cookie already exists: nothing to do.
@@ -597,27 +593,18 @@ instructions rather than proceeding to an unauthenticated request."
       t)
      ;; Server needs no cookie (or is https, handled by config): proceed.
      ((not (dsh-emacs--server-auth-required-p)) t)
-     ;; Server demands a cookie and none can be auto-minted: ask once.
+     ;; A failed attempt aborts this command; the next command can retry.
      (t
-      (if (equal (dsh-emacs--server-base-url) dsh-emacs--server-auth-ask-base)
-          ;; Already asked and the user declined / it failed this session:
-          ;; do not silently proceed to an unauthenticated RPC (that would
-          ;; pop `url''s Basic box again).  Surface the actionable error.
-          (user-error (concat "This dsh server requires a launch token but none was "
-                              "given.  Set `dsh-emacs-server-auth-token' (or put "
-                              "`?token=' in `dsh-emacs-base-url') to authenticate "
-                              "to the external dsh server"))
-        (setq dsh-emacs--server-auth-ask-base (dsh-emacs--server-base-url))
-        (let ((token (read-string
-                      (format "dsh server %s requires a launch token (paste the `token=' value from the `dsh web:' URL it printed): "
-                              (dsh-emacs--server-base-url)))))
-          (if (string-empty-p token)
-              (user-error (concat "No launch token given.  Set `dsh-emacs-server-auth-token' "
-                                  "(or put `?token=' in `dsh-emacs-base-url') to authenticate "
-                                  "to the external dsh server"))
-            (unless (dsh-emacs--server-auth-ensure token)
-              (user-error "dsh token exchange failed; the token may be stale or the URL wrong — check `C-h v dsh-emacs-server-auth-token'"))))
-        t)))))
+      (let ((token (read-string
+                    (format "dsh server %s requires a launch token (paste the `token=' value from the `dsh web:' URL it printed): "
+                            (dsh-emacs--server-base-url)))))
+        (if (string-empty-p token)
+            (user-error (concat "No launch token given.  Set `dsh-emacs-server-auth-token' "
+                                "(or put `?token=' in `dsh-emacs-base-url') to authenticate "
+                                "to the external dsh server"))
+          (unless (dsh-emacs--server-auth-ensure token)
+            (user-error "dsh token exchange failed; the token may be stale or the URL wrong — check `C-h v dsh-emacs-server-auth-token'"))))
+      t))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; CLI 检测与安装
@@ -745,7 +732,7 @@ responsive."
   (cond
    ((dsh-emacs--server-alive-p)
     (message "dsh server already running at %s" (dsh-emacs--server-base-url))
-    ;; External server needing the browser-session cookie: prompt once for the
+    ;; External server needing the browser-session cookie: prompt for the
     ;; token so the caller's first RPC is authenticated instead of popping
     ;; `url''s Basic username/password box (see
     ;; `dsh-emacs--server-auth-ensure-interactive').
@@ -840,7 +827,7 @@ suite needs no service.
 
 When a server is already reachable, also make sure an auth cookie is ready
 before the caller fires its first RPC: an external server that requires the
-browser-session cookie gets a token prompt here (once) rather than letting
+browser-session cookie gets a token prompt here rather than letting
 the unauthenticated request pop `url''s Basic username/password box."
   (interactive)
   (when (not noninteractive)

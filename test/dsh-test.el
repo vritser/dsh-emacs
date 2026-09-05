@@ -6851,31 +6851,25 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
 ;; 回归：用户自管的外置 `dsh web' 每次重启都发新 per-process token，使本端
 ;; 缓存的旧 cookie 失效；客户端无从得知 token 变了，于是持续发死 cookie、每个
 ;; RPC 都 401，直到 Emacs 重启。收到"带着我们 cookie 的 401"时应清缓存
-;; （下次调用重新 mint / 重新询问），并忘掉 ask-once 记忆。
-(let ((dsh-emacs--server-auth-cookie "dsh-auth-STALE=v1.old")
-      (dsh-emacs--server-auth-ask-base "http://127.0.0.1:3080"))
+;; （下次调用重新 mint / 重新询问）。
+(let ((dsh-emacs--server-auth-cookie "dsh-auth-STALE=v1.old"))
   (dsh-test-assert "auth-http-401-p-detects-http-401"
     (dsh-emacs--server-auth-http-401-p '(error http 401))
     (not (dsh-emacs--server-auth-http-401-p '(error http 404)))
     (not (dsh-emacs--server-auth-http-401-p nil)))
   (dsh-emacs--server-auth-maybe-expire)
   (dsh-test-assert "auth-stale-cookie-cleared-on-401"
-    (null dsh-emacs--server-auth-cookie)
-    (null dsh-emacs--server-auth-ask-base))
+    (null dsh-emacs--server-auth-cookie))
   ;; 没有 cookie 时 maybe-expire 保持原样（不误清无 cookie 场景的状态）
-  (let ((dsh-emacs--server-auth-ask-base "http://127.0.0.1:3080"))
-    (dsh-emacs--server-auth-maybe-expire)
-    (dsh-test-assert "auth-maybe-expire-keeps-ask-base-when-no-cookie"
-      (equal "http://127.0.0.1:3080" dsh-emacs--server-auth-ask-base)))
-  (setq dsh-emacs--server-auth-cookie nil
-        dsh-emacs--server-auth-ask-base nil))
+  (dsh-emacs--server-auth-maybe-expire)
+  (dsh-test-assert "auth-maybe-expire-with-no-cookie"
+    (null dsh-emacs--server-auth-cookie)))
 
 ;; --- 测试 93d4: 交互 auth 门禁 —— 已知 cookie 时不询问 ---
 (let ((dsh-emacs-base-url "http://127.0.0.1:3080")
       (dsh-emacs--server-auth-cookie "dsh-auth-HASH=ok.sig")
       (noninteractive nil)
-      (asked 0)
-      (dsh-emacs--server-auth-ask-base nil))
+      (asked 0))
   (cl-letf (((symbol-function 'read-string)
              (lambda (&rest _) (setq asked (1+ asked)) "Tok")))
     (dsh-emacs--server-auth-ensure-interactive))
@@ -6889,8 +6883,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
       (dsh-emacs--server-auth-cookie nil)
       (noninteractive nil)
       (asked 0)
-      (filter nil)
-      (dsh-emacs--server-auth-ask-base nil))
+      (filter nil))
   (cl-letf (((symbol-function 'read-string)
              (lambda (&rest _) (setq asked (1+ asked)) "x"))
             ((symbol-function 'open-network-stream)
@@ -6918,8 +6911,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
 (let ((dsh-emacs-base-url "http://127.0.0.1:3080")
       (dsh-emacs--server-auth-cookie nil)
       (noninteractive nil)
-      (asked 0)
-      (dsh-emacs--server-auth-ask-base nil))
+      (asked 0))
   (cl-letf (((symbol-function 'dsh-emacs--server-auth-required-p)
              (lambda () nil))
             ((symbol-function 'read-string)
@@ -6933,7 +6925,6 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
       (dsh-emacs--server-auth-cookie nil)
       (dsh-emacs-server-auth-token nil)
       (noninteractive nil)
-      (dsh-emacs--server-auth-ask-base nil)
       (filter nil)
       (asked 0))
   (cl-letf (((symbol-function 'dsh-emacs--server-auth-required-p)
@@ -6959,14 +6950,12 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (and (= 1 asked)
          (equal "dsh-auth-USERT=v1.sig" dsh-emacs--server-auth-cookie)))
   (setq dsh-emacs--server-auth-cookie nil
-        dsh-emacs-server-auth-token nil
-        dsh-emacs--server-auth-ask-base nil))
+        dsh-emacs-server-auth-token nil))
 
 ;; --- 测试 93d8: 交互 auth 门禁 —— 用户空输入 → user-error 指引 ---
 (let ((dsh-emacs-base-url "http://127.0.0.1:3080")
       (dsh-emacs--server-auth-cookie nil)
-      (noninteractive nil)
-      (dsh-emacs--server-auth-ask-base nil))
+      (noninteractive nil))
   (cl-letf (((symbol-function 'dsh-emacs--server-auth-required-p)
              (lambda () t))
             ((symbol-function 'read-string)
@@ -6976,38 +6965,61 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
       (user-error
        (when (string-match-p "dsh-emacs-server-auth-token"
                              (error-message-string err))
-         (dsh-test-pass "auth-gate-empty-token-errors-with-guidance")))))
-  (setq dsh-emacs--server-auth-ask-base nil))
+         (dsh-test-pass "auth-gate-empty-token-errors-with-guidance"))))))
 
-;; --- 测试 93d8b: declined 之后同一会话不再静默放行 ---
-;; 用户拒绝输入 token 后，本会话对该 base 不再重问，但也绝不再静默发
-;; 未认证请求（否则 url 又弹 Basic 框）：后续命令应给明确错误而不是放行。
-(let ((dsh-emacs-base-url "http://127.0.0.1:3080")
-      (dsh-emacs--server-auth-cookie nil)
-      (noninteractive nil)
-      (asked 0))
-  (setq dsh-emacs--server-auth-ask-base dsh-emacs-base-url)  ; 已问过并 declined
-  (cl-letf (((symbol-function 'dsh-emacs--server-auth-required-p)
-             (lambda () t))
-            ((symbol-function 'read-string)
-             (lambda (&rest _) (setq asked (1+ asked)) "x")))
-    (condition-case err
-        (dsh-emacs--server-auth-ensure-interactive)
-      (user-error
-       (when (and (= 0 asked)
-                  (string-match-p "requires a launch token"
-                                  (error-message-string err)))
-         (dsh-test-pass "auth-gate-declined-base-errors-not-silent-proceed")))))
-  (setq dsh-emacs--server-auth-ask-base nil))
+;; --- 测试 93d8b: 空输入、错误 token、C-g 后再次调用均可重试 ---
+(dolist (first-input '("" "WrongTok" quit))
+  (let ((dsh-emacs-base-url "http://127.0.0.1:3080")
+        (dsh-emacs--server-auth-cookie nil)
+        (dsh-emacs--server-process nil)
+        (dsh-emacs-server-auth-token nil)
+        (noninteractive nil)
+        (asked 0)
+        (exchanged nil)
+        (first-result nil)
+        (retry-result nil))
+    (cl-letf (((symbol-function 'dsh-emacs--server-auth-token)
+               (lambda () nil))
+              ((symbol-function 'dsh-emacs--server-auth-required-p)
+               (lambda () t))
+              ((symbol-function 'read-string)
+               (lambda (&rest _)
+                 (setq asked (1+ asked))
+                 (if (> asked 1) "CorrectTok"
+                   (if (eq first-input 'quit) (signal 'quit nil)
+                     first-input))))
+              ((symbol-function 'dsh-emacs--server-auth-ensure)
+               (lambda (token)
+                 (push token exchanged)
+                 (when (equal token "CorrectTok")
+                   (setq dsh-emacs--server-auth-cookie "dsh-auth-RETRY=ok")))))
+      (setq first-result
+            (condition-case err
+                (dsh-emacs--server-auth-ensure-interactive)
+              ((user-error quit) (car err))))
+      (dsh-test-assert (format "auth-gate-failed-attempt-blocks-%s" first-input)
+        (eq first-result (if (eq first-input 'quit) 'quit 'user-error))
+        (null dsh-emacs--server-auth-cookie)
+        (= asked 1))
+      (setq retry-result
+            (condition-case err
+                (dsh-emacs--server-auth-ensure-interactive)
+              (user-error (car err))))
+      (dsh-test-assert (format "auth-gate-retry-succeeds-%s" first-input)
+        (eq retry-result t)
+        (= asked 2)
+        (equal dsh-emacs--server-auth-cookie "dsh-auth-RETRY=ok")
+        (equal (reverse exchanged)
+               (if (equal first-input "WrongTok")
+                   '("WrongTok" "CorrectTok") '("CorrectTok")))))))
 
-;; --- 测试 93d9: 交互 auth 门禁 —— 同一会话不重复询问（declined 记忆） ---
+;; --- 测试 93d9: 交互 auth 门禁 —— 成功后缓存 cookie，不重复询问 ---
 (let ((dsh-emacs-base-url "http://127.0.0.1:3080")
       (dsh-emacs--server-auth-cookie nil)
       (noninteractive nil)
       (dsh-emacs-server-auth-token nil)
       (asked 0)
       (filter nil))
-  (setq dsh-emacs--server-auth-ask-base nil)
   (cl-letf (((symbol-function 'dsh-emacs--server-auth-required-p)
              (lambda () t))
             ((symbol-function 'read-string)
@@ -7033,8 +7045,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (and (= 1 asked)
          (equal "dsh-auth-A=v1.sig" dsh-emacs--server-auth-cookie)))
   (setq dsh-emacs--server-auth-cookie nil
-        dsh-emacs-server-auth-token nil
-        dsh-emacs--server-auth-ask-base nil))
+        dsh-emacs-server-auth-token nil))
 
 ;; --- 测试 93e: WebSocket 握手携带浏览器会话 cookie ---
 (let ((dsh-emacs-base-url "http://127.0.0.1:3080")
@@ -11149,4 +11160,3 @@ candidates as the UI would via `all-completions', not by destructuring."
 (when (and noninteractive
            (cl-some (lambda (r) (not (cdr r))) dsh-test-results))
   (kill-emacs 1))
-
