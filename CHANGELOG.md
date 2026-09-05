@@ -87,6 +87,9 @@ minor) and stay undated until the release is cut.
   directories → sessions in the host's order; picking a file inserts `@path`,
   a directory inserts `@dir/` and keeps the menu open for the next level, and
   a session inserts the host's canonical `@[label](dsh-session:…)` mention.
+  Matching is flexible — the `@` completion category uses the built-in `flex`
+  style in chat buffers (independent of your `completion-styles`), so typing a
+  word anywhere in a path narrows to it.
   Grammar (`@"path with spaces"` quoting), host-side snapshots, and
   stale-while-revalidate caching mirror dsh web's composer.  Completion is
   cooperative like slash: dsh-emacs registers a `completion-at-point-functions`

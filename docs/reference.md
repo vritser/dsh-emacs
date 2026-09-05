@@ -73,7 +73,11 @@ yourself keeps the quote open after a directory pick so completion descends.
   token at point.
 - **Completion**: `TAB` completes the active `@` token over the cache (a bare
   `@` lists everything). `TAB` is bound to `completion-at-point` in chat
-  buffers.
+  buffers. Matching is **flexible**: the `@` completion category is bound to the
+  built-in `flex` style in chat buffers (independent of your global
+  `completion-styles`), so typing a word that appears *anywhere* in a path — e.g.
+  `@button` or just `@bu` — narrows to files like
+  `@src/components/ui/button.tsx`, not only prefix matches.
 
 Menu rows are short by design: a file names its path, a directory its path
 with a trailing slash, a session only its label. Picking a file or directory

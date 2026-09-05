@@ -1881,6 +1881,14 @@ vertico, etc.)."
   ;; complete on TAB).  No-op without an active @ token or corfu-auto.
   (add-hook 'post-command-hook #'dsh-emacs-reference--auto-complete nil t)
 
+  ;; @ references match flexibly across the whole path, independent of the
+  ;; user's global completion-styles: chat buffers map the @ completion
+  ;; category (dsh-emacs-reference.el) to the built-in `flex' style.  Scoped to
+  ;; that category via buffer-local overrides, so slash and every other
+  ;; completion keep the user's own styles.
+  (setq-local completion-category-overrides
+              (cons '(dsh-emacs-reference (styles flex))
+                    completion-category-overrides))
   ;; imenu: 按 user message 索引，M-x imenu 可跳转到任意历史输入
   (setq-local imenu-create-index-function #'dsh-emacs-imenu-create-user-index)
 

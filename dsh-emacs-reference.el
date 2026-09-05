@@ -734,7 +734,14 @@ nil outside the input area or when the token is not an @ reference."
                   ;; plist covers stock completion and other CAPF consumers.
                   (let ((table (completion-table-with-metadata
                                 candidates
-                                '((display-sort-function . identity)
+                                '((category . dsh-emacs-reference)
+                                  ;; Match @ references flexibly across the whole
+                                  ;; path regardless of the user's global
+                                  ;; completion-styles: chat buffers map this
+                                  ;; category to the built-in `flex' style (see
+                                  ;; `dsh-emacs-mode'), so typing a mid-path word
+                                  ;; narrows to files like @src/…/button.tsx.
+                                  (display-sort-function . identity)
                                   (cycle-sort-function . identity))))
                         (props (list :affixation-function
                                      #'dsh-emacs-reference--affixate
