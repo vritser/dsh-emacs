@@ -102,6 +102,14 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **`@` completion rows keep their type icon while a background fetch is
+  refreshing the list**: the icon column reverse-looked-up each shown row in
+  the mutable candidate cache, so once a fetch for a narrower query replaced
+  that cache (corfu keeps showing the older snapshot popup and re-affixes it
+  on every keystroke), rows no longer present in the swapped cache rendered
+  without an icon.  The icon data is now captured into the completion table
+  when it is built and affixed from that snapshot, independent of later cache
+  replacement (rationale: postmortem/010).
 - **The `commands.list` catalog prefetch stays live while the assistant is
   replying**: the prefetch was armed on an idle timer, and idle timers do not
   fire while subprocess output is pending — the event stream keeps delivering

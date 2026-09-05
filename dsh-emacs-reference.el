@@ -618,12 +618,36 @@ when no icon provider is loaded."
                  path)))
      (t nil))))
 
-(defun dsh-emacs-reference--affixate (cands)
+(defun dsh-emacs-reference--snapshot-affix (cands rows)
+  "Capture (TEXT . (KIND . PATH)) for completion rows CANDS.
+ROWS is the session (ROW . MENTION) alist of the current cache.  Taken
+once at completion-table build time so the icon column is decided for
+exactly the rows the table exposes and never reverse-looked-up against
+`dsh-emacs--reference-candidates' later — a background fetch replaces
+that cache while a corfu popup still shows its older snapshot, and
+re-affixating those rows against the swapped cache would drop their
+icons (see `dsh-emacs-reference--affixate-with').  Rows the cache does
+not resolve (nothing to draw) map to nil."
+  (let ((cache dsh-emacs--reference-candidates))
+    (mapcar
+     (lambda (text)
+       (cons text
+             (let ((entry (or (assoc text cache)
+                              (let ((mention (cdr (assoc text rows))))
+                                (and mention (assoc mention cache))))))
+               (and entry
+                    (cons (plist-get (cdr entry) :kind)
+                          (plist-get (cdr entry) :path))))))
+     cands)))
+
+(defun dsh-emacs-reference--affixate-with (map cands)
   "Build the (CAND PREFIX SUFFIX) rows the popup renders.
 PREFIX is the per-type icon (consult-buffer style, see
-`dsh-emacs-reference--row-icon'): a file's extension glyph, the
-folder glyph for directories, the `references'/link glyph for session
-rows.  Prefixes are empty on non-graphic frames, when
+`dsh-emacs-reference--row-icon') resolved from MAP, the captured
+(TEXT . (KIND . PATH)) snapshot `dsh-emacs-reference--snapshot-affix'
+took when the table was built: a file's extension glyph, the folder
+glyph for directories, the `references'/link glyph for session rows.
+Prefixes are empty on non-graphic frames, when
 `dsh-emacs-reference-inline-icons' is nil or when no icon provider is
 loaded.  The column is drawn by this module itself: no `:company-kind'
 metadata is sent, so margin icon layers (nerd-icons-corfu, kind-icon)
@@ -633,15 +657,27 @@ completion rows show no annotation.  The icon column is display-only:
 completion inserts the plain candidate regardless."
   (mapcar
    (lambda (cand)
-     (let* ((entry (dsh-emacs-reference--entry-for cand))
-            (kind (and entry (plist-get (cdr entry) :kind)))
+     (let* ((kp (cdr (assoc cand map)))
+            (kind (car kp))
             (icon (and dsh-emacs-reference-inline-icons
                        kind
-                       (dsh-emacs-reference--row-icon
-                        (plist-get (cdr entry) :path) kind))))
+                       (dsh-emacs-reference--row-icon (cdr kp) kind))))
        (list cand
              (if icon (concat icon " ") "")
              "")))
+   cands))
+
+(defun dsh-emacs-reference--affixate (cands)
+  "Affixate CANDS against the current cache.
+`dsh-emacs-reference--affixate-with' over a live
+`dsh-emacs-reference--snapshot-affix'; callers that build a completion
+table (corfu/vertico/company-capf) must capture the map once instead,
+so a mid-popup cache refresh cannot strip icons.  This live variant is
+kept for the completion UIs that only query the cache synchronously and
+for tests."
+  (dsh-emacs-reference--affixate-with
+   (dsh-emacs-reference--snapshot-affix
+    cands (dsh-emacs-reference--session-rows))
    cands))
 
 (defun dsh-emacs-reference--exit (cand _status rows)
@@ -744,7 +780,18 @@ nil outside the input area or when the token is not an @ reference."
                                   (display-sort-function . identity)
                                   (cycle-sort-function . identity))))
                         (props (list :affixation-function
-                                     #'dsh-emacs-reference--affixate
+                                     ;; Snapshot the icon data when the table
+                                     ;; is built: affixating later against the
+                                     ;; live cache would drop icons once a
+                                     ;; background fetch replaces it while a
+                                     ;; corfu popup still shows its older
+                                     ;; snapshot (see
+                                     ;; `dsh-emacs-reference--snapshot-affix').
+                                     (let ((map (dsh-emacs-reference--snapshot-affix
+                                                 candidates rows)))
+                                       (lambda (cands)
+                                         (dsh-emacs-reference--affixate-with
+                                          map cands)))
                                      ;; Let Corfu's trigger reopen the menu at
                                      ;; a bare @ after backspace, even though
                                      ;; its normal prefix threshold is longer.

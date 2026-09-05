@@ -10664,6 +10664,25 @@ candidates as the UI would via `all-completions', not by destructuring."
            ;; 会话行用 codicon references 字形（path 被忽略）
            (string= (dsh-emacs-reference--row-icon nil 'session) "R")))))
 
+;; --- 图标数据在 completion table 建表时快照：后台 fetch 随后把
+;; `dsh-emacs--reference-candidates' 换成新查询的结果，仍开着的 corfu 弹窗
+;; （持旧快照 table）re-affix 用快照 map 而非可变缓存 → 图标不被抽走
+;; （回归：新拉取后过滤时有些行没有 icon）
+(let* ((dsh-emacs--reference-candidates
+        (list (cons "@a.ts" '(:kind file :path "src/a.ts"))
+              (cons "@sub/" '(:kind directory :path "sub"))))
+       (rows (dsh-emacs-reference--session-rows))
+       (map (dsh-emacs-reference--snapshot-affix '("@a.ts" "@sub/") rows)))
+  ;; 一个更窄的 fetch 落地，替换了全局缓存
+  (setq dsh-emacs--reference-candidates
+        (list (cons "@fresh.md" '(:kind file :path "fresh.md"))))
+  (dsh-test-assert "affix-snapshot-survives-cache-swap"
+    (cl-letf (((symbol-function 'dsh-emacs-reference--row-icon)
+               (lambda (_path kind) (symbol-name kind))))
+      (equal (dsh-emacs-reference--affixate-with map '("@a.ts" "@sub/"))
+             '(("@a.ts" "file " "")
+               ("@sub/" "directory " ""))))))
+
 ;; --- active-token / capf：输入区令牌 → 补全区域与候选 ---
 (let ((buf (generate-new-buffer " *t-ref-capf*")))
   (unwind-protect
@@ -10695,7 +10714,7 @@ candidates as the UI would via `all-completions', not by destructuring."
               ;; 提供 :company-kind（nerd-icons-corfu / kind-icon 的 :fn 型
               ;; file/folder 字形会剥掉 nerd-font 字体族 → 乱码符号）
               (dsh-test-assert "capf-plist-no-company-kind"
-                (fboundp (plist-get props :affixation-function))
+                (functionp (plist-get props :affixation-function))
                 (functionp (plist-get props :exit-function))
                 (null (plist-get props :company-kind)))
               (dsh-test-assert "capf-reopens-bare-at-after-backspace"
