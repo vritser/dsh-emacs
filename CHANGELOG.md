@@ -59,14 +59,17 @@ minor) and stay undated until the release is cut.
   directory.  The buffer still carries the raw canonical text, so the wire to
   the host is unchanged (rationale: postmortem/012).
 - **A completed session mention is an atomic chip in the composer**: picking a
-  session from the `@` menu inserts it as one unbreakable unit — the buffer
-  keeps the canonical `@[label](dsh-session:…)` text (the wire is unchanged)
-  but the composer displays only `@label`. Editing treats it as a whole:
-  backspace removes the entire mention, and typing on it hops the cursor past
-  it rather than splitting the canonical text. RET or mouse-1 on the chip
+  session from the `@` menu keeps the short `@label` text in the input and
+  wraps it as one unbreakable unit — the canonical `@[label](dsh-session:…)`
+  text is stored on the chip and expanded back when the input is read for
+  sending/history, so the wire is unchanged. Editing treats the chip as a
+  whole: backspace removes the entire mention, and typing on it hops the
+  cursor past it rather than splitting it (the buffer holds the short text
+  itself, so there is no `display`-fold geometry). RET or mouse-1 on the chip
   jumps to that session's chat buffer. Completed file picks are equally atomic
-  chips that display their own `@path` — a backspace removes the whole mention
-  — and RET/mouse-1 opens the file (rationale: postmortem/012).
+  chips that keep their own `@path` (already the wire text) — a backspace
+  removes the whole mention — and RET/mouse-1 opens the file
+  (rationale: postmortem/013).
 - **Browser-session authentication for dsh web (0.1.2-rc.1+)**: recent dsh
   servers return `401` on every RPC and WebSocket stream unless the request
   carries a `dsh-auth-*` browser cookie minted from the per-process launch
@@ -120,6 +123,14 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **C-k clears the whole composer input line**: `C-k` (`kill-line`) in the
+  chat input now clears the entire input (prompt onward) in one press, no
+  matter where the cursor sits — previously it did Emacs' forward line-kill,
+  so with only a chip (or a chip at the end) it deleted just the trailing chip
+  (or, at the very end, the input area's structural newline, dropping the
+  cursor below the input line where it could not be recovered). Clearing the
+  input never touches that structural newline and leaves the cursor on the
+  input line.
 - **The `@` menu reopens with the full list after a completed reference**:
   completing an `@` pick left the candidate cache pinned to the previous host
   query (which typing had narrowed, often to the single just-picked item), so

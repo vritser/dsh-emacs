@@ -1170,6 +1170,32 @@ When the input line is not visible because the window was scrolled up to\nread h
           (goto-char input-pos)
           (recenter -1))))))
 
+(defun dsh-emacs--composer-kill-line (orig &rest args)
+  "`kill-line' advice: C-k clears the whole composer input line.
+The chat input is a single logical line ended by a structural newline that the
+mode-line separator owns.  While point is inside the editable input, C-k
+clears the whole input (prompt onward) instead of Emacs' forward line-kill,
+which at the trailing end would delete that structural newline and strand the
+cursor below the input line.  Outside the editable input ORIG runs unchanged."
+  (if (and dsh-emacs--input-marker
+           (markerp dsh-emacs--input-marker)
+           (eq (marker-buffer dsh-emacs--input-marker) (current-buffer))
+           (>= (point) (marker-position dsh-emacs--input-marker))
+           (<= (point) (dsh-emacs--input-end)))
+      (progn
+        (dsh-emacs--clear-input)
+        nil)
+    (apply orig args)))
+
+(defvar dsh-emacs--composer-kill-line-guard-installed nil
+  "Non-nil once the composer `kill-line' advice has been added once.")
+
+(defun dsh-emacs--composer-kill-line-guard-install ()
+  "Install the C-k-clears-composer-input advice (global, idempotent)."
+  (unless dsh-emacs--composer-kill-line-guard-installed
+    (setq dsh-emacs--composer-kill-line-guard-installed t)
+    (advice-add 'kill-line :around #'dsh-emacs--composer-kill-line)))
+
 
 ;;;###autoload
 (defun dsh-emacs-open-session (session-id)
@@ -1907,6 +1933,8 @@ vertico, etc.)."
   (add-hook 'pre-command-hook #'dsh-emacs--route-typing-to-input nil t)
   ;; 输入时立即滚动到输入区
   (add-hook 'post-command-hook #'dsh-emacs--reveal-input-when-typing nil t)
+  ;; C-k 在输入区 = 清空整行输入（不删结构性换行、不坠到 input line 下）
+  (dsh-emacs--composer-kill-line-guard-install)
   (setq dsh-emacs--tool-calls (make-hash-table :test 'equal))
   (setq dsh-emacs--activity-groups (make-hash-table :test 'equal))
   (setq dsh-emacs--pending-user-messages nil
@@ -2055,11 +2083,19 @@ via the `session/queue' stream; `\\[dsh-emacs-interrupt-turn]'
       (1- (point-max)))
      (t (point-max)))))
 
+(declare-function dsh-emacs-reference--expanded-text "dsh-emacs-reference.el"
+                  (start end))
+
 (defun dsh-emacs--get-input ()
-  "Get the text in the input area, excluding the mode-line newline."
+  "Get the text in the input area, excluding the mode-line newline.
+Completed session @ chips are stored in the buffer as short `@label' text and
+expanded back to their canonical mention by
+`dsh-emacs-reference--expanded-text', so the returned text is always the wire
+form; file references (`@path', no canonical property) and plain text pass
+through unchanged."
   (when (and dsh-emacs--input-marker (marker-buffer dsh-emacs--input-marker))
-    (buffer-substring-no-properties dsh-emacs--input-marker
-                                    (dsh-emacs--input-end))))
+    (dsh-emacs-reference--expanded-text
+     dsh-emacs--input-marker (dsh-emacs--input-end))))
 
 (defun dsh-emacs--clear-input ()
   "Clear the input area, keeping the mode-line newline."

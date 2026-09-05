@@ -18,10 +18,12 @@
 ;;                                       HTTP POST /api/sessionReferenceResolver/candidates）
 ;;
 ;; 两者 payload 都是 {args: {agentId, query}}，走与 `commands.list' 相同的
-;; 信封。补全弹层的会话行显示短标签（`@label'，对齐 web 行），选择后经
-;; completion 的 :exit-function 改写为 host 产出的规范 mention
-;; `@[label](dsh-session:…)' 插入输入区；该文本经普通 `session.prompt' 送达
-;; 后，服务端的 agent/pre-step 监听器负责解析 mention、冻结源会话快照并注入
+;; 信封。补全弹层的会话行显示短标签（`@label'，对齐 web 行），选择后在输入区
+;; 保留这条短 `@label' 文本并作原子 chip —— canonical 的
+;; `@[label](dsh-session:…)' 挂在 `dsh-emacs-reference-canonical' 文本属性上，
+;; 读输入（发送/历史）时把该 span 展开回完整 mention，`session.prompt' 收到的
+;; 仍是 host 产出的规范文本；送达后，服务端的 agent/pre-step 监听器负责解析
+;; mention、冻结源会话快照并注入
 ;; 上下文（见 harness 的 dsh-session-reference 包）—— 快照逻辑全在 host，
 ;; 本文件只做组合器，与 web 的 dsh-client-ui-reference 职责一致。
 ;;
@@ -705,12 +707,13 @@ dismissed and retriggered."
 (defun dsh-emacs-reference--exit (cand _status rows)
   "Finish a picked @ candidate CAND in the composer.
 The completion UI already inserted CAND's row text; ROWS maps session rows to
-their canonical mention.  A session row is rewritten to the canonical
-`@[label](dsh-session:…)' mention and wrapped as an atomic composer chip
-(buffer keeps canonical, display shows `@label'); a file row stays editable
-but is styled as a composer link (RET/mouse opens it); a directory row keeps
-its `@dir/' token and its children are fetched so drilling can continue.  The
-wire text always carries the canonical reference.  STATUS is ignored."
+their canonical mention.  A session row is kept as its short `@label' text and
+wrapped as an atomic composer chip that stores the canonical mention in a
+`dsh-emacs-reference-canonical' text property — sending
+(`dsh-emacs-reference--expanded-text') expands the span back to the wire form.
+A file row stays editable but is styled as a composer link (RET/mouse opens
+it); a directory row keeps its `@dir/' token and its children are fetched so
+drilling can continue.  STATUS is ignored."
   (let* ((entry (dsh-emacs-reference--entry-for cand))
          (props (cdr entry))
          (mention (cdr (assoc cand rows)))
@@ -728,10 +731,12 @@ wire text always carries the canonical reference.  STATUS is ignored."
          (dsh-emacs--active-session-id) dsh-emacs--reference-requested))
       (if mention
           (progn
-            (delete-region start (point))
-            (insert mention)
-            ;; Session mention -> atomic chip (canonical kept, display @label).
-            (dsh-emacs-reference--chipify (- (point) (length mention)))
+            ;; The picked session row is the short `@label' the front-end
+            ;; already inserted: keep that text and mark it an atomic chip that
+            ;; carries the canonical mention as a text property for send-time
+            ;; expansion (no delete + insert of the long mention, no `display'
+            ;; folding).
+            (dsh-emacs-reference--session-chip start (point) mention)
             ;; This mention consumed the @ token; forget the narrowed fetch so
             ;; the next `@' re-broadens to the full list.
             (dsh-emacs-reference--reset-fetch))
@@ -993,8 +998,8 @@ in the buffer / on the wire."
 (defun dsh-emacs-reference-open-at-point ()
   "Open the @ reference under point: jump to its session or open its file.
 The reference data rides the `dsh-emacs-reference-ref' text property set by
-`dsh-emacs-reference-fontify' / `dsh-emacs-reference--make-chip'.  RET /
-mouse-1 on the span call this."
+`dsh-emacs-reference-fontify' / the composer chip makers (`--session-chip',
+`--composer-file-chip').  RET / mouse-1 on the span call this."
   (interactive)
   (let ((ref (get-text-property (point) 'dsh-emacs-reference-ref)))
     (if (null ref)
@@ -1002,42 +1007,62 @@ mouse-1 on the span call this."
       (dsh-emacs-reference--open-ref (car ref) (cdr ref)))))
 
 ;; ---------------------------------------------------------------------------
-;; Composer 原子 chip：完成的 session mention 显示为 `@label'，buffer 仍存
-;; canonical 原文（上发不变）。用 `display' 属性折叠，编辑时 chip 当整体。
+;; Composer 原子 chip：完成的 session mention 在 buffer 存短 `@label' 文本，
+;; canonical 原文（上发需要的 `@[label](dsh-session:…)'）挂
+;; `dsh-emacs-reference-canonical' 文本属性；读输入（发送/历史）前由
+;; `dsh-emacs-reference--expanded-text' 展开回完整 mention。不再用 `display'
+;; 折叠 —— buffer 文本即所见文本，编辑守卫作用于短文本、无折叠几何问题。
+;; file chip 的 `@path' 本就是 wire 文本，无 canonical 属性、展开为恒等。
 ;; ---------------------------------------------------------------------------
 
-(defun dsh-emacs-reference--make-chip (start end)
-  "Wrap the canonical session mention in START..END as a composer chip.
-The buffer keeps the canonical text; a `display' property collapses it to
-`@label'.  Marks the span with `dsh-emacs-reference-chip' (editing guard),
-a link face / RET-mouse binding and the session id.  `rear-nonsticky' keeps
-the display/face/keymap from bleeding onto text typed right after the chip.
-No-op unless the region is a complete session mention."
-  (let* ((canonical (buffer-substring-no-properties start end))
-         (li (dsh-emacs-reference--mention-label-id canonical)))
-    (when li
+(defun dsh-emacs-reference--session-chip (start end canonical)
+  "Mark the short session label in START..END as an atomic composer chip.
+The buffer keeps the short `@label' text a pick inserted; the canonical
+`@[label](dsh-session:…)' MENTION is stored in the text property
+`dsh-emacs-reference-canonical' so sending
+(`dsh-emacs-reference--expanded-text') expands the span back to the wire form.
+Marks the span with `dsh-emacs-reference-chip' (editing guard), a link face /
+RET-mouse binding and the session id.  `rear-nonsticky' keeps the style from
+bleeding onto text typed right after the chip.  No-op unless MENTION is a
+complete session mention."
+  (let ((li (dsh-emacs-reference--mention-label-id canonical)))
+    (when (and li (< start end))
       (add-text-properties
        start end
-       (list 'display (concat "@" (car li))
-             'face 'dsh-emacs-reference-face
+       (list 'face 'dsh-emacs-reference-face
              'mouse-face 'highlight
              'follow-link t
              'keymap dsh-emacs-reference--mention-keymap
              'help-echo "RET/mouse-1: open this session"
              'dsh-emacs-reference-ref (cons 'session (cdr li))
+             'dsh-emacs-reference-canonical canonical
              'dsh-emacs-reference-chip t
              'rear-nonsticky
-             '(face mouse-face keymap display follow-link help-echo
-                    dsh-emacs-reference-ref dsh-emacs-reference-chip)))
+             '(face mouse-face keymap follow-link help-echo
+                    dsh-emacs-reference-ref dsh-emacs-reference-canonical
+                    dsh-emacs-reference-chip)))
       (dsh-emacs-reference--chip-guard-install)
       t)))
 
-(defun dsh-emacs-reference--chipify (start)
-  "Wrap the canonical session mention ending at point into a chip.
-START is the mention's first character.  Returns non-nil when a chip was
-made."
-  (and (< start (point))
-       (dsh-emacs-reference--make-chip start (point))))
+(defun dsh-emacs-reference--expanded-text (start end)
+  "Return buffer text START..END with composer session chips expanded.
+A chip span (text carrying a `dsh-emacs-reference-canonical' property) is
+replaced by its canonical mention; all other text — plain runs and file chips
+whose `@path' is already the wire form — is copied verbatim, so a region with
+no chips returns its plain substring unchanged.  Non-chip text properties are
+stripped: the result is plain text, the exact form RPC / history expects."
+  (let ((out '())
+        (pos start))
+    (while (< pos end)
+      (let* ((canon (get-text-property pos 'dsh-emacs-reference-canonical))
+             (next (or (next-single-property-change
+                        pos 'dsh-emacs-reference-canonical nil end)
+                       end)))
+        (if canon
+            (push canon out)
+          (push (buffer-substring-no-properties pos next) out))
+        (setq pos next)))
+    (apply #'concat (nreverse out))))
 
 (defun dsh-emacs-reference--chip-region (pos)
   "Chip (START . END) that POS sits on or immediately after; else nil.
@@ -1167,7 +1192,11 @@ session label); MENTION is the text inserted on pick."
 (defun dsh-emacs-reference--insert-at-point (mention)
   "Insert MENTION into the editable input area at point.
 An @ token ending at point is replaced; the cursor is clamped into
-the input area first."
+the input area first.  A session MENTION is inserted as its short
+`@label' text carrying the canonical mention in a
+`dsh-emacs-reference-canonical' text property (send expands it back);
+a file/directory MENTION inserts its own text, styled as an editable
+composer chip."
   (let ((inhibit-read-only t))
     (when (and dsh-emacs--input-marker
                (markerp dsh-emacs--input-marker)
@@ -1177,21 +1206,24 @@ the input area first."
       (let* ((token (dsh-emacs-reference--active-token))
              (start (if token
                         (- (point) (length (nth 0 token)))
-                      (point))))
+                      (point)))
+             (li (dsh-emacs-reference--mention-label-id mention)))
         (delete-region start (point))
-        (insert mention)
-        (let ((ins-start (- (point) (length mention))))
-          (if (dsh-emacs-reference--chipify ins-start)
-              ;; session chip made
-              nil
-            ;; file/directory mention: editable composer chip (not collapsed)
-            (let ((path (dsh-emacs-reference--mention-relpath mention)))
-              (and path
-                   (dsh-emacs-reference--composer-file-chip
-                    ins-start (point) path))))
-          ;; This pick consumed the @ token: forget the narrowed fetch so the
-          ;; next `@' opens the full list again.
-          (dsh-emacs-reference--reset-fetch))))))
+        (if li
+            ;; Session mention -> short @label kept in the buffer, canonical
+            ;; mention on a text property for send-time expansion.
+            (progn
+              (insert (concat "@" (car li)))
+              (dsh-emacs-reference--session-chip start (point) mention))
+          ;; File/directory mention: editable composer chip (path is wire text).
+          (insert mention)
+          (let ((path (dsh-emacs-reference--mention-relpath mention)))
+            (and path
+                 (dsh-emacs-reference--composer-file-chip
+                  start (point) path))))
+        ;; This pick consumed the @ token: forget the narrowed fetch so the
+        ;; next `@' opens the full list again.
+        (dsh-emacs-reference--reset-fetch)))))
 
 (defun dsh-emacs-reference ()
   "Insert an @ file or session reference into the chat input, at point.

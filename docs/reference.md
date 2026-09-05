@@ -82,22 +82,25 @@ yourself keeps the quote open after a directory pick so completion descends.
 Menu rows are short by design: a file names its path, a directory its path
 with a trailing slash, a session only its label. Picking a file or directory
 inserts its formatted mention (`@path` / `@path/`); picking a session inserts
-the canonical `@[label](dsh-session:…)` text — the long mention never
-appears in the popup, only in the sent message.
+its short `@label` as the wire-composing form — the long canonical mention
+never appears in the popup, and the buffer keeps the short label (expanded to
+the canonical only in the sent message).
 
-A **completed session mention is atomic**: once `@[label](dsh-session:…)`
-sits in the input it is no longer completion-active, so typing after it never
-re-opens the menu and `M-x dsh-emacs-reference` will not swallow it (the web
-renders the same mention as an atomic chip). In the composer the completed
-session mention renders as an **atomic chip**: the buffer keeps the canonical
-text (so the wire is unchanged) while the display collapses to just `@label`,
-the whole mention is treated as one unit for editing (backspace removes it
-all; typing on it hops the cursor past it rather than splitting the mention),
-and RET/mouse-1 jumps to that session. Completed file picks are equally
-atomic chips that display their own `@path` (no collapse needed — the path is
-the wire text): a backspace removes the whole mention and RET/mouse-1 opens
-the file. A mid-drill directory token (`@dir/`) is left plain so typing can
-descend further.
+A **completed session mention is atomic**: once a reference sits in the input
+it is no longer completion-active, so typing after it never re-opens the menu
+and `M-x dsh-emacs-reference` will not swallow it (the web renders the same
+mention as an atomic chip). In the composer the completed session mention
+renders as an **atomic chip**: the buffer keeps the short `@label` text you
+picked, with the canonical `@[label](dsh-session:…)` text stored in a text
+property, and the whole short span is treated as one unit for editing
+(backspace removes it all; typing on it hops the cursor past it rather than
+splitting the mention) and RET/mouse-1 jumps to that session. Sending (and the
+history copy) expands the short label back to the canonical mention, so the
+wire is unchanged — no `display` folding hides a long text behind the label,
+the buffer text is exactly what you see. Completed file picks are equally
+atomic chips that keep their own `@path` (already the wire text): a backspace
+removes the whole mention and RET/mouse-1 opens the file. A mid-drill
+directory token (`@dir/`) is left plain so typing can descend further.
 
 ## Caching (stale-while-revalidate)
 

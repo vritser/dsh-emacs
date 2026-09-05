@@ -1,6 +1,9 @@
 # 012 — Rendered @ references as clickable links (transcript + composer chip)
 
-_Status: Complete._
+_Status: Complete.  The transcript layer (Slice 1) stands; the composer chip
+mechanism (Slice 2) is superseded by postmortem/013, which stores the short
+label in the buffer with the canonical mention on a text property instead of a
+`display` collapse._
 
 ## Background
 

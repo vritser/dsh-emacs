@@ -10764,22 +10764,30 @@ candidates as the UI would via `all-completions', not by destructuring."
           (equal opened "target1")))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
-;; --- composer 原子 chip：buffer 存 canonical，display 折叠成 @label，编辑当整体
+;; --- composer 原子 chip：buffer 存短 @label + canonical 文本属性，发送展开回完整 mention
 (let ((canon "@[My Talk](dsh-session:ab12_CD)"))
   (with-temp-buffer
-    (insert canon)
-    (dsh-test-assert "chip-keeps-canonical-in-buffer"
-      (and (dsh-emacs-reference--chipify (- (point) (length canon)))
-           (string= (buffer-substring-no-properties (point-min) (point-max))
-                    canon)))
-    (let ((s (point-min)))
-      (dsh-test-assert "chip-displays-label-and-carries-session"
-        (and (string= (get-text-property s 'display) "@My Talk")
-             (equal (get-text-property s 'dsh-emacs-reference-ref)
-                    '(session . "ab12_CD"))
-             (get-text-property s 'dsh-emacs-reference-chip))
-        (equal (dsh-emacs-reference--chip-region (point-max))
-               (cons (point-min) (point-max)))))
+    (setq-local dsh-emacs--input-marker (point-min-marker))
+    (insert "@My Talk")
+    (dsh-test-assert "chip-keeps-short-label-and-canonical"
+      (and (dsh-emacs-reference--session-chip (point-min) (point) canon)
+           (string= (buffer-substring-no-properties (point-min) (point))
+                    "@My Talk")
+           (string= (get-text-property (point-min)
+                                       'dsh-emacs-reference-canonical)
+                    canon)
+           (equal (get-text-property (point-min) 'dsh-emacs-reference-ref)
+                  '(session . "ab12_CD"))
+           (get-text-property (point-min) 'dsh-emacs-reference-chip)))
+    ;; no `display' folding: visible text is exactly the short label in the buffer
+    (dsh-test-assert "chip-has-no-display-folding"
+      (null (get-text-property (point-min) 'display)))
+    ;; expansion back to the full mention, via both the raw span reader and
+    ;; `dsh-emacs--get-input' (the send / history path)
+    (dsh-test-assert "chip-expands-to-full-mention"
+      (string= (dsh-emacs-reference--expanded-text (point-min) (point-max))
+               canon)
+      (string= (dsh-emacs--get-input) canon))
     ;; self-insert while point sits on the chip hops to its end first
     (goto-char (+ (point-min) 5))
     (let ((this-command 'self-insert-command))
@@ -10791,14 +10799,45 @@ candidates as the UI would via `all-completions', not by destructuring."
     (delete-backward-char 1)
     (dsh-test-assert "chip-backspace-deletes-whole-span"
       (string= (buffer-substring-no-properties (point-min) (point-max)) ""))
-    ;; typing after the chip must not inherit its link/display style
-    (insert canon)
-    (dsh-emacs-reference--chipify (- (point) (length canon)))
+    ;; typing after the chip must not inherit its link/face style
+    (insert "@My Talk")
+    (dsh-emacs-reference--session-chip (point-min) (point) canon)
     (insert " tail")
     (dsh-test-assert "chip-typed-after-stays-plain"
       (let ((p (- (point) 5)))
         (and (null (get-text-property p 'face))
              (null (get-text-property p 'dsh-emacs-reference-chip)))))))
+
+;; --- C-k (kill-line) 在输入区 = 清空整行输入：删内容、绝不删结构性换行/坠光标
+(let ((canon "@[My Talk](dsh-session:ab12_CD)"))
+  (dsh-emacs--composer-kill-line-guard-install)
+  (with-temp-buffer
+    (setq-local dsh-emacs--input-marker (point-min-marker))
+    (setq-local dsh-emacs--modeline-overlay nil)
+    ;; 只有一个 chip、光标在它尾端（选中后静止位）：C-k 清空整行输入
+    (insert "@My Talk")
+    (dsh-emacs-reference--session-chip (point-min) (point) canon)
+    (insert "\n")                   ; 结构性分隔换行（mode-line separator）
+    (goto-char (1- (point-max)))
+    (kill-line)
+    (dsh-test-assert "composer-kill-line-clears-sole-chip"
+      (and (string= (buffer-substring-no-properties (point-min) (point-max))
+                    "\n")          ; 结构性换行保留、chip 删除
+           (null (get-text-property (point-min) 'dsh-emacs-reference-chip))
+           (= (point) (point-min)))) ; 光标回输入区首，不坠到 input line 下
+    ;; 光标在输入中段：C-k 删除整行内容（不止一个 chip / 不止前方文本）
+    (erase-buffer)
+    (insert "say ")
+    (let ((chip-start (point)))
+      (insert "@My Talk")
+      (dsh-emacs-reference--session-chip chip-start (point) canon))
+    (insert "\n")
+    (goto-char (1+ (point-min)))    ; 光标在 "say " 内部
+    (kill-line)
+    (dsh-test-assert "composer-kill-line-clears-whole-input"
+      (and (string= (buffer-substring-no-properties (point-min) (point-max))
+                    "\n")
+           (= (point) (point-min))))))
 
 ;; --- composer 文件引用：保留可编辑，但带链接样式与跳转
 (with-temp-buffer
@@ -10901,14 +10940,21 @@ candidates as the UI would via `all-completions', not by destructuring."
               (dsh-test-assert "capf-session-row-short"
                 (equal (dsh-test-completion-items cands)
                        '("@My Talk")))
-              ;; 模拟前端插入行文本后调用 exit：短标签 → 规范 mention
+              ;; 模拟前端插入行文本后调用 exit：保留短 @label 文本 + canonical 属性
               (delete-region (- (point) 2) (point))
               (insert "@My Talk")
-              (dsh-test-assert "capf-exit-inserts-mention"
+              (dsh-test-assert "capf-exit-keeps-short-label-chip"
                 (progn
                   (funcall exit "@My Talk" 'finished)
                   (string= (buffer-substring-no-properties
                             (point-min) (point-max))
+                           "hi @My Talk")
+                  (string= (get-text-property
+                            (- (point) (length "@My Talk"))
+                            'dsh-emacs-reference-canonical)
+                           "@[My Talk](dsh-session:cyJpZCI6InMxIn0)")
+                  ;; 发送/历史读输入时展开回完整 mention
+                  (string= (dsh-emacs--get-input)
                            "hi @[My Talk](dsh-session:cyJpZCI6InMxIn0)")))
               ;; 完成即消费该 @ token：清掉窄化的 fetch 状态，下一次 @ 恢复全量
               (dsh-test-assert "capf-exit-resets-fetch-state"
@@ -10947,13 +10993,22 @@ candidates as the UI would via `all-completions', not by destructuring."
         (goto-char (point-max))
         (dsh-emacs-reference--insert-at-point
          "@[New](dsh-session:cyJpZCI6InMxIn0)")
-        (dsh-test-assert "insert-replaces-active-token"
+        ;; 会话 mention：buffer 存短 @label，canonical 挂文本属性
+        (dsh-test-assert "insert-replaces-token-keeps-short-label"
           (string= (buffer-substring-no-properties (point-min) (point-max))
-                   "see @[New](dsh-session:cyJpZCI6InMxIn0)"))
+                   "see @New")
+          (string= (get-text-property
+                    (- (point-max) (length "@New"))
+                    'dsh-emacs-reference-canonical)
+                   "@[New](dsh-session:cyJpZCI6InMxIn0)"))
         (goto-char (point-max))
         (dsh-emacs-reference--insert-at-point "@tail.md")
         (dsh-test-assert "insert-no-token-inserts-at-point"
           (string= (buffer-substring-no-properties (point-min) (point-max))
+                   "see @New@tail.md"))
+        ;; 读输入把短 chip 展开回完整 mention（file @path 恒等）
+        (dsh-test-assert "insert-expands-to-full-mention"
+          (string= (dsh-emacs--get-input)
                    "see @[New](dsh-session:cyJpZCI6InMxIn0)@tail.md")))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
