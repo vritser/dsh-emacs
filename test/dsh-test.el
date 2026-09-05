@@ -9894,11 +9894,18 @@ candidates as the UI would via `all-completions', not by destructuring."
           (dsh-test-assert "send-or-stop-busy-queue-submits"
             (null interrupted)
             (equal '("the next thing" queue) submitted))
-          ;; C-u 翻转 queue → steer
+          ;; C-u 显式 steer
           (setq submitted nil current-prefix-arg '(4))
           (with-current-buffer buf
             (dsh-emacs-send-or-stop))
-          (dsh-test-assert "send-or-stop-prefix-flips-to-steer"
+          (dsh-test-assert "send-or-stop-prefix-steers-from-queue"
+            (equal '("the next thing" steer) submitted))
+          ;; 默认 steer 时 C-u 仍是 steer，不翻转成 queue
+          (setq submitted nil)
+          (let ((dsh-emacs-busy-enter-behavior 'steer))
+            (with-current-buffer buf
+              (dsh-emacs-send-or-stop)))
+          (dsh-test-assert "send-or-stop-prefix-steers-from-steer"
             (equal '("the next thing" steer) submitted))
           ;; busy + 空输入 → 中断
           (setq submitted nil current-prefix-arg nil)
@@ -9911,12 +9918,21 @@ candidates as the UI would via `all-completions', not by destructuring."
             (null submitted))
           ;; behavior=stop → 中断（字节级旧行为）
           (setq interrupted nil submitted nil)
-          (let ((dsh-emacs-busy-enter-behavior 'stop))
+          (let ((dsh-emacs-busy-enter-behavior 'stop)
+                (current-prefix-arg nil))
             (with-current-buffer buf
               (dsh-emacs-send-or-stop)))
           (dsh-test-assert "send-or-stop-stop-behavior-interrupts"
             interrupted
             (null submitted))
+          ;; 即使默认 stop，C-u 也显式 steer
+          (setq interrupted nil submitted nil current-prefix-arg '(4))
+          (let ((dsh-emacs-busy-enter-behavior 'stop))
+            (with-current-buffer buf
+              (dsh-emacs-send-or-stop)))
+          (dsh-test-assert "send-or-stop-prefix-steers-from-stop"
+            (null interrupted)
+            (equal '("the next thing" steer) submitted))
           ;; idle → 普通提交（无 mode）
           (setq interrupted nil submitted nil)
           (cl-letf (((symbol-function 'dsh-emacs--busy-p) (lambda (&rest _) nil)))

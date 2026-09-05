@@ -123,6 +123,10 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **`C-u C-c C-c` consistently steers a message**: while a turn is running,
+  the prefix now selects `steer` regardless of whether the default busy-enter
+  behavior is `queue`, `steer`, or `stop` (rationale: postmortem/014).
+
 - **External server token entry can be retried**: after empty input, an
   incorrect token, or cancellation with `C-g`, running `dsh-emacs` again
   prompts for the launch token. Successful authentication still caches the

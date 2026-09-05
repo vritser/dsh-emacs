@@ -207,7 +207,7 @@ next turn (delivered automatically when the current one finishes),
 `steer' wakes the running agent and redirects its current work, and
 `stop' keeps the old behavior of interrupting the turn.  With `queue' or
 `steer', an empty input still interrupts, and `\\[universal-argument]
-\\[dsh-emacs-send-or-stop]' flips queue and steer for one send."
+\\[dsh-emacs-send-or-stop]' explicitly steers one message."
   :type '(choice (const :tag "Queue as the next turn" queue)
                  (const :tag "Steer the running turn" steer)
                  (const :tag "Interrupt the turn" stop))
@@ -2036,17 +2036,15 @@ executing (the mode-line spinner is lit) the input is delivered per
 `dsh-emacs-busy-enter-behavior': `queue' lines it up as the next turn,
 `steer' wakes the running agent, `stop' issues `session/cancel' (the old
 interrupt behavior).  With `queue'/`steer' and an EMPTY input the turn is
-interrupted, so stopping stays one key away, and `C-u' flips queue and
-steer for one send.  Success feedback (queued / steering reports) arrives
+interrupted, so stopping stays one key away, and `C-u' explicitly steers
+one message regardless of the configured behavior.  Success feedback arrives
 via the `session/queue' stream; `\\[dsh-emacs-interrupt-turn]'
 (`C-c C-b') interrupts regardless of the behavior."
   (interactive)
   (dsh-emacs-server-ensure)
   (if (dsh-emacs--busy-p)
-      (let ((behavior (if (and (consp current-prefix-arg)
-                               (not (eq dsh-emacs-busy-enter-behavior 'stop)))
-                          (if (eq dsh-emacs-busy-enter-behavior 'steer)
-                              'queue 'steer)
+      (let ((behavior (if (consp current-prefix-arg)
+                          'steer
                         dsh-emacs-busy-enter-behavior)))
         (if (eq behavior 'stop)
             (dsh-emacs-interrupt-turn)
