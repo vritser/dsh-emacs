@@ -39,6 +39,7 @@ use — disable with `dsh-emacs-new-session-auto-project`.
   (dsh-emacs-base-url "http://127.0.0.1:3080")   ; point at a remote server instead
   (dsh-emacs-default-model "deepseek-v4-flash")
   (dsh-emacs-default-preset "code")
+  (dsh-emacs-composer-goal-actions t)              ; show Goal Row action buttons
   (dsh-emacs-server-start-on-init t)             ; eager background start
   :bind (("C-x d" . dsh-emacs)                   ; open the session list
          :map dsh-emacs-mode-map                 ; inside a chat buffer
@@ -49,7 +50,9 @@ Common keys inside a chat: `C-c C-c` send — while a turn is running it
 queues the input as the next turn (`dsh-emacs-busy-enter-behavior`; `C-u`
 steers instead) and with an empty input interrupts — `C-c C-b` interrupts
 explicitly, `C-c C-q` manages the pending queue (minibuffer list, keys
-act on the highlighted item; `x` deletes all), `C-c C-m` switch model, `C-c C-a` attach an image, `C-c C-r`
+act on the highlighted item; `x` deletes all), `C-c C-g` opens the goal-action
+prefix (`p` pause, `r` resume, `e` edit, `d` clear, `a` toggle inline action
+buttons), `C-c C-m` switch model, `C-c C-a` attach an image, `C-c C-r`
 refresh, `C-c C-s` switch session in this workspace (`C-c M-s` or
 `C-u C-c C-s` across all workspaces),
 `C-c C-f` toggle the mode-line stats, `TAB` complete `/name`, and typing

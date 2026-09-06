@@ -49,6 +49,32 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Goal Row in the chat composer**: while a session has an active goal, the
+  chat buffer shows a read-only **Goal Row** pinned above the editable input —
+  a dartboard goal SVG icon (mirroring dsh web) followed by the objective and
+  phase on one line (embedded line breaks are folded, a long objective is
+  ellipsis-truncated to the window width instead of wrapping, and a completed
+  goal hides the row entirely, like dsh web) — composer chrome, not transcript
+  content, never sent to the model.  The row is fed passively from the server's
+  `goal` session projection (`session/control` frames and the `session/follow`
+  snapshot), so it appears/disappears as the goal changes and is rebuilt when
+  the session reopens.  Streamed messages stay above the Goal Row instead of
+  pushing it away from the input (rationale: postmortem/017).
+- **Goal actions**: pause, resume, edit, and clear the current goal from the
+  chat buffer — `C-c C-g` is a goal prefix (`p` pause, `r` resume, `e` edit, `d`
+  clear), and the Goal Row shows the dsh-web pause/resume/edit/clear **SVG
+  icons** (RET or mouse-1 on the icon runs the action; a text glyph is the
+  fallback when Emacs lacks SVG support).  Each action is a CAS `goals.*` call
+  on the live goal ref, guarded against double-fire, and the row updates
+  optimistically from the returned view only while that request's ref remains
+  current, so a late HTTP response cannot overwrite a newer projection (a
+  cleared goal is removed).  `edit` prompts in the minibuffer pre-filled with
+  the current objective.  Failures message the user and leave the row unchanged
+  (rationale: postmortem/018).
+  The inline action buttons are optional: `dsh-emacs-composer-goal-actions`
+  (default on) shows them on the Goal Row, `C-c C-g a` (or `M-x
+  dsh-emacs-goal-actions-toggle`) hides/shows them and re-renders the row —
+  the `C-c C-g` keys work either way.
 - **Workspace folding in the session list**: workspace and `Ungrouped` headers
   now show an expanded/collapsed indicator and accept `TAB` or `RET` to hide
   or reveal their session rows.  Fold state is local to the session-list

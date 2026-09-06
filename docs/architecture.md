@@ -15,8 +15,45 @@ dsh-emacs/
 ├── dsh-emacs-modeline.el       # Mode-line stats
 ├── dsh-emacs-queue.el        # Pending-input queue mirror (queue/steer)
 ├── dsh-emacs-server.el       # Server bootstrap: probe / auto-start / install / browser-session auth
+├── dsh-emacs-composer.el     # Composer chrome: the Goal Row above the editable input
 └── dsh-emacs-session.el      # Session list card view
 ```
+
+## Composer (`dsh-emacs-composer.el`)
+
+The bottom of a chat buffer is a **Composer**: a persistent, non-transcript UI
+region made of a read-only **Goal Row** chrome above the editable **Input
+Area**. The Input Area's geometry (the `❯ ` prompt, `dsh-emacs--input-marker` /
+`dsh-emacs--input-end`, cursor clamps, delete guards) is owned by
+`dsh-emacs.el`; `dsh-emacs-composer.el` owns the Goal Row chrome and the seam
+that keeps streamed transcript above it.
+
+The Goal Row shows the session's current goal as one read-only line (a leading
+dartboard goal SVG icon mirroring dsh web — the `◎ ` text is a fallback when
+Emacs lacks SVG support — followed by objective + phase, and trailing
+dsh-web pause/resume/edit/clear **SVG** action icons, unicode glyphs when SVG
+is unavailable) only when a goal exists, fed **passively** from the server
+`goal` session projection (`rpc.md §9`): `session/control` projection frames
+and the `session/follow` snapshot route to the session's live chat buffer. It
+is composer chrome, never a `user/message` and never sent to the model.
+
+The goal **actions** (pause/resume/edit/clear) are `goals.*` RPCs
+(`rpc.md §4.10`) issued on the current goal's CAS `ref` `{id, revision}`:
+`dsh-emacs-goal-pause|resume|edit|clear` commands under a `C-c C-g` prefix
+keymap, and each action glyph on the row binds RET/mouse-1 to the same
+command via a text-region keymap.  A pending request token guards against a
+second mutation mid-flight; a successful verb optimistically re-renders the row from
+the returned view only while its request token and CAS ref remain current (a
+clear removes it), so an already-newer projection always wins.  Failures
+surface via `message` and leave the row unchanged (see postmortem/018).
+
+Geometry: transcript inserts land at `dsh-emacs-render--input-insert-point`,
+today the start of the `❯ ` line. When a Goal Row is shown it occupies its own
+line above the input and the composer owns a buffer-local
+`dsh-emacs--composer-top-marker` pointing at that row's start; the render seam
+inserts above it, so streamed messages stack above the chrome instead of
+pushing it away from the input. The marker is `insertion-type t`, so content
+inserted above the row slides the marker down with it.
 
 ## Protocol layer (`dsh-emacs-protocol.el`)
 
@@ -42,6 +79,8 @@ when the server protocol changes you sync exactly one file. Covered payloads:
 - `agentPresets/list` → `dsh-protocol-agent-preset-list` (presets, authorable,
   has-document) → `dsh-protocol-agent-preset` (id, trust, is-default, name,
   description, broken)
+- `goal` session projection (§9) → `dsh-protocol-goal` (id, revision,
+  objective, phase, blocked-reason, max-goal-rounds, rounds-started)
 
 Conversion is one-way and lossless: `session/modelCatalog` responses become a
 `dsh-protocol-model-directory` before the picker reads them; the cached

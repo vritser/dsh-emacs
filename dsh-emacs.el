@@ -59,6 +59,7 @@
 (require 'dsh-emacs-tokens)
 (require 'dsh-emacs-markdown)
 (require 'dsh-emacs-render)
+(require 'dsh-emacs-composer)
 (require 'dsh-emacs-events)
 (require 'dsh-emacs-modeline)
 (require 'dsh-emacs-queue)
@@ -1859,6 +1860,7 @@ repaints)."
     (define-key map (kbd "C-c C-k") #'dsh-emacs-copy-code-block)
     (define-key map (kbd "C-c C-a") #'dsh-emacs-attach-file)
     (define-key map (kbd "C-c C-m") #'dsh-emacs-select-model)
+    (define-key map (kbd "C-c C-g") dsh-emacs-goal-map)
     (define-key map (kbd "M-p") #'dsh-emacs-input-history-back)
     (define-key map (kbd "M-n") #'dsh-emacs-input-history-forward)
     ;; 输入区以 "/" 开头时 TAB 补全 slash 命令名（无论弹出菜单是否开着）
@@ -1996,7 +1998,10 @@ vertico, etc.)."
   (dsh-emacs-render--reset-tool-tracking)
 
   ;; 初始化输入区域
-  (dsh-emacs--setup-input-area))
+  (dsh-emacs--setup-input-area)
+  ;; Reset Composer chrome with the buffer; the next projection or snapshot
+  ;; rebuilds the Goal Row and its top marker.
+  (dsh-emacs-composer-reset))
 
 (defun dsh-emacs--setup-input-area ()
   "Set up the input area (a read-only transcript plus a writable input box).

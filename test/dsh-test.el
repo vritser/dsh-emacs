@@ -11500,7 +11500,6 @@ candidates as the UI would via `all-completions', not by destructuring."
         (dsh-test-assert "active-token-in-progress-still-triggers"
           (equal (dsh-emacs-reference--active-token) '("@re" "re" nil))))
     (when (buffer-live-p buf) (kill-buffer buf))))
-
 ;; Performance regressions: callbacks must retain their owning buffer.
 (let ((owner (generate-new-buffer " *dsh-spinner-owner*")) timer)
   (unwind-protect
@@ -11661,6 +11660,711 @@ candidates as the UI would via `all-completions', not by destructuring."
       (when spinner (cancel-timer spinner))
       (when formatting (cancel-timer formatting)))))
 
+;; --- Composer Goal Row: parse the goal projection ---
+(let* ((proj (list (cons 'goal
+                         (list (cons 'id "g1")
+                               (cons 'revision 3)
+                               (cons 'objective "Improve model picker")
+                               (cons 'phase "active")
+                               (cons 'blockedReason nil)
+                               (cons 'maxGoalRounds 10)))))
+       (goal (dsh-emacs-composer-goal-from-projection proj)))
+  (dsh-test-assert "composer-goal-from-projection-parses"
+    (dsh-protocol-goal-p goal)
+    (equal (dsh-protocol-goal-objective goal) "Improve model picker")
+    (equal (dsh-protocol-goal-phase goal) "active")
+    (equal (dsh-protocol-goal-revision goal) 3)
+    (equal (dsh-protocol-goal-id goal) "g1"))
+  (dsh-test-assert "composer-goal-nil-projection-is-nil"
+    (null (dsh-emacs-composer-goal-from-projection nil))
+    (null (dsh-emacs-composer-goal-from-projection '((nope . 1))))))
+
+;; --- Composer Goal Row: render read-only chrome above the input ---
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (dsh-emacs-composer-set-goal-from-projection
+   (list (cons 'goal (list (cons 'objective "Ship the refactor")
+                           (cons 'phase "active")))))
+  (let ((txt (buffer-substring-no-properties (point-min) (point-max))))
+    (dsh-test-assert "composer-goal-row-rendered-above-input"
+      (string-match-p "Ship the refactor" txt)
+      (string-match-p "active" txt)
+      (markerp dsh-emacs--composer-top-marker)
+      ;; The goal row must precede the `❯' input.
+      (let ((g (string-match "Ship the refactor" txt))
+            (p (string-match "❯" txt)))
+        (and g p (< g p))))))
+
+;; --- Composer Goal Row: leading dartboard SVG display image ---
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (dsh-emacs-composer-set-goal-from-projection
+   (list (cons 'goal (list (cons 'objective "Icon lead")
+                           (cons 'phase "active")))))
+  (let ((beg (marker-position dsh-emacs--composer-top-marker)))
+    (dsh-test-assert "composer-goal-row-leads-with-svg-icon"
+      (when (image-type-available-p 'svg)
+        (get-text-property beg 'display))
+      ;; The icon cell carries both the chrome tag and read-only property.
+      (get-text-property beg 'dsh-emacs-composer-goal-row)
+      (get-text-property beg 'read-only))))
+
+;; --- Composer Goal Row: ellipsize long objectives to one line ---
+(let* ((long "this objective is far longer than any chat window could ever hope to fit on a single physical line without wrapping so it must be ellipsized")
+       (goal (dsh-emacs-composer-goal-from-projection
+              (list (cons 'goal (list (cons 'objective long)
+                                      (cons 'phase "active")))))))
+  (dsh-test-assert "composer-goal-fit-objective-ellipsizes"
+    (let ((row (dsh-emacs-composer--render-row goal))
+          (txt (dsh-emacs-composer--objective-text goal)))
+      (and (string-match-p "…" row)
+           ;; The truncated row excludes the original tail and cannot wrap.
+           (not (string-match-p (substring txt (- (length txt) 20)) row)))))
+  ;; Preserve short objectives unchanged.
+  (let ((goal2 (dsh-emacs-composer-goal-from-projection
+                (list (cons 'goal (list (cons 'objective "short")
+                                        (cons 'phase "active")))))))
+    (dsh-test-assert "composer-goal-fit-objective-keeps-short"
+      (string-match-p "short" (dsh-emacs-composer--render-row goal2))
+      (null (string-match-p "…" (dsh-emacs-composer--render-row goal2))))))
+
+;; External clients may create multiline objectives; chrome remains one line
+;; and clearing it must not leave later objective lines in the transcript.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (dsh-emacs-composer-set-goal-from-projection
+   (list (cons 'goal (list (cons 'objective "line one\r\nline two\nline three")
+                           (cons 'phase "active")))))
+  (let* ((region (dsh-emacs-composer--goal-row-region))
+         (row (buffer-substring-no-properties (car region) (cdr region))))
+    (dsh-test-assert "composer-goal-multiline-objective-folds-to-one-row"
+      (string-match-p "line one line two line three" row)
+      (= (cl-count ?\n row) 1)
+      (null (string-match-p "\r" row))))
+  (dsh-emacs-composer-set-goal-from-projection nil)
+  (dsh-test-assert "composer-goal-multiline-clear-leaves-no-orphan"
+    (null (string-match-p "line one\\|line two\\|line three"
+                          (buffer-substring-no-properties
+                           (point-min) (point-max))))))
+
+;; Fallback glyphs must fit even when the window is narrower than fixed chrome.
+(let ((goal (dsh-emacs-composer-goal-from-projection
+             (list (cons 'goal (list (cons 'objective "narrow objective")
+                                     (cons 'phase "active")))))))
+  (cl-letf (((symbol-function 'dsh-emacs-composer--row-width) (lambda () 8))
+            ((symbol-function 'dsh-emacs-composer--goal-icon) (lambda () nil))
+            ((symbol-function 'dsh-emacs-composer--action-image)
+             (lambda (_svg) nil)))
+    (dsh-test-assert "composer-goal-narrow-fallback-fits-width"
+      (<= (string-width (dsh-emacs-composer--render-row goal)) 8))))
+
+;; Use the narrowest width when several windows display the same buffer.
+(cl-letf (((symbol-function 'get-buffer-window-list)
+           (lambda (&rest _) '(wide narrow)))
+          ((symbol-function 'window-text-width)
+           (lambda (window) (if (eq window 'wide) 90 23))))
+  (dsh-test-assert "composer-goal-width-uses-narrowest-window"
+    (= (dsh-emacs-composer--row-width) 23)))
+
+;; --- Composer Goal Row: read-only chrome without the prompt face ---
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (dsh-emacs-composer-set-goal-from-projection
+   (list (cons 'goal (list (cons 'objective "Readonly row")
+                           (cons 'phase "paused")))))
+  (let* ((pos (save-excursion
+                (goto-char (point-min))
+                (and (search-forward "Readonly row" nil t)
+                     (1- (point))))))
+    (dsh-test-assert "composer-goal-row-is-readonly-chrome"
+      (and pos
+           (get-text-property pos 'read-only)
+           (get-text-property pos 'dsh-emacs-composer-goal-row)
+           ;; The objective uses the body face and never inherits the prompt face.
+           (memq 'dsh-emacs-composer-goal-body-face
+                 (if (listp (get-text-property pos 'face))
+                     (get-text-property pos 'face)
+                   (list (get-text-property pos 'face))))
+           (null (memq 'dsh-emacs-input-prompt-face
+                       (if (listp (get-text-property pos 'face))
+                           (get-text-property pos 'face)
+                         (list (get-text-property pos 'face)))))))))
+
+;; --- Composer Goal Row: transcript inserts above the row ---
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (dsh-emacs-composer-set-goal-from-projection
+   (list (cons 'goal (list (cons 'objective "Seam check")
+                           (cons 'phase "active")))))
+  ;; With a composer marker, the insertion seam resolves to the row start.
+  (let ((insert-pt (dsh-emacs-render--input-insert-point)))
+    (dsh-test-assert "composer-insert-point-lands-at-goal-row"
+      (and insert-pt
+           (= insert-pt (marker-position dsh-emacs--composer-top-marker)))))
+  ;; Messages stack above the Goal Row and retain their order.
+  (dsh-emacs-render-event
+   (list (cons 'type "assistant/message") (cons 'seq 1)
+         (cons 'data (list (cons 'message
+                                 (list (cons 'content
+                                             (vector (list (cons 'type "text")
+                                                           (cons 'text "msg-one"))))))))))
+  (dsh-emacs-render-event
+   (list (cons 'type "assistant/message") (cons 'seq 2)
+         (cons 'data (list (cons 'message
+                                 (list (cons 'content
+                                             (vector (list (cons 'type "text")
+                                                           (cons 'text "msg-two"))))))))))
+  (let ((txt (buffer-substring-no-properties (point-min) (point-max)))
+        (goal-sig "Seam check"))
+    (dsh-test-assert "composer-messages-stay-above-goal-row"
+      (let ((g1 (string-match "msg-one" txt))
+            (g2 (string-match "msg-two" txt))
+            (g (string-match goal-sig txt)))
+        (and g1 g2 g (< g1 g2) (< g2 g)))
+      ;; The Goal Row stays adjacent to the input with no message between them.
+      (let ((g (string-match goal-sig txt))
+            (p (string-match "❯" txt)))
+        (and g p (< g p))))))
+
+;; --- Composer Goal Row: a nil projection removes chrome, not transcript ---
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (dsh-emacs-composer-set-goal-from-projection
+   (list (cons 'goal (list (cons 'objective "To clear")
+                           (cons 'phase "active")))))
+  (dsh-emacs-render-event
+   (list (cons 'type "assistant/message") (cons 'seq 1)
+         (cons 'data (list (cons 'message
+                                 (list (cons 'content
+                                             (vector (list (cons 'type "text")
+                                                           (cons 'text "keep-me"))))))))))
+  (dsh-emacs-composer-set-goal-from-projection nil)
+  (let ((txt (buffer-substring-no-properties (point-min) (point-max))))
+    (dsh-test-assert "composer-goal-clear-removes-row-keeps-transcript"
+      (null (markerp dsh-emacs--composer-top-marker))
+      (null (string-match-p "To clear" txt))
+      (string-match-p "keep-me" txt))))
+
+;; --- Composer Goal Row: idempotent text and in-place projection updates ---
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (dsh-emacs-composer-set-goal-from-projection
+   (list (cons 'goal (list (cons 'objective "v1") (cons 'phase "active")))))
+  (let ((first-marker (copy-marker (marker-position dsh-emacs--composer-top-marker))))
+    ;; Reapplying identical text is idempotent and does not move the marker.
+    (dsh-emacs-composer-set-goal-from-projection
+     (list (cons 'goal (list (cons 'objective "v1") (cons 'phase "active")))))
+    (dsh-test-assert "composer-goal-idempotent-same-text"
+      (= (marker-position first-marker)
+         (marker-position dsh-emacs--composer-top-marker)))
+    ;; Replacing the objective updates the same single row.
+    (dsh-emacs-composer-set-goal-from-projection
+     (list (cons 'goal (list (cons 'objective "v2 now") (cons 'phase "paused")))))
+    (let ((txt (buffer-substring-no-properties (point-min) (point-max))))
+      (dsh-test-assert "composer-goal-update-replaces-row"
+        (null (string-match-p "v1" txt))
+        (string-match-p "v2 now" txt)
+        (string-match-p "paused" txt)
+        (markerp dsh-emacs--composer-top-marker)))))
+
+;; --- Composer Goal Row: route event projections to the live chat buffer ---
+(let* ((session-id "sess-composer-1")
+       (goal-proj (list (cons 'goal (list (cons 'objective "route me")
+                                          (cons 'phase "active")))))
+       (chat (generate-new-buffer " *t-composer-chat*")))
+  (unwind-protect
+      (progn
+        (puthash session-id chat dsh-emacs--chat-buffers)
+        (with-current-buffer chat
+          (dsh-emacs-mode)
+          (dsh-emacs-modeline-setup))
+        (dsh-emacs-events--apply-goal-projection session-id goal-proj)
+        (with-current-buffer chat
+          (dsh-test-assert "composer-projection-routes-to-chat"
+            (string-match-p "route me"
+                            (buffer-substring-no-properties
+                             (point-min) (point-max)))
+            (markerp dsh-emacs--composer-top-marker)))
+        ;; A null projection clears that session's Goal Row.
+        (dsh-emacs-events--apply-goal-projection session-id nil)
+        (with-current-buffer chat
+          (dsh-test-assert "composer-projection-null-clears"
+            (null (string-match-p "route me"
+                                  (buffer-substring-no-properties
+                                   (point-min) (point-max)))))))
+    (remhash session-id dsh-emacs--chat-buffers)
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
+;; --- Composer Goal Row: nil in a control baseline is a clear tombstone ---
+(let* ((session-id "sess-composer-baseline-nil")
+       (chat (generate-new-buffer " *t-composer-baseline-nil*")))
+  (unwind-protect
+      (progn
+        (puthash session-id chat dsh-emacs--chat-buffers)
+        (with-current-buffer chat
+          (dsh-emacs-mode)
+          (dsh-emacs-modeline-setup)
+          (dsh-emacs-composer-set-goal-from-projection
+           (list (cons 'goal (list (cons 'objective "stale baseline goal")
+                                   (cons 'phase "active"))))))
+        (dsh-emacs-events--host-control-baseline
+         nil
+         (list (cons 'projections
+                     (list (cons session-id
+                                 (list (cons 'values
+                                             (list (cons 'goal nil)))))))))
+        (with-current-buffer chat
+          (dsh-test-assert "composer-control-baseline-nil-clears"
+            (null dsh-emacs--composer-goal)
+            (null (string-match-p
+                   "stale baseline goal"
+                   (buffer-substring-no-properties (point-min) (point-max)))))))
+    (remhash session-id dsh-emacs--chat-buffers)
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
+;; --- Composer Goal Row: hide complete goals, matching dsh web ---
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (dsh-emacs-composer-set-goal-from-projection
+   (list (cons 'goal (list (cons 'objective "Shown active")
+                           (cons 'phase "active")))))
+  ;; Active goals are visible.
+  (dsh-test-assert "composer-goal-active-shown"
+    (string-match-p "Shown active"
+                    (buffer-substring-no-properties (point-min) (point-max)))
+    (markerp dsh-emacs--composer-top-marker))
+  ;; A complete projection hides the row.
+  (dsh-emacs-composer-set-goal-from-projection
+   (list (cons 'goal (list (cons 'objective "Shown active")
+                           (cons 'phase "complete")))))
+  (dsh-test-assert "composer-goal-complete-hidden"
+    (null (markerp dsh-emacs--composer-top-marker))
+    (null (string-match-p "Shown active"
+                          (buffer-substring-no-properties (point-min) (point-max))))))
+
+;; --- Composer Goal Row: a goal already complete is never shown ---
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (dsh-emacs-composer-set-goal-from-projection
+   (list (cons 'goal (list (cons 'objective "Never shown")
+                           (cons 'phase "complete")))))
+  (dsh-test-assert "composer-goal-complete-never-shown"
+    (null (markerp dsh-emacs--composer-top-marker))
+    (null (string-match-p "Never shown"
+                          (buffer-substring-no-properties (point-min) (point-max))))))
+
+;; --- Composer Goal Row: reflow the same goal after a width change ---
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (let ((row-width 80))
+    (cl-letf (((symbol-function 'dsh-emacs-composer--row-width)
+               (lambda () row-width)))
+      (dsh-emacs-composer-set-goal-from-projection
+       (list (cons 'goal
+                   (list (cons 'objective
+                               "A long objective whose rendered width must change")
+                         (cons 'phase "active")))))
+      (let ((wide (buffer-substring-no-properties (point-min) (point-max))))
+        (setq row-width 40)
+        (dsh-emacs-composer--window-configuration-change)
+        (let ((narrow (buffer-substring-no-properties (point-min) (point-max))))
+          (dsh-test-assert "composer-goal-reflows-after-window-change"
+            (not (equal wide narrow))
+            (string-match-p "…" narrow)))))))
+
+;; --- Composer Goal Row: paused and blocked goals remain visible ---
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (dsh-emacs-composer-set-goal-from-projection
+   (list (cons 'goal (list (cons 'objective "Paused goal")
+                           (cons 'phase "paused")))))
+  (dsh-test-assert "composer-goal-paused-shown"
+    (markerp dsh-emacs--composer-top-marker)
+    (string-match-p "Paused goal"
+                    (buffer-substring-no-properties (point-min) (point-max)))))
+
+;; --- Goal actions: pause wire payload and CAS ref ---
+(let ((sent nil))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (dsh-emacs-modeline-setup)
+    (setq-local dsh-emacs--buffer-session "sess-gact")
+    (dsh-emacs-composer-set-goal-from-projection
+     (list (cons 'goal (list (cons 'id "goal-1")
+                             (cons 'revision 7)
+                             (cons 'objective "Active goal")
+                             (cons 'phase "active")))))
+    (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+               (lambda (method params cb)
+                 (push (list method params) sent)
+                 (funcall cb t
+                         (list (cons 'id "goal-1")
+                               (cons 'revision 8)
+                               (cons 'objective "Active goal")
+                               (cons 'phase "paused"))))))
+      (dsh-emacs-goal-pause))
+    (let ((call (car sent)))
+      (dsh-test-assert "goal-pause-payload-ref-cas"
+        (equal (nth 0 call) "goals/pause")
+        (equal (cdr (assq 'agentId (nth 1 call))) "sess-gact")
+        (equal (cdr (assq 'revision (cdr (assq 'ref (nth 1 call))))) 7)
+        (equal (cdr (assq 'id (cdr (assq 'ref (nth 1 call))))) "goal-1")))
+    ;; A successful callback optimistically updates the row to paused.
+    (dsh-test-assert "goal-pause-optimistic-view"
+      (string-match-p "paused"
+                      (buffer-substring-no-properties (point-min) (point-max))))))
+
+;; --- Goal actions: pause is gated to the active phase ---
+(let ((sent nil))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (dsh-emacs-modeline-setup)
+    (setq-local dsh-emacs--buffer-session "sess-gpaused")
+    (dsh-emacs-composer-set-goal-from-projection
+     (list (cons 'goal (list (cons 'id "g-paused")
+                             (cons 'revision 2)
+                             (cons 'objective "Paused g")
+                             (cons 'phase "paused")))))
+    (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+               (lambda (_m _p _cb) (push t sent))))
+      (dsh-emacs-goal-pause))
+    (dsh-test-assert "goal-pause-gated-on-active"
+      (null sent))))
+
+;; --- Goal actions: an active goal cannot resume ---
+(let ((sent nil))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (dsh-emacs-modeline-setup)
+    (setq-local dsh-emacs--buffer-session "sess-gactive")
+    (dsh-emacs-composer-set-goal-from-projection
+     (list (cons 'goal (list (cons 'id "g-active")
+                             (cons 'revision 4)
+                             (cons 'objective "Active g")
+                             (cons 'phase "active")))))
+    (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+               (lambda (_m _p _cb) (push t sent))))
+      (dsh-emacs-goal-resume))
+    (dsh-test-assert "goal-resume-gated-on-paused"
+      (null sent))))
+
+;; --- Goal actions: resume moves paused to active ---
+(let ((sent nil))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (dsh-emacs-modeline-setup)
+    (setq-local dsh-emacs--buffer-session "sess-gresume")
+    (dsh-emacs-composer-set-goal-from-projection
+     (list (cons 'goal (list (cons 'id "g2") (cons 'revision 3)
+                             (cons 'objective "Paused goal")
+                             (cons 'phase "paused")))))
+    (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+               (lambda (method _params cb)
+                 (push method sent)
+                 (funcall cb t
+                         (list (cons 'id "g2")
+                               (cons 'revision 4)
+                               (cons 'objective "Paused goal")
+                               (cons 'phase "active"))))))
+      (dsh-emacs-goal-resume))
+    (dsh-test-assert "goal-resume-payload"
+      (equal (car sent) "goals/resume")
+      (string-match-p "active"
+                      (buffer-substring-no-properties (point-min) (point-max))))))
+
+;; --- Goal actions: edit reads and sends request.objective ---
+(let ((sent nil)
+      (edit-result nil))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (dsh-emacs-modeline-setup)
+    (setq-local dsh-emacs--buffer-session "sess-gedit")
+    (dsh-emacs-composer-set-goal-from-projection
+     (list (cons 'goal (list (cons 'id "g3") (cons 'revision 5)
+                             (cons 'objective "old objective")
+                             (cons 'phase "active")))))
+    (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+               (lambda (method params cb)
+                 (push (list method params) sent)
+                 (funcall cb t
+                         (list (cons 'id "g3")
+                               (cons 'revision 6)
+                               (cons 'objective "new objective")
+                               (cons 'phase "active"))))))
+      ;; Stub `read-string' because batch mode has no minibuffer input.
+      (cl-letf (((symbol-function 'read-string)
+                 (lambda (&rest _) "new objective")))
+        (setq edit-result (dsh-emacs-goal-edit))))
+    (let ((call (car sent)))
+      (dsh-test-assert "goal-edit-request-objective"
+        (equal (nth 0 call) "goals/edit")
+        (equal (cdr (assq 'objective
+                          (cdr (assq 'request (nth 1 call)))))
+               "new objective")
+        (equal (cdr (assq 'revision (cdr (assq 'ref (nth 1 call))))) 5)))
+    (dsh-test-assert "goal-edit-optimistic-view"
+      (string-match-p "new objective"
+                      (buffer-substring-no-properties (point-min) (point-max))))))
+
+;; --- Goal actions: clear sends a tombstone and removes the row ---
+(let ((sent nil))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (dsh-emacs-modeline-setup)
+    (setq-local dsh-emacs--buffer-session "sess-gclear")
+    (dsh-emacs-composer-set-goal-from-projection
+     (list (cons 'goal (list (cons 'id "g4") (cons 'revision 9)
+                             (cons 'objective "Clear me")
+                             (cons 'phase "active")))))
+    (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+               (lambda (method params cb)
+                 (push (list method params) sent)
+                 (funcall cb t (list (cons 'id "g4") (cons 'revision 10)))))
+              ((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+      (dsh-emacs-goal-clear))
+    (let ((call (car sent)))
+      (dsh-test-assert "goal-clear-payload"
+        (equal (nth 0 call) "goals/clear")
+        (equal (cdr (assq 'revision (cdr (assq 'ref (nth 1 call))))) 9)))
+    (dsh-test-assert "goal-clear-removes-row"
+      (null (markerp dsh-emacs--composer-top-marker))
+      (null (string-match-p "Clear me"
+                            (buffer-substring-no-properties (point-min) (point-max)))))))
+
+;; --- Goal actions: RPC failure reports an error and preserves the row ---
+(let ((sent nil))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (dsh-emacs-modeline-setup)
+    (setq-local dsh-emacs--buffer-session "sess-gerr")
+    (dsh-emacs-composer-set-goal-from-projection
+     (list (cons 'goal (list (cons 'id "g-error")
+                             (cons 'revision 4)
+                             (cons 'objective "Keep me")
+                             (cons 'phase "active")))))
+    (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+               (lambda (_m _p cb)
+                 (push t sent)
+                 (funcall cb nil '((message . "stale revision"))))))
+      (dsh-emacs-goal-pause))
+    (dsh-test-assert "goal-action-error-keeps-row"
+      ;; Failure leaves both the marker and row text intact.
+      (markerp dsh-emacs--composer-top-marker)
+      (string-match-p "Keep me"
+                      (buffer-substring-no-properties (point-min) (point-max))))))
+
+;; --- Goal actions: the pending guard prevents a second CAS ---
+(let ((sent 0))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (dsh-emacs-modeline-setup)
+    (setq-local dsh-emacs--buffer-session "sess-gpend")
+    (dsh-emacs-composer-set-goal-from-projection
+     (list (cons 'goal (list (cons 'id "g-pending")
+                             (cons 'revision 1)
+                             (cons 'objective "Once")
+                             (cons 'phase "active")))))
+    (setq dsh-emacs--composer-goal-pending t)
+    (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+               (lambda (_m _p _cb) (cl-incf sent))))
+      (dsh-emacs-goal-pause)
+      (dsh-emacs-goal-resume))
+    (dsh-test-assert "goal-action-pending-guard"
+      (zerop sent))))
+
+;; --- Goal actions: an older HTTP response cannot regress a newer projection ---
+(let (callback)
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (dsh-emacs-modeline-setup)
+    (setq-local dsh-emacs--buffer-session "sess-grace")
+    (dsh-emacs-composer-set-goal-from-projection
+     (list (cons 'goal (list (cons 'id "g-race")
+                             (cons 'revision 7)
+                             (cons 'objective "Before")
+                             (cons 'phase "active")))))
+    (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+               (lambda (_method _params cb) (setq callback cb))))
+      (dsh-emacs-goal-pause))
+    ;; The authoritative stream advances twice before the rev-8 HTTP response.
+    (dsh-emacs-composer-set-goal-from-projection
+     (list (cons 'goal (list (cons 'id "g-race")
+                             (cons 'revision 9)
+                             (cons 'objective "Newer projection")
+                             (cons 'phase "active")))))
+    (funcall callback t
+             (list (cons 'id "g-race")
+                   (cons 'revision 8)
+                   (cons 'objective "Older response")
+                   (cons 'phase "paused")))
+    (dsh-test-assert "goal-action-stale-response-keeps-newer-projection"
+      (equal (dsh-protocol-goal-revision dsh-emacs--composer-goal) 9)
+      (equal (dsh-protocol-goal-objective dsh-emacs--composer-goal)
+             "Newer projection")
+      (null dsh-emacs--composer-goal-pending))))
+
+;; A callback from before a reset must not clear a newer request's guard.
+(let (callback)
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (dsh-emacs-modeline-setup)
+    (setq-local dsh-emacs--buffer-session "sess-glate")
+    (dsh-emacs-composer-set-goal-from-projection
+     (list (cons 'goal (list (cons 'id "g-late")
+                             (cons 'revision 2)
+                             (cons 'objective "Still current")
+                             (cons 'phase "active")))))
+    (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+               (lambda (_method _params cb) (setq callback cb))))
+      (dsh-emacs-goal-pause))
+    (let ((newer-token (list "edit" '((id . "g-late") (revision . 2)))))
+      (setq dsh-emacs--composer-goal-pending newer-token)
+      (funcall callback t
+               (list (cons 'id "g-late")
+                     (cons 'revision 3)
+                     (cons 'objective "Late response")
+                     (cons 'phase "paused")))
+      (dsh-test-assert "goal-action-late-callback-keeps-newer-pending-guard"
+        (eq dsh-emacs--composer-goal-pending newer-token)
+        (equal (dsh-protocol-goal-objective dsh-emacs--composer-goal)
+               "Still current")))))
+
+;; --- Goal actions: the strip exposes the phase-appropriate toggle ---
+;; Assert keymap properties rather than glyph text because SVG cells use images.
+(defun dsh-test-goal-strip-binds (strip cmd)
+  "Return non-nil when some char in STRIP binds CMD on its mouse-1 keymap."
+  (let ((i 0) (ok nil))
+    (while (and (not ok) (< i (length strip)))
+      (let* ((map (get-text-property i 'keymap strip))
+             (bound (and map (lookup-key map [mouse-1]))))
+        (when (eq bound cmd) (setq ok t)))
+      (setq i (1+ i)))
+    ok))
+
+(dsh-test-assert "goal-strip-active-offers-pause"
+  (let* ((goal (dsh-emacs-composer-goal-from-projection
+                (list (cons 'goal (list (cons 'objective "A")
+                                        (cons 'phase "active"))))))
+         (strip (car (dsh-emacs-composer--goal-action-strip goal))))
+    (and strip
+         (dsh-test-goal-strip-binds strip 'dsh-emacs-goal-pause)
+         (not (dsh-test-goal-strip-binds strip 'dsh-emacs-goal-resume)))))
+(dsh-test-assert "goal-strip-paused-offers-resume"
+  (let* ((goal (dsh-emacs-composer-goal-from-projection
+                (list (cons 'goal (list (cons 'objective "A")
+                                        (cons 'phase "paused"))))))
+         (strip (car (dsh-emacs-composer--goal-action-strip goal))))
+    (and strip
+         (dsh-test-goal-strip-binds strip 'dsh-emacs-goal-resume)
+         (not (dsh-test-goal-strip-binds strip 'dsh-emacs-goal-pause)))))
+;; Blocked/complete goals have no toggle but retain edit and clear.
+(dolist (phase '("blocked" "complete"))
+  (let ((goal (dsh-emacs-composer-goal-from-projection
+               (list (cons 'goal (list (cons 'objective "A")
+                                       (cons 'phase phase)))))))
+    (let ((strip (car (dsh-emacs-composer--goal-action-strip goal))))
+      (dsh-test-assert "goal-strip-nontoggle-still-edit-clear"
+        (and strip
+             (not (dsh-test-goal-strip-binds strip 'dsh-emacs-goal-pause))
+             (not (dsh-test-goal-strip-binds strip 'dsh-emacs-goal-resume))
+             (dsh-test-goal-strip-binds strip 'dsh-emacs-goal-edit)
+             (dsh-test-goal-strip-binds strip 'dsh-emacs-goal-clear))))))
+
+;; --- Goal actions: C-c C-g prefix bindings ---
+(dsh-test-assert "goal-keymap-binds-verbs"
+  (eq (lookup-key dsh-emacs-goal-map (kbd "p")) #'dsh-emacs-goal-pause)
+  (eq (lookup-key dsh-emacs-goal-map (kbd "r")) #'dsh-emacs-goal-resume)
+  (eq (lookup-key dsh-emacs-goal-map (kbd "e")) #'dsh-emacs-goal-edit)
+  (eq (lookup-key dsh-emacs-goal-map (kbd "d")) #'dsh-emacs-goal-clear)
+  (eq (lookup-key dsh-emacs-goal-map (kbd "a")) #'dsh-emacs-goal-actions-toggle))
+
+;; --- Goal actions: row keymaps point to the correct commands ---
+;; Find the edit-bound cell by keymap because SVG cells have no fallback text.
+(defun dsh-test-goal-row-edit-cell ()
+  "Return the buffer position whose cell binds `dsh-emacs-goal-edit', or nil."
+  (let ((i (point-min)) (found nil))
+    (while (and (not found) (< i (point-max)))
+      (let ((map (get-text-property i 'keymap)))
+        (when (and map (eq (lookup-key map [mouse-1]) 'dsh-emacs-goal-edit))
+          (setq found i)))
+      (setq i (1+ i)))
+    found))
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (dsh-emacs-composer-set-goal-from-projection
+   (list (cons 'goal (list (cons 'objective "clickable")
+                           (cons 'phase "active")))))
+  (let ((edit-pos (dsh-test-goal-row-edit-cell)))
+    (dsh-test-assert "goal-row-action-click-region"
+      (and edit-pos
+           (eq (lookup-key (get-text-property edit-pos 'keymap) [mouse-1])
+               'dsh-emacs-goal-edit)
+           (eq (lookup-key (get-text-property edit-pos 'keymap) (kbd "RET"))
+               'dsh-emacs-goal-edit)
+           (get-text-property edit-pos 'mouse-face)
+           ;; SVG uses a display image; fallback text retains the same keymap.
+           (if (image-type-available-p 'svg)
+               (get-text-property edit-pos 'display)
+             t)))))
+
+;; --- Goal actions: disabling inline actions yields an empty strip ---
+(let ((goal (dsh-emacs-composer-goal-from-projection
+             (list (cons 'goal (list (cons 'objective "A")
+                                     (cons 'phase "active")))))))
+  (let ((dsh-emacs-composer-goal-actions nil))
+    (dsh-test-assert "goal-actions-option-off-hides-strip"
+      (null (dsh-emacs-composer--goal-action-strip goal))))
+  (let ((dsh-emacs-composer-goal-actions t))
+    (dsh-test-assert "goal-actions-option-on-shows-strip"
+      (dsh-emacs-composer--goal-action-strip goal))))
+
+;; --- Goal actions: the option and toggle repaint inline actions ---
+(let ((buf (generate-new-buffer " *t-goal-toggle*"))
+      (default-before (default-value 'dsh-emacs-composer-goal-actions)))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-modeline-setup)
+        (dsh-emacs-composer-set-goal-from-projection
+         (list (cons 'goal (list (cons 'objective "toggle me")
+                                 (cons 'phase "active")))))
+        (dsh-test-assert "goal-toggle-renders-actions-on"
+          (not (null (dsh-test-goal-row-edit-cell))))
+        ;; Disable and repaint: no action cells remain.
+        (setq-local dsh-emacs-composer-goal-actions nil)
+        (dsh-emacs-composer-refresh)
+        (dsh-test-assert "goal-toggle-refresh-hides-actions"
+          (null (dsh-test-goal-row-edit-cell)))
+        ;; The interactive command toggles and repaints.
+        (dsh-emacs-goal-actions-toggle)
+        (dsh-test-assert "goal-actions-toggle-turns-back-on"
+          dsh-emacs-composer-goal-actions
+          (local-variable-p 'dsh-emacs-composer-goal-actions)
+          (eq (default-value 'dsh-emacs-composer-goal-actions) default-before)
+          (not (null (dsh-test-goal-row-edit-cell)))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; --- Goal actions: toggling outside chat creates no local override ---
+(with-temp-buffer
+  (let ((errored nil))
+    (condition-case nil
+        (dsh-emacs-goal-actions-toggle)
+      (user-error (setq errored t)))
+    (dsh-test-assert "goal-actions-toggle-outside-chat-errors-cleanly"
+      errored
+      (not (local-variable-p 'dsh-emacs-composer-goal-actions)))))
 (princ "\n===== 测试总结 =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))
       (fail (cl-count-if (lambda (r) (not (cdr r))) dsh-test-results)))

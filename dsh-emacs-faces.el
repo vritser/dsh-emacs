@@ -445,6 +445,25 @@ Bold, no italic — matching dsh web's thinkingToggle style."
 	"Input area prompt symbol (❯)."
 	:group 'dsh-emacs-faces)
 
+(defface dsh-emacs-composer-goal-face
+	`((((background light)) :foreground ,dsh-emacs-color-accent)
+		(((background dark))  :foreground ,dsh-emacs-color-accent-dark)
+		(t :inherit shadow))
+	"Goal Row leading dartboard icon tint (SVG `currentColor'; text fallback)."
+	:group 'dsh-emacs-faces)
+
+(defface dsh-emacs-composer-goal-body-face
+	'((t :inherit shadow :slant italic))
+	"Goal Row objective / phase text (the read-only chrome above the input)."
+	:group 'dsh-emacs-faces)
+
+(defface dsh-emacs-composer-goal-action-face
+	`((((background light)) :foreground ,dsh-emacs-color-accent)
+		(((background dark))  :foreground ,dsh-emacs-color-accent-dark)
+		(t :inherit shadow))
+	"Goal Row inline action glyphs (pause/resume/edit/clear buttons)."
+	:group 'dsh-emacs-faces)
+
 ;;; ---------------------------------------------------------------------------
 ;;;  mode-line / token / cost
 ;;; ---------------------------------------------------------------------------

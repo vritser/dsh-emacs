@@ -132,6 +132,9 @@ truncated with `...`; set to 0 to disable).
 | `dsh-emacs-running-face` | Generating status |
 | `dsh-emacs-input-box-face` | Input box background |
 | `dsh-emacs-input-prompt-face` | Input prompt "❯" |
+| `dsh-emacs-composer-goal-face` | Goal Row leading icon tint (dartboard SVG, `currentColor`) |
+| `dsh-emacs-composer-goal-body-face` | Goal Row objective / phase text |
+| `dsh-emacs-composer-goal-action-face` | Goal Row action SVG icons tint (dsh-web pause/resume/edit/clear) |
 | `dsh-emacs-accent-face` | Accent color (badges, headings) |
 
 ## Markdown rendering

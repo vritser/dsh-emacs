@@ -21,7 +21,8 @@
   '("dsh-emacs.el" "dsh-emacs-session.el"
     "dsh-emacs-markdown.el" "dsh-emacs-render.el"
     "dsh-emacs-events.el" "dsh-emacs-ui.el"
-    "dsh-emacs-faces.el" "dsh-emacs-tokens.el" "dsh-emacs-footer.el")
+    "dsh-emacs-faces.el" "dsh-emacs-tokens.el" "dsh-emacs-footer.el"
+    "dsh-emacs-composer.el")
   "产品源码文件（相对仓库根）。脚本会逐个 testcover-start 插桩。
 注意: dsh-emacs-protocol.el 不在列表中——testcover 的 edebug-after
 会对 cl-defstruct 返回值做 testcover--copy-object 复制，破坏 struct

@@ -510,6 +510,47 @@ canonical `@[label](dsh-session:...)' prompt text the client inserts."
   created-at
   mention)
 
+;; ---------------------------------------------------------------------------
+;; goal projection (§9 `goal` cell) — parsed for the Composer Goal Row
+;; ---------------------------------------------------------------------------
+;; The `goal' session projection value is the GoalView core the host folds
+;; from goals.* state: `{ goal: {id, revision, objective, phase,
+;; blockedReason?, maxGoalRounds}, roundsStarted, createdAt, updatedAt }` or
+;; null.  Phase 1 renders only objective/phase (display chrome); the rest is
+;; carried so the row can grow without re-wiring callers.
+
+(cl-defstruct (dsh-protocol-goal
+               (:constructor dsh-protocol-goal--from-projection
+                             (value
+                              &aux
+                              (id (let ((g (cdr (assq 'goal value))))
+                                    (and g (cdr (assq 'id g)))))
+                              (revision (let ((g (cdr (assq 'goal value))))
+                                          (and g (cdr (assq 'revision g)))))
+                              (objective (let ((g (cdr (assq 'goal value))))
+                                           (and g (cdr (assq 'objective g)))))
+                              (phase (let ((g (cdr (assq 'goal value))))
+                                       (and g (cdr (assq 'phase g)))))
+                              (blocked-reason
+                               (let ((g (cdr (assq 'goal value))))
+                                 (and g (cdr (assq 'blockedReason g)))))
+                              (max-goal-rounds
+                               (let ((g (cdr (assq 'goal value))))
+                                 (and g (cdr (assq 'maxGoalRounds g)))))
+                              (rounds-started (cdr (assq 'roundsStarted
+                                                          value))))))
+  "The `goal' session projection (§9), parsed for the Composer Goal Row.
+Phase 1 reads OBJECTIVE and PHASE to render read-only chrome; the identity /
+budget fields are carried for later milestones.  A nil projection maps to a
+nil goal (no row)."
+  id
+  revision
+  objective
+  phase
+  blocked-reason
+  max-goal-rounds
+  rounds-started)
+
 (defun dsh-protocol--struct (struct-alist-pred constructor value)
   "Return VALUE as a struct via CONSTRUCTOR if needed.
 STRUCT-ALIST-PRED distinguishes an already-converted struct from a wire

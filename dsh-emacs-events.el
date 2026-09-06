@@ -519,8 +519,8 @@ tail; no separate history fetch precedes the connect."
 (defun dsh-emacs-events--apply-snapshot-projections (session-id projections)
   "Apply a follow snapshot's PROJECTIONS block (`{asOfSeq, values}').
 `title' feeds the session cache/buffer name, `contextPressure' the
-mode-line ctx% — the same consumers as the `session/control' projection
-increment frames use."
+mode-line ctx%, `goal' the Composer Goal Row — the same consumers as the
+`session/control' projection increment frames use."
   (let ((values (and (listp projections)
                      (dsh-emacs-render--aget "values" projections))))
     (when (listp values)
@@ -531,7 +531,13 @@ increment frames use."
            (list :apply-title session-id title))))
       (let ((pressure (dsh-emacs-render--aget "contextPressure" values)))
         (when (listp pressure)
-          (dsh-emacs--events-apply-context-projection session-id pressure))))))
+          (dsh-emacs--events-apply-context-projection session-id pressure)))
+      ;; The follow snapshot is the chat open-time baseline for the Composer
+      ;; Goal Row, seeded exactly like ctx/title.
+      (when (boundp 'dsh-emacs--chat-buffers)
+        (let ((goal-value (dsh-emacs-render--aget "goal" values)))
+          (when (listp goal-value)
+            (dsh-emacs-events--apply-goal-projection session-id goal-value)))))))
 
 
 (defun dsh-emacs-events--consume-frames (process)
@@ -1201,25 +1207,44 @@ record is intentionally not read — no background-task UI consumes it yet
                (values (dsh-emacs-render--aget "values" baseline)))
           (dolist (kv (if (vectorp values) (append values nil)
                         (and (listp values) values)))
-            (when (and (listp kv) (cdr kv))
+            ;; Projection values may legitimately be nil: `(goal . nil)' is
+            ;; the authoritative tombstone that removes the Composer row.
+            (when (consp kv)
               (dsh-emacs-events--host-apply-projection
                sid (car kv) (cdr kv)))))))))
 
 (defun dsh-emacs-events--host-apply-projection (session-id key value)
   "Apply one projection cell (KEY . VALUE) of SESSION-ID locally.
 `contextPressure' feeds the mode-line ctx%, `title' the session cache and
-chat buffer name; other keys are reserved for later milestones."
+chat buffer name, `goal' the live chat buffer's Composer Goal Row; other keys
+are reserved for later milestones."
   (when session-id
-    (pcase key
+    (pcase (if (symbolp key) (symbol-name key) key)
       ("contextPressure"
        (when (listp value)
          (dsh-emacs--events-apply-context-projection session-id value)))
+      ("goal"
+       (dsh-emacs-events--apply-goal-projection session-id value))
       ("title"
        (when (and value (not (string-empty-p value)))
          (dsh-emacs-events--apply-title nil session-id value)
          (dsh-emacs-events--host-frame-record
           (list :apply-title session-id value))))
       (_ nil))))
+
+(defun dsh-emacs-events--apply-goal-projection (session-id value)
+  "Apply a `goal' projection VALUE to SESSION-ID's live chat buffer.
+Parses the projection and renders the Composer Goal Row chrome there (hidden
+when the projection is nil).  Unlike the ctx/title consumers this touches only
+the session's own chat buffer — the Goal Row is composer chrome, not list or
+mode-line state."
+  (when (and (boundp 'dsh-emacs--chat-buffers)
+             (hash-table-p dsh-emacs--chat-buffers)
+             (fboundp 'dsh-emacs-composer-set-goal-from-projection))
+    (let ((buf (gethash session-id dsh-emacs--chat-buffers)))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (dsh-emacs-composer-set-goal-from-projection value))))))
 
 (defun dsh-emacs-events--host-session-activity (session-id _updated-at)
   "Bump SESSION-ID to the front of the cached session list (recent first)."

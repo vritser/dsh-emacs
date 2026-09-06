@@ -55,6 +55,8 @@
 ;; lives further down; this silences the byte-compiler for the earlier reset
 ;; path without changing runtime initialization semantics.
 (defvar dsh-emacs--command-spinners)
+(defvar dsh-emacs--input-marker)
+(defvar dsh-emacs--composer-top-marker)
 
 ;;; ---------------------------------------------------------------------------
 ;;; 定制
@@ -635,10 +637,21 @@ Rendered transcript blocks must be inserted before this line.  Do not move
 back one line: after the first reply that would point inside the previous
 assistant body and reverse the order of subsequent replies.
 
-The live prompt marker is preferred; when it is missing or points into
-another buffer, the anchor is located again by the prompt face so messages
-can never be appended below the input area."
+When a composer chrome row (Goal Row) is shown above the input, its top marker
+(`dsh-emacs--composer-top-marker') wins so streamed content stays above the
+chrome; otherwise the live prompt marker is preferred; when it is missing or
+points into another buffer, the anchor is located again by the prompt face so
+messages can never be appended below the input area."
   (or
+   ;; 0. Composer chrome (Goal Row) top: transcript must insert above it so the
+   ;; chrome never separates from the editable input.
+   (when (and (boundp 'dsh-emacs--composer-top-marker)
+              (markerp dsh-emacs--composer-top-marker)
+              (eq (marker-buffer dsh-emacs--composer-top-marker)
+                  (current-buffer)))
+     (save-excursion
+       (goto-char (marker-position dsh-emacs--composer-top-marker))
+       (line-beginning-position)))
    ;; 1. Live marker pointing into the current buffer.
    (let ((m (and (boundp 'dsh-emacs--input-marker)
                  (markerp dsh-emacs--input-marker)
