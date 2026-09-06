@@ -3064,6 +3064,111 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                 (dsh-test-pass "session-filter-render-hides-other-sessions")))))
       (kill-buffer buf))))
 
+;; --- 测试 51b: session list workspace 折叠在重绘后保留 ---
+(dsh-test-assert "workspace-fold-tab-keybinding"
+  (eq (lookup-key dsh-emacs-session-mode-map (kbd "TAB"))
+      #'dsh-emacs-session-toggle-workspace))
+
+(let* ((sessions (dsh-emacs-test--session-items
+                  (list (list (cons 'sessionId "s1") (cons 'updatedAt 100)
+                              (cons 'projections
+                                    (list (cons 'values
+                                                (list (cons 'title "Alpha")))))))))
+       (workspaces (list (dsh-protocol-workspace--from-alist
+                          (list (cons 'workspaceId "w1")
+                                (cons 'title "WS A")
+                                (cons 'sessionIds ["s1"])))))
+       (buf (generate-new-buffer " *dsh-workspace-fold*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (let ((dsh-emacs--sessions sessions)
+              (dsh-emacs--workspaces workspaces)
+              (dsh-emacs--archived-sessions nil))
+          (dsh-emacs-session--render)
+          (goto-char (point-min))
+          (search-forward "WS A")
+          (beginning-of-line)
+          (dsh-emacs-session-toggle-workspace)
+          (dsh-test-assert "workspace-fold-keeps-header-focused"
+            (equal (dsh-emacs-workspace-id-at-point) "w1"))
+          (let ((folded (buffer-substring-no-properties
+                         (point-min) (point-max))))
+            (dsh-test-assert "workspace-fold-hides-session"
+              (and (string-match-p "▸ WS A  (1)" folded)
+                   (not (string-match-p "Alpha" folded)))))
+          (dsh-emacs-session--render)
+          (let ((refreshed (buffer-substring-no-properties
+                            (point-min) (point-max))))
+            (dsh-test-assert "workspace-fold-survives-render"
+              (and (string-match-p "▸ WS A  (1)" refreshed)
+                   (not (string-match-p "Alpha" refreshed)))))
+          (goto-char (point-min))
+          (search-forward "WS A")
+          (beginning-of-line)
+          (dsh-emacs-open-session-at-point)
+          (dsh-test-assert "workspace-ret-expands"
+            (string-match-p "Alpha"
+                            (buffer-substring-no-properties
+                             (point-min) (point-max))))))
+    (kill-buffer buf)))
+
+(let* ((sessions (dsh-emacs-test--session-items
+                  (list (list (cons 'sessionId "loose")
+                              (cons 'updatedAt 100)
+                              (cons 'projections
+                                    (list (cons 'values
+                                                (list (cons 'title
+                                                            "Loose")))))))))
+       (buf (generate-new-buffer " *dsh-ungrouped-fold*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (let ((dsh-emacs--sessions sessions)
+              (dsh-emacs--workspaces nil)
+              (dsh-emacs--archived-sessions nil))
+          (dsh-emacs-session--render)
+          (goto-char (point-min))
+          (search-forward "Ungrouped")
+          (beginning-of-line)
+          (dsh-emacs-session-toggle-workspace)
+          (let ((folded (buffer-substring-no-properties
+                         (point-min) (point-max))))
+            (dsh-test-assert "ungrouped-fold-hides-session"
+              (and (string-match-p "▸ Ungrouped  (1)" folded)
+                   (not (string-match-p "Loose" folded)))))))
+    (kill-buffer buf)))
+
+(let* ((sessions (dsh-emacs-test--session-items
+                  (list (list (cons 'sessionId "default-loose")
+                              (cons 'updatedAt 100)
+                              (cons 'projections
+                                    (list (cons 'values
+                                                (list (cons 'title
+                                                            "Default Loose")))))))))
+       (buf (generate-new-buffer " *dsh-workspace-fold-default*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (let ((dsh-emacs--sessions sessions)
+              (dsh-emacs--workspaces nil)
+              (dsh-emacs--archived-sessions nil)
+              (dsh-emacs-workspaces-collapsed-by-default t))
+          (dsh-emacs-session--render)
+          (dsh-test-assert "workspace-fold-default-collapsed"
+            (not (string-match-p
+                  "Default Loose"
+                  (buffer-substring-no-properties (point-min) (point-max)))))
+          (dsh-emacs-expand-workspaces)
+          (dsh-test-assert "workspace-expand-workspaces-shows-session"
+            (string-match-p
+             "Default Loose"
+             (buffer-substring-no-properties (point-min) (point-max))))
+          (dsh-emacs-collapse-workspaces)
+          (dsh-test-assert "workspace-collapse-workspaces-hides-session"
+            (not (string-match-p
+                  "Default Loose"
+                  (buffer-substring-no-properties
+                   (point-min) (point-max)))))))
+    (kill-buffer buf)))
+
 ;; --- 测试 52: 输入历史 M-p / M-n ---
 ;; Pinned to cross-session mode on purpose: this test exercises the browse
 ;; mechanics over the shared list (the new default is per-session; see 52b).

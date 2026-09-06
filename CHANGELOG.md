@@ -49,6 +49,14 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Workspace folding in the session list**: workspace and `Ungrouped` headers
+  now show an expanded/collapsed indicator and accept `TAB` or `RET` to hide
+  or reveal their session rows.  Fold state is local to the session-list
+  buffer and survives realtime and manual refreshes.  The new option
+  `dsh-emacs-workspaces-collapsed-by-default` controls the initial state, and
+  `dsh-emacs-collapse-workspaces` / `dsh-emacs-expand-workspaces` change every
+  group in the current list
+  (rationale: postmortem/015).
 - **Rendered @ references in the transcript are clickable links**: a user
   message that echoes a completed `@` mention shows it as an accent-colored,
   underlined link instead of raw text — a session mention

@@ -26,6 +26,7 @@
 ;;
 ;; 键位：
 ;;   RET     打开会话
+;;   TAB     折叠/展开工作区
 ;;   c       新建会话
 ;;   r       重命名会话
 ;;   D       删除会话（如果 API 支持）
@@ -90,6 +91,7 @@ Interactively resolve command targets through `dsh-emacs--active-session-id'
 (defvar dsh-emacs-session-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET") #'dsh-emacs-open-session-at-point)
+    (define-key map (kbd "TAB") #'dsh-emacs-session-toggle-workspace)
     (define-key map "c" #'dsh-emacs-new-session)
     (define-key map "C" #'dsh-emacs-new-session-choose-preset)
     (define-key map "r" #'dsh-emacs-rename-session-at-point)
@@ -117,6 +119,15 @@ while it is alive (the fetch already re-renders in place, keeping any
 active workspace filter)."
   :type '(choice (const :tag "Off" nil)
                  (number :tag "Seconds"))
+  :group 'dsh-emacs)
+
+(defcustom dsh-emacs-workspaces-collapsed-by-default nil
+  "Whether workspace groups start collapsed in the session list.
+This applies to real workspaces and the Ungrouped bucket.  `TAB' or `RET'
+on a group header overrides the default for the current session-list
+buffer; `dsh-emacs-collapse-workspaces' and
+`dsh-emacs-expand-workspaces' change all groups in that buffer."
+  :type 'boolean
   :group 'dsh-emacs)
 
 (define-derived-mode dsh-emacs-session-mode special-mode "DSH Sessions"
@@ -147,7 +158,11 @@ active workspace filter)."
         ;; 重绘后仍停在同一个会话行上：列表在事件/刷新/自动刷新之间重建时，
         ;; 光标不弹回顶部，hl-line 高亮也随之保持（否则导航中列表自己“跳走”，
         ;; 体感就是卡顿）。
-        (restore-id (dsh-emacs-session-id-at-point)))
+        (restore-id (dsh-emacs-session-id-at-point))
+        (restore-group-id
+         (and (null (dsh-emacs-session-id-at-point))
+              (get-text-property (point)
+                                 'dsh-emacs-workspace-group-id))))
     (erase-buffer)
     
     ;; Header
@@ -167,19 +182,26 @@ active workspace filter)."
       ;; Group sessions by workspace
       (dolist (group (dsh-emacs-session--group-sessions sessions workspaces))
         (dsh-emacs-session--render-group group)))
-    ;; Restore the previously focused session row, if it is still listed.
-    (when restore-id
+    ;; Restore the previously focused session row or workspace header, if it
+    ;; is still listed.  Header restoration matters when toggling a fold:
+    ;; the rows below it disappear, but the cursor should stay on the group.
+    (when (or restore-id restore-group-id)
       (goto-char (point-min))
       (catch 'dsh-session-restored
         (while (not (eobp))
-          (when (equal restore-id (dsh-emacs-session-id-at-point))
+          (when (if restore-id
+                    (equal restore-id (dsh-emacs-session-id-at-point))
+                  (and (null (dsh-emacs-session-id-at-point))
+                       (equal restore-group-id
+                              (get-text-property
+                               (point) 'dsh-emacs-workspace-group-id))))
             (throw 'dsh-session-restored t))
           (forward-line 1))))
     ;; On a fresh buffer (no previously focused row) the `insert` calls above
     ;; leave point at the end; park it on the first session row instead so the
     ;; list opens with the cursor (and hl-line) at the top, not the bottom.
     ;; A buffer with no rows simply stays at the header.
-    (unless restore-id
+    (unless (or restore-id restore-group-id)
       (goto-char (point-min))
       (catch 'dsh-first-row
         (while (not (eobp))
@@ -278,31 +300,40 @@ sessions are always excluded."
   "Render a GROUP plist header and its session rows."
   (let* ((label (plist-get group :label))
          (ws-id (plist-get group :workspace-id))
+         (group-id (or ws-id :ungrouped))
          (members (plist-get group :sessions))
-         (count (length members)))
+         (count (length members))
+         (collapsed (dsh-emacs-session--workspace-collapsed-p group-id)))
     ;; Group header
     (let ((start (point)))
-      (insert (propertize (format "%s  (%d)" label count)
+      (insert (propertize (format "%s%s  (%d)"
+                                  (cond
+                                   (collapsed "▸ ")
+                                   (t "▾ "))
+                                  label count)
                           'face 'dsh-emacs-group-face))
       (when ws-id
         (put-text-property start (point) 'dsh-emacs-workspace-id ws-id))
+      (put-text-property start (point)
+                         'dsh-emacs-workspace-group-id group-id)
       (put-text-property start (point) 'dsh-emacs-workspace-title label)
       (insert "\n"))
     ;; Session rows: every row carries the workspace context (id + title)
     ;; so `c' (new session) anywhere inside this group creates inside it.
-    (if members
-        (dolist (session members)
-          (dsh-emacs-session--render-session session 2
-                                             (and ws-id ws-id)
-                                             (and ws-id label)))
-      ;; Empty workspace: show a New Session row (like dsh web's blank
-      ;; row) so `c' can create a session inside this workspace.
-      (let ((start (point)))
-        (insert (propertize "  New Session" 'face 'dsh-emacs-status-idle-face))
-        (when ws-id
-          (put-text-property start (point) 'dsh-emacs-workspace-id ws-id)
-          (put-text-property start (point) 'dsh-emacs-workspace-title label))
-        (insert "\n")))
+    (unless collapsed
+      (if members
+          (dolist (session members)
+            (dsh-emacs-session--render-session session 2
+                                               (and ws-id ws-id)
+                                               (and ws-id label)))
+        ;; Empty workspace: show a New Session row (like dsh web's blank
+        ;; row) so `c' can create a session inside this workspace.
+        (let ((start (point)))
+          (insert (propertize "  New Session" 'face 'dsh-emacs-status-idle-face))
+          (when ws-id
+            (put-text-property start (point) 'dsh-emacs-workspace-id ws-id)
+            (put-text-property start (point) 'dsh-emacs-workspace-title label))
+          (insert "\n"))))
     (insert "\n")))
 
 ;;; ---------------------------------------------------------------------------
@@ -313,6 +344,53 @@ sessions are always excluded."
   "Workspace id the session list is filtered to, or nil for all.")
 (defvar-local dsh-emacs-session--filter-ws-title nil
   "Human title of the active workspace filter (shown in the header).")
+
+(defvar-local dsh-emacs-session--workspace-fold-default :inherit
+  "Default fold state for this list buffer, or `:inherit' for the option.")
+
+(defvar-local dsh-emacs-session--workspace-fold-overrides nil
+  "Alist of group ids and their buffer-local collapsed states.
+Real workspaces use their server ids; Ungrouped uses `:ungrouped'.")
+
+(defun dsh-emacs-session--workspace-collapsed-p (group-id)
+  "Return non-nil when GROUP-ID should render collapsed."
+  (if-let* ((override (assoc group-id
+                             dsh-emacs-session--workspace-fold-overrides)))
+      (cdr override)
+    (if (eq dsh-emacs-session--workspace-fold-default :inherit)
+        dsh-emacs-workspaces-collapsed-by-default
+      dsh-emacs-session--workspace-fold-default)))
+
+(defun dsh-emacs-session-toggle-workspace ()
+  "Fold or unfold the workspace or Ungrouped header at point."
+  (interactive)
+  (let ((group-id (get-text-property
+                   (point) 'dsh-emacs-workspace-group-id)))
+    (unless (and group-id (null (dsh-emacs-session-id-at-point)))
+      (user-error "Not on a workspace header"))
+    (let ((override (assoc group-id
+                           dsh-emacs-session--workspace-fold-overrides))
+          (new-state
+           (not (dsh-emacs-session--workspace-collapsed-p group-id))))
+      (if override
+          (setcdr override new-state)
+        (push (cons group-id new-state)
+              dsh-emacs-session--workspace-fold-overrides)))
+    (dsh-emacs-session--render)))
+
+(defun dsh-emacs-collapse-workspaces ()
+  "Collapse every workspace group in the current session-list buffer."
+  (interactive)
+  (setq dsh-emacs-session--workspace-fold-default t
+        dsh-emacs-session--workspace-fold-overrides nil)
+  (dsh-emacs-session--render))
+
+(defun dsh-emacs-expand-workspaces ()
+  "Expand every workspace group in the current session-list buffer."
+  (interactive)
+  (setq dsh-emacs-session--workspace-fold-default nil
+        dsh-emacs-session--workspace-fold-overrides nil)
+  (dsh-emacs-session--render))
 
 (defvar-local dsh-emacs-session--auto-refresh-timer nil
   "Timer driving `dsh-emacs-session-auto-refresh-interval'.")
@@ -535,15 +613,20 @@ Uses projections data when available, falls back to running flag."
   (get-text-property (point) 'dsh-emacs-session-id))
 
 (defun dsh-emacs-open-session-at-point ()
-  "Open session at point."
+  "Open the session at point, or toggle a group header."
   (interactive)
-  (dsh-emacs-server-ensure)
-  (let ((session-id (dsh-emacs-session-id-at-point)))
-    (if session-id
-        (progn
-          (dsh-emacs-open-session session-id)
-          (message "Opened session %s" session-id))
-      (user-error "No session at point"))))
+  (let ((session-id (dsh-emacs-session-id-at-point))
+        (group-id (get-text-property
+                   (point) 'dsh-emacs-workspace-group-id)))
+    (cond
+     (session-id
+      (dsh-emacs-server-ensure)
+      (dsh-emacs-open-session session-id)
+      (message "Opened session %s" session-id))
+     (group-id
+      (dsh-emacs-session-toggle-workspace))
+     (t
+      (user-error "No session or workspace at point")))))
 
 (defun dsh-emacs-rename-session-at-point ()
   "Rename session at point."
