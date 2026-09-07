@@ -144,6 +144,13 @@ remain available. Action tooltips show readable labels and keyboard shortcuts.
 Use `C-c C-g ?` for the full objective and blocked reason, also available in
 the objective tooltip. SVG icons occupy at most two columns of pixel space.
 
+The Next Message row sits below the Goal Row and above `❯`, using
+`dsh-emacs-input-prompt-face` for its text and clock icon, matching the
+historical next-preview prefix; `Next:` is the non-SVG fallback. It folds line
+breaks and fits the narrowest window displaying the chat. Its full text is available
+in the tooltip; queue management remains under `C-c C-q`. Hiding or completing
+a goal does not hide Next Message. Both rows share Composer's read-only region.
+
 ## Markdown rendering
 
 Streaming text is inserted immediately. After the first chunk, Markdown

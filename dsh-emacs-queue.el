@@ -27,15 +27,13 @@
 ;;     candidate list and applies single keys to the CURRENTLY highlighted
 ;;     entry (vertico up/down picks the item — no numbering): e = edit,
 ;;     s = steer, d = delete, RET = send now, x = delete the whole queue;
-;;   - while the queue is non-empty the input prompt carries a
-;;     clock-icon + text prefix preview (the `[next: …] ' brackets
-;;     appear only when Emacs lacks SVG image support).
+;;   - Composer displays the next visible pending item on its own read-only
+;;     row above the input; this module owns selection and transient gating.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'dsh-emacs-protocol)
-(require 'dsh-emacs-faces)
 
 ;; 同包模块的惰性边界（见 AGENTS.md）：dsh-emacs.el 装配本模块，运行时
 ;; 反向调用其符号走 declare-function，避免顶层 require 环。
@@ -44,9 +42,8 @@
 (declare-function dsh-emacs--replace-input "dsh-emacs" (text))
 (declare-function dsh-emacs--rpc-async "dsh-emacs" (method params callback))
 (declare-function dsh-emacs--submit-prompt "dsh-emacs" (message &optional images mode))
-(declare-function dsh-emacs-render--input-anchor-pos "dsh-emacs-render" ())
+(declare-function dsh-emacs-composer-render "dsh-emacs-composer" ())
 
-(defvar dsh-emacs--input-marker)
 (defvar dsh-emacs--buffer-session)
 ;; Borrowed vertico runtime variables (see `dsh-emacs-queue--menu-item'):
 ;; declare-only so the byte-compiler stays quiet — always read under `boundp'.
@@ -88,7 +85,7 @@ updates the mirror but emits no feedback — it clears when the mirror
 settles back to empty (the claim frame), in the submit failure branch,
 or via `dsh-emacs-queue--submit-suppress-timer' (transport-safety only:
 un-sticks the echo gate when neither a settle frame nor an RPC failure
-ever arrives; it paces NO preview).  The `[next: …]' preview is gated
+ever arrives; it paces NO preview).  The Next Message preview is gated
 by this flag too — with one event-driven exception: while a turn is
 RUNNING (`dsh-emacs--busy-p') the preview shows regardless, because an
 item mirrored then can only be claimed at the turn end and is genuinely
@@ -143,16 +140,11 @@ flashes are genuine (ordering information) and stay."
                            (with-current-buffer buf
                              (dsh-emacs-queue--submit-suppress-clear))))))))
 
-(defvar-local dsh-emacs--queue-prefix nil
-  "The input-prompt prefix string currently shown before `❯ ', or nil.
-Compared byte-wise before removal, so a stale prefix after an input-area
-rebuild can never delete the wrong region.")
-
-(defvar-local dsh-emacs-queue--prefix-timer nil
-  "Pending zero-delay timer that repaints the prefix / mode-line.
+(defvar-local dsh-emacs-queue--paint-timer nil
+  "Pending zero-delay timer that repaints Composer and the mode-line.
 Queue frames arrive in bursts — the host often splices an item in and
 claims it again within milliseconds, and painting each frame would
-flash the `[next: …] ' prefix.  One repaint per burst, from the settled
+flash the Next Message row.  One repaint per burst, from the settled
 mirror, keeps such transient states invisible.")
 
 (defun dsh-emacs-queue-items ()
@@ -288,81 +280,33 @@ settles back to empty or by its timeout."
         (dsh-emacs-queue--schedule-paint)))))
 
 ;;; ---------------------------------------------------------------------------
-;;; 输入行前缀预览：SVG 时钟图标 + 下一条提示 ❯
+;;; 下一条消息的选择 / 可见性，以及 UI 合并刷新
 ;;; ---------------------------------------------------------------------------
 
-(defun dsh-emacs-queue--next-item ()
-  "Return the next message the host will send, or nil.
-The host delivers in-flight `steering' (next-step) items at the running
-agent's next step, before any `queued' (next-turn) item of the next
-turn, so the preview prefers the first steering item and falls back to
-the first queued one.  `context' items are host-injected content, not
-pending user messages — never previewed."
-  (or (cl-find-if (lambda (item)
-                    (eq (dsh-protocol-queue-item-placement item) 'steering))
-                  dsh-emacs--queue-items)
-      (cl-find-if (lambda (item)
-                    (eq (dsh-protocol-queue-item-placement item) 'queued))
-                  dsh-emacs--queue-items)))
-
-(defconst dsh-emacs-queue--next-icon-svg
-  "<svg width=\"14\" height=\"14\" viewBox=\"0 0 14 14\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M7.00049 0.199829C3.24488 0.199829 0.199952 3.24408 0.199707 6.99963C0.199707 8.0414 0.434087 9.03061 0.854004 9.91467L1.11279 10.4576L2.19775 9.94202L1.94092 9.39905L1.81787 9.12268C1.5498 8.46885 1.40186 7.75171 1.40186 6.99963C1.4021 3.90808 3.90888 1.40198 7.00049 1.40198C10.0919 1.40219 12.5979 3.90821 12.5981 6.99963C12.5981 10.0913 10.0921 12.5983 7.00049 12.5983C6.36734 12.5983 5.90348 12.5535 5.49268 12.4401C5.08803 12.3283 4.7041 12.1414 4.24463 11.8209C3.57111 11.3511 2.60588 11.1855 1.81006 11.6881L1.79736 11.6959L1.78467 11.7047L1.25537 12.0778L1.65381 13.2672L2.46045 12.6989C2.75029 12.5214 3.18004 12.5442 3.55615 12.8063C4.10063 13.1861 4.60863 13.4423 5.17334 13.5983C5.73194 13.7525 6.31665 13.8004 7.00049 13.8004C10.7561 13.8002 13.8003 10.7553 13.8003 6.99963C13.8 3.24421 10.7559 0.200041 7.00049 0.199829ZM3.81201 7.47327V8.67542H7.11572V7.47327H3.81201ZM3.81201 6.34924H10.2173V5.14709H3.81201V6.34924Z\" fill=\"currentColor\"></path></svg>"
-  "SVG data of the next-preview clock icon (14x14, filled via `currentColor').
-
-The `currentColor' value is mapped to the `:foreground' image property
-by `dsh-emacs-queue--next-icon', so the icon picks up the prompt face's
-color instead of a hard-coded one.")
-
-(defun dsh-emacs-queue--next-icon ()
-  "Return the clock-icon image string for the next-preview prefix, or nil.
-The result is a single space carrying the image `display' property plus
-the prompt face on its character, so the welcome prompt run stays
-contiguous.  nil when SVG images are unavailable (Emacs built without
-librsvg) — callers then fall back to the `[next: …] ' brackets."
-  (when (image-type-available-p 'svg)
-    (let ((fg (face-foreground 'dsh-emacs-input-prompt-face nil t)))
-      (propertize
-       " "
-       'face 'dsh-emacs-input-prompt-face
-       'display
-       (create-image dsh-emacs-queue--next-icon-svg
-                     'svg t
-                     :ascent 'center
-                     :scale 1.0
-                     :foreground (or fg "gray50"))))))
-
-(defun dsh-emacs-queue--prefix (preview)
-  "Build the input-prompt prefix showing PREVIEW.
-With SVG support the prefix is a clock icon followed by the preview
-text; otherwise the historical `[next: …] ' brackets are kept.  The
-whole string carries `dsh-emacs-input-prompt-face' (the icon keeps its
-`display' property), so prefix and `❯ ' merge into one prompt run and
-the anchor scan / byte-wise removal logic stays intact."
-  (let ((icon (dsh-emacs-queue--next-icon)))
-    (if icon
-        (propertize (concat icon " " preview " ")
-                    'face 'dsh-emacs-input-prompt-face)
-      (propertize (format "[next: %s] " preview)
-                  'face 'dsh-emacs-input-prompt-face))))
+(defun dsh-emacs-queue-next-item ()
+  "Return the next pending message to display in this buffer, or nil.
+Steering (next-step) precedes queued (next-turn); context entries are never
+previewed.  Suppress the client's transient self-submit while idle, but show
+parked input immediately while a turn runs.  The raw mirror is unchanged."
+  (when (or (null dsh-emacs--queue-submit-suppress) (dsh-emacs--busy-p))
+    (or (cl-find 'steering dsh-emacs--queue-items
+                 :key #'dsh-protocol-queue-item-placement)
+        (cl-find 'queued dsh-emacs--queue-items
+                 :key #'dsh-protocol-queue-item-placement))))
 
 (defun dsh-emacs-queue--paint-after-burst ()
-  "Repaint the next-preview prefix and mode-line from the CURRENT mirror.
-Runs once per frame burst (zero-delay timer); the mirror already holds
-the settled state, so a transient item that was spliced and instantly
-claimed never surfaces in the prefix."
-  (setq dsh-emacs-queue--prefix-timer nil)
-  (when (and dsh-emacs--input-marker
-             (marker-buffer dsh-emacs--input-marker))
-    (dsh-emacs-queue--update-prefix)
-    (force-mode-line-update)))
+  "Repaint Composer and mode-line from the settled queue mirror."
+  (setq dsh-emacs-queue--paint-timer nil)
+  (dsh-emacs-composer-render)
+  (force-mode-line-update))
 
 (defun dsh-emacs-queue--schedule-paint ()
-  "Schedule one prefix/mode-line repaint for the current frame burst.
+  "Schedule one Composer/mode-line repaint for the current frame burst.
 Further frames arriving before the timer fires (same burst) are folded
-into the same repaint — see `dsh-emacs-queue--prefix-timer'."
-  (unless dsh-emacs-queue--prefix-timer
+into the same repaint — see `dsh-emacs-queue--paint-timer'."
+  (unless dsh-emacs-queue--paint-timer
     (let ((buf (current-buffer)))
-      (setq dsh-emacs-queue--prefix-timer
+      (setq dsh-emacs-queue--paint-timer
             (run-at-time
              0 nil
              (lambda ()
@@ -370,59 +314,13 @@ into the same repaint — see `dsh-emacs-queue--prefix-timer'."
                  (with-current-buffer buf
                    (dsh-emacs-queue--paint-after-burst)))))))))
 
-(defun dsh-emacs-queue--update-prefix ()
-  "Sync the next-preview prompt prefix (clock icon + text) with the mirror.
-The prefix sits in the read-only welcome region (prompt face run, so
-the input anchor keeps pointing at the run start); edits go through
-`inhibit-read-only' and the previous prefix is removed only when it is
-still exactly what this module inserted.
-The gate is suppression minus the parked case, driven by state — no
-timing: while `dsh-emacs--queue-submit-suppress' is set the mirror's
-only item is the client's own just-submitted message, which the
-transcript renders directly, and a transient preview would flash the
-input line — UNLESS a turn is running (`dsh-emacs--busy-p'): an item
-mirrored while a turn runs can only be claimed at the turn end, so it
-is genuinely parked and the preview must show it at once, whatever the
-flag says.  The mode-line pending count is never gated."
-  (when (and dsh-emacs--input-marker
-             (marker-buffer dsh-emacs--input-marker))
-    (let* ((anchor (dsh-emacs-render--input-anchor-pos))
-           ;; Self-submit transient while idle: no `[next: …]' preview —
-           ;; the message goes straight into the transcript, a preview
-           ;; would only flash the input line (see
-           ;; `dsh-emacs--queue-submit-suppress').  A RUNNING turn lifts
-           ;; the gate: the item is parked, its preview is the point.
-           (next (and (or (null dsh-emacs--queue-submit-suppress)
-                          (dsh-emacs--busy-p))
-                      (dsh-emacs-queue--next-item)))
-           (wanted (and anchor next
-                        (dsh-emacs-queue--prefix
-                         (dsh-emacs-queue-preview
-                          (dsh-protocol-queue-item-text next))))))
-      (when anchor
-        (let ((inhibit-read-only t)
-              (old (and dsh-emacs--queue-prefix
-                        (length dsh-emacs--queue-prefix))))
-          (when (and old
-                     (> old 0)
-                     (<= (+ anchor old) (point-max))
-                     (string= (buffer-substring-no-properties
-                               anchor (+ anchor old))
-                              dsh-emacs--queue-prefix))
-            (delete-region anchor (+ anchor old)))
-          (setq dsh-emacs--queue-prefix nil)
-          (when wanted
-            (goto-char anchor)
-            (insert wanted)
-            (setq dsh-emacs--queue-prefix wanted)))))))
-
 (defun dsh-emacs-queue--refresh-ui ()
-  "Recompute the input-prompt next preview and the mode-line counts.
+  "Recompute Composer rows and the mode-line counts.
 Optimistic path (steer/delete/edit RPC success): paint right away and
 drop any pending burst repaint, so our own actions stay instantaneous."
-  (when (timerp dsh-emacs-queue--prefix-timer)
-    (cancel-timer dsh-emacs-queue--prefix-timer))
-  (setq dsh-emacs-queue--prefix-timer nil)
+  (when (timerp dsh-emacs-queue--paint-timer)
+    (cancel-timer dsh-emacs-queue--paint-timer))
+  (setq dsh-emacs-queue--paint-timer nil)
   (dsh-emacs-queue--paint-after-burst))
 
 ;;; ---------------------------------------------------------------------------

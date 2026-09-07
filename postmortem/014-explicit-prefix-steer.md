@@ -1,5 +1,7 @@
 # 014 — Prefix Argument Explicitly Selects Steer
 
+_The dependency on the local busy indicator is superseded by 021._
+
 ## Background
 
 The queue/steer workflow introduced `C-u C-c C-c` as a temporary inversion

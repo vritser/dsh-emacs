@@ -49,6 +49,13 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Next Message joins Composer**: pending input now has its own read-only
+  row below the goal and above `❯`, with a window-width preview and full-text
+  tooltip. Its text and icon use the prompt accent color, matching the former
+  next-preview prefix. Goal and queue rows appear independently; updates
+  preserve the draft and cursor. Steering priority and transient suppression
+  are unchanged (rationale: postmortem/020).
+
 - **Composer goal feedback**: `C-c C-g ?` shows the full objective and blocked
   reason. Pending actions show progress and temporarily hide inline controls;
   narrow rows prioritize status and objective, and action tooltips include
@@ -180,6 +187,12 @@ minor) and stay undated until the release is cut.
   editing.
 
 ### Fixed
+
+- **Busy submission no longer falls back to an optimistic send**: `C-c C-c`
+  honors the host's cached running status even before the chat stream receives
+  `turn/start`, so queued input does not render a premature user row.
+  `C-u C-c C-c` likewise always sends nonempty input with steer semantics
+  (rationale: postmortem/021).
 
 - **Goal editing preserves source text**: accepting an unchanged objective
   keeps its original line breaks and whitespace instead of sending the folded

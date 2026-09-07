@@ -9655,13 +9655,20 @@ candidates as the UI would via `all-completions', not by destructuring."
     (when (buffer-live-p chat) (kill-buffer chat))
     (delete-process proc)))
 
-;; Prefix gating: while the self-submit transient lives (mirror holds only
-;; our own message, suppress armed) the `[next: …]' prefix must not paint —
+(defun dsh-test-composer-next-row ()
+  "Return the displayed Next Message row in this buffer, or nil."
+  (when-let* ((beg (text-property-any (point-min) (point-max)
+                                    'dsh-emacs-composer-next-row t)))
+    (buffer-substring beg (next-single-property-change
+                          beg 'dsh-emacs-composer-next-row nil (point-max)))))
+
+;; Preview gating: while the self-submit transient lives (mirror holds only
+;; our own message, suppress armed) the `Next: …' row must not paint —
 ;; a preview would flash the input line on every submit (the literal
 ;; "flash next message" symptom); once disarmed it paints from the mirror
 ;; normally.  The mode-line Q/S counts are not gated and still reflect
 ;; the queue.
-(let ((buf (get-buffer-create " *t-queue-prefix-gate*")))
+(let ((buf (get-buffer-create " *t-queue-next-row-gate*")))
   (unwind-protect
       (with-current-buffer buf
         (dsh-emacs-mode)
@@ -9670,21 +9677,21 @@ candidates as the UI would via `all-completions', not by destructuring."
         (setq dsh-emacs--queue-items
               (list (dsh-protocol-queue-item--from-alist
                      (dsh-emacs-test--queue-item "g1" "queued" "gated"))))
-        (dsh-emacs-queue--update-prefix)
-        (dsh-test-assert "queue-submit-suppress-gates-prefix"
-          (null dsh-emacs--queue-prefix))
+        (dsh-emacs-composer-render)
+        (dsh-test-assert "queue-submit-suppress-gates-next-row"
+          (null (dsh-test-composer-next-row)))
         (dsh-emacs-queue--submit-suppress-clear)
-        (dsh-emacs-queue--update-prefix)
-        (dsh-test-assert "queue-submit-suppress-ungates-prefix"
-          dsh-emacs--queue-prefix))
+        (dsh-emacs-composer-render)
+        (dsh-test-assert "queue-submit-suppress-ungates-next-row"
+          (dsh-test-composer-next-row)))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
 ;; Disarming triggers a repaint: when the timeout lifts the flag while the
-;; message is STILL queued (a long busy turn), the `[next: …]' preview must
+;; message is STILL queued (a long busy turn), the `Next: …' preview must
 ;; come back — frames are the only repaint trigger, the flag change alone
-;; is not, so without this the prefix would stay gone until the next frame
+;; is not, so without this the row would stay gone until the next frame
 ;; arrives.
-(let ((buf (get-buffer-create " *t-queue-prefix-restore*"))
+(let ((buf (get-buffer-create " *t-queue-next-row-restore*"))
       (paints nil))
   (unwind-protect
       (with-current-buffer buf
@@ -9696,23 +9703,23 @@ candidates as the UI would via `all-completions', not by destructuring."
           (setq dsh-emacs--queue-items
                 (list (dsh-protocol-queue-item--from-alist
                        (dsh-emacs-test--queue-item "g2" "queued" "still queued"))))
-          (dsh-emacs-queue--update-prefix)
-          (dsh-test-assert "queue-submit-suppress-holds-prefix-hidden"
-            (null dsh-emacs--queue-prefix))
+          (dsh-emacs-composer-render)
+          (dsh-test-assert "queue-submit-suppress-holds-row-hidden"
+            (null (dsh-test-composer-next-row)))
           (dsh-emacs-queue--submit-suppress-clear)
           (dsh-test-assert "queue-submit-suppress-clear-schedules-repaint"
             (consp paints))
           (dolist (fn paints) (funcall fn))
-          (dsh-test-assert "queue-submit-suppress-timeout-restores-prefix"
-            dsh-emacs--queue-prefix)))
+          (dsh-test-assert "queue-submit-suppress-timeout-restores-row"
+            (dsh-test-composer-next-row))))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
 ;; The parked case is revealed by STATE, not by a timer: while a turn is
 ;; running (`dsh-emacs--ml-busy') an item in the mirror can only be
-;; claimed at the turn end, so the `[next: …]' preview must show it even
+;; claimed at the turn end, so the `Next: …' preview must show it even
 ;; though the submit-suppression is still armed — the old timer-only
 ;; reveal is what made a queued message appear ~2s late.
-(let ((buf (get-buffer-create " *t-queue-prefix-busy-reveal*")))
+(let ((buf (get-buffer-create " *t-queue-next-row-busy-reveal*")))
   (unwind-protect
       (with-current-buffer buf
         (dsh-emacs-mode)
@@ -9722,9 +9729,9 @@ candidates as the UI would via `all-completions', not by destructuring."
         (setq dsh-emacs--queue-items
               (list (dsh-protocol-queue-item--from-alist
                      (dsh-emacs-test--queue-item "pb" "queued" "parked"))))
-        (dsh-emacs-queue--update-prefix)
+        (dsh-emacs-composer-render)
         (dsh-test-assert "queue-submit-suppress-busy-reveals-parked"
-          dsh-emacs--queue-prefix
+          (dsh-test-composer-next-row)
           dsh-emacs--queue-submit-suppress))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
@@ -9856,7 +9863,7 @@ candidates as the UI would via `all-completions', not by destructuring."
 
 ;; 事件分发级：session/control 的 `queue' item（value 带 items 数组）经
 ;; `dsh-emacs-events--host-item' 按 session-id 路由到该会话的 chat 缓冲的
-;; dsh-emacs-queue-apply——镜像与 [next] 前缀即时更新；其它会话的 queue item
+;; dsh-emacs-queue-apply——镜像与 [next] 预览行即时更新；其它会话的 queue item
 ;; 找不到打开的 chat 缓冲（fallback 到 current-buffer），不碰本镜像。
 (let* ((old-chats dsh-emacs--chat-buffers)
        (chat (get-buffer-create " *t-queue-dispatch*"))
@@ -9876,7 +9883,7 @@ candidates as the UI would via `all-completions', not by destructuring."
         (cl-letf (((symbol-function 'run-at-time)
                    (lambda (_delay _repeat fn) (push fn paints) t)))
           ;; 匹配会话的 queue item → 路由到该会话 chat 缓冲的 queue-apply；
-          ;; 突发结束重绘一次后前缀可见
+          ;; 突发结束重绘一次后预览行可见
           (dsh-emacs-events--host-item
            proc
            (list (cons 'type "queue")
@@ -9890,9 +9897,9 @@ candidates as the UI would via `all-completions', not by destructuring."
               (= 1 (length dsh-emacs--queue-items))
               (equal "dispatched"
                      (dsh-protocol-queue-item-text (car dsh-emacs--queue-items)))
-              dsh-emacs--queue-prefix))
+              (dsh-test-composer-next-row)))
           ;; 其它会话的 queue item（无打开的 chat 缓冲）→ 落在 current-buffer，
-          ;; 本镜像与前缀原样
+          ;; 本镜像与预览行原样
           (with-current-buffer neutral
             (dsh-emacs-events--host-item
              proc
@@ -9904,7 +9911,7 @@ candidates as the UI would via `all-completions', not by destructuring."
               (= 1 (length dsh-emacs--queue-items))
               (equal "dispatched"
                      (dsh-protocol-queue-item-text (car dsh-emacs--queue-items)))
-              dsh-emacs--queue-prefix))))
+              (dsh-test-composer-next-row)))))
     (setq dsh-emacs--chat-buffers old-chats)
     (when (buffer-live-p chat) (kill-buffer chat))
     (when (buffer-live-p neutral) (kill-buffer neutral))
@@ -9958,49 +9965,45 @@ candidates as the UI would via `all-completions', not by destructuring."
   (let ((dsh-emacs--queue-items steer-two))
     (dsh-test-assert "queue-next-item-steering-led"
       (equal "Alpha" (dsh-protocol-queue-item-text
-                      (dsh-emacs-queue--next-item)))))
+                      (dsh-emacs-queue-next-item)))))
   (let ((dsh-emacs--queue-items mixed))
     (dsh-test-assert "queue-next-item-steering-over-queued"
       (equal "Alpha" (dsh-protocol-queue-item-text
-                      (dsh-emacs-queue--next-item)))))
+                      (dsh-emacs-queue-next-item)))))
   (let ((dsh-emacs--queue-items queued-only))
     (dsh-test-assert "queue-next-item-falls-back-to-queued"
       (equal "Beta" (dsh-protocol-queue-item-text
-                     (dsh-emacs-queue--next-item)))))
+                     (dsh-emacs-queue-next-item)))))
   (let ((dsh-emacs--queue-items context-first))
     (dsh-test-assert "queue-next-item-skips-context"
       (equal "Alpha" (dsh-protocol-queue-item-text
-                      (dsh-emacs-queue--next-item)))))
+                      (dsh-emacs-queue-next-item)))))
   (let ((dsh-emacs--queue-items nil))
     (dsh-test-assert "queue-next-item-empty-nil"
-      (null (dsh-emacs-queue--next-item)))))
+      (null (dsh-emacs-queue-next-item)))))
 
-;; 前缀构建：SVG 图标路径（icon + 空格 + 文本，display 属性保留、整串带
-;; prompt face）与无 SVG 回退（[next: …]）；两者都保持"整串共享 prompt
-;; face"的合并 run 不变式（anchor 扫描 / 字节级删除依赖它）
-(let ((icon (propertize " " 'display '(image :type svg :data "x"))))
-  (cl-letf (((symbol-function 'dsh-emacs-queue--next-icon) (lambda () icon)))
-    (let ((prefix (dsh-emacs-queue--prefix "Alpha")))
-      (dsh-test-assert "queue-prefix-icon-shape"
-        (string= "  Alpha " (substring-no-properties prefix))
-        (equal '(image :type svg :data "x")
-               (get-text-property 0 'display prefix))
-        (eq 'dsh-emacs-input-prompt-face
-            (get-text-property 0 'face prefix))
-        (eq 'dsh-emacs-input-prompt-face
-            (get-text-property (- (length prefix) 2) 'face prefix)))))
-  (cl-letf (((symbol-function 'dsh-emacs-queue--next-icon) (lambda () nil)))
-    (let ((prefix (dsh-emacs-queue--prefix "Alpha")))
-      (dsh-test-assert "queue-prefix-bracket-fallback"
-        (string= "[next: Alpha] " (substring-no-properties prefix))
-        (eq 'dsh-emacs-input-prompt-face
-            (get-text-property 0 'face prefix))))))
+;; Next Message uses the same prompt color as the historical next-preview prefix.
+(let ((item (dsh-protocol-queue-item--from-alist
+             (dsh-emacs-test--queue-item "a" "queued" "Alpha"))))
+  (cl-letf (((symbol-function 'image-type-available-p) (lambda (_type) t))
+            ((symbol-function 'create-image)
+             (lambda (_data _type _data-p &rest props) (cons 'image props))))
+    (let ((row (dsh-emacs-composer--render-next-row item)))
+      (dsh-test-assert "composer-next-icon-is-chrome"
+        (equal "   Alpha" (substring-no-properties row))
+        (eq 'image (car (get-text-property 0 'display row)))
+        (eq 'dsh-emacs-input-prompt-face (get-text-property 0 'face row)))))
+  (cl-letf (((symbol-function 'image-type-available-p) (lambda (_type) nil)))
+    (let ((row (dsh-emacs-composer--render-next-row item)))
+      (dsh-test-assert "composer-next-text-fallback-is-chrome"
+        (equal "Next: Alpha" (substring-no-properties row))
+        (eq 'dsh-emacs-input-prompt-face (get-text-property 0 'face row))))))
 
 ;; 集成回归：steer 一条后，服务器先推 remove 帧（镜像清空）、再推 next-step
 ;; 帧（条目以 steering 回归）——按宿主发送顺序，在途 steering 就是下一条，
-;; 所以 reinsert 后 next 预览显示该条目。前缀重绘按帧突发合并（run-at-time
+;; 所以 reinsert 后 next 预览显示该条目。预览行重绘按帧突发合并（run-at-time
 ;; 0）：remove+reinsert 打进同一突发时只画最终态，remove 造成的瞬时空窗不上屏。
-(let ((buf (get-buffer-create " *t-queue-prefix-clear*"))
+(let ((buf (get-buffer-create " *t-queue-next-row-clear*"))
       (paints nil))
   (unwind-protect
       (with-current-buffer buf
@@ -10019,20 +10022,20 @@ candidates as the UI would via `all-completions', not by destructuring."
                                 "a" "queued" "Alpha")))))
           (funcall (car paints))
           (setq paints nil)
-          (dsh-test-assert "queue-prefix-steer-before-shows-next"
-            (and dsh-emacs--queue-prefix
+          (dsh-test-assert "queue-next-row-steer-before-shows-next"
+            (and (dsh-test-composer-next-row)
                  (let ((plain (substring-no-properties
-                               dsh-emacs--queue-prefix)))
+                               (dsh-test-composer-next-row))))
                    (and (string-search "Alpha" plain)
-                        ;; SVG 可用：图标前缀以 icon(空格) 开头；否则回退括号形式
+                        ;; SVG 可用：图标预览行以 icon(空格) 开头；否则回退文本形式
                         (if (image-type-available-p 'svg)
                             (string-prefix-p " " plain)
-                          (string-search "[next:" plain))))))
-          ;; 突发 2：remove 帧（镜像即时清空，前缀暂不重绘）+ steering 回归帧
+                          (string-search "Next:" plain))))))
+          ;; 突发 2：remove 帧（镜像即时清空，预览行暂不重绘）+ steering 回归帧
           (dsh-emacs-queue-apply buf 'proc (list (cons 'items [])))
           (dsh-test-assert "queue-mirror-clears-on-steer-remove"
             (null dsh-emacs--queue-items)
-            (null (dsh-emacs-queue--next-item)))
+            (null (dsh-emacs-queue-next-item)))
           (dsh-emacs-queue-apply
            buf 'proc
            (list (cons 'items
@@ -10043,15 +10046,15 @@ candidates as the UI would via `all-completions', not by destructuring."
             (= 1 (length paints)))
           (funcall (car paints))
           (setq paints nil)
-          (dsh-test-assert "queue-prefix-steer-reinsert-shows-inflight"
-            (and dsh-emacs--queue-prefix
+          (dsh-test-assert "queue-next-row-steer-reinsert-shows-inflight"
+            (and (dsh-test-composer-next-row)
                  (string-search "Alpha"
                                 (substring-no-properties
-                                 dsh-emacs--queue-prefix))))))
+                                 (dsh-test-composer-next-row)))))))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
 ;; 闪现回归：宿主 splice 一条 item 后瞬间认领（item→空两帧打进同一突发）时，
-;; [next] 前缀不得上屏——合并重绘只看突发结束后的最终镜像（空 → 无前缀）。
+;; [next] 预览行不得上屏——合并重绘只看突发结束后的最终镜像（空 → 无预览行）。
 ;; 对照：真正停驻的条目（突发后仍在）→ 重绘后正常显示。
 (let ((buf (get-buffer-create " *t-queue-burst*"))
       (paints nil))
@@ -10075,9 +10078,9 @@ candidates as the UI would via `all-completions', not by destructuring."
           (funcall (car paints))
           (setq paints nil)
           (dsh-test-assert "queue-burst-claimed-item-never-paints"
-            (null dsh-emacs--queue-prefix)
+            (null (dsh-test-composer-next-row))
             (null dsh-emacs--queue-items))
-          ;; 对照：条目真实停驻（突发后仍在）→ 重绘后前缀显示
+          ;; 对照：条目真实停驻（突发后仍在）→ 重绘后预览行显示
           (dsh-emacs-queue-apply
            buf 'proc
            (list (cons 'items
@@ -10086,10 +10089,10 @@ candidates as the UI would via `all-completions', not by destructuring."
           (funcall (car paints))
           (setq paints nil)
           (dsh-test-assert "queue-burst-parked-item-paints"
-            (and dsh-emacs--queue-prefix
+            (and (dsh-test-composer-next-row)
                  (string-search "parked"
                                 (substring-no-properties
-                                 dsh-emacs--queue-prefix))))))
+                                 (dsh-test-composer-next-row)))))))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
 ;; 挂起提交：mode 解析（显式 / behavior 回退）与 payload mode 字段
@@ -10197,14 +10200,48 @@ candidates as the UI would via `all-completions', not by destructuring."
           (dsh-test-assert "send-or-stop-prefix-steers-from-stop"
             (null interrupted)
             (equal '("the next thing" steer) submitted))
-          ;; idle → 普通提交（无 mode）
+          ;; 即使本地 busy 状态尚未亮起，C-u 仍是显式 steer：不得降级为
+          ;; plain queue submit（否则还会错误乐观渲染 user 行）。
           (setq interrupted nil submitted nil)
+          (cl-letf (((symbol-function 'dsh-emacs--busy-p) (lambda (&rest _) nil)))
+            (with-current-buffer buf
+              (dsh-emacs-send-or-stop)))
+          (dsh-test-assert "send-or-stop-prefix-steers-when-local-idle"
+            (null interrupted)
+            (equal '("the next thing" steer) submitted))
+          ;; idle + 无前缀 → 普通提交（无 mode）
+          (setq submitted nil current-prefix-arg nil)
           (cl-letf (((symbol-function 'dsh-emacs--busy-p) (lambda (&rest _) nil)))
             (with-current-buffer buf
               (dsh-emacs-send-or-stop)))
           (dsh-test-assert "send-or-stop-idle-submits-plain"
             (null interrupted)
             (equal '("the next thing" nil) submitted))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; The core session-status projection can lead the chat's turn/start frame.
+;; Plain C-c C-c must honor that authoritative running bit instead of taking
+;; the optimistic plain-submit path and rendering a premature user row.
+(let ((buf (get-buffer-create " *t-send-host-running*"))
+      (submitted nil)
+      (dsh-emacs--sessions
+       (dsh-emacs-test--session-items
+        '(((sessionId . "host-running") (running . t))))))
+  (unwind-protect
+      (cl-letf (((symbol-function 'dsh-emacs-server-ensure) #'ignore)
+                ((symbol-function 'dsh-emacs--get-input)
+                 (lambda () "queue behind host turn"))
+                ((symbol-function 'dsh-emacs--submit-prompt)
+                 (lambda (message &optional _images mode)
+                   (setq submitted (list message mode)))))
+        (with-current-buffer buf
+          (setq-local dsh-emacs--buffer-session "host-running"
+                      dsh-emacs--ml-busy nil)
+          (let ((current-prefix-arg nil)
+                (dsh-emacs-busy-enter-behavior 'queue))
+            (dsh-emacs-send-or-stop)))
+        (dsh-test-assert "send-or-stop-host-running-uses-deferred-queue"
+          (equal '("queue behind host turn" queue) submitted)))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
 ;; updateQueue 动作：remove/steer/edit 的 wire 形状
@@ -10337,26 +10374,26 @@ candidates as the UI would via `all-completions', not by destructuring."
                                :test #'string=)))
             (dsh-emacs-queue--steer item)
             (let ((cb (car calls))) (setq calls (cdr calls)) (funcall cb t nil)))
-          (dsh-test-assert "queue-prefix-optimistic-steer-second-flips"
-            (and dsh-emacs--queue-prefix
+          (dsh-test-assert "queue-next-row-optimistic-steer-second-flips"
+            (and (dsh-test-composer-next-row)
                  (string-search "Second"
-                                (substring-no-properties dsh-emacs--queue-prefix))
+                                (substring-no-properties (dsh-test-composer-next-row)))
                  (not (string-search "First"
                                      (substring-no-properties
-                                      dsh-emacs--queue-prefix)))))
+                                      (dsh-test-composer-next-row))))))
           ;; 该在途项被消费（删除）：next 回落到排队首 First
           (let ((item (cl-find "p2" dsh-emacs--queue-items
                                :key (lambda (i) (dsh-protocol-queue-item-id i))
                                :test #'string=)))
             (dsh-emacs-queue--delete item)
             (let ((cb (car calls))) (setq calls (cdr calls)) (funcall cb t nil)))
-          (dsh-test-assert "queue-prefix-optimistic-steered-consumed-falls-back"
-            (and dsh-emacs--queue-prefix
+          (dsh-test-assert "queue-next-row-optimistic-steered-consumed-falls-back"
+            (and (dsh-test-composer-next-row)
                  (string-search "First"
-                                (substring-no-properties dsh-emacs--queue-prefix))
+                                (substring-no-properties (dsh-test-composer-next-row)))
                  (not (string-search "Second"
                                      (substring-no-properties
-                                      dsh-emacs--queue-prefix)))))))
+                                      (dsh-test-composer-next-row))))))))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
 (let ((buf (get-buffer-create " *t-prefix-opt-delete*"))
@@ -10377,20 +10414,20 @@ candidates as the UI would via `all-completions', not by destructuring."
                                :test #'string=)))
             (dsh-emacs-queue--delete item)
             (let ((cb (car calls))) (setq calls (cdr calls)) (funcall cb t nil)))
-          (dsh-test-assert "queue-prefix-optimistic-delete-first-flips"
-            (and dsh-emacs--queue-prefix
+          (dsh-test-assert "queue-next-row-optimistic-delete-first-flips"
+            (and (dsh-test-composer-next-row)
                  (string-search "Fourth"
-                                (substring-no-properties dsh-emacs--queue-prefix))
+                                (substring-no-properties (dsh-test-composer-next-row)))
                  (not (string-search "Third"
                                      (substring-no-properties
-                                      dsh-emacs--queue-prefix)))))
+                                      (dsh-test-composer-next-row))))))
           (let ((item (cl-find "p4" dsh-emacs--queue-items
                                :key (lambda (i) (dsh-protocol-queue-item-id i))
                                :test #'string=)))
             (dsh-emacs-queue--delete item)
             (let ((cb (car calls))) (setq calls (cdr calls)) (funcall cb t nil)))
-          (dsh-test-assert "queue-prefix-optimistic-delete-only-clears"
-            (null dsh-emacs--queue-prefix))))
+          (dsh-test-assert "queue-next-row-optimistic-delete-only-clears"
+            (null (dsh-test-composer-next-row)))))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
 (let ((buf (get-buffer-create " *t-prefix-opt-head*"))
@@ -10412,13 +10449,13 @@ candidates as the UI would via `all-completions', not by destructuring."
             (dsh-emacs-queue--steer item)
             (let ((cb (car calls))) (setq calls (cdr calls)) (funcall cb t nil)))
           ;; steer 队首：next 保持队首（它就是宿主下一条，只是改为在途状态）
-          (dsh-test-assert "queue-prefix-optimistic-steer-head-keeps-head"
-            (and dsh-emacs--queue-prefix
+          (dsh-test-assert "queue-next-row-optimistic-steer-head-keeps-head"
+            (and (dsh-test-composer-next-row)
                  (string-search "Fifth"
-                                (substring-no-properties dsh-emacs--queue-prefix))
+                                (substring-no-properties (dsh-test-composer-next-row)))
                  (not (string-search "Sixth"
                                      (substring-no-properties
-                                      dsh-emacs--queue-prefix)))))))
+                                      (dsh-test-composer-next-row))))))))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
 ;; 队列管理器：任何一层 C-g 一次彻底退出（不残留、不抛错）
@@ -11738,7 +11775,7 @@ candidates as the UI would via `all-completions', not by destructuring."
   (dsh-emacs-composer-set-goal-from-projection
    (list (cons 'goal (list (cons 'objective "line one\r\nline two\nline three")
                            (cons 'phase "active")))))
-  (let* ((region (dsh-emacs-composer--goal-row-region))
+  (let* ((region (dsh-emacs-composer--region))
          (row (buffer-substring-no-properties (car region) (cdr region))))
     (dsh-test-assert "composer-goal-multiline-objective-folds-to-one-row"
       (string-match-p "line one line two line three" row)
@@ -12455,6 +12492,108 @@ candidates as the UI would via `all-completions', not by destructuring."
       (= (plist-get (cdr (get-text-property 0 'display action)) :width) 10)
       (= (string-width icon) 2)
       (= (string-width action) 2))))
+
+;; Composer owns both rows; queue state must never become prompt text.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs--replace-input "draft\nsecond line")
+  (goto-char (+ dsh-emacs--input-marker 3))
+  (setq dsh-emacs--queue-items
+        (list (dsh-protocol-queue-item--from-alist
+               (dsh-emacs-test--queue-item "next" "queued" "Queued work"))))
+  (dsh-emacs-composer-set-goal-from-projection
+   '((goal . ((objective . "Current goal") (phase . "active")))))
+  (dsh-emacs-queue--paint-after-burst)
+  (dsh-test-assert "composer-next-has-own-row-and-preserves-draft-point"
+    (dsh-test-composer-next-row)
+    (equal (dsh-emacs--get-input) "draft\nsecond line")
+    (= (- (point) dsh-emacs--input-marker) 3)
+    (equal (buffer-substring-no-properties
+            (dsh-emacs-render--input-anchor-pos) dsh-emacs--input-marker)
+           "❯ ")
+    (string-match-p "Current goal.*\n.*Queued work.*\n❯ draft"
+                    (buffer-string)))
+  ;; Use the actual transcript insertion seam while both chrome rows exist.
+  (save-excursion
+    (goto-char (dsh-emacs-render--input-insert-point))
+    (let ((inhibit-read-only t)) (insert "STREAMED\n")))
+  (dsh-emacs-composer-set-goal nil)
+  (dsh-test-assert "composer-goal-clear-keeps-next-and-transcript"
+    (markerp dsh-emacs--composer-top-marker)
+    (dsh-test-composer-next-row)
+    (string-match-p "STREAMED\n.*Queued work.*\n❯ draft" (buffer-string))
+    (not (string-match-p "Current goal" (buffer-string)))
+    (equal (dsh-emacs--get-input) "draft\nsecond line"))
+  (setq dsh-emacs--queue-items nil)
+  (dsh-emacs-queue--paint-after-burst)
+  (dsh-test-assert "composer-last-row-removal-clears-only-chrome"
+    (null dsh-emacs--composer-top-marker)
+    (null (dsh-test-composer-next-row))
+    (string-match-p "STREAMED\n❯ draft" (buffer-string))
+    (equal (dsh-emacs--get-input) "draft\nsecond line")))
+
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (setq dsh-emacs--queue-items
+        (list (dsh-protocol-queue-item--from-alist
+               (dsh-emacs-test--queue-item
+                "wide" "queued"
+                "First line\nSecond line with a long continuation 中文中文中文"))))
+  (let ((width 60))
+    (cl-letf (((symbol-function 'dsh-emacs-composer--row-width)
+               (lambda () width)))
+      (dsh-emacs-queue--paint-after-burst)
+      (let ((wide (dsh-test-composer-next-row)))
+        (setq width 18)
+        (dsh-emacs-composer--window-configuration-change)
+        (let ((narrow (dsh-test-composer-next-row)))
+          (dsh-test-assert "composer-next-reflows-without-goal"
+            (and wide narrow
+                 (> (string-width (string-trim-right wide))
+                    (string-width (string-trim-right narrow)))
+                 (<= (string-width (string-trim-right narrow)) 18)
+                 (= (cl-count ?\n narrow) 1)
+                 (get-text-property 0 'read-only narrow))))))))
+
+;; Removing Next Message must leave the goal intact.  Rebuilding the input
+;; invalidates geometry but not the mirrored data or the ability to repaint.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (setq dsh-emacs--queue-items
+        (list (dsh-protocol-queue-item--from-alist
+               (dsh-emacs-test--queue-item "row" "queued" "Pending work"))))
+  (dsh-emacs-composer-set-goal-from-projection
+   '((goal . ((objective . "Keep goal") (phase . "active")))))
+  (let ((top dsh-emacs--composer-top-marker)
+        (end dsh-emacs--composer-end-marker)
+        (tick (buffer-chars-modified-tick)))
+    (dsh-emacs-composer-render)
+    (dsh-test-assert "composer-unchanged-rows-do-not-rewrite-buffer"
+      (eq top dsh-emacs--composer-top-marker)
+      (eq end dsh-emacs--composer-end-marker)
+      (= tick (buffer-chars-modified-tick))))
+  (dsh-emacs-render-event
+   '((type . "assistant/message") (seq . 1)
+     (data . ((message . ((content . [((type . "text")
+                                     (text . "Rendered transcript"))])))))))
+  (setq dsh-emacs--queue-items nil)
+  (dsh-emacs-queue--paint-after-burst)
+  (dsh-test-assert "composer-next-clear-keeps-goal-and-rendered-transcript"
+    (null (dsh-test-composer-next-row))
+    (string-match-p "Keep goal.*\n❯ " (buffer-string))
+    (string-match-p "Rendered transcript" (buffer-string))
+    (dsh-emacs-composer--region))
+  (dsh-emacs--setup-input-area)
+  (dsh-emacs-composer-render)
+  (dsh-test-assert "composer-rebuild-replaces-collapsed-markers"
+    (dsh-emacs-composer--region)
+    (string-match-p "DeepSeek Harness" (buffer-string))
+    (string-match-p "Keep goal.*\n❯ " (buffer-string)))
+  (dsh-emacs-composer-set-goal nil)
+  (dsh-test-assert "composer-all-markers-release-when-empty"
+    (null dsh-emacs--composer-top-marker)
+    (null dsh-emacs--composer-end-marker)))
 
 (princ "\n===== 测试总结 =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))

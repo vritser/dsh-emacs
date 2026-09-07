@@ -9,38 +9,25 @@
 
 ;;; Commentary:
 
-;; The **Composer chrome** layer at the bottom of a chat buffer.  As in dsh
-;; web, composer means the input area together with persistent read-only chrome
-;; pinned above it.  This file owns the non-transcript portion:
+;; Composer owns the persistent read-only rows above the editable input:
 ;;
 ;;   Conversation Buffer
 ;;   ├── Transcript            -- owned by dsh-emacs-render.el
-;;   └── Composer              -- owned here
-;;       ├── Goal Row          -- read-only chrome, not transcript content
-;;       │    └── action glyphs -- clickable/keyed pause/resume/edit/clear
-;;       └── Input Area        -- editable; geometry owned by dsh-emacs.el
-;;                                          (dsh-emacs--input-marker / --input-end)
+;;   └── Composer
+;;       ├── Goal Row          -- optional goal, phase and actions
+;;       ├── Next Message      -- optional pending-message preview
+;;       └── Input Area        -- editing/geometry owned by dsh-emacs.el
 ;;
-;; The chrome is a **Goal Row**: one read-only line for the session's current
-;; goal, directly above the editable `❯ ' input.  Long objectives are
-;; ellipsized to the window width and never wrap; complete goals are hidden.
-;; The row is never transcript content and is never sent to the model.  Goal
-;; data arrives passively through the `goal' session projection (§9), while
-;; pause/resume/edit/clear are explicit user-triggered `goals.*' RPCs (§4.10)
-;; carrying a CAS ref.  `dsh-emacs-composer-goal-actions' controls the inline
-;; buttons; `C-c C-g a' toggles them locally without affecting other goal keys.
+;; Goal data comes from the goal projection; its actions carry a CAS ref.
+;; Queue data stays in dsh-emacs-queue.el, which determines which pending
+;; message is visible and when burst updates repaint.  Composer only reads it.
+;; Both rows fold line breaks and fit the narrowest viewing window.  Neither
+;; row is transcript or editable input, and neither is included when sending.
 ;;
-;; ## Geometry: the composer-top seam
-;;
-;; `dsh-emacs-render--input-insert-point' normally resolves to the start of the
-;; `❯ ' line.  Once the Goal Row is inserted above that line, later transcript
-;; blocks must land above the row or they would separate the chrome from the
-;; input.  The buffer-local `dsh-emacs--composer-top-marker' anchors the row;
-;; while it is live the renderer inserts at that marker, and when it is nil the
-;; renderer falls back to the `❯ ' line.
-;;
-;; This keeps the ownership seam narrow: fragment rendering and the wire
-;; protocol remain unchanged.
+;; The top marker (insertion type t) is the transcript insertion seam.  The
+;; end marker (insertion type nil) stops before the prompt.  They delimit the
+;; complete chrome region, whether it contains zero, one or two rows.  Repaints
+;; replace only that region and preserve the draft and its cursor position.
 
 ;;; Code:
 
@@ -52,6 +39,7 @@
 ;; render here to avoid a cycle.  Input-marker geometry remains owned by
 ;; dsh-emacs.el; this module only reads the shared variable.
 (declare-function dsh-emacs-render--input-insert-point "dsh-emacs-render" ())
+(declare-function dsh-emacs-queue-next-item "dsh-emacs-queue" ())
 (defvar dsh-emacs--input-marker)
 (defvar-local dsh-emacs--composer-goal-pending nil
   "Identity token of this buffer's in-flight `goals.*' mutation, or nil.")
@@ -64,7 +52,7 @@
 ;;; ---------------------------------------------------------------------------
 
 (defgroup dsh-emacs-composer nil
-  "Composer chrome (the Goal Row above the chat input) for `dsh-emacs'."
+  "Read-only Goal and Next Message rows in chat buffers."
   :group 'dsh-emacs
   :prefix "dsh-emacs-")
 
@@ -92,16 +80,15 @@ composer chrome — never a message and never sent to the model; only the
 explicit `goals.*' actions the user triggers send its ref.")
 
 (defvar-local dsh-emacs--composer-top-marker nil
-  "Marker at the start of the Goal Row chrome above the editable input.
-Non-nil only while a Goal Row is shown; it is the single anchor for both the
-row's own region (its line is the chrome) and the transcript seam: when live,
-`dsh-emacs-render--input-insert-point' inserts above it so streamed content
-never lands between the Goal Row and the editable input.  Marker-based so
-transcript inserts above it never invalidate the recorded region.  Buffer-local.")
+  "Start of Composer's read-only rows; transcript inserts above this marker.
+Its insertion type is t, so streaming leaves it attached to the chrome.")
 
-(defvar-local dsh-emacs--composer-goal-sig nil
-  "Signature of the last rendered Goal Row (text content), for idempotent
-re-renders.  Buffer-local.")
+(defvar-local dsh-emacs--composer-end-marker nil
+  "End of Composer chrome, immediately before the editable prompt line.
+Its insertion type is nil so text inserted at the prompt stays outside chrome.")
+
+(defvar-local dsh-emacs--composer-sig nil
+  "Content and layout inputs of the last rendered Composer region.")
 
 ;;; ---------------------------------------------------------------------------
 ;;; Goal view protocol (§9 `goal' projection -> dsh-protocol-goal)
@@ -283,18 +270,19 @@ Colored via `currentColor' mapped to the action face's foreground."
                    (dsh-emacs-composer--phase-text goal))))
     (if (string-empty-p phase) "" (format "  ·  %s" phase))))
 
-(defun dsh-emacs-composer--sig (goal)
-  "Return the content and layout inputs of GOAL's cached row."
-  (list (dsh-protocol-goal-objective goal)
-        (dsh-protocol-goal-phase goal)
-        (dsh-protocol-goal-blocked-reason goal)
+(defun dsh-emacs-composer--sig (goal next)
+  "Return the content and layout inputs of GOAL and NEXT's cached rows."
+  (list (and goal (list (dsh-protocol-goal-objective goal)
+                        (dsh-protocol-goal-phase goal)
+                        (dsh-protocol-goal-blocked-reason goal)))
+        (and next (list (dsh-protocol-queue-item-text next)))
         dsh-emacs-composer-goal-actions
         (dsh-emacs-composer--pending-text)
         (dsh-emacs-composer--row-width)
         (dsh-emacs-composer--icon-width)))
 
 (defun dsh-emacs-composer--row-width ()
-  "Return the text width available for the Goal Row.
+  "Return the text width available for Composer rows.
 When several windows show this buffer, use the narrowest so the shared row
 fits all of them.  Fall back to a generous cap when the buffer is not on screen
 yet (mid setup / batch)."
@@ -427,62 +415,54 @@ Callers add the chrome tag and read-only over the whole span."
     ;; while retaining text properties on whatever cells remain visible.
     (truncate-string-to-width row available nil nil "…")))
 
-(defun dsh-emacs-composer--goal-row-region ()
-  "Return (BEG . END) of the Goal Row line, or nil when not shown.
-BEG is the composer-top marker; END is just past the row's trailing newline.
-Both derive from the marker, so transcript inserts above the row never drift
-them."
-  (when (and dsh-emacs--composer-top-marker
-             (markerp dsh-emacs--composer-top-marker)
-             (eq (marker-buffer dsh-emacs--composer-top-marker)
-                 (current-buffer)))
-    (let ((beg (marker-position dsh-emacs--composer-top-marker)))
-      (when (and (>= beg (point-min)) (<= beg (point-max)))
-        (save-excursion
-          (goto-char beg)
-          (let ((line-end (line-end-position)))
-            ;; The row is exactly one line ending at (line-end + 1) when its
-            ;; newline is present; if a torn region has no newline yet, cap at
-            ;; point-max.
-            (cons beg (min (point-max) (1+ line-end)))))))))
+(defconst dsh-emacs-composer--next-icon-svg
+  "<svg width=\"14\" height=\"14\" viewBox=\"0 0 14 14\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M7.00049 0.199829C3.24488 0.199829 0.199952 3.24408 0.199707 6.99963C0.199707 8.0414 0.434087 9.03061 0.854004 9.91467L1.11279 10.4576L2.19775 9.94202L1.94092 9.39905L1.81787 9.12268C1.5498 8.46885 1.40186 7.75171 1.40186 6.99963C1.4021 3.90808 3.90888 1.40198 7.00049 1.40198C10.0919 1.40219 12.5979 3.90821 12.5981 6.99963C12.5981 10.0913 10.0921 12.5983 7.00049 12.5983C6.36734 12.5983 5.90348 12.5535 5.49268 12.4401C5.08803 12.3283 4.7041 12.1414 4.24463 11.8209C3.57111 11.3511 2.60588 11.1855 1.81006 11.6881L1.79736 11.6959L1.78467 11.7047L1.25537 12.0778L1.65381 13.2672L2.46045 12.6989C2.75029 12.5214 3.18004 12.5442 3.55615 12.8063C4.10063 13.1861 4.60863 13.4423 5.17334 13.5983C5.73194 13.7525 6.31665 13.8004 7.00049 13.8004C10.7561 13.8002 13.8003 10.7553 13.8003 6.99963C13.8 3.24421 10.7559 0.200041 7.00049 0.199829ZM3.81201 7.47327V8.67542H7.11572V7.47327H3.81201ZM3.81201 6.34924H10.2173V5.14709H3.81201V6.34924Z\" fill=\"currentColor\"></path></svg>"
+  "SVG clock for the Composer Next Message row.")
 
-(defun dsh-emacs-composer--remove-goal-row ()
-  "Delete the current Goal Row chrome line and clear its bookkeeping.
-Removes only the region derived from the composer-top marker, so streamed
-transcript (always inserted above the marker) is never touched."
-  (when-let* ((region (dsh-emacs-composer--goal-row-region)))
+(defun dsh-emacs-composer--render-next-row (item)
+  "Return ITEM's single-line preview fitted to the viewing windows."
+  (let* ((text (or (dsh-protocol-queue-item-text item) ""))
+         (preview (replace-regexp-in-string "[\t\n\r]+" " " text))
+         (icon (when (image-type-available-p 'svg)
+                 (propertize
+                  "  " 'display
+                  (create-image dsh-emacs-composer--next-icon-svg 'svg t
+                                :ascent 'center :scale 1.0
+                                :width (dsh-emacs-composer--icon-width)
+                                :foreground
+                                (or (face-foreground 'dsh-emacs-input-prompt-face nil t)
+                                    "gray50")))))
+         (row (concat (if icon (concat icon " ") "Next: ") preview)))
+    (propertize
+     (truncate-string-to-width row (dsh-emacs-composer--row-width) nil nil "…")
+     'face 'dsh-emacs-input-prompt-face
+     'help-echo (concat text "\nC-c C-q to manage pending messages"))))
+
+(defun dsh-emacs-composer--region ()
+  "Return (BEG . END) of the live Composer chrome, or nil.
+A buffer rebuild can collapse its markers; only a nonempty, tagged region
+still belongs to Composer.  Never infer its extent from line contents."
+  (when (and (markerp dsh-emacs--composer-top-marker)
+             (markerp dsh-emacs--composer-end-marker)
+             (eq (marker-buffer dsh-emacs--composer-top-marker) (current-buffer))
+             (eq (marker-buffer dsh-emacs--composer-end-marker) (current-buffer)))
+    (let ((beg (marker-position dsh-emacs--composer-top-marker))
+          (end (marker-position dsh-emacs--composer-end-marker)))
+      (when (and (<= (point-min) beg) (< beg end) (<= end (point-max))
+                 (get-text-property beg 'dsh-emacs-composer-chrome))
+        (cons beg end)))))
+
+(defun dsh-emacs-composer--clear ()
+  "Remove only the owned chrome region and release its markers and cache."
+  (when-let* ((region (dsh-emacs-composer--region)))
     (let ((inhibit-read-only t))
       (delete-region (car region) (cdr region))))
-  (when (and dsh-emacs--composer-top-marker
-             (marker-buffer dsh-emacs--composer-top-marker))
-    (set-marker dsh-emacs--composer-top-marker nil))
+  (dolist (marker (list dsh-emacs--composer-top-marker
+                        dsh-emacs--composer-end-marker))
+    (when (markerp marker) (set-marker marker nil)))
   (setq dsh-emacs--composer-top-marker nil
-        dsh-emacs--composer-goal-sig nil))
-
-(defun dsh-emacs-composer--insert-goal-row (goal)
-  "Render GOAL as a read-only Goal Row directly above the editable input.
-The row occupies its own line at the transcript boundary; the composer-top
-marker is placed at its start so future transcript inserts land above it."
-  (let* ((inhibit-read-only t)
-         (row (dsh-emacs-composer--render-row goal)))
-    (save-excursion
-      ;; Land where a transcript block would today: the start of the editable
-      ;; `❯ ' line.  The Goal Row becomes a fresh line above it.
-      (goto-char (or (dsh-emacs-render--input-insert-point) (point-max)))
-      (beginning-of-line)
-      (let ((beg (point)))
-        (insert row "\n")
-        (let ((end (1- (point))))    ; exclude the trailing newline
-          ;; read-only + tagged as chrome; deliberately NO prompt face so the
-          ;; anchor scan (`dsh-emacs-render--input-anchor-pos') still resolves
-          ;; to the real `❯ ' run below it.  Faces come from --render-row.
-          (put-text-property beg end 'dsh-emacs-composer-goal-row t)
-          (put-text-property beg end 'read-only t))
-        ;; insert-type t: transcript is inserted AT the marker position (the
-        ;; goal row's line start); with t the marker moves past the inserted
-        ;; text and stays pinned to the goal row start as content stacks above.
-        (setq dsh-emacs--composer-top-marker (copy-marker beg t)
-              dsh-emacs--composer-goal-sig (dsh-emacs-composer--sig goal))))))
+        dsh-emacs--composer-end-marker nil
+        dsh-emacs--composer-sig nil))
 
 (defun dsh-emacs-composer--visible-p (goal)
   "Return non-nil when GOAL should show a Goal Row.
@@ -492,20 +472,38 @@ goal is a finished target, not an active strip.  Paused/blocked stay visible."
        (not (equal (dsh-protocol-goal-phase goal) "complete"))))
 
 (defun dsh-emacs-composer-render ()
-  "Re-render the Goal Row chrome from `dsh-emacs--composer-goal'.
-Shows a read-only row when a goal is present and not complete, removes it
-otherwise (a complete goal hides, like dsh web).  Idempotent: re-renders only
-when the goal text actually changed.  When the buffer has no live editable
-region yet (not a chat buffer / mid setup) nothing renders."
+  "Render Goal and Next Message rows as one owned region above the input.
+Queue selection and visibility belong to the queue module.  Composer reads
+that mirror without copying it, and retains only a presentation signature.
+Repeated renders preserve the region when content and width are unchanged."
   (when (and (markerp dsh-emacs--input-marker)
              (eq (marker-buffer dsh-emacs--input-marker) (current-buffer)))
-    (if (dsh-emacs-composer--visible-p dsh-emacs--composer-goal)
-        (let ((sig (dsh-emacs-composer--sig dsh-emacs--composer-goal)))
-          (unless (equal sig dsh-emacs--composer-goal-sig)
-            (dsh-emacs-composer--remove-goal-row)
-            (dsh-emacs-composer--insert-goal-row dsh-emacs--composer-goal)))
-      (when dsh-emacs--composer-top-marker
-        (dsh-emacs-composer--remove-goal-row)))))
+    (let* ((goal (and (dsh-emacs-composer--visible-p dsh-emacs--composer-goal)
+                      dsh-emacs--composer-goal))
+           (next (dsh-emacs-queue-next-item))
+           (sig (dsh-emacs-composer--sig goal next)))
+      (unless (and (equal sig dsh-emacs--composer-sig)
+                   (or (not (or goal next)) (dsh-emacs-composer--region)))
+        (let ((text (concat
+                     (when goal
+                       (propertize
+                        (concat (dsh-emacs-composer--render-row goal) "\n")
+                        'dsh-emacs-composer-goal-row t))
+                     (when next
+                       (propertize
+                        (concat (dsh-emacs-composer--render-next-row next) "\n")
+                        'dsh-emacs-composer-next-row t))))
+              (inhibit-read-only t))
+          (save-excursion
+            (dsh-emacs-composer--clear)
+            (unless (string-empty-p text)
+              (goto-char (dsh-emacs-render--input-insert-point))
+              (let ((beg (point)))
+                (insert (propertize text 'dsh-emacs-composer-chrome t
+                                    'read-only t 'rear-nonsticky t))
+                (setq dsh-emacs--composer-top-marker (copy-marker beg t)
+                      dsh-emacs--composer-end-marker (copy-marker (point) nil))))
+            (setq dsh-emacs--composer-sig sig)))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Public API
@@ -525,26 +523,23 @@ never sent to the model."
    (dsh-emacs-composer-goal-from-projection value)))
 
 (defun dsh-emacs-composer-refresh ()
-  "Re-render the Goal Row of the current buffer from its current goal.
-Forces a repaint even when the goal is unchanged — e.g. after the user toggled
-`dsh-emacs-composer-goal-actions' and wants the row to pick up the change."
+  "Re-render this buffer's Goal and Next Message rows.
+Forces a repaint even when their content is unchanged, for example after
+changing `dsh-emacs-composer-goal-actions'."
   (when (and (markerp dsh-emacs--input-marker)
              (eq (marker-buffer dsh-emacs--input-marker) (current-buffer)))
-    (setq dsh-emacs--composer-goal-sig nil)
+    (setq dsh-emacs--composer-sig nil)
     (dsh-emacs-composer-render)))
 
 (defun dsh-emacs-composer--window-configuration-change ()
-  "Reflow this buffer's Goal Row after its displayed window geometry changes."
-  (when dsh-emacs--composer-goal
-    (dsh-emacs-composer-render)))
+  "Reflow Composer after its displayed window geometry changes."
+  (dsh-emacs-composer-render))
 
 (defun dsh-emacs-composer-reset ()
-  "Reset composer chrome state (called when a chat buffer (re)opens).
-Drops any stale goal view and the composer-top marker; the Goal Row is rebuilt
-from the next projection/snapshot, so reopen stays self-consistent."
-  (setq-local dsh-emacs--composer-goal nil)
-  (setq dsh-emacs--composer-top-marker nil
-        dsh-emacs--composer-goal-sig nil
+  "Release Composer chrome and goal state when a chat buffer reopens.
+The next projection/snapshot supplies goal and queue data."
+  (dsh-emacs-composer--clear)
+  (setq dsh-emacs--composer-goal nil
         dsh-emacs--composer-goal-pending nil)
   (add-hook 'window-configuration-change-hook
             #'dsh-emacs-composer--window-configuration-change nil t))

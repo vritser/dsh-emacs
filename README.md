@@ -63,6 +63,11 @@ context when you send. In the
 session list: `RET` open, `c` create, `w` workspace filter, `/` search,
 `g` refresh.  Everything else is in the [manual](#documentation).
 
+The Composer displays the current goal and the next pending message on
+separate read-only rows above `❯`. The Next Message preview adapts to window
+width; steering items take priority over queued messages. Hover for the full
+text, or use `C-c C-q` to manage pending messages.
+
 ## Server setup
 
 By default everything is managed for you: before the first RPC,

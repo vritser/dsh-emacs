@@ -1,5 +1,7 @@
 # 017 — Composer Goal Row (chat-buffer chrome above the input)
 
+_The single-row geometry is superseded by 020; Composer now owns two optional rows._
+
 ## Background
 
 The chat buffer's bottom region was a single implicit concept: a read-only

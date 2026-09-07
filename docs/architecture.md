@@ -15,18 +15,20 @@ dsh-emacs/
 ├── dsh-emacs-modeline.el       # Mode-line stats
 ├── dsh-emacs-queue.el        # Pending-input queue mirror (queue/steer)
 ├── dsh-emacs-server.el       # Server bootstrap: probe / auto-start / install / browser-session auth
-├── dsh-emacs-composer.el     # Composer chrome: the Goal Row above the editable input
+├── dsh-emacs-composer.el     # Composer chrome: Goal and Next Message rows above the input
 └── dsh-emacs-session.el      # Session list card view
 ```
 
 ## Composer (`dsh-emacs-composer.el`)
 
 The bottom of a chat buffer is a **Composer**: a persistent, non-transcript UI
-region made of a read-only **Goal Row** chrome above the editable **Input
-Area**. The Input Area's geometry (the `❯ ` prompt, `dsh-emacs--input-marker` /
+region with optional read-only **Goal Row** and **Next Message** rows, in that
+order, above the editable **Input Area**. The input geometry (the `❯ ` prompt,
+`dsh-emacs--input-marker` /
 `dsh-emacs--input-end`, cursor clamps, delete guards) is owned by
-`dsh-emacs.el`; `dsh-emacs-composer.el` owns the Goal Row chrome and the seam
-that keeps streamed transcript above it.
+`dsh-emacs.el`; `dsh-emacs-composer.el` owns both chrome rows and the seam
+that keeps streamed transcript above them. The queue module supplies the
+visible next item directly from its mirror; Composer keeps no second queue.
 
 The Goal Row shows the session's current goal as one read-only line (a leading
 dartboard goal SVG icon mirroring dsh web — the `◎ ` text is a fallback when
@@ -58,13 +60,22 @@ reserve two columns and are capped to fit the narrowest viewing frame's cells.
 Goal projection and RPC response decoding both belong to the protocol module;
 Composer's mutation callback compares parsed goal identities and revisions.
 
-Geometry: transcript inserts land at `dsh-emacs-render--input-insert-point`,
-today the start of the `❯ ` line. When a Goal Row is shown it occupies its own
-line above the input and the composer owns a buffer-local
-`dsh-emacs--composer-top-marker` pointing at that row's start; the render seam
-inserts above it, so streamed messages stack above the chrome instead of
-pushing it away from the input. The marker is `insertion-type t`, so content
-inserted above the row slides the marker down with it.
+Next Message displays an SVG clock followed by the preview, or `Next: …` as
+a text fallback, folding line breaks and truncating to the window width. Hover
+for the full text and use `C-c C-q` to manage the queue. Either row may appear
+independently; clearing a goal leaves pending input visible, and clearing the
+queue leaves the goal.
+
+Geometry: `dsh-emacs--composer-top-marker` and
+`dsh-emacs--composer-end-marker` delimit the complete read-only chrome region,
+including row newlines. The top marker has insertion type `t`, so transcript
+inserts through `dsh-emacs-render--input-insert-point` leave it attached to the
+rows. The end marker has insertion type `nil` and stops before the `❯ ` line.
+Composer replaces only its tagged region, preserving the draft and cursor,
+and releases both markers when no rows remain. A content/layout signature
+avoids rewriting unchanged rows; resize reflows Next Message even without a
+goal. The input prompt remains a plain `❯ ` run, with no queue-prefix scanning
+or text matching needed to remove stale previews.
 
 ## Protocol layer (`dsh-emacs-protocol.el`)
 
@@ -143,21 +154,15 @@ The wire item shape (`id`, `placement` = `queued`/`steering`/`context`,
 `dsh-emacs-protocol.el`.  The mirror drives the mode-line `[Qn Sm]`
 indicator, the echo-area feedback (enqueue / steer / consumption,
 diffed against the previous mirror, with locally-deleted ids suppressed),
-the input-prompt prefix — a small clock icon (SVG `currentColor`
-mapped to the prompt face's foreground, `[next: …] ` brackets as
-fallback when Emacs lacks SVG support) followed by the next message
-the host will send: the preview follows the host's delivery order, so
-an item steered into the running turn (`steering`, next-step, injected
-at the agent's next step) leads it ahead of items queued for the next
-turn (`queued`, next-turn); our own steer/delete/edit RPCs update the
-mirror optimistically on
-success, so the hint and mode-line refresh immediately without waiting
-for the confirming frame; prefix repaints are coalesced per frame burst
-(one zero-delay timer paints the settled mirror), so an item the host
-splices and instantly claims never flashes the hint),
-and the `C-c C-q` manager (a
-minibuffer candidate list whose single keys `e`/`s`/`d`/`RET` act on the
-highlighted item; `x` deletes the whole queue).  `context`
+the Composer Next Message row, and the `C-c C-q` manager.
+`dsh-emacs-queue-next-item` determines the visible next message from delivery
+order and the transient gate: steering (next-step) takes priority over queued
+(next-turn). Composer owns its clock icon, width fitting and buffer geometry.
+Our steer/delete/edit RPCs still update the mirror optimistically on success,
+so Composer and the mode-line refresh immediately. Queue-triggered repaints
+are coalesced per frame burst with the existing zero-delay timer, preserving
+transient suppression. The manager's minibuffer keys `e`/`s`/`d`/`RET` act on the
+highlighted item; `x` deletes the whole queue. `context`
 items (host-injected next-step content) are mirrored but never counted,
 previewed, or listed; `steering` items count and list, and — as the
 next thing the host injects — head the preview.
@@ -168,15 +173,14 @@ idle, or queued behind a running turn with nothing else pending — is
 appended to the inbox and claimed when the turn starts, two
 `session/queue` frames within milliseconds.  With an empty mirror those
 frames carry no ordering information, so the transient splice/claim
-gets no `queued:` / `running:` echo and no `[next: …]` preview paint
-(the preview would otherwise flash the input line: inserted on the
-splice-in frame, removed on the claim) — `dsh-emacs-queue--mark-submit-suppress`
+gets no `queued:` / `running:` echo and no Next Message preview paint
+(the row would otherwise flash as the item is inserted and claimed) — `dsh-emacs-queue--mark-submit-suppress`
 arms `dsh-emacs--queue-submit-suppress` when the mirror is empty at
 submit time, on both the plain and the deferred path; it clears when
 the mirror settles back to empty, in the submit failure branch, or by
 a transport-hygiene timer (a dead transport would otherwise leave the
 echo gate stuck until the next submit — the timer paces no preview).
-The `[next: …]` preview is gated by the same flag, with one
+The Next Message preview is gated by the same flag, with one
 event-driven escape: while a turn is running (`dsh-emacs--busy-p`,
 buffer-local) the preview shows regardless, because an item mirrored
 then can only be claimed at the turn end and is genuinely parked —

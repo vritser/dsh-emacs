@@ -207,8 +207,9 @@ Mirrors dsh web's `busyEnter' setting: `queue' lines the input up as the
 next turn (delivered automatically when the current one finishes),
 `steer' wakes the running agent and redirects its current work, and
 `stop' keeps the old behavior of interrupting the turn.  With `queue' or
-`steer', an empty input still interrupts, and `\\[universal-argument]
-\\[dsh-emacs-send-or-stop]' explicitly steers one message."
+`steer', an empty input still interrupts.  `\\[universal-argument]
+\\[dsh-emacs-send-or-stop]' explicitly steers one nonempty message regardless
+of the local busy indicator."
   :type '(choice (const :tag "Queue as the next turn" queue)
                  (const :tag "Steer the running turn" steer)
                  (const :tag "Interrupt the turn" stop))
@@ -2057,8 +2058,15 @@ editing inside an earlier one."
 
 (defun dsh-emacs--busy-p ()
   "Return non-nil when this chat buffer is generating.
-Consults the same buffer-local flag that drives the mode-line spinner."
-  (and (boundp 'dsh-emacs--ml-busy) dsh-emacs--ml-busy))
+The chat stream's buffer-local flag drives the mode-line spinner.  The core
+session-status projection can arrive before that stream's `turn/start', so
+also consult the authoritative cached session row; otherwise `C-c C-c' can
+misclassify a running host turn as idle and take the optimistic plain-submit
+path."
+  (or (and (boundp 'dsh-emacs--ml-busy) dsh-emacs--ml-busy)
+      (when-let* ((session-id (dsh-emacs--active-session-id))
+                  (session (dsh-emacs--chat-session-item session-id)))
+        (dsh-protocol-session-running session))))
 
 (defun dsh-emacs-interrupt-turn ()
   "Interrupt the running turn via `session/cancel'.
@@ -2085,31 +2093,31 @@ until the next wake (see `dsh-emacs-list-queue')."
 (defun dsh-emacs-send-or-stop ()
   "Send the input as a message, or act on the running turn.
 
-When idle, the text after the `❯ ' prompt is submitted.  While a turn is
-executing (the mode-line spinner is lit) the input is delivered per
+When idle, the text after the `❯ ' prompt is submitted.  `C-u' explicitly
+steers one nonempty message even if the local busy indicator has not caught up
+with the host.  Otherwise, while a turn is executing (the mode-line spinner is
+lit), the input is delivered per
 `dsh-emacs-busy-enter-behavior': `queue' lines it up as the next turn,
 `steer' wakes the running agent, `stop' issues `session/cancel' (the old
 interrupt behavior).  With `queue'/`steer' and an EMPTY input the turn is
-interrupted, so stopping stays one key away, and `C-u' explicitly steers
-one message regardless of the configured behavior.  Success feedback arrives
-via the `session/queue' stream; `\\[dsh-emacs-interrupt-turn]'
+interrupted, so stopping stays one key away.  Success feedback arrives via the
+`session/queue' stream; `\\[dsh-emacs-interrupt-turn]'
 (`C-c C-b') interrupts regardless of the behavior."
   (interactive)
   (dsh-emacs-server-ensure)
-  (if (dsh-emacs--busy-p)
-      (let ((behavior (if (consp current-prefix-arg)
-                          'steer
-                        dsh-emacs-busy-enter-behavior)))
-        (if (eq behavior 'stop)
-            (dsh-emacs-interrupt-turn)
-          (let ((input (dsh-emacs--get-input)))
-            (if (string-empty-p (string-trim input))
-                (dsh-emacs-interrupt-turn)
-              (dsh-emacs--submit-prompt input nil behavior)))))
-    (let ((input (dsh-emacs--get-input)))
-      (if (string-empty-p (string-trim input))
-          (message "Please enter a message")
-        (dsh-emacs--submit-prompt input)))))
+  (let* ((busy (dsh-emacs--busy-p))
+         (steer-p (consp current-prefix-arg))
+         (input (dsh-emacs--get-input))
+         (empty-p (string-empty-p (string-trim input))))
+    (cond
+     ((and steer-p (not empty-p))
+      (dsh-emacs--submit-prompt input nil 'steer))
+     (busy
+      (if (or empty-p (eq dsh-emacs-busy-enter-behavior 'stop))
+          (dsh-emacs-interrupt-turn)
+        (dsh-emacs--submit-prompt input nil dsh-emacs-busy-enter-behavior)))
+     (empty-p (message "Please enter a message"))
+     (t (dsh-emacs--submit-prompt input)))))
 
 (defun dsh-emacs--input-end ()
   "Return the end of editable input, before the mode-line separator newline."

@@ -3,6 +3,8 @@
 _The `C-u C-c C-c` toggle described below is superseded by 014; it now
 always selects steer._
 
+_The prompt-prefix presentation is superseded by 020; queue semantics remain._
+
 ## Background
 
 While a turn runs, dsh delivers further input through the agent inbox:

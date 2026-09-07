@@ -637,13 +637,13 @@ Rendered transcript blocks must be inserted before this line.  Do not move
 back one line: after the first reply that would point inside the previous
 assistant body and reverse the order of subsequent replies.
 
-When a composer chrome row (Goal Row) is shown above the input, its top marker
+When Composer chrome (Goal / Next Message) is shown above the input, its marker
 (`dsh-emacs--composer-top-marker') wins so streamed content stays above the
 chrome; otherwise the live prompt marker is preferred; when it is missing or
 points into another buffer, the anchor is located again by the prompt face so
 messages can never be appended below the input area."
   (or
-   ;; 0. Composer chrome (Goal Row) top: transcript must insert above it so the
+   ;; 0. Composer chrome top: transcript must insert above it so the
    ;; chrome never separates from the editable input.
    (when (and (boundp 'dsh-emacs--composer-top-marker)
               (markerp dsh-emacs--composer-top-marker)
