@@ -728,13 +728,15 @@ Used for incremental rendering.")
 
 (defvar-local dsh-emacs--streaming-assistant nil
   "Current assistant stream state, or nil.
-The plist contains :key, :start, :end, :event-id and :raw.  The body between
-:start and :end is kept as raw Markdown while chunks arrive, then rewritten
+The plist contains :key, :start, :end, :event-id, :chunks and :timer.
+:chunks retains raw deltas in reverse order; :timer coalesces Markdown work.
+The body between :start and :end is kept as raw Markdown while chunks
+arrive, then rewritten
 in place by `dsh-emacs-markdown-replace-markup'.")
 
 (defvar-local dsh-emacs--streaming-thinking nil
   "Current live reasoning/Think block stream state, or nil.
-The plist contains :key, :label-start, :start, :end and :raw.  Reasoning
+The plist contains :key, :start and :end.  Reasoning
 deltas grow a raw body below the \"✶ Think\" header; on finalization
 (`block-end' or `assistant/message') the raw region is replaced by the
 collapsible Think fragment.")
@@ -771,6 +773,8 @@ miss the entry is cleaned up.")
 
 (defun dsh-emacs-render--reset-tool-tracking ()
   "Reset tool tracking state. Called on full transcript reload."
+  (dsh-emacs--command-spinner-clear-all)
+  (dsh-emacs-render--flush-stream)
   (setq dsh-emacs--streaming-assistant nil
         dsh-emacs--streaming-thinking nil
         dsh-emacs--tool-states (make-hash-table :test 'equal)
@@ -848,15 +852,18 @@ blocks are never touched.  The agent-shell-style watermark and frozen
 properties make already stable spans cheap to revisit while allowing the
 last incomplete Markdown construct to be completed by a later chunk."
   (let ((start (marker-position (plist-get state :start)))
-        (end (marker-position (plist-get state :end))))
+        (end (marker-position (plist-get state :end)))
+        render-start)
     (when (and start end (<= start end))
       (save-excursion
         (save-restriction
           (goto-char start)
           (narrow-to-region start end)
+          (setq render-start (if force start
+                               (dsh-emacs-markdown--watermark-start)))
           (let ((inhibit-read-only t))
             (dsh-emacs-markdown-replace-markup :force force))))
-      (let ((body-start (marker-position (plist-get state :start)))
+      (let ((body-start render-start)
             (body-end (marker-position (plist-get state :end)))
             (event-id (plist-get state :event-id)))
         (when (and body-start body-end (<= body-start body-end))
@@ -870,6 +877,18 @@ last incomplete Markdown construct to be completed by a later chunk."
               (put-text-property body-start body-end
                                  'dsh-emacs-event-block event-id))))))))
 
+(defun dsh-emacs-render--flush-stream (&optional buffer)
+  "Flush BUFFER's pending Markdown pass and cancel its one-shot timer."
+  (let ((buffer (or buffer (current-buffer))))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (when-let* ((state dsh-emacs--streaming-assistant)
+                    (timer (plist-get state :timer)))
+          (cancel-timer timer)
+          (setf (plist-get state :timer) nil)
+          (dsh-emacs-render--stream-render-region state)
+          (dsh-emacs-render--follow-stream))))))
+
 (defun dsh-emacs-render--start-assistant-stream (event text)
   "Create or extend the live assistant stream with TEXT from EVENT."
   (when (and (stringp text) (not (string-empty-p text)))
@@ -882,6 +901,7 @@ last incomplete Markdown construct to be completed by a later chunk."
       ;; stream.
       (when (and state
                  (not (equal key (dsh-emacs-render--stream-state-key state))))
+        (dsh-emacs-render--flush-stream)
         (setq state nil
               dsh-emacs--streaming-assistant nil))
       (unless state
@@ -908,7 +928,8 @@ last incomplete Markdown construct to be completed by a later chunk."
                             :start (copy-marker start nil)
                             :end end
                             :event-id event-id
-                            :raw text)
+                            :chunks (list text)
+                            :timer nil)
                 dsh-emacs--streaming-assistant state
                 new-state t)))
       (when (and state (not new-state))
@@ -916,35 +937,46 @@ last incomplete Markdown construct to be completed by a later chunk."
               (inhibit-read-only t))
           (save-excursion
             (goto-char end)
-            (insert text))
-          (setq state (plist-put state :raw
-                                 (concat (plist-get state :raw) text))
-                dsh-emacs--streaming-assistant state)))
-      (dsh-emacs-render--stream-render-region state)
+            (insert (propertize text
+                                'read-only t
+                                'front-sticky '(read-only)
+                                'rear-nonsticky '(read-only)
+                                'face 'dsh-emacs-assistant-body-face
+                                'dsh-emacs-event-block
+                                (plist-get state :event-id))))
+          (push text (plist-get state :chunks))))
+      (if new-state
+          (dsh-emacs-render--stream-render-region state)
+        (unless (plist-get state :timer)
+          (setf (plist-get state :timer)
+                (run-at-time 0.05 nil #'dsh-emacs-render--flush-stream
+                             (current-buffer)))))
       state)))
 
 (defun dsh-emacs-render--finish-assistant-stream (event final-text)
   "Replace the live stream with FINAL-TEXT from assistant/message EVENT.
-The final event is authoritative: this repairs a missing chunk and performs
-one forced Markdown pass so a delimiter completed by the final message is
-rendered immediately."
+The final event repairs missing chunks.  Matching text needs only the
+pending incremental pass; changed text is replaced and rendered in full."
   (let ((state dsh-emacs--streaming-assistant))
     (when (and state
                (equal (dsh-emacs-render--stream-key event)
                       (dsh-emacs-render--stream-state-key state)))
-      (let* ((start (marker-position (plist-get state :start)))
-             (end (marker-position (plist-get state :end)))
-             (text (or final-text ""))
-             (inhibit-read-only t))
-        (when (and start end)
-          (save-excursion
-            (goto-char start)
-            (delete-region start end)
-            (insert text)
-            (set-marker (plist-get state :end) (point)))
-          (setq state (plist-put state :raw text)
-                dsh-emacs--streaming-assistant state)
-          (dsh-emacs-render--stream-render-region state t)))
+      (let ((text (or final-text "")))
+        (if (equal text (apply #'concat (reverse (plist-get state :chunks))))
+            (dsh-emacs-render--flush-stream)
+          (when-let* ((timer (plist-get state :timer)))
+            (cancel-timer timer)
+            (setf (plist-get state :timer) nil))
+          (let ((start (marker-position (plist-get state :start)))
+                (end (marker-position (plist-get state :end)))
+                (inhibit-read-only t))
+            (when (and start end)
+              (save-excursion
+                (goto-char start)
+                (delete-region start end)
+                (insert text)
+                (set-marker (plist-get state :end) (point)))
+              (dsh-emacs-render--stream-render-region state t)))))
       (set-marker (plist-get state :start) nil)
       (set-marker (plist-get state :end) nil)
       (setq dsh-emacs--streaming-assistant nil)
@@ -991,8 +1023,7 @@ text arrives."
               (setq end (copy-marker (- (point) 1) t))))
           (setq state (list :key key
                             :start (copy-marker start nil)
-                            :end end
-                            :raw text)
+                            :end end)
                 dsh-emacs--streaming-thinking state
                 new-state t)))
       (when (and state (not new-state))
@@ -1000,10 +1031,7 @@ text arrives."
           (save-excursion
             (let ((inhibit-read-only t))
               (goto-char end)
-              (insert text)))
-          (setq state (plist-put state :raw
-                                 (concat (plist-get state :raw) text))
-                dsh-emacs--streaming-thinking state)))
+              (insert text)))))
       state)))
 
 (defun dsh-emacs-render--replace-live-thinking-text (ns block-id final-text)
@@ -1870,47 +1898,36 @@ Replaces any existing animation for the same command (idempotent)."
   (let ((timer (run-at-time dsh-emacs--command-spinner-interval
                             dsh-emacs--command-spinner-interval
                             #'dsh-emacs--command-spinner-tick
-                            command-id)))
+                            buffer command-id)))
     (puthash command-id (list buffer timer 0)
              dsh-emacs--command-spinners)))
 
-(defun dsh-emacs--command-spinner-tick (command-id)
-  "Advance COMMAND-ID's spinner one frame and redraw its row label.
-Auto-stops when the chat buffer is gone or the row no longer exists.
-The per-buffer `dsh-emacs--command-blocks' lookup happens inside the chat
-buffer, because a timer callback may otherwise run in any buffer."
-  (let ((rec (gethash command-id dsh-emacs--command-spinners)))
-    (when rec
-      (let ((buffer (nth 0 rec))
-            (timer (nth 1 rec)))
-        (if (and (buffer-live-p buffer)
-                 (timerp timer))
-            (with-current-buffer buffer
-              (if (gethash command-id dsh-emacs--command-blocks)
-                  (let* ((entry (gethash command-id dsh-emacs--command-blocks))
-                         (next-index (mod (1+ (nth 2 rec))
-                                          (length dsh-emacs--command-spinner-frames))))
-                    (setcar (nthcdr 2 rec) next-index)
-                    (dsh-emacs-ui-update-fragment
-                     (dsh-emacs-ui-make-fragment
-                      :namespace-id (nth 0 entry)
-                      :block-id (nth 1 entry)
-                      :label-left (concat
-                                   (dsh-emacs-render--tool-leading
-                                    (or (nth 3 entry) "")
-                                    'pending)
-                                   (propertize (nth 2 entry)
-                                               'face 'dsh-emacs-tool-title-face)
-                                   " "
-                                   (nth next-index
-                                        dsh-emacs--command-spinner-frames))
-                      :style 'minimal
-                      :color-key 'tool-pending))
-                    ;; The label change above caused a full delete + re-insert,
-                    ;; so re-apply the tool-row pending tint to the whole row.
-                    (dsh-emacs-render--command-tint-running
-                     (nth 0 entry) (nth 1 entry)))
-                (dsh-emacs--command-spinner-stop command-id)))
+(defun dsh-emacs--command-spinner-tick (buffer command-id)
+  "Advance COMMAND-ID's animation in BUFFER, repainting visible rows only."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when-let* ((rec (gethash command-id dsh-emacs--command-spinners)))
+        (if-let* ((entry (gethash command-id dsh-emacs--command-blocks)))
+            (let ((next-index (mod (1+ (nth 2 rec))
+                                   (length dsh-emacs--command-spinner-frames))))
+              (setcar (nthcdr 2 rec) next-index)
+              (when (get-buffer-window buffer 0)
+                (dsh-emacs-ui-update-fragment
+                 (dsh-emacs-ui-make-fragment
+                  :namespace-id (nth 0 entry)
+                  :block-id (nth 1 entry)
+                  :label-left (concat
+                               (dsh-emacs-render--tool-leading
+                                (or (nth 3 entry) "") 'pending)
+                               (propertize (nth 2 entry)
+                                           'face 'dsh-emacs-tool-title-face)
+                               " "
+                               (nth next-index dsh-emacs--command-spinner-frames))
+                  :style 'minimal
+                  :color-key 'tool-pending))
+                ;; Fragment replacement needs its running tint restored.
+                (dsh-emacs-render--command-tint-running
+                 (nth 0 entry) (nth 1 entry))))
           (dsh-emacs--command-spinner-stop command-id))))))
 
 (defun dsh-emacs--command-spinner-stop (command-id)

@@ -136,6 +136,12 @@ truncated with `...`; set to 0 to disable).
 
 ## Markdown rendering
 
+Streaming text is inserted immediately. After the first chunk, Markdown
+formatting is coalesced over 50ms using one pending timer per chat; final
+messages flush it synchronously. Hidden command rows do not repaint for
+spinner animation. Large unfinished code blocks and extending tables can
+still require a substantial single formatting pass.
+
 The Markdown renderer is modeled on `agent-shell-markdown` and uses
 replacement-style rendering: Markdown marker characters are removed and face
 properties are kept on the visible text. It supports bold, italic,

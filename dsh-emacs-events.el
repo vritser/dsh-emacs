@@ -172,6 +172,7 @@ generation and a new clientId.")
 ;; at runtime from teardown only.
 (declare-function dsh-emacs--ml-busy-clear "dsh-emacs-modeline" ())
 (declare-function dsh-emacs--ml-busy-set "dsh-emacs-modeline" (flag))
+(declare-function dsh-emacs-render--flush-stream "dsh-emacs-render" (&optional buffer))
 (declare-function dsh-emacs--command-spinner-clear-all "dsh-emacs-render" ())
 (declare-function dsh-emacs--command-spinner-revive "dsh-emacs-render" ())
 ;; Runtime dependencies defined in dsh-emacs.el / dsh-emacs-render.el.
@@ -264,17 +265,18 @@ socket; the caller opens its specific stream (a chat's
     (process-send-string process
                          (dsh-emacs-events--frame 10 payload))))
 
-(cl-defun dsh-emacs-events--read-frame (input)
-  "Return (OPCODE FIN PAYLOAD REST), or nil when INPUT is incomplete."
+(cl-defun dsh-emacs-events--read-frame (input &optional (start 0))
+  "Read INPUT at START; return (OPCODE FIN PAYLOAD NEXT), or nil.
+NEXT is the byte offset following this frame; INPUT is never copied as a tail."
   (let ((length (length input)))
-    (when (>= length 2)
-      (let* ((first (aref input 0))
-             (second (aref input 1))
+    (when (>= (- length start) 2)
+      (let* ((first (aref input start))
+             (second (aref input (1+ start)))
              (fin (/= 0 (logand first 128)))
              (opcode (logand first 15))
              (masked (/= 0 (logand second 128)))
              (size (logand second 127))
-             (offset 2))
+             (offset (+ start 2)))
         (cond
          ((= size 126)
           (when (< length (+ offset 2)) (cl-return-from dsh-emacs-events--read-frame nil))
@@ -294,13 +296,12 @@ socket; the caller opens its specific stream (a chat's
                         (setq offset (+ offset 4))))))
           (when (< length (+ offset size))
             (cl-return-from dsh-emacs-events--read-frame nil))
-          (let ((payload (copy-sequence (substring input offset (+ offset size))))
-                (rest (substring input (+ offset size))))
+          (let ((payload (substring input offset (+ offset size))))
             (when mask
               (dotimes (i size)
                 (aset payload i
                       (logxor (aref payload i) (aref mask (mod i 4))))))
-            (list opcode fin payload rest)))))))
+            (list opcode fin payload (+ offset size))))))))
 
 (defun dsh-emacs-events--apply-title (_chat session-id title)
   "Apply a live `session/title' event: update the session cache, the chat\n buffer name (when SESSION-ID is the buffer's session) and the session list\n row, without touching the transcript."
@@ -537,26 +538,35 @@ increment frames use."
   "Consume complete WebSocket frames buffered for PROCESS."
   (condition-case err
       (let ((input (process-get process 'dsh-emacs-event-input))
+            (offset 0)
             frame)
-        (while (and input (setq frame (dsh-emacs-events--read-frame input)))
-      (setq input (nth 3 frame))
-      (let ((opcode (nth 0 frame))
-            (fin (nth 1 frame))
-            (payload (nth 2 frame)))
-        (cond
-         ((= opcode 9) (dsh-emacs-events--send-pong process payload))
-         ((= opcode 8) (delete-process process))
-         ((or (= opcode 1) (= opcode 0))
-          (let ((fragment (if (= opcode 1) ""
-                            (or (process-get process 'dsh-emacs-event-fragment) ""))))
-            (setq fragment (concat fragment payload))
-            (if fin
-                (progn
-                  (process-put process 'dsh-emacs-event-fragment nil)
-                  (dsh-emacs-events--dispatch-json
-                   process (decode-coding-string fragment 'utf-8)))
-              (process-put process 'dsh-emacs-event-fragment fragment)))))))
-        (process-put process 'dsh-emacs-event-input input))
+        (while (and input (setq frame (dsh-emacs-events--read-frame input offset)))
+          (setq offset (nth 3 frame))
+          (let ((opcode (nth 0 frame))
+                (fin (nth 1 frame))
+                (payload (nth 2 frame)))
+            (cond
+             ((= opcode 9) (dsh-emacs-events--send-pong process payload))
+             ((= opcode 10)
+              (let ((chat (dsh-emacs-events--chat process)))
+                (when (buffer-live-p chat)
+                  (with-current-buffer chat
+                    (when (and (eq process dsh-emacs--event-process)
+                               (equal payload dsh-emacs--ws-probe-inflight))
+                      (setq dsh-emacs--ws-probe-inflight nil))))))
+             ((= opcode 8) (delete-process process))
+             ((or (= opcode 1) (= opcode 0))
+              (let ((fragment (cons payload
+                                    (unless (= opcode 1)
+                                      (process-get process 'dsh-emacs-event-fragment)))))
+                (if fin
+                    (progn
+                      (process-put process 'dsh-emacs-event-fragment nil)
+                      (dsh-emacs-events--dispatch-json
+                       process (decode-coding-string
+                                (apply #'concat (nreverse fragment)) 'utf-8)))
+                  (process-put process 'dsh-emacs-event-fragment fragment)))))))
+        (process-put process 'dsh-emacs-event-input (substring input offset)))
     (error (message "dsh WebSocket frame error: %S" err))))
 
 (defun dsh-emacs-events--filter (process string)
@@ -643,36 +653,27 @@ never stack parallel reconnect timers."
     (dsh-emacs-events--lost process)))
 
 (defun dsh-emacs-events--watchdog-tick (buffer)
-  "Confirm the event stream is actually delivering while a turn runs.
-The dsh mux can leave a socket open-but-unread (bytes pile up in the kernel
-queue while Emacs never invokes the process filter), making the stream look
-alive although nothing renders.  When the stream stays silent for > 3s
-mid-turn the socket is killed so the sentinel reconnects; the fresh
-`session/follow' snapshot then reseeds whatever was missed (records carry
-original seqs, the anchor gate renders only the new tail) — no history
-probe RPC is needed anymore.  Self-stops outside an active turn.  BUFFER is
-the chat buffer this watchdog was armed for: the timer is buffer-local but
-timers fire with no buffer context, so the owning buffer is passed
-explicitly (with several session buffers open, the global
-`dsh-emacs--current-buffer' would point at the last-opened one and the
-watchdog would check the wrong stream)."
+  "Probe BUFFER's quiet WebSocket while a turn runs.
+After three seconds without business events, send a ping.  Only an
+unanswered ping times out the connection; a slow model or tool may stay
+silent indefinitely while its transport continues to answer pings."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (if (and (bound-and-true-p dsh-emacs--ml-busy)
                dsh-emacs--event-ready
                (process-live-p dsh-emacs--event-process))
           (let ((now (float-time)))
-            (when (and (not dsh-emacs--ws-probe-inflight)
-                       (or (null dsh-emacs--ws-last-event-time)
-                           (> (- now dsh-emacs--ws-last-event-time) 3.0))
-                       (> (- now (or dsh-emacs--ws-last-probe-time 0)) 3.0))
-              ;; The stream is stalled mid-turn: reconnect; the fresh follow
-              ;; snapshot catches the stream up (anchor-diffed rendering).
-              (when (process-live-p dsh-emacs--event-process)
-                (setq dsh-emacs--ws-probe-inflight t)
-                (setq dsh-emacs--ws-last-probe-time now)
-                (delete-process dsh-emacs--event-process))))
-        ;; No turn in progress: stop.
+            (cond
+             (dsh-emacs--ws-probe-inflight
+              (when (> (- now dsh-emacs--ws-last-probe-time) 3.0)
+                (delete-process dsh-emacs--event-process)))
+             ((and (> (- now (or dsh-emacs--ws-last-event-time 0)) 3.0)
+                   (> (- now (or dsh-emacs--ws-last-probe-time 0)) 3.0))
+              (setq dsh-emacs--ws-probe-inflight (format "dsh-%s" now)
+                    dsh-emacs--ws-last-probe-time now)
+              (process-send-string
+               dsh-emacs--event-process
+               (dsh-emacs-events--frame 9 dsh-emacs--ws-probe-inflight)))))
         (dsh-emacs-events--watchdog-stop)))))
 
 (defun dsh-emacs-events--watchdog-start ()
@@ -830,6 +831,8 @@ reconnect is re-armed and another connect scheduled."
   (let ((chat (or chat (current-buffer))))
     (when (buffer-live-p chat)
       (with-current-buffer chat
+        (when (fboundp 'dsh-emacs-render--flush-stream)
+          (dsh-emacs-render--flush-stream))
         (when (timerp dsh-emacs--event-reconnect-timer)
           (cancel-timer dsh-emacs--event-reconnect-timer))
         (dsh-emacs-events--health-stop)

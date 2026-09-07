@@ -140,3 +140,11 @@ The Markdown-rendering and folding machinery builds on
 ## License
 
 [GPL-3.0-or-later](LICENSE) — GNU General Public License v3 or later.
+
+### Streaming performance
+
+Reply text appears immediately; Markdown formatting coalesces over 50ms
+and flushes when the final message arrives. Hidden command rows skip
+animation redraws. During a quiet running turn, WebSocket ping/pong checks
+transport health before reconnecting, so long model or tool waits do not
+by themselves cause history replay. See [architecture](docs/architecture.md).

@@ -2220,7 +2220,13 @@ span a newline, so backing off to start-of-last-line covers their
 split-across-chunks case.  Open inline backticks already extend
 only to end-of-line, so they're naturally within that zone."
   (when (> (point-max) (point-min))
-    (let* ((source-ranges (dsh-emacs-markdown--source-block-ranges))
+    (let* ((source-ranges
+            (save-restriction
+              ;; Stable text cannot acquire a new open fence.  Keep this
+              ;; final scan incremental too, like the rendering passes.
+              (narrow-to-region (dsh-emacs-markdown--watermark-start)
+                                (point-max))
+              (dsh-emacs-markdown--source-block-ranges)))
            (open-fence-start
             (let ((last (car (last source-ranges))))
               (when (and last (= (cdr last) (point-max)))

@@ -885,6 +885,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
       (when (string-match-p "hello \\*\\*bold" partial)
         (dsh-test-pass "assistant-stream-keeps-incomplete-markup")))
     (dsh-emacs-render-event chunk-2)
+    (dsh-emacs-render--flush-stream)
     (let* ((text (buffer-string))
            (bold-pos (string-match "bold" text))
            (face (and bold-pos (get-text-property bold-pos 'face text))))
@@ -7827,8 +7828,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                    (timerp (nth 1 (gethash "spin1" dsh-emacs--command-spinners))))
           (dsh-test-pass "command-spinner-starts"))
         ;; 手动推 2 帧：索引推进且 label 换帧（batch 里 timer 不自动 fire）
-        (dsh-emacs--command-spinner-tick "spin1")
-        (dsh-emacs--command-spinner-tick "spin1")
+        (dsh-emacs--command-spinner-tick (current-buffer) "spin1")
+        (dsh-emacs--command-spinner-tick (current-buffer) "spin1")
         (when (= 2 (nth 2 (gethash "spin1" dsh-emacs--command-spinners)))
           (dsh-test-pass "command-spinner-advances"))
         ;; done 停表：hash 清空
@@ -7880,7 +7881,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
           (when tinted
             (dsh-test-pass "command-running-tints-whole-block")))
         ;; spinner tick 每帧整行重建，着色必须不丢
-        (dsh-emacs--command-spinner-tick "tint1")
+        (dsh-emacs--command-spinner-tick (current-buffer) "tint1")
         (let* ((qid (format "%s-cmd-%s" (dsh-emacs-render--make-namespace) "tint1"))
                (blk (dsh-emacs-ui--find-block qid)))
           (when (and blk
@@ -7932,7 +7933,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
           (when (string-match-p "💻" txt)
             (dsh-test-pass "command-leading-icon-is-bash")))
         ;; done 后依旧保留 bash 图标
-        (dsh-emacs--command-spinner-tick "bash1")
+        (dsh-emacs--command-spinner-tick (current-buffer) "bash1")
         (dsh-emacs-render-event
          '((type . "command/done") (seq . 71)
            (data . ((commandId . "bash1") (kind . "success")
@@ -7969,8 +7970,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                    (timerp (nth 1 (gethash "rv1" dsh-emacs--command-spinners))))
           (dsh-test-pass "command-spinner-revive-restarts"))
         ;; 复活后照常推进帧
-        (dsh-emacs--command-spinner-tick "rv1")
-        (dsh-emacs--command-spinner-tick "rv1")
+        (dsh-emacs--command-spinner-tick (current-buffer) "rv1")
+        (dsh-emacs--command-spinner-tick (current-buffer) "rv1")
         (when (= 2 (nth 2 (gethash "rv1" dsh-emacs--command-spinners)))
           (dsh-test-pass "command-spinner-revive-advances")))
     (setq dsh-emacs--command-spinners old-spinners)
@@ -11499,6 +11500,167 @@ candidates as the UI would via `all-completions', not by destructuring."
         (dsh-test-assert "active-token-in-progress-still-triggers"
           (equal (dsh-emacs-reference--active-token) '("@re" "re" nil))))
     (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; Performance regressions: callbacks must retain their owning buffer.
+(let ((owner (generate-new-buffer " *dsh-spinner-owner*")) timer)
+  (unwind-protect
+      (progn
+        (with-current-buffer owner
+          (dsh-emacs-render--reset-tool-tracking)
+          (dsh-emacs--command-spinner-start "perf" owner)
+          (setq timer (nth 1 (gethash "perf" dsh-emacs--command-spinners))))
+        (with-temp-buffer
+          (apply (timer--function timer) (timer--args timer)))
+        (dsh-test-assert "spinner-callback-stops-missing-row-from-other-buffer"
+          (not (memq timer timer-list)))
+        (with-current-buffer owner
+          (dsh-emacs--command-spinner-start "perf" owner)
+          (setq timer (nth 1 (gethash "perf" dsh-emacs--command-spinners)))
+          (dsh-emacs-render--reset-tool-tracking))
+        (dsh-test-assert "spinner-reset-cancels-old-timer"
+          (not (memq timer timer-list))))
+    (when timer (cancel-timer timer))
+    (when (buffer-live-p owner) (kill-buffer owner))))
+;; An idle application stream is healthy when the WebSocket answers pings.
+(with-temp-buffer
+  (let ((process (make-pipe-process :name "dsh-watchdog-test"
+                                    :buffer (current-buffer) :noquery t))
+        sent deleted)
+    (unwind-protect
+        (progn
+          (setq-local dsh-emacs--event-process process
+                      dsh-emacs--event-ready t
+                      dsh-emacs--ml-busy t
+                      dsh-emacs--ws-last-event-time 90
+                      dsh-emacs--ws-last-probe-time nil
+                      dsh-emacs--ws-probe-inflight nil)
+          (process-put process 'dsh-emacs-chat-buffer (current-buffer))
+          (cl-letf (((symbol-function 'float-time) (lambda (&rest _) 100.0))
+                    ((symbol-function 'process-send-string)
+                     (lambda (_process data) (setq sent data)))
+                    ((symbol-function 'delete-process)
+                     (lambda (_process) (setq deleted t))))
+            (dsh-emacs-events--watchdog-tick (current-buffer)))
+          (dsh-test-assert "watchdog-probes-before-disconnecting"
+            sent (not deleted)
+            (= 9 (or (car (and sent (dsh-emacs-events--read-frame sent))) -1)))
+          (when sent
+            (let ((payload (nth 2 (dsh-emacs-events--read-frame sent))))
+              (process-put process 'dsh-emacs-event-input
+                           (dsh-emacs-events--frame 10 "wrong-probe"))
+              (dsh-emacs-events--consume-frames process)
+              (dsh-test-assert "watchdog-ignores-unmatched-pong"
+                dsh-emacs--ws-probe-inflight)
+              (process-put process 'dsh-emacs-event-input
+                           (dsh-emacs-events--frame 10 payload))
+              (dsh-emacs-events--consume-frames process)
+              (dsh-test-assert "watchdog-pong-clears-probe"
+                (not dsh-emacs--ws-probe-inflight))))
+          (setq dsh-emacs--ws-probe-inflight "unanswered"
+                dsh-emacs--ws-last-probe-time 90
+                deleted nil)
+          (cl-letf (((symbol-function 'float-time) (lambda (&rest _) 100.0))
+                    ((symbol-function 'delete-process)
+                     (lambda (_process) (setq deleted t))))
+            (dsh-emacs-events--watchdog-tick (current-buffer)))
+          (dsh-test-assert "watchdog-disconnects-unanswered-probe" deleted))
+      (delete-process process))))
+
+;; A burst paints Markdown once, then finalization reuses the painted body.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let ((event '((data . ((turn . 1) (step . 1)))))
+        (calls 0) (forced 0)
+        (render (symbol-function 'dsh-emacs-markdown-replace-markup)))
+    (cl-letf (((symbol-function 'dsh-emacs-markdown-replace-markup)
+               (lambda (&rest args)
+                 (setq calls (1+ calls))
+                 (when (plist-get args :force) (setq forced (1+ forced)))
+                 (apply render args))))
+      (dsh-emacs-render--start-assistant-stream event "hello")
+      (dotimes (_ 10)
+        (dsh-emacs-render--start-assistant-stream event " world"))
+      (dsh-test-assert "stream-coalesces-markdown-burst" (= calls 1))
+      (let* ((state dsh-emacs--streaming-assistant)
+             (end (marker-position (plist-get state :end))))
+        (dsh-test-assert "stream-pending-text-is-visible-and-read-only"
+          (equal (buffer-substring-no-properties
+                  (plist-get state :start) end)
+                 (concat "hello" (apply #'concat (make-list 10 " world"))))
+          (get-text-property (1- end) 'read-only)))
+      (dsh-emacs-render--finish-assistant-stream
+       event (concat "hello" (apply #'concat (make-list 10 " world"))))
+      (dsh-test-assert "stream-final-flushes-without-full-rewrite"
+        (= calls 2) (= forced 0) (null dsh-emacs--streaming-assistant)))))
+
+;; Cursor parsing retains a partial tail and handles masks/extended lengths.
+(dolist (size '(0 3 126 65536))
+  (let* ((payload (make-string size ?x))
+         (wire (dsh-emacs-events--frame 1 payload))
+         (input (concat "prefix" wire wire))
+         (first (dsh-emacs-events--read-frame input 6))
+         (second (dsh-emacs-events--read-frame input (nth 3 first))))
+    (dsh-test-assert (format "websocket-cursor-roundtrip-%d" size)
+      (= (nth 0 first) 1) (nth 1 first)
+      (equal (nth 2 first) payload)
+      (equal (nth 2 second) payload)
+      (= (nth 3 second) (length input))
+      (null (dsh-emacs-events--read-frame (substring wire 0 -1))))))
+(with-temp-buffer
+  (let* ((process (make-pipe-process :name "dsh-frame-test"
+                                     :buffer (current-buffer) :noquery t))
+         (first (concat (unibyte-string 129 3) "one"))
+         (second (concat (unibyte-string 129 3) "two"))
+         delivered)
+    (unwind-protect
+        (cl-letf (((symbol-function 'dsh-emacs-events--dispatch-json)
+                   (lambda (_process json) (push json delivered))))
+          (process-put process 'dsh-emacs-event-input
+                       (concat first (substring second 0 3)))
+          (dsh-emacs-events--consume-frames process)
+          (dsh-test-assert "websocket-consume-preserves-partial-tail"
+            (equal delivered '("one"))
+            (equal (process-get process 'dsh-emacs-event-input)
+                   (substring second 0 3)))
+          (process-put process 'dsh-emacs-event-input
+                       (concat (process-get process 'dsh-emacs-event-input)
+                               (substring second 3)))
+          (dsh-emacs-events--consume-frames process)
+          (dsh-test-assert "websocket-consume-completes-partial-tail"
+            (equal delivered '("two" "one"))
+            (equal (process-get process 'dsh-emacs-event-input) "")))
+      (delete-process process))))
+
+;; Pending Markdown timers must not outlive their transcript.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let ((event '((data . ((turn . 1) (step . 1))))) timer)
+    (dsh-emacs-render--start-assistant-stream event "hello ")
+    (dsh-emacs-render--start-assistant-stream event "**world**")
+    (setq timer (plist-get dsh-emacs--streaming-assistant :timer))
+    (dsh-emacs-events-disconnect)
+    (dsh-test-assert "stream-disconnect-flushes-and-cancels-timer"
+      (timerp timer) (not (memq timer timer-list))
+      (not (string-match-p "\\*\\*" (buffer-string))))))
+
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let ((event '((data . ((turn . 1) (step . 1)))))
+        spinner formatting)
+    (unwind-protect
+        (progn
+          (dsh-emacs--command-spinner-start "mode-reset" (current-buffer))
+          (setq spinner (nth 1 (gethash "mode-reset" dsh-emacs--command-spinners)))
+          (dsh-emacs-render--start-assistant-stream event "hello ")
+          (dsh-emacs-render--start-assistant-stream event "world")
+          (setq formatting (plist-get dsh-emacs--streaming-assistant :timer))
+          (dsh-emacs-mode)
+          (dsh-test-assert "mode-reinitialization-cancels-owned-timers"
+            (not (memq spinner timer-list))
+            (not (memq formatting timer-list))))
+      (when spinner (cancel-timer spinner))
+      (when formatting (cancel-timer formatting)))))
+
 (princ "\n===== 测试总结 =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))
       (fail (cl-count-if (lambda (r) (not (cdr r))) dsh-test-results)))

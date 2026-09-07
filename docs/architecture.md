@@ -148,7 +148,7 @@ machinery below restores it, and until then replies appear only via manual
 refresh (`C-c C-r`):
 
 1. **user/message** → `dsh-emacs-render-user-message`: rendered as a card background
-2. **assistant/chunk** → `dsh-emacs-render-assistant-chunk`: the text-delta is appended to the current reply and re-rendered as Markdown in place
+2. **assistant/chunk** → `dsh-emacs-render-assistant-chunk`: text appears immediately; subsequent Markdown passes coalesce on a 50ms one-shot timer. Finalization, stream changes and disconnect flush the pending pass.
 3. **assistant/message** → `dsh-emacs-render-assistant-message`: the final snapshot is used to correct the streamed body, avoiding duplicate display
 4. **tool/call** → `dsh-emacs-render-tool-call`: rendered as a rounded box (pending state)
 5. **tool/result** → `dsh-emacs-render-tool-result`: updates the existing tool card (success/error state)
@@ -159,8 +159,11 @@ skipped and only message-aligned `event` records seed the buffer, so old
 `assistant/chunk` deltas are not replayed and the completed
 `assistant/message` is used directly; new chunks from live follow events
 are handled directly. The streamed body uses
-`agent-shell-markdown`'s watermark/frozen properties so that only the
-not-yet-stable tail is re-rendered.
+watermark/frozen properties so that only the not-yet-stable tail is
+re-rendered and styled. Raw deltas are retained as a list and joined once
+for comparison with the final message; an unchanged final message keeps the
+painted body. The WebSocket decoder walks each input batch by byte offset,
+retains its incomplete tail once, and joins message fragments only at FIN.
 
 ## Event-stream reliability
 
@@ -205,11 +208,13 @@ not-yet-stable tail is re-rendered.
   render once as the catch-up.  Without the gate a reconnect repainted the
   whole transcript a second time (doubled user messages and assistant replies,
   interleaved layout, only fixed by reopening the session).
-- **Stream health watchdog**: after sending a message, if the event stream
-  delivers nothing for 3 consecutive seconds mid-turn, the socket is killed so
-  the sentinel reconnects; the fresh follow snapshot then reseeds whatever was
-  missed (records carry original seqs, the anchor gate renders only the new
-  tail) — no history-probe RPC is needed anymore.
+- **Stream health watchdog**: while a turn runs, three seconds without
+  business events triggers a WebSocket ping. A matching pong clears the
+  probe; only a probe unanswered for more than three seconds kills the
+  socket. Long model/tool waits therefore do not force reconnects on a
+  responsive connection. Reconnect snapshots remain anchor-gated catch-up;
+  there is no history-probe RPC. This tests transport responsiveness, not
+  whether the server's logical follow stream is making progress.
 - **The open window is bounded**: the snapshot is requested with
   `dsh-emacs-history-window` (default 30 messages), and the GC threshold is
   raised dynamically (cpu-profiler measurements showed Automatic GC consuming

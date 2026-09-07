@@ -150,6 +150,18 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Streaming replies stay responsive during chunk bursts**: text appears
+  immediately while Markdown updates coalesce over 50ms; unchanged final
+  messages reuse the rendered body and stable text avoids repeated styling
+  (rationale: postmortem/016).
+- **Command animation timers are cleaned up reliably**: callbacks use their
+  owning chat buffer, transcript resets cancel old timers, and hidden chats
+  skip row repainting.
+- **Quiet turns no longer trigger immediate reconnects**: the watchdog first
+  sends a WebSocket ping and reconnects only if its matching pong times out.
+  Batched frames and fragmented messages also avoid repeated tail copying
+  (rationale: postmortem/016).
+
 - **The mode-line shows the session's agent preset again**: the dsh 0.1.2 wire
   migration moved `agentPreset` from a top-level `session/list` row field to a
   session projection (`projections.values.agentPreset`), but the client kept

@@ -1968,6 +1968,7 @@ vertico, etc.)."
 
   ;; 重置渲染状态
   (add-hook 'kill-buffer-hook #'dsh-emacs-events-disconnect nil t)
+  (add-hook 'change-major-mode-hook #'dsh-emacs-events-disconnect nil t)
   (add-hook 'kill-buffer-hook #'dsh-emacs--chat-buffer-untrack nil t)
   ;; 聊天缓冲永不"modified"：会话转录不落盘，关闭时不应提示保存
   (add-hook 'kill-buffer-query-functions #'dsh-emacs--chat-buffer-clear-modified nil t)
