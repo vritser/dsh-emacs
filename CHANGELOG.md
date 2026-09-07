@@ -49,6 +49,20 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Bash tool rows expand into a terminal card**: a settled (or running)
+  bash/pwsh call now opens into the dsh-web `BashRow` shape — a
+  code-block-style background band (`dsh-emacs-tool-bash-panel-face`) with a
+  single `$` prompt row for the command (a multi-line or over-long command
+  is flattened to one line and ellipsized; the full raw command remains
+  available as the row's tooltip), a divider where the output starts, the
+  raw output below, and (for a failure or interrupt) a state-colored footer
+  (`✗ exit N`, `✗ signal …`, `⏸ interrupted`) — instead of the generic IN/OUT
+  ioCard.  A clean exit ends bare at the output, with no `✓ exit 0` line.
+  Other tool variants keep the ioCard.  The card's faces are baked onto its
+  text (so fold/unfold preserves them) and the row's state tint stays on the
+  header line; the new `dsh-emacs-tool-bash-prompt-face` colors the `$`
+  prompt with the same tool-purple as the leading icon.
+
 - **Next Message joins Composer**: pending input now has its own read-only
   row below the goal and above `❯`, with a window-width preview and full-text
   tooltip. Its text and icon use the prompt accent color, matching the former

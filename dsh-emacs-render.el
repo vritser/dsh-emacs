@@ -1562,6 +1562,13 @@ the event seq but renders no ordinary tool card."
          (title (dsh-emacs-render--tool-title name))
          (summary (dsh-emacs-render--tool-summary variant args))
          (body-text (dsh-emacs-render--tool-body-text variant args))
+         ;; bash rows draw their (running) expanded body as a terminal card —
+         ;; the `$' prompt rows, styled — so the first frame already matches
+         ;; the settled card the result will complete.
+         (display-body (if (equal variant "bash")
+                           (or (dsh-emacs-render--bash-card-body body-text)
+                               body-text)
+                         body-text))
          (ns (dsh-emacs-render--make-namespace))
          (insert-point (dsh-emacs-render--input-insert-point))
          (ts (dsh-emacs-render--event-time event))
@@ -1582,7 +1589,7 @@ the event seq but renders no ordinary tool card."
         :block-id block-id
         :label-left label-left
         :label-right label-right
-        :body body-text
+        :body display-body
         :style 'minimal
         :color-key 'tool-pending)
        :create-new t
@@ -1595,16 +1602,21 @@ the event seq but renders no ordinary tool card."
        :group-id dsh-emacs--current-group-id)
       ;; Apply pending face to the block border + body background.
       ;; Use add-face-text-property (APPEND) to merge with existing face
-      ;; attributes (e.g. a Nerd Font :family on icon glyphs).
+      ;; attributes (e.g. a Nerd Font :family on icon glyphs).  bash rows
+      ;; tint their header only: the terminal-card body carries its own
+      ;; baked faces.
       (when-let* ((b (dsh-emacs-ui-find-block (format "%s-%s" ns block-id))))
-        (let ((inhibit-read-only t))
-          (add-face-text-property (car b) (cdr b)
+        (let* ((inhibit-read-only t)
+               (end (if (equal variant "bash")
+                        (dsh-emacs-render--block-header-end (car b))
+                      (cdr b))))
+          (add-face-text-property (car b) end
                                   'dsh-emacs-tool-pending-face t))))
     ;; Return seq via the helper to keep helper structure.
     (dsh-emacs-render--event-seq event)))))
 
 ;;; ---------------------------------------------------------------------------
-;;; 渲染器：工具结果（dsh web 风格 ioCard）
+;;; 渲染器：工具结果（bash 终端卡 / 其他工具 ioCard）
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-render--tool-leading (icon state)
@@ -1649,6 +1661,124 @@ toggle — which strips faces — keeps them readable)."
     ('stopped "⏸ interrupted")
     (_ nil)))
 
+(defun dsh-emacs-render--bash-command (args-text)
+  "Return the shell command inside ARGS-TEXT, or nil.
+ARGS-TEXT is the rendered body of a tool call
+(`dsh-emacs-render--tool-body-text'); a bash/pwsh call carries the command
+prefixed with \"$ \".  Anything else (pretty-printed JSON from a malformed
+call, no command key) yields nil, so callers keep the generic ioCard."
+  (when (and (stringp args-text) (string-prefix-p "$ " args-text))
+    (let ((command (string-trim (substring args-text 2))))
+      (and (not (string-empty-p command)) command))))
+
+(defun dsh-emacs-render--bash-command-line (command)
+  "Return COMMAND (possibly multi-line) flattened to ONE display line.
+Internal newlines and runs of whitespace collapse to single spaces, and
+anything longer than the card's command width is truncated with \"…\" — a
+script or backslash-wrapped pipeline never grows the card's command block
+past a single row.  Returns nil for an empty COMMAND."
+  (when (and (stringp command) (not (string-empty-p command)))
+    (let* ((flat (string-trim
+                  (replace-regexp-in-string
+                   "[ \t]+" " "
+                   (replace-regexp-in-string "[\n\r]+" " " command))))
+           (limit (max 20 (- (dsh-emacs-ui--box-width) 4))))
+      (if (> (string-width flat) limit)
+          (truncate-string-to-width flat limit nil nil "…")
+        flat))))
+
+(defun dsh-emacs-render--bash-panel-row (row)
+  "Return ROW padded to the fragment box width as one terminal-card band.
+The card surface (`dsh-emacs-tool-bash-panel-face') is PREPENDED to the
+row's face list, so the row keeps its own piece faces (the `$' prompt
+glyph, divider, status colors) — the panel face supplies only the
+background, exactly like the transcript's code-block surfaces."
+  (let* ((width (dsh-emacs-ui--box-width))
+         (pad (max 0 (- width (string-width row))))
+         (s (concat row (make-string pad ?\s))))
+    (add-face-text-property 0 (length s)
+                            'dsh-emacs-tool-bash-panel-face nil s)
+    s))
+
+(defun dsh-emacs-render--bash-card-body (args-text &optional out-text state exit-code signal)
+  "Compose the expanded body of a bash/pwsh tool row as a terminal card.
+Mirrors dsh web's TerminalBlock inside BashRow: a single `$' prompt row for
+the command (see `dsh-emacs-render--bash-command-line' — one line, overflow
+ellipsized), a hairline divider, then the raw output below.  A failure or
+interrupt appends a state-colored footer (`✗ exit 1', `✗ signal …',
+`⏸ interrupted'); a clean exit (0, no signal) ends bare at the output, like
+the web card whose exit-0 pill never renders.
+
+ARGS-TEXT is the rendered call body (\"$ <command>\" for a bash call) from
+`dsh-emacs-render--tool-body-text'; OUT-TEXT is the full result text.
+STATE/EXIT-CODE/SIGNAL follow `dsh-emacs-render--tool-status-text'; a nil
+STATE (call still running) draws the prompt row only (no output yet, so no
+divider either).
+
+When the one-line prompt is elided, the row carries the full raw command as
+a `help-echo' tooltip.  Faces are baked onto the returned string so
+fold/unfold preserves the styling.  Returns nil when ARGS-TEXT carries no
+\"$ \" command — callers then keep the generic ioCard.  Rows are padded into
+one background band (`dsh-emacs-tool-bash-panel-face', see
+`dsh-emacs-render--bash-panel-row'), the transcript code-block surface."
+  (let* ((raw-cmd (dsh-emacs-render--bash-command args-text))
+         (cmd-line (dsh-emacs-render--bash-command-line raw-cmd))
+         (raw-out (and (stringp out-text)
+                       (not (string-empty-p out-text))
+                       (string-trim-right out-text "\n")))
+         (out-lines (and raw-out (split-string raw-out "\n")))
+         ;; A clean settle shows no footer: the header's green state tint
+         ;; already says "done", and exit 0 carries no news to print.
+         (status-text (and (memq state '(error stopped))
+                           (dsh-emacs-render--tool-status-text
+                            state exit-code signal))))
+    (when cmd-line
+      (let* ((prompt-row (concat "  "
+                                 (propertize "$ " 'face
+                                             'dsh-emacs-tool-bash-prompt-face)
+                                 cmd-line))
+             (out-rows (mapcar (lambda (line) (concat "  " line)) out-lines))
+             ;; The prompt row doubles as the full-command tooltip whenever
+             ;; the visible line is elided (flattened or truncated).
+             (prompt-row (if (equal raw-cmd cmd-line)
+                             prompt-row
+                           (progn
+                             (put-text-property 0 (length prompt-row)
+                                                'help-echo raw-cmd
+                                                prompt-row)
+                             prompt-row)))
+             ;; Divider spans the widest content row (command or output), so
+             ;; the rule stops flush with the text instead of overrunning it.
+             (content-width (apply #'max 0
+                                   (mapcar #'string-width
+                                           (cons prompt-row out-rows))))
+             (divider (and out-lines
+                           (concat "  "
+                                   (propertize (make-string
+                                                (min 80 (max 4 (- content-width 2)))
+                                                ?─)
+                                               'face 'dsh-emacs-divider-face))))
+             (footer (and status-text
+                          (concat "  "
+                                  (propertize status-text 'face
+                                              (if (eq state 'error)
+                                                  'dsh-emacs-tool-error-face
+                                                'dsh-emacs-tool-stopped-face)))))
+             (rows (append (list prompt-row)
+                           (and divider (list divider))
+                           out-rows
+                           (and footer (list footer)))))
+        (mapconcat #'dsh-emacs-render--bash-panel-row rows "\n")))))
+
+(defun dsh-emacs-render--block-header-end (block-start)
+  "Return the buffer position just past the header line at BLOCK-START.
+Minimal (flat) tool rows tint only their header by final state — the
+expanded bash terminal-card body carries its own baked faces — so the state
+face pass stops at the end of the header line for those rows."
+  (save-excursion
+    (goto-char block-start)
+    (1+ (line-end-position))))
+
 (defun dsh-emacs-render-tool-result (event)
   "Render a `tool/result' event by appending to the corresponding tool-call block."
   (if (not dsh-emacs-show-tool-calls)
@@ -1690,8 +1820,16 @@ toggle — which strips faces — keeps them readable)."
                  (args (or (plist-get prev :args) ""))
                  (summary (or (plist-get prev :summary) ""))
                  (icon (or (plist-get prev :icon) ""))
+                 (variant (plist-get prev :variant))
                  (status-text (dsh-emacs-render--tool-status-text state exit-code signal))
-                 (body (dsh-emacs-render--tool-body-io args full-text status-text)))
+                 ;; A settled bash/pwsh call expands into a terminal card
+                 ;; (`$' prompt rows + output + status footer); every other
+                 ;; tool keeps the generic ioCard (IN/OUT).
+                 (body (or (and (equal variant "bash")
+                                (dsh-emacs-render--bash-card-body
+                                 args full-text state exit-code signal))
+                           (dsh-emacs-render--tool-body-io
+                            args full-text status-text))))
             (dsh-emacs-ui-update-fragment
              (dsh-emacs-ui-make-fragment
               :namespace-id ns
@@ -1712,11 +1850,16 @@ toggle — which strips faces — keeps them readable)."
                                                   ('error 'tool-error)
                                                   (_ 'tool-stopped)))
             ;; Re-face the block border/body.  Merge (APPEND) so Nerd Font
-            ;; :family on icon glyphs is preserved.
+            ;; :family on icon glyphs is preserved.  bash rows tint only the
+            ;; header line: their expanded terminal-card body carries baked
+            ;; faces and must not be re-colored by the row state.
             (when-let* ((b (dsh-emacs-ui-find-block qualified-id)))
-              (let ((inhibit-read-only t))
+              (let* ((inhibit-read-only t)
+                     (end (if (equal variant "bash")
+                              (dsh-emacs-render--block-header-end (car b))
+                            (cdr b))))
                 (add-face-text-property
-                 (car b) (cdr b)
+                 (car b) end
                  (pcase state
                    ('success 'dsh-emacs-tool-success-face)
                    ('error 'dsh-emacs-tool-error-face)

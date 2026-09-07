@@ -17,8 +17,9 @@ builds on agent-shell, the mode-line stats on pi-mono):
   shown with dsh web's Think icon (IconThink) + "Think" + a first-sentence
   preview (truncated with `...` when too long)
 - **Tool calls**: collapsible tool rows modeled on dsh web, with a variant icon
-  + status color (pending=orange, success=green, error=red) and separate IN/OUT
-  sections
+  + status color (pending=orange, success=green, error=red); bash/pwsh rows
+  expand into a terminal card (`$` prompt + output, error/interrupt footer),
+  other variants into separate IN/OUT sections
 - **Activity groups**: consecutive tool calls are merged automatically and show
   an aggregate status (e.g. "2 of 3 completed")
 - **Mode-line stats**: a compact status section spliced into the mode line (cwd, git branch, model,
@@ -44,6 +45,8 @@ builds on agent-shell, the mode-line stats on pi-mono):
 | `dsh-emacs-tool-error-face` | Tool failed (red border + light red background) |
 | `dsh-emacs-tool-stopped-face` | Tool interrupted (purple) |
 | `dsh-emacs-tool-icon-face` | Tool variant icon (purple, mimicking dsh web's tool purple #a78bfa) |
+| `dsh-emacs-tool-bash-prompt-face` | Bash terminal card `$` prompt glyph (same tool-purple accent) |
+| `dsh-emacs-tool-bash-panel-face` | Bash terminal card surface (the expanded card's background band, mirroring the code-block panel look) |
 | `dsh-emacs-tool-io-face` | IN / OUT section labels |
 | `dsh-emacs-tool-title-face` | Tool card title |
 | `dsh-emacs-tool-output-face` | Tool output text |
@@ -51,8 +54,8 @@ builds on agent-shell, the mode-line stats on pi-mono):
 
 Tool rows mimic dsh web's `ToolRow`: each tool call renders as one row of
 **collapsible** cards, with a header of `variant icon + title + summary`;
-expanding reveals a dsh web-style **ioCard** (an `IN` arguments / `OUT` result
-pair). Icons correspond one-to-one with dsh web's `VARIANT_ICONS`:
+expanding reveals the call body.  Icons correspond one-to-one with dsh web's
+`VARIANT_ICONS`:
 
 | Variant | Icon | Corresponding dsh web icon |
 |---|---|---|
@@ -67,14 +70,34 @@ pair). Icons correspond one-to-one with dsh web's `VARIANT_ICONS`:
 Status semantics align with dsh web's `leadingFor`/`stateStatus`:
 
 - **Running**: keeps the variant icon with purple highlighting (no spinner animation)
-- **Success** (exit 0): keeps the variant icon, appends `✓ exit 0` to the body
+- **Success** (exit 0): keeps the variant icon; ioCard rows still append
+  `✓ exit 0`, a bash terminal card shows no success footer (a clean exit has
+  no news to print, matching the web card whose exit-0 pill never renders)
 - **Failure** (exit≠0 / signal / isError): leading switches to the red status dot `●`, body shows `✗ exit N`
 - **Interrupted** (signal): leading switches to the yellow status dot `◐`, body shows `⏸ interrupted`
 
+Expanded bodies mirror dsh web's keyed toolviews:
+
+- **bash/pwsh rows expand into a terminal card** (dsh web `BashRow` +
+  `TerminalBlock`): the card body is one background band (the
+  `dsh-emacs-tool-bash-panel-face` surface, the same look as transcript code
+  blocks) carrying a single `$` prompt row for the command (prompt glyph in
+  the tool-purple `dsh-emacs-tool-bash-prompt-face`; a multi-line or
+  over-long command is flattened to one line and ellipsized — the full raw
+  command stays available as the row's tooltip), a thin `─` divider where
+  the output starts, and the raw output verbatim below.  A failure or
+  interrupt appends a state-colored footer (`✗ exit N`, `✗ signal …`,
+  `⏸ interrupted`); a clean exit ends bare at the output.  While the call is
+  still running the card shows only the prompt row.  The faces are baked
+  onto the card text, so fold/unfold keeps the styling; the row's state tint
+  covers only the header line, never the card.
+- Every other variant keeps a dsh web-style **ioCard** (an `IN` arguments /
+  `OUT` result pair with the status line on top).
+
 The collapsed state is a **compact single line** (no ellipsis placeholders, no
 extra blank lines), and adjacent tool rows stack tightly; pressing `RET` on a
-tool row expands/collapses the IN/OUT body (the body is stored inside the
-block, so expanding always restores it).
+tool row expands/collapses the body (the body is stored inside the block, so
+expanding always restores it).
 
 Summary key precedence matches dsh web's `SUMMARY_KEYS`:
 bash→`description|command`, read→`path|file_path|url`,

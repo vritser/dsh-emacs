@@ -323,6 +323,24 @@ underlined in the accent color.  RET or mouse-1 opens it (see
 	"Tool running state text (◌ pulse)."
 	:group 'dsh-emacs-faces)
 
+(defface dsh-emacs-tool-bash-prompt-face
+	`((((background light)) :foreground ,dsh-emacs-color-tool-icon :weight bold)
+		(((background dark))  :foreground ,dsh-emacs-color-tool-icon-dark :weight bold)
+		(t :inherit bold))
+	"Bash terminal card `$' prompt glyph — the same tool-purple accent as the
+leading variant icon, so an expanded bash row reads as one tool surface."
+	:group 'dsh-emacs-faces)
+
+(defface dsh-emacs-tool-bash-panel-face
+	`((((background light)) :background "#f2f4f7")
+		(((background dark))  :background "#22252d")
+		(t :background "gray20"))
+	"Bash terminal card surface — the flat background band of the expanded
+card, the text-mode analog of dsh web's TerminalBlock code surface.  Rows
+are padded to the fragment box width, so the band spans the whole card
+without relying on `:extend'."
+	:group 'dsh-emacs-faces)
+
 ;;; ---------------------------------------------------------------------------
 ;;; todo 计划行
 ;;; ---------------------------------------------------------------------------

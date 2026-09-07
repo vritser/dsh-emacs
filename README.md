@@ -137,8 +137,9 @@ check, checker self-tests, full unit suite, clean load) before pushing.
 
 The UI is designed to mirror the
 [dsh web](https://github.com/deepseek-ai/deepseek-harness) UI: tool rows reuse
-its exact SVG icons and `ToolRow` / `ioCard` semantics, and the session list,
-command rows and context meter follow dsh-web conventions.
+its exact SVG icons and `ToolRow` semantics (bash rows expand into a terminal
+card, other variants into an `ioCard`), and the session list, command rows and
+context meter follow dsh-web conventions.
 
 The Markdown-rendering and folding machinery builds on
 [agent-shell](https://github.com/xenodium/agent-shell) (`agent-shell-ui.el` /

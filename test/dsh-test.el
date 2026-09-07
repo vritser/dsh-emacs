@@ -1232,17 +1232,20 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                ;; 运行中保留变体图标；动画 spinner 已移至 mode-line 进度条
                (string-match-p "Bash" block))
       (dsh-test-pass "tool-running-keeps-variant-icon")))
-  ;; 2) 成功结果：body 含 IN / OUT 两段，成功态保留 icon 并显示输出
+  ;; 2) 成功结果：bash 展开为终端卡（$ 提示行 + 输出，干净退出无 ✓ 页脚），
+  ;;    不再是泛化的 IN/OUT ioCard
   (dsh-emacs-render-tool-result
    (dsh-emacs-test--tool-result-event 2 "c1" nil 0 "total 3\ndrwxr-xr-x"))
   (let* ((ns (dsh-emacs-render--make-namespace))
          (block (dsh-emacs-test--tool-block-text (format "%s-tool-c1" ns))))
     (when (and block
-               (string-match-p "IN" block)
-               (string-match-p "OUT" block)
                (string-match-p (regexp-quote "💻 ") block)
-               (string-match-p "drwxr-xr-x" block))
-      (dsh-test-pass "tool-success-IN-OUT-body")))
+               (string-match-p (regexp-quote "$ ls -la") block)
+               (string-match-p "drwxr-xr-x" block)
+               (not (string-match-p (regexp-quote "✓ exit 0") block))
+               (not (string-match-p "IN" block))
+               (not (string-match-p "OUT" block)))
+      (dsh-test-pass "tool-bash-success-terminal-card")))
   ;; 3) 错误结果：leading 变成红色状态点 ●
   (dsh-emacs-render-tool-call
    (dsh-emacs-test--tool-call-event 3 "c2" "edit" "{\"path\":\"/tmp/x\"}"))
@@ -1271,7 +1274,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                (not (string-match-p "OUT" block)))
       (dsh-test-pass "tool-no-output-hides-OUT-section"))))
 
-;; --- 测试 31: 折叠工具行紧凑（无省略号/空白）+ 展开恢复 IN/OUT ---
+;; --- 测试 31: 折叠工具行紧凑（无省略号/空白）+ 展开恢复 bash 终端卡 ---
 (with-temp-buffer
   (dsh-emacs-mode)
   (dsh-emacs-modeline-setup)
@@ -1283,24 +1286,26 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
   (let* ((ns (dsh-emacs-render--make-namespace))
          (block (dsh-emacs-test--tool-block-text (format "%s-tool-x1" ns))))
     (when (and block
-               ;; 折叠时仅一行：含表头，不含省略号占位，不含 IN/OUT
+               ;; 折叠时仅一行：含表头，不含省略号占位，不含卡正文
                (string-match-p "Bash" block)
+               (not (string-match-p (regexp-quote "$ ls") block))
                (not (string-match-p "IN" block))
                (not (string-match-p "OUT" block))
                (string-match-p "list" block))
       (dsh-test-pass "tool-collapsed-single-line"))
-    ;; 展开应恢复 IN/OUT 正文，再折叠应回到单行
+    ;; 展开应恢复终端卡正文（$ 提示行 + 输出；干净退出无 ✓ 页脚），再折叠应回到单行
     (dsh-emacs-ui-toggle-fragment)
     (let* ((expanded (dsh-emacs-test--tool-block-text (format "%s-tool-x1" ns))))
       (when (and expanded
-                 (string-match-p "IN" expanded)
-                 (string-match-p "OUT" expanded)
-                 (string-match-p "file-a" expanded))
-        (dsh-test-pass "tool-expand-restores-IN-OUT"))
+                 (string-match-p (regexp-quote "$ ls") expanded)
+                 (string-match-p "file-a" expanded)
+                 (not (string-match-p (regexp-quote "✓ exit 0") expanded))
+                 (not (string-match-p "IN" expanded)))
+        (dsh-test-pass "tool-bash-expand-restores-terminal-card"))
       (dsh-emacs-ui-toggle-fragment)
       (let ((recollapsed (dsh-emacs-test--tool-block-text (format "%s-tool-x1" ns))))
         (when (and recollapsed
-                   (not (string-match-p "IN" recollapsed))
+                   (not (string-match-p (regexp-quote "$ ls") recollapsed))
                    (string-match-p "Bash" recollapsed))
           (dsh-test-pass "tool-recollapse-single-line"))))))
 
@@ -1582,15 +1587,59 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                    (not (string-match-p "⚙" txt))
                    (not (string-match-p "…" txt)))
           (dsh-test-pass "running-tool-no-spinner"))))
-    ;; 工具完成后行仍正确渲染到同一块（不消失）
+    ;; 工具完成后行仍正确渲染到同一块（不消失）：bash 卡含 $ 提示 + 输出
     (dsh-emacs-render-tool-result
      (dsh-emacs-test--tool-result-event 2 "c1" nil 0 "total 3\ndrwxrwxr-x"))
     (when-let* ((b (dsh-emacs-ui-find-block qid)))
       (let ((txt (buffer-substring-no-properties (car b) (cdr b))))
-        (when (and (string-match-p "IN" txt)
-                   (string-match-p "OUT" txt)
-                   (string-match-p (regexp-quote "💻 ") txt))
+        (when (and (string-match-p (regexp-quote "💻 ") txt)
+                   (string-match-p (regexp-quote "$ ls -la") txt)
+                   (string-match-p "drwxrwxr-x" txt))
           (dsh-test-pass "tool-row-not-lost-after-result"))))))
+
+;; --- 测试 34c: bash 非零退出 / 多行命令的终端卡 ---
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "x1" "bash"
+     "{\"description\":\"build+test\",\"command\":\"make build\\nmake test\"}"))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event 2 "x1" nil 1 "make: *** No rule.  Stop."))
+  (let* ((ns (dsh-emacs-render--make-namespace))
+         (block (dsh-emacs-test--tool-block-text (format "%s-tool-x1" ns))))
+    (when (and block
+               ;; 命令区是单行（多行命令拍平成一行，只有一个 $ 提示）；
+               ;; 错误页脚带退出码
+               (string-match-p (regexp-quote "$ make build") block)
+               (not (string-match-p (regexp-quote "$ make test") block))
+               (string-match-p "make test" block)
+               (string-match-p "make: \\*\\*\\* No rule" block)
+               (string-match-p (regexp-quote "✗ exit 1") block))
+      (dsh-test-pass "tool-bash-error-terminal-card"))))
+
+;; --- 测试 34d: bash 命令区单行且超长省略 ---
+(let ((long-cmd (mapconcat #'identity
+                           (make-list 8 "step --flag=very-long-option-name")
+                           "\\n")))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (setq-local dsh-emacs-tool-expand-by-default t)
+    (dsh-emacs-render-tool-call
+     (dsh-emacs-test--tool-call-event 1 "d1" "bash"
+       (concat "{\"description\":\"many steps\",\"command\":\"" long-cmd "\"}")))
+    (dsh-emacs-render-tool-result
+     (dsh-emacs-test--tool-result-event 2 "d1" nil 0 "ok"))
+    (let* ((ns (dsh-emacs-render--make-namespace))
+           (block (dsh-emacs-test--tool-block-text (format "%s-tool-d1" ns)))
+           (occ (let ((n 0) (pos 0))
+                  (while (string-match (regexp-quote "$ ") block pos)
+                    (setq n (1+ n) pos (match-end 0)))
+                  n)))
+      (when (and block
+                 (= occ 1)
+                 (string-match-p "…" block))
+        (dsh-test-pass "tool-bash-command-single-line-ellipsis")))))
 
 ;; --- 测试 34b: 用户消息之后紧跟工具行：保留一个空行 ---
 (let ((buf (generate-new-buffer " *t34b-layout*")))
