@@ -49,6 +49,11 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Composer goal feedback**: `C-c C-g ?` shows the full objective and blocked
+  reason. Pending actions show progress and temporarily hide inline controls;
+  narrow rows prioritize status and objective, and action tooltips include
+  readable labels and shortcuts (rationale: postmortem/019).
+
 - **Goal Row in the chat composer**: while a session has an active goal, the
   chat buffer shows a read-only **Goal Row** pinned above the editable input —
   a dartboard goal SVG icon (mirroring dsh web) followed by the objective and
@@ -175,6 +180,12 @@ minor) and stay undated until the release is cut.
   editing.
 
 ### Fixed
+
+- **Goal editing preserves source text**: accepting an unchanged objective
+  keeps its original line breaks and whitespace instead of sending the folded
+  display label.
+- **Goal icons respect row width**: SVG icons reserve two columns and have a
+  pixel-width cap, preventing their display width from exceeding the budget.
 
 - **Streaming replies stay responsive during chunk bursts**: text appears
   immediately while Markdown updates coalesce over 50ms; unchanged final

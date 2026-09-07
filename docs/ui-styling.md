@@ -137,6 +137,13 @@ truncated with `...`; set to 0 to disable).
 | `dsh-emacs-composer-goal-action-face` | Goal Row action SVG icons tint (dsh-web pause/resume/edit/clear) |
 | `dsh-emacs-accent-face` | Accent color (badges, headings) |
 
+The Composer Goal Row hides action icons while an operation is pending and
+shows its progress (for example, “Pausing…”). In narrow windows it drops
+inline actions to preserve objective and status space; the `C-c C-g` commands
+remain available. Action tooltips show readable labels and keyboard shortcuts.
+Use `C-c C-g ?` for the full objective and blocked reason, also available in
+the objective tooltip. SVG icons occupy at most two columns of pixel space.
+
 ## Markdown rendering
 
 Streaming text is inserted immediately. After the first chunk, Markdown

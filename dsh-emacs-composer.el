@@ -111,10 +111,7 @@ re-renders.  Buffer-local.")
   "Parse the `goal' projection VALUE into a `dsh-protocol-goal' or nil.
 VALUE is the projection cell (a wire alist) or nil; nil/empty maps to nil so a
 cleared goal hides the row."
-  (when (and value (listp value)
-             (let ((g (cdr (assq 'goal value))))
-               (and g (listp g))))
-    (dsh-protocol-goal--from-projection value)))
+  (dsh-protocol-goal-projection--from-alist value))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Goal Row rendering (one read-only line above the `❯ ' input)
@@ -148,19 +145,30 @@ cleared goal hides the row."
 Colored via `currentColor', mapped to the goal face's foreground by
 `dsh-emacs-composer--goal-icon'.")
 
+(defun dsh-emacs-composer--icon-width ()
+  "Return an icon pixel width fitting two columns in every viewing frame."
+  (let ((windows (get-buffer-window-list (current-buffer) nil t)))
+    (min 13 (* 2 (if windows
+                     (apply #'min
+                            (mapcar (lambda (window)
+                                      (frame-char-width (window-frame window)))
+                                    windows))
+                   (frame-char-width))))))
+
 (defun dsh-emacs-composer--goal-icon ()
   "Return the goal SVG icon image string, or nil when SVG is unavailable.
-The result is a single space carrying the icon `display' property plus the
+The result reserves two columns carrying the icon `display' property plus the
 composer goal face, so the row's chrome tag / read-only stay one run."
   (when (image-type-available-p 'svg)
     (let ((fg (face-foreground 'dsh-emacs-composer-goal-face nil t)))
-      (propertize " "
+      (propertize "  "
                   'face 'dsh-emacs-composer-goal-face
                   'display
                   (create-image dsh-emacs-composer--goal-icon-svg
                                 'svg t
                                 :ascent 'center
                                 :scale 1.0
+                                :width (dsh-emacs-composer--icon-width)
                                 :foreground (or fg "gray50"))))))
 
 ;; ---------------------------------------------------------------------------
@@ -242,6 +250,7 @@ Colored via `currentColor' mapped to the action face's foreground."
        (let ((fg (face-foreground 'dsh-emacs-composer-goal-action-face nil t)))
          (create-image svg 'svg t
                        :ascent 'center :scale 1.0
+                       :width (dsh-emacs-composer--icon-width)
                        :foreground (or fg "gray50")))))
 
 (defun dsh-emacs-composer--phase-text (goal)
@@ -260,24 +269,29 @@ Colored via `currentColor' mapped to the action face's foreground."
         "untitled goal"
       one-line)))
 
+(defun dsh-emacs-composer--pending-text ()
+  "Return the current mutation's user-facing progress label, or nil."
+  (pcase (car-safe dsh-emacs--composer-goal-pending)
+    ("pause" "Pausing…")
+    ("resume" "Resuming…")
+    ("edit" "Updating…")
+    ("clear" "Clearing…")))
+
 (defun dsh-emacs-composer--phase-suffix-text (goal)
   "Return the phase suffix text for GOAL (empty string when no phase)."
-  (let ((phase (dsh-emacs-composer--phase-text goal)))
+  (let ((phase (or (dsh-emacs-composer--pending-text)
+                   (dsh-emacs-composer--phase-text goal))))
     (if (string-empty-p phase) "" (format "  ·  %s" phase))))
 
 (defun dsh-emacs-composer--sig (goal)
-  "Return the plain-text signature of GOAL's row (for idempotent re-renders).
-Independent of icon/face presentation so the same objective+phase never forces
-a redundant repaint across rebuilds.  Includes whether the inline action
-buttons are enabled, so toggling `dsh-emacs-composer-goal-actions' re-renders
-an existing Goal Row."
-  (let ((phase (dsh-emacs-composer--phase-text goal)))
-    (format "%s|actions=%s|width=%d"
-            (if (string-empty-p phase)
-                (dsh-emacs-composer--objective-text goal)
-              (format "%s\n%s" (dsh-emacs-composer--objective-text goal) phase))
-            (if dsh-emacs-composer-goal-actions "on" "off")
-            (dsh-emacs-composer--row-width))))
+  "Return the content and layout inputs of GOAL's cached row."
+  (list (dsh-protocol-goal-objective goal)
+        (dsh-protocol-goal-phase goal)
+        (dsh-protocol-goal-blocked-reason goal)
+        dsh-emacs-composer-goal-actions
+        (dsh-emacs-composer--pending-text)
+        (dsh-emacs-composer--row-width)
+        (dsh-emacs-composer--icon-width)))
 
 (defun dsh-emacs-composer--row-width ()
   "Return the text width available for the Goal Row.
@@ -314,12 +328,17 @@ host real click targets."
         (img (dsh-emacs-composer--action-image svg)))
     (define-key map (kbd "RET") cmd)
     (define-key map [mouse-1] cmd)
-    (propertize (if img " " glyph)
+    (propertize (if img "  " glyph)
                 'face 'dsh-emacs-composer-goal-action-face
                 'keymap map
                 'mouse-face 'highlight
                 'display img
-                'help-echo (format "%s (mouse-1/RET)" (symbol-name cmd)))))
+                'help-echo
+                (pcase cmd
+                  ('dsh-emacs-goal-pause "Pause goal · C-c C-g p")
+                  ('dsh-emacs-goal-resume "Resume goal · C-c C-g r")
+                  ('dsh-emacs-goal-edit "Edit goal · C-c C-g e")
+                  ('dsh-emacs-goal-clear "Clear goal · C-c C-g d")))))
 
 (defun dsh-emacs-composer--goal-action-spec (key)
   "Return (GLYPH . SVG) of the dsh web goal action KEY, or nil.
@@ -346,6 +365,7 @@ complete)."
                    ("paused" 'resume)
                    (_ nil)))
          (keys (and dsh-emacs-composer-goal-actions
+                    (not dsh-emacs--composer-goal-pending)
                     (delq nil (list toggle 'edit 'clear))))
          (strip (and keys
                      (mapconcat
@@ -372,27 +392,36 @@ Callers add the chrome tag and read-only over the whole span."
   (let* ((icon (or (dsh-emacs-composer--goal-icon)
                    (propertize "◎ " 'face 'dsh-emacs-composer-goal-face)))
          (objective (dsh-emacs-composer--objective-text goal))
-         (phase-text (dsh-emacs-composer--phase-text goal))
          (suffix-text (dsh-emacs-composer--phase-suffix-text goal))
-         (action (dsh-emacs-composer--goal-action-strip goal))
-         (action-cols (and action (cdr action)))
          (available (dsh-emacs-composer--row-width))
-         ;; The rendered icon can be wider than one column in the non-SVG
-         ;; fallback, so measure it instead of assuming a fixed cell width.
-         (suffix-cols (string-width suffix-text))
-         (fixed (+ (string-width icon) 1 suffix-cols
-                   (if action-cols (+ 2 action-cols) 0)))
+         ;; SVGs reserve two columns; fallback glyphs use their text width.
+         (base-cols (+ (string-width icon) 1 (string-width suffix-text)))
+         (strip (dsh-emacs-composer--goal-action-strip goal))
+         ;; Keep at least eight objective columns before offering click cells.
+         (action (and strip (<= (+ base-cols 2 (cdr strip) 8) available)
+                      strip))
+         (fixed (+ base-cols (if action (+ 2 (cdr action)) 0)))
          (objective-budget (max 1 (- available fixed)))
          (shown (dsh-emacs-composer--fit-objective objective objective-budget))
-         (body (propertize shown 'face 'dsh-emacs-composer-goal-body-face))
-         (suffix (if (string-empty-p phase-text)
+         (body (propertize shown
+                           'face 'dsh-emacs-composer-goal-body-face
+                           'help-echo
+                           (concat (or (dsh-protocol-goal-objective goal) "")
+                                   (when-let* ((reason
+                                                (dsh-protocol-goal-blocked-reason
+                                                 goal)))
+                                     (format "\nBlocked: %s" reason))
+                                   "\nC-c C-g ? for full details")))
+         (suffix (if (string-empty-p suffix-text)
                      ""
                    (propertize suffix-text
                                'face 'dsh-emacs-composer-goal-body-face)))
          (actions (if action
                       (concat "  " (car action))
                     ""))
-         (row (concat icon " " body suffix actions)))
+         (row (if (> (+ fixed 1) available)
+                  (concat (string-trim-left suffix-text) " " body)
+                (concat icon " " body suffix actions))))
     ;; Fixed chrome can itself exceed an unusually narrow split.  This final
     ;; clamp is the safety boundary that preserves the one-visual-line contract
     ;; while retaining text properties on whatever cells remain visible.
@@ -535,21 +564,12 @@ from the next projection/snapshot, so reopen stays self-consistent."
   (list (cons 'id (dsh-protocol-goal-id goal))
         (cons 'revision (dsh-protocol-goal-revision goal))))
 
-(defun dsh-emacs-composer--goal-view-from-rpc (value)
-  "Build a `dsh-protocol-goal' from an RPC GoalView VALUE (or nil).
-The `goals/pause|resume|edit' response is the bare goal core
-\(\{id, revision, objective, phase, …\}\) — the same keys the projection nests
-under `goal', so wrap it in that shape to reuse the projection parser."
-  (and value (listp value)
-       (dsh-emacs-composer-goal-from-projection
-        (list (cons 'goal value)))))
-
 (defun dsh-emacs-composer--goal-mutate (verb &optional objective on-ok)
   "Send a `goals/VERB' mutation for the current buffer's goal.
 Resolves the session id (agentId) and CAS ref from the live goal.  Guards a
 pending in-flight mutation so rapid keys can't double-CAS.  ON-OK (optional)
-receives the parsed result view when the verb returns one (clear/creates pass
-nil).  Failures surface via `message' and leave the row unchanged."
+receives the parsed result view (clear returns a goal containing only its
+tombstone identity).  Failures surface via `message' and leave the row unchanged."
   (let* ((session-id (dsh-emacs--active-session-id))
          (goal dsh-emacs--composer-goal))
     (cond
@@ -576,13 +596,15 @@ nil).  Failures surface via `message' and leave the row unchanged."
                        (ref . ,ref)
                        ,@(and objective `((request . ((objective . ,objective))))))))
         (setq dsh-emacs--composer-goal-pending pending-token)
+        (dsh-emacs-composer-render)
         (dsh-emacs--rpc-async
          (format "goals/%s" verb) params
          (lambda (ok value)
            (let ((own-request
                   (eq dsh-emacs--composer-goal-pending pending-token)))
              (when own-request
-               (setq dsh-emacs--composer-goal-pending nil))
+               (setq dsh-emacs--composer-goal-pending nil)
+               (dsh-emacs-composer-render))
              (if (null ok)
                  (message "Failed to %s goal: %S" verb value)
                ;; The projection stream is authoritative and can outrun the
@@ -590,34 +612,52 @@ nil).  Failures surface via `message' and leave the row unchanged."
                ;; this exact request still owns the pending slot and its CAS
                ;; ref is still current; otherwise it would regress a newer
                ;; projection (or clear a newly-created goal).
-               (let* ((current dsh-emacs--composer-goal)
+               (let* ((response (and (listp value) value
+                                     (dsh-protocol-goal--from-alist value)))
+                      (current dsh-emacs--composer-goal)
                       (current-id (and current
                                        (dsh-protocol-goal-id current)))
                       (current-revision
                        (and current (dsh-protocol-goal-revision current)))
                       (request-current
                        (and current
-                            (equal current-id (cdr (assq 'id ref)))
+                            (equal current-id (dsh-protocol-goal-id goal))
                             (equal current-revision
-                                   (cdr (assq 'revision ref)))))
+                                   (dsh-protocol-goal-revision goal))))
                       ;; The same operation's projection commonly arrives
                       ;; before its HTTP response.  Applying that identical
                       ;; view is safe and preserves the command's success
                       ;; feedback; only a different/newer ref is stale.
                       (response-current
-                       (and current (listp value)
-                            (equal current-id (cdr (assq 'id value)))
+                       (and current response
+                            (equal current-id (dsh-protocol-goal-id response))
                             (equal current-revision
-                                   (cdr (assq 'revision value)))))
+                                   (dsh-protocol-goal-revision response))))
                       (clear-already-applied
                        (and (equal verb "clear") (null current))))
                  (if (and own-request
                           (or request-current response-current
                               clear-already-applied))
                      (when (functionp on-ok)
-                       (condition-case nil (funcall on-ok value) (quit nil)))
+                       (condition-case nil (funcall on-ok response) (quit nil)))
                    (message "Goal %s completed; kept current goal state"
                             verb))))))))))))
+
+(defun dsh-emacs-goal-describe ()
+  "Show the full goal objective, phase and blocked reason in a help buffer."
+  (interactive)
+  (let ((goal dsh-emacs--composer-goal)
+        (pending (dsh-emacs-composer--pending-text)))
+    (unless goal (user-error "No current goal"))
+    (with-help-window "*dsh goal*"
+      (princ (or (dsh-protocol-goal-objective goal) "Untitled goal"))
+      (when pending
+        (princ (format "\n\n%s" pending)))
+      (when-let* ((phase (dsh-protocol-goal-phase goal)))
+        (princ (format "\n\nPhase: %s" phase)))
+      (when-let* ((reason (dsh-protocol-goal-blocked-reason goal)))
+        (princ (format "\n\nBlocked: %s" reason)))
+      (princ "\n"))))
 
 (defun dsh-emacs-goal-pause ()
   "Pause the current session's active goal (goals/pause)."
@@ -625,8 +665,7 @@ nil).  Failures surface via `message' and leave the row unchanged."
   (dsh-emacs-composer--goal-mutate
    "pause" nil
    (lambda (value)
-     (dsh-emacs-composer-set-goal
-      (dsh-emacs-composer--goal-view-from-rpc value))
+     (dsh-emacs-composer-set-goal value)
      (message "Goal paused"))))
 
 (defun dsh-emacs-goal-resume ()
@@ -635,8 +674,7 @@ nil).  Failures surface via `message' and leave the row unchanged."
   (dsh-emacs-composer--goal-mutate
    "resume" nil
    (lambda (value)
-     (dsh-emacs-composer-set-goal
-      (dsh-emacs-composer--goal-view-from-rpc value))
+     (dsh-emacs-composer-set-goal value)
      (message "Goal resumed"))))
 
 (defun dsh-emacs-goal-edit ()
@@ -644,17 +682,16 @@ nil).  Failures surface via `message' and leave the row unchanged."
   (interactive)
   (let* ((goal dsh-emacs--composer-goal)
          (current (and (dsh-emacs-composer--visible-p goal)
-                       (dsh-emacs-composer--objective-text goal))))
+                       (or (dsh-protocol-goal-objective goal) ""))))
     (if (null current)
         (message "No current goal to edit")
       (let ((new (read-string "New goal objective: " current)))
         (if (string-empty-p (string-trim new))
             (message "Goal objective unchanged (empty input)")
           (dsh-emacs-composer--goal-mutate
-           "edit" (string-trim new)
+           "edit" (if (equal new current) current (string-trim new))
            (lambda (value)
-             (dsh-emacs-composer-set-goal
-              (dsh-emacs-composer--goal-view-from-rpc value))
+             (dsh-emacs-composer-set-goal value)
              (message "Goal updated"))))))))
 
 (defun dsh-emacs-goal-clear ()
@@ -682,9 +719,10 @@ Goal Row immediately.  The `C-c C-g' prefix keys keep working either way."
   (message "Goal Row action buttons %s"
            (if dsh-emacs-composer-goal-actions "shown" "hidden")))
 
-;; Prefix keymap: C-c C-g <p|r|e|d|a>.
+;; Prefix keymap: C-c C-g <?|p|r|e|d|a>.
 (defvar dsh-emacs-goal-map
   (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "?") #'dsh-emacs-goal-describe)
     (define-key map (kbd "p") #'dsh-emacs-goal-pause)
     (define-key map (kbd "r") #'dsh-emacs-goal-resume)
     (define-key map (kbd "e") #'dsh-emacs-goal-edit)

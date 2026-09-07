@@ -12365,6 +12365,97 @@ candidates as the UI would via `all-completions', not by destructuring."
     (dsh-test-assert "goal-actions-toggle-outside-chat-errors-cleanly"
       errored
       (not (local-variable-p 'dsh-emacs-composer-goal-actions)))))
+;; Editing must preserve the source objective, including embedded newlines.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (setq-local dsh-emacs--buffer-session "goal-edit-source")
+  (dsh-emacs-composer-set-goal-from-projection
+   '((goal . ((id . "g") (revision . 1) (phase . "active")
+              (objective . "first\nsecond")))))
+  (let (initial sent)
+    (cl-letf (((symbol-function 'read-string)
+               (lambda (_prompt value &rest _args)
+                 (setq initial value) value))
+              ((symbol-function 'dsh-emacs--rpc-async)
+               (lambda (_method params _callback) (setq sent params))))
+      (dsh-emacs-goal-edit))
+    (dsh-test-assert "goal-edit-preserves-source-objective"
+      (equal initial "first\nsecond")
+      (equal (cdr (assq 'objective (cdr (assq 'request sent))))
+             "first\nsecond"))))
+
+;; Pending state must be visible immediately and disappear on failure.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (setq-local dsh-emacs--buffer-session "goal-pending-feedback")
+  (dsh-emacs-composer-set-goal-from-projection
+   '((goal . ((id . "g") (revision . 1) (phase . "active")
+              (objective . "Work")))))
+  (let (callback)
+    (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+               (lambda (_method _params cb) (setq callback cb))))
+      (dsh-emacs-goal-pause))
+    (dsh-test-assert "goal-pending-visible-without-actions"
+      (string-match-p "Pausing" (buffer-string))
+      (null (dsh-test-goal-row-edit-cell)))
+    (funcall callback nil "offline")
+    (dsh-test-assert "goal-pending-failure-restores-controls"
+      (not (string-match-p "Pausing" (buffer-string)))
+      (dsh-test-goal-row-edit-cell))))
+
+;; Full details remain reachable even when the compact row is truncated.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-composer-set-goal-from-projection
+   '((goal . ((id . "details") (revision . 2) (phase . "blocked")
+              (objective . "First line\nSecond line")
+              (blockedReason . "Needs approval")))))
+  (save-window-excursion
+    (dsh-emacs-goal-describe)
+    (with-current-buffer "*dsh goal*"
+      (dsh-test-assert "goal-details-preserve-objective-and-explain-block"
+        (string-match-p "First line\nSecond line" (buffer-string))
+        (string-match-p "Phase: blocked" (buffer-string))
+        (string-match-p "Blocked: Needs approval" (buffer-string))
+        buffer-read-only)))
+  (dsh-emacs-composer-set-goal-from-projection
+   '((goal . ((id . "details") (revision . 3) (phase . "blocked")
+              (objective . "First line\nSecond line")
+              (blockedReason . "Needs credentials")))))
+  (dsh-test-assert "goal-reason-only-change-refreshes-tooltip"
+    (cl-loop for pos from (point-min) below (point-max)
+             thereis (let ((help (get-text-property pos 'help-echo)))
+                       (and (stringp help)
+                            (string-match-p "Needs credentials" help)))))
+  (dsh-test-assert "goal-details-key"
+    (eq (lookup-key dsh-emacs-goal-map (kbd "?"))
+        #'dsh-emacs-goal-describe)))
+
+(let ((goal (dsh-emacs-composer-goal-from-projection
+             '((goal . ((objective . "A long objective")
+                        (phase . "blocked")))))))
+  (cl-letf (((symbol-function 'dsh-emacs-composer--row-width) (lambda () 24)))
+    (let ((row (dsh-emacs-composer--render-row goal)))
+      (dsh-test-assert "goal-compact-row-prioritizes-status"
+        (string-match-p "blocked" row)
+        (<= (string-width row) 24)
+        (not (dsh-test-goal-strip-binds row 'dsh-emacs-goal-edit))))))
+
+;; Both SVGs must fit their backing text even in a frame with tiny cells.
+(cl-letf (((symbol-function 'image-type-available-p) (lambda (_type) t))
+          ((symbol-function 'get-buffer-window-list) (lambda (&rest _args) nil))
+          ((symbol-function 'frame-char-width) (lambda (&optional _frame) 5))
+          ((symbol-function 'create-image)
+           (lambda (_data _type _data-p &rest props) (cons 'image props))))
+  (let* ((icon (dsh-emacs-composer--goal-icon))
+         (action (dsh-emacs-composer--goal-action-cell
+                  "⏸" dsh-emacs-composer--pause-svg #'dsh-emacs-goal-pause)))
+    (dsh-test-assert "goal-svg-fits-reserved-columns"
+      (= (plist-get (cdr (get-text-property 0 'display icon)) :width) 10)
+      (= (plist-get (cdr (get-text-property 0 'display action)) :width) 10)
+      (= (string-width icon) 2)
+      (= (string-width action) 2))))
+
 (princ "\n===== 测试总结 =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))
       (fail (cl-count-if (lambda (r) (not (cdr r))) dsh-test-results)))

@@ -52,9 +52,9 @@ steers instead) and with an empty input interrupts — `C-c C-b` interrupts
 explicitly, `C-c C-q` manages the pending queue (minibuffer list, keys
 act on the highlighted item; `x` deletes all), `C-c C-g` opens the goal-action
 prefix (`p` pause, `r` resume, `e` edit, `d` clear, `a` toggle inline action
-buttons), `C-c C-m` switch model, `C-c C-a` attach an image, `C-c C-r`
-refresh, `C-c C-s` switch session in this workspace (`C-c M-s` or
-`C-u C-c C-s` across all workspaces),
+buttons, `?` full objective and blocked reason), `C-c C-m` switch model,
+`C-c C-a` attach an image, `C-c C-r` refresh, `C-c C-s` switch session in
+this workspace (`C-c M-s` or `C-u C-c C-s` across all workspaces),
 `C-c C-f` toggle the mode-line stats, `TAB` complete `/name`, and typing
 `@` completes file/directory/session references — the web-style @ directive:
 `@src/` drills into a directory, `@session-title` inserts a canonical

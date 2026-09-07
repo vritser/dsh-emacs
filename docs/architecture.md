@@ -47,6 +47,17 @@ the returned view only while its request token and CAS ref remain current (a
 clear removes it), so an already-newer projection always wins.  Failures
 surface via `message` and leave the row unchanged (see postmortem/018).
 
+`C-c C-g ?` (`dsh-emacs-goal-describe`) opens a read-only help buffer with
+the full objective, phase and blocked reason. The objective's tooltip also
+exposes the full text and reason. Editing starts from the original objective,
+preserving embedded line breaks; display folding is confined to the row.
+While an action is pending, its progress label replaces the phase and inline
+actions are hidden. Narrow windows drop actions before sacrificing objective
+space, then prioritize status when even the fixed chrome cannot fit. SVGs
+reserve two columns and are capped to fit the narrowest viewing frame's cells.
+Goal projection and RPC response decoding both belong to the protocol module;
+Composer's mutation callback compares parsed goal identities and revisions.
+
 Geometry: transcript inserts land at `dsh-emacs-render--input-insert-point`,
 today the start of the `❯ ` line. When a Goal Row is shown it occupies its own
 line above the input and the composer owns a buffer-local
