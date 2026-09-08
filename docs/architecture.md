@@ -19,6 +19,47 @@ dsh-emacs/
 └── dsh-emacs-session.el      # Session list card view
 ```
 
+## Transcript fragments (`dsh-emacs-ui.el`)
+
+The renderer supplies a complete alist snapshot: identity, labels, body,
+border style, optional whole-block/header faces, and the non-foldable flag.
+`dsh-emacs-ui-update-fragment` replaces that snapshot while preserving the
+user's fold state. Nil fields clear previous values; this is not a patch API.
+It returns the exact `(START . END)` range, excluding surrounding spacing.
+
+Identity is the separate `:namespace-id` / `:block-id` pair, compared with
+`equal`; do not join these strings. Lookup and deletion both take two
+positional arguments: `(dsh-emacs-ui-find-block namespace-id block-id)` and
+`(dsh-emacs-ui-delete-fragment namespace-id block-id)`. Thus `("a-b", "c")`
+and `("a", "b-c")` identify different cards. Navigation and bulk folding
+walk local property boundaries without repeated identity searches.
+See [decision record 024](../postmortem/024-fragment-identity-and-local-navigation.md).
+
+One renderer builds the complete text and its `dsh-emacs-ui-state` property
+before the buffer is edited. Updates and fold changes both use it and replace
+text inside `atomic-change-group`; rendering or insertion errors propagate
+while preserving the previous card. Minimal blocks need no special
+body-range editing path. The stored snapshot includes labels and
+faces as well as the full body; fold/unfold preserves embedded links, icon
+faces and body styling. `:color-key` is opaque renderer metadata and does
+not apply colors. Renderers choose concrete `:face` / `:header-face` values;
+the UI merges those after embedded faces on every redraw. Bash terminal
+cards use a header face while retaining their own body faces.
+
+Each render measures the displaying window once and shares that body width
+between the header, body and footer. Titles take priority over summaries;
+bordered rows add four framing columns. Headers retain embedded keymaps,
+local maps and button actions; only otherwise passive text gets the fold map.
+Long body lines remain intact. Width is recomputed on update/fold, not through
+a resize hook. See [decision record 023](../postmortem/023-fragment-layout-and-atomic-updates.md).
+
+The UI does not interpret message kinds. Renderers can mark text with
+`dsh-emacs-ui-space-after` to request blank lines after it; user messages
+request one. Fragment lookup/navigation use the contiguous state property.
+There is no group hierarchy or append/header-only mutation API. Streaming
+assistant text remains owned by the renderer's existing stream path.
+See [decision record 022](../postmortem/022-fragment-snapshots.md).
+
 ## Composer (`dsh-emacs-composer.el`)
 
 The bottom of a chat buffer is a **Composer**: a persistent, non-transcript UI
@@ -286,8 +327,10 @@ retains its incomplete tail once, and joins message fragments only at FIN.
 
 ## Activity groups
 
-3 or more consecutive tool calls are merged automatically into one activity
-group showing an aggregate status (e.g. "2 of 3 completed").
+Tool cards currently render and fold independently. The renderer retains
+legacy group counters and `dsh-emacs-group-consecutive-tools`, but does not
+create group headers or attach child fragments. The UI has no group API;
+these renderer remnants are recorded as follow-up debt in decision 022.
 
 ## Chinese encoding
 

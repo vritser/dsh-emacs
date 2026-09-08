@@ -20,8 +20,6 @@ builds on agent-shell, the mode-line stats on pi-mono):
   + status color (pending=orange, success=green, error=red); bash/pwsh rows
   expand into a terminal card (`$` prompt + output, error/interrupt footer),
   other variants into separate IN/OUT sections
-- **Activity groups**: consecutive tool calls are merged automatically and show
-  an aggregate status (e.g. "2 of 3 completed")
 - **Mode-line stats**: a compact status section spliced into the mode line (cwd, git branch, model,
   tokens, context%, and cost)
 - **Session list**: card view showing session title, working directory, branch,
@@ -114,12 +112,25 @@ The collapsed row shows a preview of the first reasoning sentence on the right
 (`dsh-emacs-thinking-preview-max` controls the maximum length; longer content is
 truncated with `...`; set to 0 to disable).
 
-## Activity groups
+## Fragment styling for extensions
 
-| Face | Description |
-|---|---|
-| `dsh-emacs-group-face` | Activity group header (e.g. "2 of 3 completed") |
-| `dsh-emacs-group-count-face` | Activity group count |
+Fragment snapshots accept `:face` for the entire card and `:header-face`
+for the header only. These are merged after embedded text faces on every
+update and fold/unfold, so body links and icon fonts survive. Supply the
+complete snapshot on update; nil clears prior content and styling.
+The unused `dsh-emacs-ui-body-face` and `dsh-emacs-ui-group-header-face`
+have been removed. See the [fragment API](architecture.md#transcript-fragments-dsh-emacs-uiel)
+for the update contract.
+
+Titles retain their own link/button keymaps; the remaining title text uses
+RET/click to fold. The main title is fitted first, then the summary uses any
+remaining space. Headers and bordered bodies/footers share one width measured
+from the displaying window, including narrow windows. Long body lines retain
+their content. Layout is recomputed when a card updates or folds.
+
+Tool cards currently fold independently; no aggregate activity-group header
+is rendered. The remaining renderer group options/faces are legacy state,
+not a working grouping surface.
 
 ## Mode-line stats
 

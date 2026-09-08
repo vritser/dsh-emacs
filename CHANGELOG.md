@@ -10,6 +10,22 @@ minor) and stay undated until the release is cut.
 
 ### Breaking Changes
 
+- **Fragment lookup and deletion take separate identity arguments**:
+  use `(dsh-emacs-ui-find-block namespace-id block-id)` and
+  `(dsh-emacs-ui-delete-fragment namespace-id block-id)`. Joined IDs and
+  keyword deletion arguments are no longer accepted (rationale: postmortem/024).
+
+- **Fragment extension API uses complete snapshots**: callers of
+  `dsh-emacs-ui-update-fragment` supply all content and styling fields;
+  nil clears a field and the return value is now `(START . END)`.
+  Unused group and `hide-label-on-collapse` constructor arguments, the
+  `append` update argument, and `dsh-emacs-ui-make-group-model`,
+  `dsh-emacs-ui-update-header`, `dsh-emacs-ui-restyle-block`,
+  `dsh-emacs-ui-state-at`, and `dsh-emacs-ui-block-p` are removed.
+  The unused `dsh-emacs-ui-body-face` and `dsh-emacs-ui-group-header-face`
+  are also removed. Extensions should supply `:face` / `:header-face`
+  with their snapshot (rationale: postmortem/022).
+
 - **dsh 0.1.2 wire protocol migration**: the client now talks the dsh 0.1.2
   RPC/stream protocol.  The realtime event surfaces moved from the old
   per-session mux + host stream (`/api/events.mux`, `/api/events.host`,
@@ -201,6 +217,26 @@ minor) and stay undated until the release is cut.
   editing.
 
 ### Fixed
+
+- **Fragment IDs containing hyphens stay distinct**: updating or deleting
+  one namespace/block pair cannot target another pair with the same joined
+  spelling. Navigation and bulk folding use local text boundaries
+  (rationale: postmortem/024).
+
+- **Fragment titles stay readable in narrow windows**: main titles take
+  priority over summaries, and bordered headers, bodies and footers share
+  one width calculation (rationale: postmortem/023).
+- **Custom title actions survive redraws**: embedded link/button keymaps
+  remain active; other title text retains the default fold action
+  (rationale: postmortem/023).
+- **Failed card updates preserve the transcript**: rendering finishes before
+  replacement, and insertion failures roll back text changes while reporting
+  the original error (rationale: postmortem/023).
+
+- **Fragment updates preserve complete cards**: shrinking or clearing a
+  body keeps neighboring blocks intact, and folding restores the current
+  labels, body text properties and card colors. Updates preserve the user's
+  fold state (rationale: postmortem/022).
 
 - **Busy submission no longer falls back to an optimistic send**: `C-c C-c`
   honors the host's cached running status even before the chat stream receives

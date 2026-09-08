@@ -724,9 +724,8 @@ above AND is marked so the NEXT insertion keeps one blank line below it
             ;; trailing blank separator line, so blank lines stay transparent.
             (add-face-text-property start text-end face t)
             (when user-message
-              ;; Marker consulted by `dsh-emacs-ui--blank-above-preserve':
-              ;; whatever is inserted next keeps one blank line below the
-              ;; user message.
+              ;; UI spacing is independent of the message's business identity.
+              (put-text-property start text-end 'dsh-emacs-ui-space-after 1)
               (put-text-property start text-end 'dsh-emacs-user-message t))
             (when event-id
               (put-text-property start end 'dsh-emacs-event-block event-id))))))))
@@ -820,12 +819,12 @@ miss the entry is cleaned up.")
            (done dsh-emacs--current-group-completed)
            (total dsh-emacs--current-group-count)
            (right (format "%d of %d completed" done total))
-           (qualified-id (format "%s-%s" (dsh-emacs-render--make-namespace) gid))
-           (block (dsh-emacs-ui-find-block qualified-id)))
+           (ns (dsh-emacs-render--make-namespace))
+           (block (dsh-emacs-ui-find-block ns gid)))
       (when block
         (dsh-emacs-ui-update-fragment
          (dsh-emacs-ui-make-fragment
-          :namespace-id (dsh-emacs-render--make-namespace)
+          :namespace-id ns
           :block-id gid
           :label-left (propertize "Tool activity" 'face 'dsh-emacs-group-face)
           :label-right right)
@@ -1369,15 +1368,10 @@ session chips; see `dsh-emacs-reference-fontify'."
                      (or timestamp ""))
     :body text
     :style 'minimal
-    :color-key 'thinking)
+    :color-key 'thinking
+    :face 'dsh-emacs-thinking-face)
    :create-new t :expanded dsh-emacs-thinking-expand-by-default
-   :insert-before insert-point)
-  ;; Apply thinking face to the entire block (like tool rows),
-  ;; not just the body — one face, whole row.
-  (when-let* ((b (dsh-emacs-ui-find-block (format "%s-%s" namespace-id block-id))))
-    (let ((inhibit-read-only t))
-      (add-face-text-property (car b) (cdr b)
-                              'dsh-emacs-thinking-face t))))
+   :insert-before insert-point))
 
 ;;; ---------------------------------------------------------------------------
 ;;; 渲染器：todo 计划行（每事件一行，像 tool 卡）
@@ -1471,11 +1465,6 @@ spread the rows apart (each todo is one line)."
   "Return the per-event block-id of a todo row with CALL-ID."
   (or call-id "unknown"))
 
-(defun dsh-emacs-render--todo-qualified-id (call-id)
-  "Return the qualified-id of the todo row for CALL-ID."
-  (dsh-emacs-ui--qualified-id dsh-emacs--todo-namespace
-                              (dsh-emacs-render--todo-block-id call-id)))
-
 (defun dsh-emacs-render--todo-row (list call-id)
   "Render one todo row for the whole snapshot LIST at the event's position.
 Like a tool card, each `todo_write' snapshot gets its own collapsible row in
@@ -1533,17 +1522,6 @@ the event seq but renders no ordinary tool card."
   "Return a stable block-id for TOOL-CALL-ID (so we can update it later)."
   (format "tool-%s" tool-call-id))
 
-(defun dsh-emacs-render--tool-group-id (tool-call-id)
-  "Return the group id the tool-call with TOOL-CALL-ID belongs to, if any."
-  (let ((state (dsh-emacs-render--tool-state tool-call-id)))
-    (when state (plist-get state :group-id))))
-
-(defun dsh-emacs-render--tool-group-qualified-id (tool-call-id)
-  "Return the qualified id of the group for TOOL-CALL-ID."
-  (let* ((gid (dsh-emacs-render--tool-group-id tool-call-id))
-         (ns (dsh-emacs-render--make-namespace)))
-    (and gid (format "%s-%s" ns gid))))
-
 (defun dsh-emacs-render-tool-call (event)
   "Render a `tool/call' event. Returns seq."
   (let ((name (dsh-emacs-render--aget "name" (dsh-emacs-render--event-data event))))
@@ -1553,67 +1531,59 @@ the event seq but renders no ordinary tool card."
       (if (not dsh-emacs-show-tool-calls)
           nil
         (let* ((data (dsh-emacs-render--event-data event))
-         (call-id (dsh-emacs-render--aget "callId" data))
-         (name (dsh-emacs-render--aget "name" data))
-         (args (dsh-emacs-render--aget "arguments" data))
-         (variant-info (dsh-emacs-render--tool-variant name))
-         (variant (car variant-info))
-         (icon (cdr variant-info))
-         (title (dsh-emacs-render--tool-title name))
-         (summary (dsh-emacs-render--tool-summary variant args))
-         (body-text (dsh-emacs-render--tool-body-text variant args))
-         ;; bash rows draw their (running) expanded body as a terminal card —
-         ;; the `$' prompt rows, styled — so the first frame already matches
-         ;; the settled card the result will complete.
-         (display-body (if (equal variant "bash")
-                           (or (dsh-emacs-render--bash-card-body body-text)
-                               body-text)
-                         body-text))
-         (ns (dsh-emacs-render--make-namespace))
-         (insert-point (dsh-emacs-render--input-insert-point))
-         (ts (dsh-emacs-render--event-time event))
-         (label-left (concat icon " "
-                             (propertize title 'face 'dsh-emacs-tool-title-face)))
-         (label-right (or summary ""))
-         (block-id (dsh-emacs-render--tool-call-block-id call-id)))
-      ;; Track state for later (tool/result will update this block).
-      (dsh-emacs-render--set-tool-state
-       call-id :state 'pending :variant variant :icon icon :title title
-       :summary summary :args body-text :call-time ts :ns ns)
-      ;; Maybe open / reuse an activity group.
-      (dsh-emacs-render--ensure-group)
-      (setq dsh-emacs--current-group-count (1+ dsh-emacs--current-group-count))
-      (dsh-emacs-ui-update-fragment
-       (dsh-emacs-ui-make-fragment
-        :namespace-id ns
-        :block-id block-id
-        :label-left label-left
-        :label-right label-right
-        :body display-body
-        :style 'minimal
-        :color-key 'tool-pending)
-       :create-new t
-       :expanded dsh-emacs-tool-expand-by-default
-       :insert-before insert-point)
-      ;; Update tracked state with group id.
-      (dsh-emacs-render--set-tool-state
-       call-id :state 'pending :variant variant :icon icon :title title
-       :summary summary :args body-text :call-time ts :ns ns
-       :group-id dsh-emacs--current-group-id)
-      ;; Apply pending face to the block border + body background.
-      ;; Use add-face-text-property (APPEND) to merge with existing face
-      ;; attributes (e.g. a Nerd Font :family on icon glyphs).  bash rows
-      ;; tint their header only: the terminal-card body carries its own
-      ;; baked faces.
-      (when-let* ((b (dsh-emacs-ui-find-block (format "%s-%s" ns block-id))))
-        (let* ((inhibit-read-only t)
-               (end (if (equal variant "bash")
-                        (dsh-emacs-render--block-header-end (car b))
-                      (cdr b))))
-          (add-face-text-property (car b) end
-                                  'dsh-emacs-tool-pending-face t))))
-    ;; Return seq via the helper to keep helper structure.
-    (dsh-emacs-render--event-seq event)))))
+               (call-id (dsh-emacs-render--aget "callId" data))
+               (name (dsh-emacs-render--aget "name" data))
+               (args (dsh-emacs-render--aget "arguments" data))
+               (variant-info (dsh-emacs-render--tool-variant name))
+               (variant (car variant-info))
+               (icon (cdr variant-info))
+               (title (dsh-emacs-render--tool-title name))
+               (summary (dsh-emacs-render--tool-summary variant args))
+               (body-text (dsh-emacs-render--tool-body-text variant args))
+               ;; bash rows draw their (running) expanded body as a terminal card —
+               ;; the `$' prompt rows, styled — so the first frame already matches
+               ;; the settled card the result will complete.
+               (display-body (if (equal variant "bash")
+                                 (or (dsh-emacs-render--bash-card-body body-text)
+                                     body-text)
+                               body-text))
+               (ns (dsh-emacs-render--make-namespace))
+               (insert-point (dsh-emacs-render--input-insert-point))
+               (ts (dsh-emacs-render--event-time event))
+               (label-left (concat icon " "
+                                   (propertize title 'face 'dsh-emacs-tool-title-face)))
+               (label-right (or summary ""))
+               (block-id (dsh-emacs-render--tool-call-block-id call-id)))
+          ;; Track state for later (tool/result will update this block).
+          (dsh-emacs-render--set-tool-state
+           call-id :state 'pending :variant variant :icon icon :title title
+           :summary summary :args body-text :call-time ts :ns ns)
+          ;; Maybe open / reuse an activity group.
+          (dsh-emacs-render--ensure-group)
+          (setq dsh-emacs--current-group-count (1+ dsh-emacs--current-group-count))
+          (dsh-emacs-ui-update-fragment
+           (dsh-emacs-ui-make-fragment
+            :namespace-id ns
+            :block-id block-id
+            :label-left label-left
+            :label-right label-right
+            :body display-body
+            :style 'minimal
+            :color-key 'tool-pending
+            :header-face (when (equal variant "bash")
+                           'dsh-emacs-tool-pending-face)
+            :face (unless (equal variant "bash")
+                    'dsh-emacs-tool-pending-face))
+           :create-new t
+           :expanded dsh-emacs-tool-expand-by-default
+           :insert-before insert-point)
+          ;; Update tracked state with group id.
+          (dsh-emacs-render--set-tool-state
+           call-id :state 'pending :variant variant :icon icon :title title
+           :summary summary :args body-text :call-time ts :ns ns
+           :group-id dsh-emacs--current-group-id))
+        ;; Return seq via the helper to keep helper structure.
+        (dsh-emacs-render--event-seq event)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; 渲染器：工具结果（bash 终端卡 / 其他工具 ioCard）
@@ -1770,33 +1740,24 @@ one background band (`dsh-emacs-tool-bash-panel-face', see
                            (and footer (list footer)))))
         (mapconcat #'dsh-emacs-render--bash-panel-row rows "\n")))))
 
-(defun dsh-emacs-render--block-header-end (block-start)
-  "Return the buffer position just past the header line at BLOCK-START.
-Minimal (flat) tool rows tint only their header by final state — the
-expanded bash terminal-card body carries its own baked faces — so the state
-face pass stops at the end of the header line for those rows."
-  (save-excursion
-    (goto-char block-start)
-    (1+ (line-end-position))))
-
 (defun dsh-emacs-render-tool-result (event)
   "Render a `tool/result' event by appending to the corresponding tool-call block."
   (if (not dsh-emacs-show-tool-calls)
       nil
     (let* ((data (dsh-emacs-render--event-data event))
-         (message (dsh-emacs-render--aget "message" data))
-         ;; dsh Web stores the originating tool id under message.source;
-         ;; accept the compact message.callId shape too (used by older
-         ;; events/tests and some RPC responses).
-         (call-id (or (dsh-emacs-render--aget "callId" message)
-                      (dsh-emacs-render--aget
-                       "callId" (dsh-emacs-render--aget "source" message))
-                      (dsh-emacs-render--aget "callId" data)))
-         (content (dsh-emacs-render--aget "content" message))
-         (is-error nil)
-         (exit-code nil)
-         (signal nil)
-         (text-parts '()))
+           (message (dsh-emacs-render--aget "message" data))
+           ;; dsh Web stores the originating tool id under message.source;
+           ;; accept the compact message.callId shape too (used by older
+           ;; events/tests and some RPC responses).
+           (call-id (or (dsh-emacs-render--aget "callId" message)
+                        (dsh-emacs-render--aget
+                         "callId" (dsh-emacs-render--aget "source" message))
+                        (dsh-emacs-render--aget "callId" data)))
+           (content (dsh-emacs-render--aget "content" message))
+           (is-error nil)
+           (exit-code nil)
+           (signal nil)
+           (text-parts '()))
       (dolist (block (append content nil))
         (when (equal (dsh-emacs-render--aget "type" block) "tool-result")
           (setq is-error (dsh-emacs-render--json-bool (dsh-emacs-render--aget "isError" block)))
@@ -1813,14 +1774,18 @@ face pass stops at the end of the header line for those rows."
                        (signal 'stopped)
                        (t 'success))))
              (ns (dsh-emacs-render--make-namespace))
-             (block-id (dsh-emacs-render--tool-call-block-id call-id))
-             (qualified-id (format "%s-%s" ns block-id)))
+             (block-id (dsh-emacs-render--tool-call-block-id call-id)))
         (when-let* ((prev (dsh-emacs-render--tool-state call-id)))
           (let* ((title (or (plist-get prev :title) "Tool"))
                  (args (or (plist-get prev :args) ""))
                  (summary (or (plist-get prev :summary) ""))
                  (icon (or (plist-get prev :icon) ""))
                  (variant (plist-get prev :variant))
+                 (face (pcase state
+                         ('success 'dsh-emacs-tool-success-face)
+                         ('error 'dsh-emacs-tool-error-face)
+                         ('stopped 'dsh-emacs-tool-stopped-face)
+                         (_ 'dsh-emacs-tool-pending-face)))
                  (status-text (dsh-emacs-render--tool-status-text state exit-code signal))
                  ;; A settled bash/pwsh call expands into a terminal card
                  ;; (`$' prompt rows + output + status footer); every other
@@ -1840,32 +1805,13 @@ face pass stops at the end of the header line for those rows."
               :label-right summary
               :body body
               :style 'minimal
+              :header-face (when (equal variant "bash") face)
+              :face (unless (equal variant "bash") face)
               :color-key (pcase state
-                          ('success 'tool-success)
-                          ('error 'tool-error)
-                          (_ 'tool-stopped)))
-             :create-new nil)
-            (dsh-emacs-ui-restyle-block qualified-id (pcase state
-                                                  ('success 'tool-success)
-                                                  ('error 'tool-error)
-                                                  (_ 'tool-stopped)))
-            ;; Re-face the block border/body.  Merge (APPEND) so Nerd Font
-            ;; :family on icon glyphs is preserved.  bash rows tint only the
-            ;; header line: their expanded terminal-card body carries baked
-            ;; faces and must not be re-colored by the row state.
-            (when-let* ((b (dsh-emacs-ui-find-block qualified-id)))
-              (let* ((inhibit-read-only t)
-                     (end (if (equal variant "bash")
-                              (dsh-emacs-render--block-header-end (car b))
-                            (cdr b))))
-                (add-face-text-property
-                 (car b) end
-                 (pcase state
-                   ('success 'dsh-emacs-tool-success-face)
-                   ('error 'dsh-emacs-tool-error-face)
-                   ('stopped 'dsh-emacs-tool-stopped-face)
-                   (_ 'dsh-emacs-tool-pending-face))
-                 t))))
+                           ('success 'tool-success)
+                           ('error 'tool-error)
+                           (_ 'tool-stopped)))
+             :create-new nil))
           ;; Track the new state.
           (dsh-emacs-render--set-tool-state
            call-id :state state :result full-text :exit-code exit-code)
@@ -2080,10 +2026,8 @@ Replaces any existing animation for the same command (idempotent)."
                                " "
                                (nth next-index dsh-emacs--command-spinner-frames))
                   :style 'minimal
-                  :color-key 'tool-pending))
-                ;; Fragment replacement needs its running tint restored.
-                (dsh-emacs-render--command-tint-running
-                 (nth 0 entry) (nth 1 entry))))
+                  :color-key 'tool-pending
+                  :face 'dsh-emacs-tool-pending-face))))
           (dsh-emacs--command-spinner-stop command-id))))))
 
 (defun dsh-emacs--command-spinner-stop (command-id)
@@ -2111,22 +2055,10 @@ animation for each such entry.  No-op when the command already settled
 the row no longer exists, or there is nothing to revive."
   (dolist (command-id (hash-table-keys dsh-emacs--command-blocks))
     (when-let* ((entry (gethash command-id dsh-emacs--command-blocks))
-                (block (dsh-emacs-ui-find-block (format "%s-%s" (nth 0 entry)
-                                                        (nth 1 entry))))
+                (block (dsh-emacs-ui-find-block (nth 0 entry) (nth 1 entry)))
                 (state (get-text-property (car block) 'dsh-emacs-ui-state))
                 ((eq (map-elt state :color-key) 'tool-pending)))
       (dsh-emacs--command-spinner-start command-id (current-buffer)))))
-
-(defun dsh-emacs-render--command-tint-running (ns block-id)
-  "Tint running slash-command row NS-BLOCK-ID like a running tool row.
-Applies `dsh-emacs-tool-pending-face' (orange, bold) to the whole block
-with merge semantics, so the leading icon's Nerd Font :family survives.
-The spinner tick re-inserts the row every frame, so call this after every
-fragment update while the command is running."
-  (when-let* ((b (dsh-emacs-ui-find-block (format "%s-%s" ns block-id))))
-    (let ((inhibit-read-only t))
-      (add-face-text-property (car b) (cdr b)
-                              'dsh-emacs-tool-pending-face t))))
 
 (defun dsh-emacs-render-command-optimistic (line)
   "Render a slash-command row immediately for LINE (e.g. \"/compact\").
@@ -2157,10 +2089,10 @@ the real `command/run' event when it arrives."
                        " "
                        (car dsh-emacs--command-spinner-frames))
           :style 'minimal
-          :color-key 'tool-pending)
+          :color-key 'tool-pending
+          :face 'dsh-emacs-tool-pending-face)
          :create-new t :expanded t
          :insert-before (dsh-emacs-render--input-insert-point))
-        (dsh-emacs-render--command-tint-running ns block-id)
         (dsh-emacs--command-spinner-start temp-id
                                           (current-buffer))))))
 
@@ -2172,11 +2104,7 @@ Stops the spinner, deletes the fragment, and clears `dsh-emacs--pending-command'
            (entry (gethash temp-id dsh-emacs--command-blocks)))
       (dsh-emacs--command-spinner-stop temp-id)
       (when entry
-        (let* ((qualified-id (format "%s-%s" (nth 0 entry) (nth 1 entry)))
-               (block (dsh-emacs-ui-find-block qualified-id)))
-          (when block
-            (let ((inhibit-read-only t))
-              (delete-region (car block) (cdr block))))))
+        (dsh-emacs-ui-delete-fragment (nth 0 entry) (nth 1 entry)))
       (remhash temp-id dsh-emacs--command-blocks))
     (setq dsh-emacs--pending-command nil)))
 
@@ -2216,13 +2144,8 @@ Returns the event seq."
                                                 dsh-emacs--command-blocks)))
                       (dsh-emacs--command-spinner-stop temp-id)
                       (when temp-entry
-                        (let* ((qid (format "%s-%s"
-                                            (nth 0 temp-entry)
-                                            (nth 1 temp-entry)))
-                               (blk (dsh-emacs-ui-find-block qid)))
-                          (when blk
-                            (let ((inhibit-read-only t))
-                              (delete-region (car blk) (cdr blk))))))
+                        (dsh-emacs-ui-delete-fragment
+                         (nth 0 temp-entry) (nth 1 temp-entry)))
                       (remhash temp-id dsh-emacs--command-blocks))
                     (setq dsh-emacs--pending-command nil))
                   ;; Now render with the real command-id.
@@ -2237,10 +2160,10 @@ Returns the event seq."
                                  " "
                                  (car dsh-emacs--command-spinner-frames))
                     :style 'minimal
-                    :color-key 'tool-pending)
+                    :color-key 'tool-pending
+                    :face 'dsh-emacs-tool-pending-face)
                    :create-new t :expanded nil
                    :insert-before (dsh-emacs-render--input-insert-point))
-                  (dsh-emacs-render--command-tint-running ns block-id)
                   (dsh-emacs--command-spinner-start command-id
                                                     (current-buffer)))
               (when-let* ((entry (gethash command-id
@@ -2251,9 +2174,7 @@ Returns the event seq."
                        (state (if ok 'success 'error))
                        (text (dsh-emacs-render--aget "text" data))
                        (entry-icon (or (nth 3 entry)
-                                       (dsh-emacs-render--tool-icon "bash")))
-                       (qualified-id (format "%s-%s" (nth 0 entry)
-                                             (nth 1 entry))))
+                                       (dsh-emacs-render--tool-icon "bash"))))
                   (dsh-emacs-ui-update-fragment
                    (dsh-emacs-ui-make-fragment
                     :namespace-id (nth 0 entry) :block-id (nth 1 entry)
@@ -2266,26 +2187,18 @@ Returns the event seq."
                     ;; body is a collapsible section below, collapsed by default,
                     ;; so `goal' is not truncated to `goal…' by top-border.
                     :label-right (propertize
-                                   (or (dsh-emacs-render--command-status-text state)
-                                       "")
-                                   'face (if ok
-                                             'dsh-emacs-tool-success-face
-                                           'dsh-emacs-tool-error-face))
+                                  (or (dsh-emacs-render--command-status-text state)
+                                      "")
+                                  'face (if ok
+                                            'dsh-emacs-tool-success-face
+                                          'dsh-emacs-tool-error-face))
                     :body (and (stringp text) (not (string-empty-p text)) text)
                     :style 'minimal
-                    :color-key (if ok 'tool-success 'tool-error))
-                   :create-new nil)
-                  (dsh-emacs-ui-restyle-block
-                   qualified-id (if ok 'tool-success 'tool-error))
-                  ;; 节点边框/正文着色与状态一致（merge 保留 icon 的 :family）
-                  (when-let* ((b (dsh-emacs-ui-find-block qualified-id)))
-                    (let ((inhibit-read-only t))
-                      (add-face-text-property
-                       (car b) (cdr b)
-                       (if ok
-                           'dsh-emacs-tool-success-face
-                         'dsh-emacs-tool-error-face)
-                       t))))))))))
+                    :color-key (if ok 'tool-success 'tool-error)
+                    :face (if ok
+                              'dsh-emacs-tool-success-face
+                            'dsh-emacs-tool-error-face))
+                   :create-new nil))))))))
     seq))
 
 ;;; ---------------------------------------------------------------------------

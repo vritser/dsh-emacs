@@ -121,6 +121,7 @@ it in the dsh web UI (`M-x dsh-emacs-open-web`) or the dsh home files
 - [Model picker](docs/model-picker.md) — grouping, icons, reasoning effort
 - [Mode line](docs/modeline.md) — segments, context% source, spinner
 - [UI styling](docs/ui-styling.md) — faces, dsh-web icons, markdown rendering
+- [Fragment extension API](docs/architecture.md#transcript-fragments-dsh-emacs-uiel) — complete snapshots, title actions and persistent card styling
 - [Customization](docs/customization.md) — every option
 - [Development & testing](AGENTS.md) — workflow and verification commands
 - [Changelog](CHANGELOG.md)

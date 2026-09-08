@@ -610,6 +610,276 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                  (not (string-match-p "·" text)))
         (dsh-test-pass "minimal-label-separator-disabled")))))
 
+;; Fragment updates are complete snapshots; adjacent blocks stay intact.
+(dolist (style '(minimal rounded sharp))
+  (with-temp-buffer
+    (dsh-emacs-ui-update-fragment
+     (dsh-emacs-ui-make-fragment
+      :namespace-id "snapshot" :block-id "a" :style style
+      :label-left "Original" :label-right "Summary" :body "old body")
+     :expanded t)
+    (dsh-emacs-ui-update-fragment
+     (dsh-emacs-ui-make-fragment
+      :namespace-id "snapshot" :block-id "b" :style style
+      :label-left "Neighbor" :body "untouched")
+     :expanded t)
+    (let* ((neighbor (dsh-emacs-ui-find-block "snapshot" "b"))
+           (neighbor-text (buffer-substring (car neighbor) (cdr neighbor))))
+      (dolist (body '("longer\nreplacement\nbody" "short" nil))
+        (condition-case err
+            (progn
+              (dsh-emacs-ui-update-fragment
+               (dsh-emacs-ui-make-fragment
+                :namespace-id "snapshot" :block-id "a" :style style
+                :body body))
+              (let* ((block (dsh-emacs-ui-find-block "snapshot" "a"))
+                     (state (get-text-property (car block) 'dsh-emacs-ui-state))
+                     (next (dsh-emacs-ui-find-block "snapshot" "b")))
+                (dsh-test-assert (format "fragment-snapshot-%s-%S" style body)
+                  (equal (map-elt state :body) body)
+                  (not (string-match-p "Original\\|Summary"
+                                       (buffer-substring (car block) (cdr block))))
+                  (= (cdr block) (car next))
+                  (equal-including-properties
+                   neighbor-text (buffer-substring (car next) (cdr next))))))
+          (error (dsh-test-fail (format "fragment-snapshot-%s-%S" style body)
+                                (error-message-string err))))))))
+
+;; Nil clears flags/faces; ranges and the input marker survive replacements.
+(with-temp-buffer
+  (insert "Prompt: draft")
+  (let ((input (copy-marker (point-min) t))
+        (model (dsh-emacs-ui-make-fragment
+                :namespace-id "flags" :block-id "a" :style 'minimal
+                :label-left "Title" :label-right "Summary" :body "body"
+                :non-foldable t :face 'bold :header-face 'italic)))
+    (goto-char (point-max))
+    (dsh-emacs-ui-update-fragment model :insert-before input)
+    (goto-char (point-min))
+    (dsh-emacs-ui-toggle-fragment)
+    (dsh-test-assert "fragment-non-foldable-stays-visible"
+      (not (map-elt (get-text-property (point-min) 'dsh-emacs-ui-state)
+                    :collapsed))
+      (string-match-p "body" (buffer-string)))
+    (setq model (dsh-emacs-ui-make-fragment
+                 :namespace-id "flags" :block-id "a" :style 'sharp
+                 :label-left "New title" :body "replacement"))
+    (goto-char (point-max))
+    (let* ((range (dsh-emacs-ui-update-fragment model :insert-before input))
+           (state (get-text-property (car range) 'dsh-emacs-ui-state)))
+      (dsh-test-assert "fragment-clears-flags-style-and-faces"
+        (eq (map-elt state :style) 'sharp)
+        (not (map-elt state :non-foldable))
+        (not (map-elt state :face))
+        (not (map-elt state :header-face))
+        (not (string-match-p "Summary" (buffer-string)))
+        (= (cdr range) input)
+        (= (point) (point-max))
+        (equal (buffer-substring-no-properties input (point-max)) "Prompt: draft")
+        (not (get-text-property input 'dsh-emacs-ui-state)))
+      (goto-char (car range))
+      (search-forward "replacement")
+      (dsh-test-assert "fragment-old-face-removed-from-text"
+        (not (get-text-property (1- (point)) 'face)))
+      (goto-char (car range))
+      (dsh-emacs-ui-toggle-fragment)
+      (dsh-test-assert "fragment-cleared-non-foldable-can-collapse"
+        (not (string-match-p "replacement" (buffer-string))))
+      (dsh-emacs-ui-expand-all)
+      (dsh-test-assert "fragment-expand-all-restores-snapshot"
+        (string-match-p "replacement" (buffer-string)))
+      (dsh-emacs-ui-collapse-all)
+      (dsh-test-assert "fragment-collapse-all-hides-body"
+        (not (string-match-p "replacement" (buffer-string)))))
+    (set-marker input nil)))
+
+;; Namespace and block ID are separate identity components, even with hyphens.
+(with-temp-buffer
+  (dsh-emacs-ui-update-fragment
+   (dsh-emacs-ui-make-fragment
+    :namespace-id "a-b" :block-id "c" :style 'minimal
+    :label-left "First" :body "one") :expanded t)
+  (dsh-emacs-ui-update-fragment
+   (dsh-emacs-ui-make-fragment
+    :namespace-id "a" :block-id "b-c" :style 'minimal
+    :label-left "Second" :body "two") :expanded t)
+  (dsh-test-assert "fragment-hyphenated-identities-do-not-collide"
+    (equal (buffer-substring-no-properties (point-min) (point-max))
+           "First\none\nSecond\ntwo\n"))
+  (dsh-emacs-ui-update-fragment
+   (dsh-emacs-ui-make-fragment
+    :namespace-id "a-b" :block-id "c" :style 'minimal
+    :label-left "Changed" :body "three"))
+  (dsh-test-assert "fragment-update-isolated-by-both-identity-components"
+    (equal (buffer-substring-no-properties (point-min) (point-max))
+           "Changed\nthree\nSecond\ntwo\n")))
+
+(with-temp-buffer
+  (dsh-emacs-ui-update-fragment
+   (dsh-emacs-ui-make-fragment
+    :namespace-id "a-b" :block-id "c" :style 'minimal :label-left "First"))
+  (dsh-emacs-ui-update-fragment
+   (dsh-emacs-ui-make-fragment
+    :namespace-id "a" :block-id "b-c" :style 'minimal :label-left "Second"))
+  (dsh-test-assert "fragment-pair-lookup-selects-distinct-blocks"
+    (= (car (dsh-emacs-ui-find-block "a-b" "c")) (point-min))
+    (> (car (dsh-emacs-ui-find-block "a" "b-c")) (point-min)))
+  (dsh-emacs-ui-delete-fragment "a-b" "c")
+  (dsh-test-assert "fragment-pair-delete-keeps-other-identity"
+    (not (dsh-emacs-ui-find-block "a-b" "c"))
+    (equal (buffer-substring-no-properties (point-min) (point-max)) "Second\n")))
+
+;; Local navigation and bulk folding must not scan by identity for every card.
+(with-temp-buffer
+  (dolist (name '("First" "Second" "Fixed"))
+    (dsh-emacs-ui-update-fragment
+     (dsh-emacs-ui-make-fragment
+      :namespace-id "local" :block-id name :style 'minimal :label-left name
+      :body (concat name " body") :non-foldable (equal name "Fixed"))
+     :create-new t :expanded t))
+  (let ((lookups 0)
+        (find-block (symbol-function 'dsh-emacs-ui-find-block)))
+    (cl-letf (((symbol-function 'dsh-emacs-ui-find-block)
+               (lambda (&rest args)
+                 (setq lookups (1+ lookups))
+                 (apply find-block args))))
+      (goto-char (point-min))
+      (dsh-emacs-ui-forward-block)
+      (dsh-test-assert "fragment-forward-reaches-adjacent-block"
+        (looking-at-p "Second\n"))
+      (dsh-emacs-ui-backward-block)
+      (dsh-test-assert "fragment-backward-reaches-adjacent-block"
+        (= (point) (point-min)))
+      (dsh-emacs-ui-collapse-all)
+      (dsh-test-assert "fragment-collapse-all-keeps-non-foldable"
+        (equal (buffer-substring-no-properties (point-min) (point-max))
+               "First\nSecond\nFixed\nFixed body\n"))
+      (dsh-emacs-ui-expand-all)
+      (dsh-test-assert "fragment-expand-all-restores-all-local-bodies"
+        (equal (buffer-substring-no-properties (point-min) (point-max))
+               "First\nFirst body\nSecond\nSecond body\nFixed\nFixed body\n")))
+    (dsh-test-assert "fragment-local-actions-avoid-global-identity-scans"
+      (= lookups 0))))
+
+;; Header layout gives the title priority and measures geometry once.
+(dolist (style '(minimal rounded sharp))
+  (with-temp-buffer
+    (let ((calls 0))
+      (cl-letf (((symbol-function 'dsh-emacs-ui--box-width)
+                 (lambda () (setq calls (1+ calls)) 20)))
+        (dsh-emacs-ui-update-fragment
+         (dsh-emacs-ui-make-fragment
+          :namespace-id "layout" :block-id "a" :style style
+          :label-left "构建结果" :label-right (make-string 60 ?x)
+          :body "body")
+         :expanded t))
+      (goto-char (point-min))
+      (let ((header (buffer-substring-no-properties (point) (line-end-position))))
+        (dsh-test-assert (format "fragment-title-priority-%s" style)
+                         (string-match-p "构建结果" header)
+                         (<= (string-width header) (if (eq style 'minimal) 20 24))
+                         (= calls 1)))
+      (unless (eq style 'minimal)
+        (let ((widths (mapcar #'string-width
+                              (split-string (buffer-string) "\n" t))))
+          (dsh-test-assert (format "fragment-border-widths-agree-%s" style)
+                           (equal widths '(24 24 24))))))))
+
+(with-temp-buffer
+  (let ((window (selected-window)))
+    (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) window))
+              ((symbol-function 'window-text-width)
+               (lambda (target)
+                 (dsh-test-assert "fragment-measures-displaying-window"
+                                  (eq target window))
+                 12)))
+      (dsh-test-assert "fragment-narrow-window-has-no-40-column-floor"
+                       (= (dsh-emacs-ui--box-width) 8)))))
+
+(dolist (width '(1 4 12))
+  (dolist (style '(minimal rounded sharp))
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'dsh-emacs-ui--box-width) (lambda () width)))
+        (dsh-emacs-ui-update-fragment
+         (dsh-emacs-ui-make-fragment
+          :namespace-id "narrow" :block-id "a" :style style
+          :label-left "很长的标题" :label-right "摘要" :body "hidden body")))
+      (dsh-test-assert (format "fragment-narrow-header-and-placeholder-%s-%s"
+                               style width)
+                       (cl-every (lambda (line)
+                                   (<= (string-width line)
+                                       (+ width (if (eq style 'minimal) 0 4))))
+                                 (split-string (buffer-string) "\n" t))))))
+
+;; Embedded link/button keymaps take precedence over the fold default.
+(with-temp-buffer
+  (dsh-emacs-ui-mode 1)
+  (let* ((map (make-sparse-keymap))
+         (label (concat "Title "
+                        (propertize "Open" 'keymap map 'help-echo "open details")))
+         (model (dsh-emacs-ui-make-fragment
+                 :namespace-id "actions" :block-id "a" :style 'minimal
+                 :label-left label :body "body")))
+    (define-key map (kbd "RET") #'ignore)
+    (dsh-emacs-ui-update-fragment model)
+    (dotimes (_ 2)
+      (goto-char (point-min))
+      (search-forward "Open")
+      (dsh-test-assert "fragment-custom-header-action-preserved"
+                       (eq (get-text-property (1- (point)) 'keymap) map)
+                       (save-excursion
+                         (backward-char)
+                         (eq (key-binding (kbd "RET")) #'ignore))
+                       (equal (get-text-property (1- (point)) 'help-echo) "open details")
+                       (eq (get-text-property (point-min) 'keymap) dsh-emacs-ui-fragment-map))
+      (goto-char (point-min))
+      (dsh-emacs-ui-toggle-fragment))))
+
+;; Rendering and insertion failures preserve text, properties and input markers.
+(dolist (fault '(render insert))
+  (dolist (operation '(update fold create))
+    (with-temp-buffer
+      (let ((model (dsh-emacs-ui-make-fragment
+                    :namespace-id "failure" :block-id "a" :style 'minimal
+                    :label-left "Original" :body "old body")))
+        (dsh-emacs-ui-update-fragment model :expanded t)
+        (let ((inhibit-read-only t)) (goto-char (point-max)) (insert "Prompt: draft"))
+        (let ((before (buffer-substring (point-min) (point-max)))
+              (anchor (copy-marker (- (point-max) 13) t))
+              (original-end (point-max))
+              (insert-function (symbol-function 'insert))
+              (face-function (symbol-function 'add-face-text-property))
+              caught)
+          (goto-char (point-max))
+          (condition-case err
+              (cl-letf (((symbol-function 'add-face-text-property)
+                         (lambda (&rest args)
+                           (if (eq fault 'render)
+                               (error "injected failure")
+                             (apply face-function args))))
+                        ((symbol-function 'insert)
+                         (lambda (&rest args)
+                           (apply insert-function args)
+                           (when (eq fault 'insert)
+                             (error "injected failure")))))
+                (pcase operation
+                  ('fold (goto-char (point-min)) (dsh-emacs-ui-toggle-fragment))
+                  (_ (dsh-emacs-ui-update-fragment
+                      (dsh-emacs-ui-make-fragment
+                       :namespace-id "failure"
+                       :block-id (if (eq operation 'create) "b" "a")
+                       :style 'minimal :label-left "Replacement" :body "new body"
+                       :face 'bold)
+                      :insert-before anchor))))
+            (error (setq caught (equal (error-message-string err)
+                                       "injected failure"))))
+          (dsh-test-assert (format "fragment-failed-%s-%s-rolls-back" operation fault)
+                           caught
+                           (= (point-max) original-end)
+                           (equal-including-properties before (buffer-string))
+                           (equal (buffer-substring-no-properties anchor (point-max)) "Prompt: draft"))
+          (set-marker anchor nil))))))
+
 ;; --- 测试 9: 事件渲染器函数存在 ---
 (when (fboundp 'dsh-emacs-render-event)
   (dsh-test-pass "render-event function exists"))
@@ -1174,9 +1444,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
       (dsh-test-pass "input-anchor-keeps-own-line"))))
 
 ;; --- 测试 29: dsh web 风格工具行 —— 变体 icon + IN/OUT ioCard + 状态点 ---
-(defun dsh-emacs-test--tool-block-text (qualified-id)
-  "Return the full text of the UI block with QUALIFIED-ID, or nil."
-  (when-let* ((b (dsh-emacs-ui-find-block qualified-id)))
+(defun dsh-emacs-test--tool-block-text (namespace-id block-id)
+  "Return the UI block text for NAMESPACE-ID and BLOCK-ID, or nil."
+  (when-let* ((b (dsh-emacs-ui-find-block namespace-id block-id)))
     (buffer-substring-no-properties (car b) (cdr b))))
 
 (defun dsh-emacs-test--tool-call-event (seq call-id name args)
@@ -1226,7 +1496,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
   (dsh-emacs-render-tool-call
    (dsh-emacs-test--tool-call-event 1 "c1" "bash" "{\"description\":\"list files\",\"command\":\"ls -la\"}"))
   (let* ((ns (dsh-emacs-render--make-namespace))
-         (block (dsh-emacs-test--tool-block-text (format "%s-tool-c1" ns))))
+         (block (dsh-emacs-test--tool-block-text ns "tool-c1")))
     (when (and block
                (string-match-p (regexp-quote "💻 ") block)
                ;; 运行中保留变体图标；动画 spinner 已移至 mode-line 进度条
@@ -1237,7 +1507,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
   (dsh-emacs-render-tool-result
    (dsh-emacs-test--tool-result-event 2 "c1" nil 0 "total 3\ndrwxr-xr-x"))
   (let* ((ns (dsh-emacs-render--make-namespace))
-         (block (dsh-emacs-test--tool-block-text (format "%s-tool-c1" ns))))
+         (block (dsh-emacs-test--tool-block-text ns "tool-c1")))
     (when (and block
                (string-match-p (regexp-quote "💻 ") block)
                (string-match-p (regexp-quote "$ ls -la") block)
@@ -1252,7 +1522,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
   (dsh-emacs-render-tool-result
    (dsh-emacs-test--tool-result-event 4 "c2" nil 1 "segmentation fault"))
   (let* ((ns (dsh-emacs-render--make-namespace))
-         (block (dsh-emacs-test--tool-block-text (format "%s-tool-c2" ns))))
+         (block (dsh-emacs-test--tool-block-text ns "tool-c2")))
     (when (and block
                (string-match-p (regexp-quote "● ") block)
                (string-match-p "segmentation fault" block))
@@ -1268,7 +1538,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
   (dsh-emacs-render-tool-result
    (dsh-emacs-test--tool-result-event 2 "c3" nil 0 ""))
   (let* ((ns (dsh-emacs-render--make-namespace))
-         (block (dsh-emacs-test--tool-block-text (format "%s-tool-c3" ns))))
+         (block (dsh-emacs-test--tool-block-text ns "tool-c3")))
     (when (and block
                (string-match-p "IN" block)
                (not (string-match-p "OUT" block)))
@@ -1284,7 +1554,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
   (dsh-emacs-render-tool-result
    (dsh-emacs-test--tool-result-event 2 "x1" nil 0 "file-a"))
   (let* ((ns (dsh-emacs-render--make-namespace))
-         (block (dsh-emacs-test--tool-block-text (format "%s-tool-x1" ns))))
+         (block (dsh-emacs-test--tool-block-text ns "tool-x1")))
     (when (and block
                ;; 折叠时仅一行：含表头，不含省略号占位，不含卡正文
                (string-match-p "Bash" block)
@@ -1295,7 +1565,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
       (dsh-test-pass "tool-collapsed-single-line"))
     ;; 展开应恢复终端卡正文（$ 提示行 + 输出；干净退出无 ✓ 页脚），再折叠应回到单行
     (dsh-emacs-ui-toggle-fragment)
-    (let* ((expanded (dsh-emacs-test--tool-block-text (format "%s-tool-x1" ns))))
+    (let* ((expanded (dsh-emacs-test--tool-block-text ns "tool-x1")))
       (when (and expanded
                  (string-match-p (regexp-quote "$ ls") expanded)
                  (string-match-p "file-a" expanded)
@@ -1303,33 +1573,42 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                  (not (string-match-p "IN" expanded)))
         (dsh-test-pass "tool-bash-expand-restores-terminal-card"))
       (dsh-emacs-ui-toggle-fragment)
-      (let ((recollapsed (dsh-emacs-test--tool-block-text (format "%s-tool-x1" ns))))
+      (let ((recollapsed (dsh-emacs-test--tool-block-text ns "tool-x1")))
         (when (and recollapsed
                    (not (string-match-p (regexp-quote "$ ls") recollapsed))
                    (string-match-p "Bash" recollapsed))
           (dsh-test-pass "tool-recollapse-single-line"))))))
 
-;; --- 测试 31bis: collapsed block 追加 chunk —— let 并行求值陷阱回归 ---
-;; Emacs `let' 并行求值：绑定列表内后者引用前者会 void-variable（实测
-;; `(let ((a 1) (b (1+ a))) ...)' 直接崩溃）。append-body-section 的
-;; collapsed 分支曾用 `let' 让 old-count 引用 old-body——修复前该路径
-;; 每次执行都崩，此处断言其完整跑完。
-(with-temp-buffer
-  (let ((inhibit-read-only t))
-    (insert "AAAA\nBBBB\n")
-    (put-text-property 1 (point) 'dsh-emacs-ui-state
-                       (list :collapsed t :body "a\nb" :style 'box)))
-  (let ((ran (condition-case err
-                 (progn
-                   (dsh-emacs-ui--append-body-section
-                    (list (cons :start 1) (cons :end (point))) "new" nil)
-                   t)
-               (error
-                (dsh-test-fail "ui-collapsed-append-survives"
-                               (format "collapsed append crashed: %S" err))
-                nil))))
-    (when ran
-      (dsh-test-pass "ui-collapsed-append-survives"))))
+;; Collapsed snapshots retain complete content and faces across repeated folds.
+(dolist (style '(minimal rounded sharp))
+  (with-temp-buffer
+    (let ((model (dsh-emacs-ui-make-fragment
+                  :namespace-id "fold" :block-id "a" :style style
+                  :label-left "Title" :body "before"
+                  :face 'dsh-emacs-tool-success-face
+                  :header-face 'dsh-emacs-thinking-face)))
+      (dsh-emacs-ui-update-fragment model)
+      (setf (alist-get :body model)
+            (propertize "after\nsecond" 'face 'italic 'help-echo "body help"))
+      (dsh-emacs-ui-update-fragment model :expanded t)
+      (dsh-test-assert (format "fragment-update-preserves-fold-%s" style)
+        (map-elt (get-text-property (point-min) 'dsh-emacs-ui-state) :collapsed)
+        (not (string-match-p "second" (buffer-string))))
+      (dotimes (_ 2)
+        (goto-char (point-min))
+        (dsh-emacs-ui-toggle-fragment)
+        (goto-char (point-min))
+        (search-forward "second")
+        (let ((faces (get-text-property (1- (point)) 'face)))
+          (dsh-test-assert (format "fragment-expand-content-faces-%s" style)
+            (memq 'italic faces)
+            (memq 'dsh-emacs-tool-success-face faces)
+            (not (memq 'dsh-emacs-thinking-face faces))
+            (equal (get-text-property (1- (point)) 'help-echo) "body help")
+            (memq 'dsh-emacs-thinking-face
+                  (get-text-property (+ (point-min) 3) 'face))))
+        (goto-char (point-min))
+        (dsh-emacs-ui-toggle-fragment)))))
 
 ;; --- 测试 32: 工具名与图标解耦 —— 同图标不同名 ---
 (with-temp-buffer
@@ -1338,7 +1617,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
   (dsh-emacs-render-tool-call
    (dsh-emacs-test--tool-call-event 1 "g1" "grep" "{\"pattern\":\"foo\"}"))
   (let* ((ns (dsh-emacs-render--make-namespace))
-         (block (dsh-emacs-test--tool-block-text (format "%s-tool-g1" ns))))
+         (block (dsh-emacs-test--tool-block-text ns "tool-g1")))
     (when (and block
                (string-match-p "🔍 Grep" block)      ; 放大镜图标 + 真实工具名
                (not (string-match-p "Search" block)) ; 不得再显示成 Search
@@ -1351,7 +1630,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
   (dsh-emacs-render-tool-call
    (dsh-emacs-test--tool-call-event 1 "w1" "web_search" "{\"query\":\"cats\"}"))
   (let* ((ns (dsh-emacs-render--make-namespace))
-         (block (dsh-emacs-test--tool-block-text (format "%s-tool-w1" ns))))
+         (block (dsh-emacs-test--tool-block-text ns "tool-w1")))
     (when (and block
                (string-match-p "🌐 Web Search" block)
                (not (string-match-p "🌐 Search · cats" block)))
@@ -1373,7 +1652,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
   (dsh-emacs-render-tool-call
    (dsh-emacs-test--tool-call-event 1 "u1" "my_tool" "{\"x\":\"1\"}"))
   (let* ((ns (dsh-emacs-render--make-namespace))
-         (block (dsh-emacs-test--tool-block-text (format "%s-tool-u1" ns))))
+         (block (dsh-emacs-test--tool-block-text ns "tool-u1")))
     (when (and block (string-match-p "✨ My Tool" block))
       (dsh-test-pass "tool-unknown-humanized-title"))))
 
@@ -1384,7 +1663,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (dsh-emacs-render-tool-call
      (dsh-emacs-test--tool-call-event 1 "u2" "my_tool" "{\"x\":\"1\"}")))
   (let* ((ns (dsh-emacs-render--make-namespace))
-         (block (dsh-emacs-test--tool-block-text (format "%s-tool-u2" ns))))
+         (block (dsh-emacs-test--tool-block-text ns "tool-u2")))
     (when (and block (string-match-p "✨ Curated" block))
       (dsh-test-pass "tool-title-defcustom-override"))))
 
@@ -1579,9 +1858,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
    (dsh-emacs-test--tool-call-event 1 "c1" "bash" "{\"command\":\"ls -la\"}"))
   (let* ((st (dsh-emacs-render--tool-state "c1"))
          (ns (plist-get st :ns))
-         (qid (format "%s-%s" ns (dsh-emacs-render--tool-call-block-id "c1"))))
+         (block-id (dsh-emacs-render--tool-call-block-id "c1")))
     ;; 初始渲染：行首为变体图标（无 spinner 齿轮），无尾部 …
-    (when-let* ((b (dsh-emacs-ui-find-block qid)))
+    (when-let* ((b (dsh-emacs-ui-find-block ns block-id)))
       (let ((txt (buffer-substring-no-properties (car b) (cdr b))))
         (when (and (string-match-p (regexp-quote "💻 ") txt)
                    (not (string-match-p "⚙" txt))
@@ -1590,7 +1869,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     ;; 工具完成后行仍正确渲染到同一块（不消失）：bash 卡含 $ 提示 + 输出
     (dsh-emacs-render-tool-result
      (dsh-emacs-test--tool-result-event 2 "c1" nil 0 "total 3\ndrwxrwxr-x"))
-    (when-let* ((b (dsh-emacs-ui-find-block qid)))
+    (when-let* ((b (dsh-emacs-ui-find-block ns block-id)))
       (let ((txt (buffer-substring-no-properties (car b) (cdr b))))
         (when (and (string-match-p (regexp-quote "💻 ") txt)
                    (string-match-p (regexp-quote "$ ls -la") txt)
@@ -1607,7 +1886,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
   (dsh-emacs-render-tool-result
    (dsh-emacs-test--tool-result-event 2 "x1" nil 1 "make: *** No rule.  Stop."))
   (let* ((ns (dsh-emacs-render--make-namespace))
-         (block (dsh-emacs-test--tool-block-text (format "%s-tool-x1" ns))))
+         (block (dsh-emacs-test--tool-block-text ns "tool-x1")))
     (when (and block
                ;; 命令区是单行（多行命令拍平成一行，只有一个 $ 提示）；
                ;; 错误页脚带退出码
@@ -1631,7 +1910,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (dsh-emacs-render-tool-result
      (dsh-emacs-test--tool-result-event 2 "d1" nil 0 "ok"))
     (let* ((ns (dsh-emacs-render--make-namespace))
-           (block (dsh-emacs-test--tool-block-text (format "%s-tool-d1" ns)))
+           (block (dsh-emacs-test--tool-block-text ns "tool-d1"))
            (occ (let ((n 0) (pos 0))
                   (while (string-match (regexp-quote "$ ") block pos)
                     (setq n (1+ n) pos (match-end 0)))
@@ -7787,8 +8066,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                (txt (buffer-string))
                (above-input (buffer-substring (point-min)
                                               dsh-emacs--input-marker)))
-          (let* ((qid (format "%s-cmd-%s" (dsh-emacs-render--make-namespace) "c1"))
-                 (blk (dsh-emacs-ui--find-block qid))
+          (let* ((ns (dsh-emacs-render--make-namespace))
+                 (block-id "cmd-c1")
+                 (blk (dsh-emacs-ui-find-block ns block-id))
                  (state (and blk (get-text-property (car blk) 'dsh-emacs-ui-state))))
             (when (and (= run-seq 10) (= done-seq 11)
                        ;; label = "goal" (args stripped, no / prefix) + short status
@@ -7813,8 +8093,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
            (data . ((commandId . "c2") (kind . "error")
                     (text . "unknown preset")))))
         (let* ((txt (buffer-string))
-               (qid (format "%s-cmd-%s" (dsh-emacs-render--make-namespace) "c2"))
-               (blk (dsh-emacs-ui--find-block qid))
+               (ns (dsh-emacs-render--make-namespace))
+               (block-id "cmd-c2")
+               (blk (dsh-emacs-ui-find-block ns block-id))
                (state (and blk (get-text-property (car blk) 'dsh-emacs-ui-state))))
           (when (and (string-match-p "● permission" txt)
                      (string-match-p "failed" txt)
@@ -7847,8 +8128,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
            (data . ((commandId . "pfx1") (kind . "success")
                     (text . "Compacted 174 history items")))))
         (let* ((txt (buffer-string))
-               (qid (format "%s-cmd-%s" (dsh-emacs-render--make-namespace) "pfx1"))
-               (blk (dsh-emacs-ui--find-block qid))
+               (ns (dsh-emacs-render--make-namespace))
+               (block-id "cmd-pfx1")
+               (blk (dsh-emacs-ui-find-block ns block-id))
                (state (and blk (get-text-property (car blk) 'dsh-emacs-ui-state))))
           (when (and (string-match-p "compact" txt)
                      (string-match-p "done" txt)
@@ -7919,8 +8201,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (dsh-emacs-render-event
          '((type . "command/run") (seq . 60)
            (data . ((commandId . "tint1") (name . "goal")))))
-        (let* ((qid (format "%s-cmd-%s" (dsh-emacs-render--make-namespace) "tint1"))
-               (blk (dsh-emacs-ui--find-block qid))
+        (let* ((ns (dsh-emacs-render--make-namespace))
+               (block-id "cmd-tint1")
+               (blk (dsh-emacs-ui-find-block ns block-id))
                (tinted (and blk
                             (seq-every-p
                              (lambda (pos)
@@ -7931,8 +8214,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (dsh-test-pass "command-running-tints-whole-block")))
         ;; spinner tick 每帧整行重建，着色必须不丢
         (dsh-emacs--command-spinner-tick (current-buffer) "tint1")
-        (let* ((qid (format "%s-cmd-%s" (dsh-emacs-render--make-namespace) "tint1"))
-               (blk (dsh-emacs-ui--find-block qid)))
+        (let* ((ns (dsh-emacs-render--make-namespace))
+               (block-id "cmd-tint1")
+               (blk (dsh-emacs-ui-find-block ns block-id)))
           (when (and blk
                      (seq-every-p
                       (lambda (pos)
@@ -7956,8 +8240,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
           (dsh-emacs-render-command-optimistic "/compact")
           (let* ((entry (gethash "pending-compact" dsh-emacs--command-blocks))
                  (blk (and entry
-                           (dsh-emacs-ui--find-block
-                            (format "%s-%s" (nth 0 entry) (nth 1 entry))))))
+                           (dsh-emacs-ui-find-block (nth 0 entry) (nth 1 entry)))))
             (when (and blk
                        (seq-every-p
                         (lambda (pos)
@@ -8058,8 +8341,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
          '((type . "command/run") (seq . 54)
            (data . ((commandId . "rv3") (name . "goal")))))
         (when-let* ((entry (gethash "rv3" dsh-emacs--command-blocks))
-                    (qid (format "%s-%s" (nth 0 entry) (nth 1 entry)))
-                    (blk (dsh-emacs-ui--find-block qid)))
+                    (ns (nth 0 entry))
+                    (block-id (nth 1 entry))
+                    (blk (dsh-emacs-ui-find-block ns block-id)))
           (let ((inhibit-read-only t))
             (delete-region (car blk) (cdr blk))))
         (dsh-emacs--command-spinner-clear-all)
@@ -8889,7 +9173,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
    (dsh-emacs-test--tool-call-event 1 "t1" "todo_write"
     "{\"todos\":[{\"content\":\"A\",\"status\":\"in_progress\"},{\"content\":\"B\",\"status\":\"pending\"}]}"))
   (let ((txt (buffer-string)))
-    (when (and (dsh-emacs-ui-find-block (dsh-emacs-render--todo-qualified-id "t1"))
+    (when (and (dsh-emacs-ui-find-block dsh-emacs--todo-namespace "t1")
                ;; items are ☐ checkboxes (in_progress/pending) with status words
                (string-match-p (regexp-quote "☐") txt)
                (string-match-p "in progress" txt)
@@ -8913,8 +9197,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
    (dsh-emacs-test--tool-call-event 2 "t2" "todo_write"
     "{\"todos\":[{\"content\":\"A\",\"status\":\"completed\"},{\"content\":\"B\",\"status\":\"in_progress\"},{\"content\":\"C\",\"status\":\"pending\"}]}"))
   (let ((txt (buffer-string)))
-    (when (and (dsh-emacs-ui-find-block (dsh-emacs-render--todo-qualified-id "t1"))
-               (dsh-emacs-ui-find-block (dsh-emacs-render--todo-qualified-id "t2"))
+    (when (and (dsh-emacs-ui-find-block dsh-emacs--todo-namespace "t1")
+               (dsh-emacs-ui-find-block dsh-emacs--todo-namespace "t2")
                (string-match-p "1/3 completed" txt)
                (string-match-p (regexp-quote "C") txt)
                (string-match-p (regexp-quote "☑") txt))
@@ -8939,7 +9223,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
   (dsh-emacs-render-tool-call
    (dsh-emacs-test--tool-call-event 1 "t1" "todo_write"
     "{\"todos\":[{\"content\":\"Alpha\",\"status\":\"in_progress\"},{\"content\":\"Beta\",\"status\":\"pending\"}]}"))
-  (let* ((b (dsh-emacs-ui-find-block (dsh-emacs-render--todo-qualified-id "t1")))
+  (let* ((b (dsh-emacs-ui-find-block dsh-emacs--todo-namespace "t1"))
          (blk (and b (buffer-substring-no-properties (car b) (cdr b)))))
     (when (and b (string-match-p "Todo" blk)
                (not (string-match-p (regexp-quote "Alpha") (buffer-string))))
@@ -8965,7 +9249,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
   (dsh-emacs-render-tool-call
    (dsh-emacs-test--tool-call-event 1 "t1" "todo_write"
     "{\"todos\":[{\"content\":\"Alpha\",\"status\":\"in_progress\"},{\"content\":\"Beta\",\"status\":\"pending\"},{\"content\":\"Gamma\",\"status\":\"completed\"}]}"))
-  (let* ((b (dsh-emacs-ui-find-block (dsh-emacs-render--todo-qualified-id "t1")))
+  (let* ((b (dsh-emacs-ui-find-block dsh-emacs--todo-namespace "t1"))
          (blk (and b (buffer-substring-no-properties (car b) (cdr b)))))
     (when (and b
                (string-match-p "1/3 completed" (buffer-string))
