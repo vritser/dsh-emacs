@@ -1,5 +1,8 @@
 # 024 — Fragment Identity and Local Navigation
 
+Lookup-scan limitations superseded by 026; separate identity components and
+local navigation remain in effect.
+
 ## Background
 
 At baseline `049f0a6`, fragment identity joined namespace and block ID with

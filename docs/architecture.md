@@ -26,6 +26,17 @@ border style, optional whole-block/header faces, and the non-foldable flag.
 `dsh-emacs-ui-update-fragment` replaces that snapshot while preserving the
 user's fold state. Nil fields clear previous values; this is not a patch API.
 It returns the exact `(START . END)` range, excluding surrounding spacing.
+An identical snapshot skips rendering when the buffer change tick, measured
+width and label separator still match the last successful update. Snapshot
+strings are copied so later caller mutation cannot fool this comparison.
+Otherwise it renders again; identical rendered text and properties still
+return the range without buffer writes or viewport adjustment.
+Changed updates preserve the common text prefix and suffix and replace only
+the middle span. Native string comparisons locate the suffix without a Lisp
+loop over every character or reversed copies of the body. The new state is
+applied across the block, but visual properties are written only on differing
+runs. Property-only updates do not replace characters. Changed updates still
+render and compare the whole card.
 
 Identity is the separate `:namespace-id` / `:block-id` pair, compared with
 `equal`; do not join these strings. Lookup and deletion both take two
@@ -34,6 +45,16 @@ positional arguments: `(dsh-emacs-ui-find-block namespace-id block-id)` and
 and `("a", "b-c")` identify different cards. Navigation and bulk folding
 walk local property boundaries without repeated identity searches.
 See [decision record 024](../postmortem/024-fragment-identity-and-local-navigation.md).
+
+Identity lookup caches a start marker and its state object per buffer.
+Successful insertion, update and folding refresh the cache; deletion releases
+the entry. Each hit verifies the marker against the actual state property.
+Misses and stale entries use property search, retaining the last matching
+block rule for duplicate identities. Erase and undo invalidate the index;
+narrowed operations bypass it so a restricted lookup cannot poison the full
+buffer's ordering. Cache entries are published after atomic edits succeed.
+See [decision record 026](../postmortem/026-fragment-performance-cache.md)
+for lifecycle constraints and measured results.
 
 One renderer builds the complete text and its `dsh-emacs-ui-state` property
 before the buffer is edited. Updates and fold changes both use it and replace
@@ -341,3 +362,13 @@ as a Latin-1 character, garbling Chinese text. This package therefore extracts
 the response body and decodes it with `decode-coding-string` as UTF-8 into a
 multibyte string, which is then parsed with `json-read-from-string` — Chinese
 titles, messages, and tool results all display correctly.
+
+### Live thinking refresh
+
+The renderer inserts the first reasoning delta immediately, then queues raw
+strings in reverse order on the live thinking state. One buffer-owned 100ms
+one-shot timer joins and inserts the pending burst, clears the queue and
+follows the viewport once. Per-event follow calls skip a pending burst.
+Non-reasoning events, step changes and stream teardown flush pending text
+before continuing. This keeps transport delivery immediate while limiting
+reasoning-driven buffer invalidation. See [027](../postmortem/027-thinking-refresh.md).

@@ -36,6 +36,244 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
       (dsh-test-pass name)
     (dsh-test-fail name "断言不成立（dsh-test-assert）")))
 
+;; Follow checks must stop after one screen plus slack, even in long history.
+(with-temp-buffer
+  (insert (make-string 20000 ?\n) "tail")
+  (let ((window (selected-window))
+        (counted 0)
+        (original (symbol-function 'count-lines)))
+    (cl-letf (((symbol-function 'window-start) (lambda (&rest _) 1))
+              ((symbol-function 'window-text-height) (lambda (&rest _) 5))
+              ((symbol-function 'count-lines)
+               (lambda (start end &rest args)
+                 (setq counted (+ counted (- end start)))
+                 (apply original start end args))))
+      (dsh-test-assert "follow-threshold-keeps-boundary"
+        (dsh-emacs-render--window-at-bottom-p window 16)
+        (not (dsh-emacs-render--window-at-bottom-p window 17)))
+      (dsh-test-assert "follow-long-history-is-not-at-bottom"
+        (not (dsh-emacs-render--window-at-bottom-p window (point-max))))
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) window))
+                ((symbol-function 'set-window-start) #'ignore))
+        (dsh-emacs-ui-update-fragment
+         (dsh-emacs-ui-make-fragment :label-left "New" :style 'minimal)
+         :create-new t))
+      (dsh-test-assert "follow-checks-do-not-count-entire-history"
+        (< counted 100)))))
+
+;; A displayed buffer can contain an offscreen running command.
+(with-temp-buffer
+  (let ((dsh-emacs--command-spinners (make-hash-table :test 'equal))
+        (dsh-emacs--command-blocks (make-hash-table :test 'equal))
+        (window (selected-window))
+        (visible nil)
+        (redraws 0))
+    (puthash "spin" (list (current-buffer) nil 0) dsh-emacs--command-spinners)
+    (puthash "spin" '("ns" "cmd-spin" "goal" "") dsh-emacs--command-blocks)
+    (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) window))
+              ((symbol-function 'get-buffer-window-list)
+               (lambda (&rest _) (list window)))
+              ((symbol-function 'dsh-emacs-ui-find-block)
+               (lambda (&rest _) '(1 . 10)))
+              ((symbol-function 'pos-visible-in-window-p)
+               (lambda (&rest _) visible))
+              ((symbol-function 'dsh-emacs-ui-update-fragment)
+               (lambda (&rest _) (setq redraws (1+ redraws)))))
+      (dsh-emacs--command-spinner-tick (current-buffer) "spin")
+      (dsh-test-assert "spinner-offscreen-advances-without-redraw"
+        (= redraws 0)
+        (= (nth 2 (gethash "spin" dsh-emacs--command-spinners)) 1))
+      (setq visible t)
+      (dsh-emacs--command-spinner-tick (current-buffer) "spin")
+      (dsh-test-assert "spinner-visible-resumes-redraw"
+        (= redraws 1)
+        (= (nth 2 (gethash "spin" dsh-emacs--command-spinners)) 2)))))
+
+;; Identical fragment updates must preserve interior markers and change ticks.
+(dolist (style '(minimal rounded sharp))
+  (with-temp-buffer
+    (let* ((model (dsh-emacs-ui-make-fragment
+                   :namespace-id "unchanged" :block-id "a" :style style
+                   :label-left "Title" :body "body"))
+           (range (dsh-emacs-ui-update-fragment model :expanded t))
+           (inside (copy-marker (+ (car range) 2)))
+           (tick (buffer-modified-tick)))
+      (dsh-test-assert (format "fragment-identical-update-no-write-%s" style)
+        (equal range (dsh-emacs-ui-update-fragment model))
+        (= tick (buffer-modified-tick))
+        (= inside (+ (car range) 2)))
+      (setf (alist-get :body model) (propertize "body" 'face 'bold))
+      (dsh-emacs-ui-update-fragment model)
+      (goto-char (point-min))
+      (search-forward "body")
+      (dsh-test-assert (format "fragment-property-only-update-applies-%s" style)
+        (eq (get-text-property (1- (point)) 'face) 'bold))
+      (set-marker inside nil))))
+
+;; Hidden content and layout changes must not be mistaken for identical updates.
+(with-temp-buffer
+  (let ((model (dsh-emacs-ui-make-fragment
+                :label-left "Long title" :body "old" :style 'minimal)))
+    (dsh-emacs-ui-update-fragment model)
+    (setf (alist-get :body model) (propertize "new" 'face 'italic))
+    (dsh-emacs-ui-update-fragment model)
+    (goto-char (point-min))
+    (dsh-emacs-ui-toggle-fragment)
+    (search-forward "new")
+    (dsh-test-assert "fragment-hidden-update-retains-new-body-properties"
+      (eq (get-text-property (1- (point)) 'face) 'italic))
+    (cl-letf (((symbol-function 'dsh-emacs-ui--box-width) (lambda () 4)))
+      (dsh-emacs-ui-update-fragment model))
+    (goto-char (point-min))
+    (dsh-test-assert "fragment-same-model-reflows-at-new-width"
+      (equal (buffer-substring-no-properties (point) (line-end-position))
+             "Lon…"))))
+
+;; Changed fragments retain markers in the unchanged prefix and suffix.
+(with-temp-buffer
+  (let* ((model (dsh-emacs-ui-make-fragment
+                 :style 'minimal :label-left "Title" :body "alpha\nold\nomega"))
+         (range (dsh-emacs-ui-update-fragment model :expanded t))
+         (title (copy-marker (+ (car range) 2)))
+         (suffix (copy-marker (- (cdr range) 4))))
+    (setf (alist-get :body model) "alpha\nlong replacement\nomega")
+    (dsh-emacs-ui-update-fragment model)
+    (dsh-test-assert "fragment-diff-preserves-unchanged-markers"
+      (= title 3)
+      (equal (buffer-substring-no-properties suffix (+ suffix 3)) "ega"))
+    (set-marker title nil)
+    (set-marker suffix nil)))
+
+;; Repeated lookup and identical updates must not scan or render again.
+(with-temp-buffer
+  (let ((model (dsh-emacs-ui-make-fragment
+                :namespace-id "cache" :block-id "a" :style 'minimal
+                :label-left "Title" :body "Body"))
+        (scans 0) (renders 0)
+        (scan (symbol-function 'text-property-search-backward))
+        (render (symbol-function 'dsh-emacs-ui--render-fragment)))
+    (dsh-emacs-ui-update-fragment model :expanded t)
+    (cl-letf (((symbol-function 'text-property-search-backward)
+               (lambda (&rest args) (setq scans (1+ scans)) (apply scan args)))
+              ((symbol-function 'dsh-emacs-ui--render-fragment)
+               (lambda (&rest args) (setq renders (1+ renders)) (apply render args))))
+      (dotimes (_ 3)
+        (dsh-emacs-ui-find-block "cache" "a")
+        (dsh-emacs-ui-update-fragment model))
+      (dsh-test-assert "fragment-repeated-updates-skip-scan-and-render"
+        (= scans 0) (= renders 0)))
+    ;; Caller mutation and external text edits must invalidate the fast path.
+    (aset (alist-get :body model) 0 ?b)
+    (dsh-emacs-ui-update-fragment model)
+    (dsh-test-assert "fragment-caller-string-mutation-is-not-cached"
+      (string-match-p "body" (buffer-string)))
+    (let ((inhibit-read-only t))
+      (goto-char (point-min)) (insert "prefix\n"))
+    (dsh-test-assert "fragment-index-follows-external-prefix-insertion"
+      (= (car (dsh-emacs-ui-find-block "cache" "a")) 8))
+    (let ((inhibit-read-only t)) (erase-buffer))
+    (dsh-test-assert "fragment-index-does-not-return-erased-block"
+      (not (dsh-emacs-ui-find-block "cache" "a")))
+    (dsh-emacs-ui-update-fragment model)
+    (goto-char (point-min)) (dsh-emacs-ui-toggle-fragment)
+    (dsh-test-assert "fragment-index-survives-recreate-and-fold"
+      (equal (dsh-emacs-ui-find-block "cache" "a")
+             (cons (point-min) (point-max))))))
+
+;; Header changes do not rewrite unchanged body styling; rollback stays atomic.
+(with-temp-buffer
+  (let* ((model (dsh-emacs-ui-make-fragment
+                 :style 'minimal :label-left "Old"
+                 :body (propertize "unchanged body" 'face 'italic)))
+         (writes 0)
+         (setter (symbol-function 'set-text-properties)))
+    (dsh-emacs-ui-update-fragment model :expanded t)
+    (setf (alist-get :label-left model) "New")
+    (cl-letf (((symbol-function 'set-text-properties)
+               (lambda (start end props &optional object)
+                 (when (and (not object) (>= start 5))
+                   (setq writes (1+ writes)))
+                 (funcall setter start end props object))))
+      (dsh-emacs-ui-update-fragment model))
+    (dsh-test-assert "fragment-header-change-does-not-restyle-body"
+      (= writes 0)
+      (eq (get-text-property 5 'face) 'italic))
+    (let ((before (buffer-string))
+          (putter (symbol-function 'put-text-property))
+          caught)
+      (setf (alist-get :body model) (propertize "unchanged body" 'face 'bold))
+      (condition-case err
+          (cl-letf (((symbol-function 'put-text-property)
+                     (lambda (start end prop value &optional object)
+                       (funcall putter start end prop value object)
+                       (when (and (not object) (eq prop 'dsh-emacs-ui-state))
+                         (error "injected property failure")))))
+            (dsh-emacs-ui-update-fragment model))
+        (error (setq caught (equal (error-message-string err)
+                                   "injected property failure"))))
+      (dsh-test-assert "fragment-property-failure-rolls-back-cache-and-text"
+        caught (equal-including-properties before (buffer-string))
+        (equal (dsh-emacs-ui-find-block "global" "1")
+               (cons (point-min) (point-max)))))))
+
+;; The index preserves duplicate-ID ordering, delete/undo and buffer isolation.
+(with-temp-buffer
+  (buffer-enable-undo)
+  (let ((model (dsh-emacs-ui-make-fragment :style 'minimal :label-left "Later")))
+    (dsh-emacs-ui-update-fragment model :create-new t)
+    (setf (alist-get :label-left model) "Earlier")
+    (dsh-emacs-ui-update-fragment model :create-new t :insert-before (point-min))
+    (dsh-test-assert "fragment-index-keeps-last-duplicate"
+      (= (car (dsh-emacs-ui-find-block "global" "1")) 9))
+    (save-restriction
+      (narrow-to-region 1 9)
+      (dsh-test-assert "fragment-index-respects-narrowing"
+        (equal (dsh-emacs-ui-find-block "global" "1") '(1 . 9))))
+    (dsh-test-assert "fragment-index-widen-restores-last-duplicate"
+      (= (car (dsh-emacs-ui-find-block "global" "1")) 9))
+    (undo-boundary)
+    (dsh-emacs-ui-delete-fragment "global" "1")
+    (dsh-test-assert "fragment-index-delete-reveals-earlier-duplicate"
+      (equal (dsh-emacs-ui-find-block "global" "1") '(1 . 9)))
+    (let ((inhibit-read-only t)) (undo-boundary) (undo 1))
+    (dsh-test-assert "fragment-index-undo-restores-last-duplicate"
+      (= (car (dsh-emacs-ui-find-block "global" "1")) 9))
+    (with-temp-buffer
+      (dsh-test-assert "fragment-index-is-buffer-local"
+        (not (dsh-emacs-ui-find-block "global" "1"))))))
+
+;; A cached model must still honor separator and arbitrary buffer changes.
+(with-temp-buffer
+  (let ((model (dsh-emacs-ui-make-fragment
+                :style 'minimal :label-left "Title" :label-right "Summary")))
+    (dsh-emacs-ui-update-fragment model)
+    (let ((dsh-emacs-ui-label-separator "/"))
+      (dsh-emacs-ui-update-fragment model)
+      (dsh-test-assert "fragment-cache-invalidates-on-separator-change"
+        (equal (buffer-substring-no-properties (point-min) (point-max))
+               "Title / Summary\n"))
+      (let ((inhibit-read-only t))
+        (subst-char-in-region (point-min) (point-max) ?T ?X))
+      (dsh-emacs-ui-update-fragment model)
+      (dsh-test-assert "fragment-cache-repairs-external-text-edit"
+        (equal (buffer-substring-no-properties (point-min) (point-max))
+               "Title / Summary\n")))))
+
+;; Entirely narrowed operations need no global cache, including deletion.
+(with-temp-buffer
+  (insert "outside\n")
+  (save-restriction
+    (narrow-to-region (point-max) (point-max))
+    (dsh-emacs-ui-update-fragment
+     (dsh-emacs-ui-make-fragment :style 'minimal :label-left "Inside"))
+    (condition-case err
+        (progn
+          (dsh-emacs-ui-delete-fragment "global" "1")
+          (dsh-test-assert "fragment-narrowed-delete-without-index"
+            (= (point-min) (point-max))))
+      (error (dsh-test-fail "fragment-narrowed-delete-without-index"
+                            (error-message-string err))))))
+
 ;; --- 测试 1: 模块加载 ---
 (when (featurep 'dsh-emacs)
   (dsh-test-pass "dsh-emacs loaded"))
@@ -1170,7 +1408,76 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                     1))
         (dsh-test-pass "assistant-stream-final-event-does-not-duplicate")))))
 
+(let* ((input (concat (propertize "%中" 'face 'bold)
+                      (propertize "%%" 'face 'italic)))
+       (expected (concat (propertize "%%中" 'face 'bold)
+                         (propertize "%%%%" 'face 'italic))))
+  (string-match "b" "abc")
+  (let ((saved (match-data)))
+    (dsh-test-assert "modeline-percent-preserves-properties-and-match-data"
+      (equal-including-properties
+       (dsh-emacs-modeline--escape-percent input) expected)
+      (equal saved (match-data))
+      (equal (dsh-emacs-modeline--escape-percent "") "")
+      (equal (dsh-emacs-modeline--escape-percent "plain") "plain"))))
+
 ;; --- 测试 21b: thinking / reasoning 流式渲染 ---
+(with-temp-buffer
+  (let ((icons 0)
+        (event '((data . ((turn . 1) (step . 1))))))
+    (cl-letf (((symbol-function 'dsh-emacs-render--think-icon)
+               (lambda () (cl-incf icons) "✶")))
+      (dotimes (_ 100)
+        (dsh-emacs-render--start-thinking-stream event "x")))
+    (dsh-test-assert "thinking-burst-defers-buffer-edits"
+      (equal (buffer-string) "✶ Think\nx\n")
+      (= (length (plist-get dsh-emacs--streaming-thinking :chunks)) 99))
+    (let ((writes 0))
+      (add-hook 'after-change-functions (lambda (&rest _) (cl-incf writes)) nil t)
+      (dsh-emacs-render--flush-thinking)
+      (dsh-test-assert "thinking-burst-flushes-one-edit"
+        (= writes 1)
+        (null (plist-get dsh-emacs--streaming-thinking :timer))))
+    (dsh-test-assert "thinking-stream-builds-header-once"
+      (= icons 1)
+      (equal (buffer-string) (concat "✶ Think\n" (make-string 100 ?x) "\n")))))
+
+(with-temp-buffer
+  (save-window-excursion
+    (switch-to-buffer (current-buffer))
+    (insert "body\ninput")
+    (goto-char (point-max))
+    (set-window-start (selected-window) 1)
+    (let ((writes 0))
+      (cl-letf (((symbol-function 'dsh-emacs-render--input-anchor-pos)
+                 (lambda () 6))
+                ((symbol-function 'set-window-start)
+                 (lambda (&rest _) (cl-incf writes))))
+        (dotimes (_ 100) (dsh-emacs-render--follow-stream)))
+      (dsh-test-assert "follow-keeps-unchanged-window-start"
+        (= writes 0)))))
+
+(with-temp-buffer
+  (let ((event '((data . ((turn . 1) (step . 1))))))
+    (dsh-emacs-render--start-thinking-stream event "first")
+    (dsh-emacs-render--start-thinking-stream event " queued")
+    (dsh-emacs-render--start-thinking-stream
+     '((data . ((turn . 1) (step . 2)))) "second")
+    (dsh-test-assert "thinking-switch-flushes-old-step"
+      (string-match-p "first queued" (buffer-string)))
+    (dsh-emacs-render--start-thinking-stream
+     '((data . ((turn . 1) (step . 2)))) " tail")
+    (dsh-emacs-render-event '((type . "unknown-boundary")))
+    (dsh-test-assert "thinking-event-boundary-flushes"
+      (string-match-p "second tail" (buffer-string))
+      (null (plist-get dsh-emacs--streaming-thinking :timer)))
+    (dsh-emacs-render--start-thinking-stream
+     '((data . ((turn . 1) (step . 2)))) " disconnect")
+    (dsh-emacs-render--flush-stream)
+    (dsh-test-assert "thinking-teardown-flushes"
+      (string-match-p "second tail disconnect" (buffer-string))
+      (null (plist-get dsh-emacs--streaming-thinking :timer)))))
+
 (when dsh-emacs-show-reasoning
   (dsh-test-pass "thinking-show-reasoning-defaults-on"))
 
@@ -1186,6 +1493,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
   (dsh-emacs-render-event
    (json-read-from-string
     "{\"type\":\"assistant/chunk\",\"seq\":3,\"data\":{\"turn\":1,\"step\":1,\"chunk\":{\"type\":\"reasoning-delta\",\"index\":0,\"text\":\" then two\"}}}"))
+  (dsh-emacs-render--flush-thinking)
   (let ((text (buffer-substring-no-properties (point-min) (point-max))))
     (when (and (string-match-p "✶ Think" text)
                (string-match-p "think step one then two" text))

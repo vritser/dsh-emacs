@@ -643,18 +643,15 @@ are not counted, matching dsh web's QueueDock."
 Mode-line strings undergo `%'-sequence expansion, so a literal `%' must be
 doubled to `%%'.  Each duplicate keeps the face at the original position, so
 rendered tokens (faces on `CH99%') keep their color."
-  (let ((i 0)
-        (len (length txt))
-        (out ""))
-    (while (< i len)
-      (if (eq (aref txt i) ?%)
-          (let ((ch (substring txt i (1+ i))))
-            ;; 两份拷贝都带原位置的文本属性。
-            (setq out (concat out ch ch)
-                  i (1+ i)))
-        (setq out (concat out (substring txt i (1+ i)))
-              i (1+ i))))
-    out))
+  (save-match-data
+    (let ((start 0) pos parts)
+      (while (setq pos (string-match "%" txt start))
+        (push (substring txt start (1+ pos)) parts)
+        (push (substring txt pos (1+ pos)) parts)
+        (setq start (1+ pos)))
+      (if parts
+          (apply #'concat (nreverse (cons (substring txt start) parts)))
+        txt))))
 
 (defun dsh-emacs-modeline--modeinline ()
   "Return the compact stats segment for the mode line: \"(model ↑in ↓out CH%)\".

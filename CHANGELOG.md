@@ -218,6 +218,41 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Mode-line redraws allocate less**: percent escaping preserves styled
+  text without repeatedly copying the entire growing status string, reducing
+  garbage collection during streaming and busy-animation redraws.
+
+- **Thinking bursts redraw in batches**: the first delta appears immediately;
+  later deltas are inserted together every 100ms, with one follow pass per
+  batch. Event boundaries and disconnect flush pending text
+  (rationale: postmortem/027).
+
+- **Lower thinking-stream overhead**: build the Think SVG header only when
+  the live block starts, and avoid resetting an unchanged window start on
+  every streamed chunk. Text still appears immediately and bottom-following
+  continues when the viewport needs to move.
+
+- **Repeated card updates avoid transcript scans and redundant rendering**:
+  validated buffer-local markers accelerate lookup, unchanged snapshots skip
+  rendering, and title edits leave unchanged body styling alone. Cache handling
+  preserves deletion, folding, undo and narrowed-buffer behavior
+  (rationale: postmortem/026).
+
+- **Fragment edits retain unchanged text**: updates replace only the middle
+  span between a common prefix and suffix, preserving markers in retained
+  text while refreshing styling and snapshot properties
+  (rationale: postmortem/025).
+
+- **Unchanged fragment updates preserve buffer positions**: identical
+  rendered text and properties skip replacement, avoiding change hooks and
+  interior-marker movement. Styling, hidden content and width changes
+  still update normally.
+
+- **Reading long history avoids unnecessary redraw work**: stream and
+  fragment scroll-follow checks inspect at most one screen plus ten lines.
+  Running command spinners repaint only when their header is visible in a
+  window, resuming on the next tick after scrolling back.
+
 - **Fragment IDs containing hyphens stay distinct**: updating or deleting
   one namespace/block pair cannot target another pair with the same joined
   spelling. Navigation and bulk folding use local text boundaries

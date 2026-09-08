@@ -597,8 +597,10 @@ leaving manually scrolled-up windows untouched."
   (ignore-errors
     (let ((start (window-start window)))
       (and (<= start anchor)
-           (<= (count-lines start anchor)
-               (+ (max 1 (window-text-height window)) 10))))))
+           (save-excursion
+             (goto-char start)
+             (forward-line (+ (max 1 (window-text-height window)) 10))
+             (>= (point) anchor))))))
 
 (defun dsh-emacs-render--follow-stream ()
   "Scroll transcript windows to keep the newest content visible above input.
@@ -608,7 +610,8 @@ selected, or the window's point already sits in the input area).  Windows
 the user scrolled up or clicked into are left alone.  For the selected
 window (inline input mode) the buffer point is never moved: the view is
 re-pinned via `set-window-start' while the user keeps typing."
-  (let ((anchor (dsh-emacs-render--input-anchor-pos)))
+  (let ((anchor (and (not (plist-get dsh-emacs--streaming-thinking :timer))
+                     (dsh-emacs-render--input-anchor-pos))))
     ;; No input prompt face run (e.g. mid re-render).  Falling back to
     ;; point-max would park followed windows' point on the phantom display
     ;; line beneath the input, and re-apply it on every stream redraw — the
@@ -624,7 +627,9 @@ re-pinned via `set-window-start' while the user keeps typing."
               (save-excursion
                 (goto-char anchor)
                 (forward-line (- (1- (max 1 (window-text-height window)))))
-                (set-window-start window (max (point-min) (point)) t))
+                (let ((start (max (point-min) (point))))
+                  (unless (= start (window-start window))
+                    (set-window-start window start t))))
               ;; Keep the pinned viewer's cursor at the input anchor; never move
               ;; the buffer point of the selected inline-input window while
               ;; typing.
@@ -748,7 +753,9 @@ in place by `dsh-emacs-markdown-replace-markup'.")
 
 (defvar-local dsh-emacs--streaming-thinking nil
   "Current live reasoning/Think block stream state, or nil.
-The plist contains :key, :start and :end.  Reasoning
+The plist contains :key, :start, :end, :chunks and :timer.
+Pending deltas are collected in reverse order and inserted every 100ms.
+Reasoning
 deltas grow a raw body below the \"✶ Think\" header; on finalization
 (`block-end' or `assistant/message') the raw region is replaced by the
 collapsible Think fragment.")
@@ -894,6 +901,7 @@ last incomplete Markdown construct to be completed by a later chunk."
   (let ((buffer (or buffer (current-buffer))))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
+        (dsh-emacs-render--flush-thinking)
         (when-let* ((state dsh-emacs--streaming-assistant)
                     (timer (plist-get state :timer)))
           (cancel-timer timer)
@@ -994,6 +1002,22 @@ pending incremental pass; changed text is replaced and rendered in full."
       (setq dsh-emacs--streaming-assistant nil)
       t)))
 
+(defun dsh-emacs-render--flush-thinking (&optional buffer)
+  "Insert BUFFER's queued reasoning deltas in one edit and follow once."
+  (when (buffer-live-p (or buffer (current-buffer)))
+    (with-current-buffer (or buffer (current-buffer))
+      (when-let* ((state dsh-emacs--streaming-thinking)
+                  (timer (plist-get state :timer)))
+        (cancel-timer timer)
+        (setf (plist-get state :timer) nil)
+        (let ((text (apply #'concat (reverse (plist-get state :chunks))))
+              (inhibit-read-only t))
+          (save-excursion
+            (goto-char (plist-get state :end))
+            (insert text))
+          (setf (plist-get state :chunks) nil))
+        (dsh-emacs-render--follow-stream)))))
+
 (defun dsh-emacs-render--thinking-stream-alive-for-p (key)
   "Return non-nil when the live thinking stream is active for KEY."
   (and dsh-emacs--streaming-thinking
@@ -1010,12 +1034,11 @@ text arrives."
              (stringp text) (not (string-empty-p text)))
     (let* ((key (dsh-emacs-render--stream-key event))
            (state dsh-emacs--streaming-thinking)
-           (label (concat (dsh-emacs-render--think-icon) " "
-                          (propertize "Think" 'face 'dsh-emacs-thinking-face)))
            (new-state nil))
       ;; A different turn/step started reasoning: leave the previous raw
       ;; body in place (it is finalized by its own message) and start fresh.
       (when (and state (not (equal key (plist-get state :key))))
+        (dsh-emacs-render--flush-thinking)
         (setq state nil
               dsh-emacs--streaming-thinking nil))
       (unless state
@@ -1030,20 +1053,21 @@ text arrives."
                   (goto-char (point-max))))
               (dsh-emacs-ui--consume-blanks-above)
               (setq start (point))
-              (insert label "\n")
+              (insert (dsh-emacs-render--think-icon) " "
+                      (propertize "Think" 'face 'dsh-emacs-thinking-face) "\n")
               (insert text "\n")
               (setq end (copy-marker (- (point) 1) t))))
           (setq state (list :key key
                             :start (copy-marker start nil)
-                            :end end)
+                            :end end :chunks nil :timer nil)
                 dsh-emacs--streaming-thinking state
                 new-state t)))
       (when (and state (not new-state))
-        (let ((end (plist-get state :end)))
-          (save-excursion
-            (let ((inhibit-read-only t))
-              (goto-char end)
-              (insert text)))))
+        (push text (plist-get state :chunks))
+        (unless (plist-get state :timer)
+          (setf (plist-get state :timer)
+                (run-at-time 0.1 nil #'dsh-emacs-render--flush-thinking
+                             (current-buffer)))))
       state)))
 
 (defun dsh-emacs-render--replace-live-thinking-text (ns block-id final-text)
@@ -1051,6 +1075,7 @@ text arrives."
 NS and BLOCK-ID name the collapsible fragment; FINAL-TEXT is the
 authoritative reasoning body from `assistant/message'.  Returns non-nil
 when a live stream existed and was replaced."
+  (dsh-emacs-render--flush-thinking)
   (let ((state dsh-emacs--streaming-thinking))
     (when state
       (let ((start (marker-position (plist-get state :start)))
@@ -2013,7 +2038,13 @@ Replaces any existing animation for the same command (idempotent)."
             (let ((next-index (mod (1+ (nth 2 rec))
                                    (length dsh-emacs--command-spinner-frames))))
               (setcar (nthcdr 2 rec) next-index)
-              (when (get-buffer-window buffer 0)
+              (when-let* ((windows (get-buffer-window-list buffer nil 'visible))
+                          (block (dsh-emacs-ui-find-block
+                                  (nth 0 entry) (nth 1 entry)))
+                          ((cl-some (lambda (window)
+                                      (pos-visible-in-window-p
+                                       (car block) window))
+                                    windows)))
                 (dsh-emacs-ui-update-fragment
                  (dsh-emacs-ui-make-fragment
                   :namespace-id (nth 0 entry)
@@ -2209,6 +2240,13 @@ Returns the event seq."
   "Dispatch EVENT to the appropriate renderer. Returns the event seq, or nil."
   (let* ((type (dsh-emacs-render--aget "type" event))
          (seq nil))
+    ;; Preserve event order at boundaries; only reasoning bursts are deferred.
+    (unless (and (equal type "assistant/chunk")
+                 (equal (dsh-emacs-render--aget
+                         "type" (dsh-emacs-render--aget
+                                 "chunk" (dsh-emacs-render--event-data event)))
+                        "reasoning-delta"))
+      (dsh-emacs-render--flush-thinking))
     (pcase type
       ("user/message" (setq seq (dsh-emacs-render-user-message event)))
       ("assistant/chunk" (setq seq (dsh-emacs-render-assistant-chunk event)))

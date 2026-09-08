@@ -290,14 +290,49 @@ to the number of blank lines to preserve after their content."
       (forward-line -1))
     (get-text-property (line-beginning-position) 'dsh-emacs-ui-space-after)))
 
-(defun dsh-emacs-ui--render-fragment (model &optional expanded)
+(defvar-local dsh-emacs-ui--blocks nil
+  "Identity to (START-MARKER STATE TICK LAYOUT) lookup cache.
+Text properties remain authoritative; invalid markers are never returned.")
+
+(defun dsh-emacs-ui--invalidate-index (&rest _)
+  "Release cached markers on erase or undo, which can restore duplicate IDs."
+  (when (and dsh-emacs-ui--blocks
+             (or undo-in-progress (= (buffer-size) 0)))
+    (maphash (lambda (_ entry) (set-marker (car entry) nil))
+             dsh-emacs-ui--blocks)
+    (clrhash dsh-emacs-ui--blocks)))
+
+(cl-defun dsh-emacs-ui--remember-block (range &optional layout)
+  "Cache RANGE after a successful write or lookup, with optional LAYOUT."
+  (when (buffer-narrowed-p)
+    (cl-return-from dsh-emacs-ui--remember-block nil))
+  (unless dsh-emacs-ui--blocks
+    (setq dsh-emacs-ui--blocks (make-hash-table :test 'equal))
+    (add-hook 'after-change-functions #'dsh-emacs-ui--invalidate-index nil t))
+  (let* ((state (get-text-property (car range) 'dsh-emacs-ui-state))
+         (key (cons (map-elt state :namespace-id) (map-elt state :block-id)))
+         (entry (gethash key dsh-emacs-ui--blocks)))
+    ;; CREATE-NEW can deliberately duplicate an identity.  Lookup retains
+    ;; its existing last-in-buffer rule, even when inserting an earlier copy.
+    (unless (and entry (marker-position (car entry))
+                 (< (car entry) (point-max))
+                 (> (car entry) (car range))
+                 (eq (get-text-property (car entry) 'dsh-emacs-ui-state)
+                     (nth 1 entry)))
+      (when entry (set-marker (car entry) nil))
+      (puthash key (list (copy-marker (car range) t) state
+                         (and layout (buffer-modified-tick)) layout)
+               dsh-emacs-ui--blocks))))
+
+(defun dsh-emacs-ui--render-fragment (model &optional expanded width)
   "Render MODEL as a propertized string without changing the buffer.
-MODEL carries both identity components; EXPANDED sets its fold state."
+MODEL carries both identity components; EXPANDED sets its fold state.
+WIDTH, when supplied, is the body width already measured by the caller."
   (let* ((style (map-elt model :style))
          (body (map-elt model :body))
          (non-foldable (map-elt model :non-foldable))
          (collapsed (not (or non-foldable expanded)))
-         (width (dsh-emacs-ui--box-width))
+         (width (or width (dsh-emacs-ui--box-width)))
          (header (concat (dsh-emacs-ui--top-border
                           (map-elt model :label-left) (map-elt model :label-right)
                           collapsed style non-foldable width)
@@ -314,6 +349,10 @@ MODEL carries both identity components; EXPANDED sets its fold state."
                        (unless (eq style 'minimal)
                          (concat (dsh-emacs-ui--bottom-border style width) "\n"))))
          (state (copy-tree model)))
+    ;; Snapshots must not alias mutable strings owned by the caller.
+    (dolist (key '(:namespace-id :block-id :label-left :label-right :body))
+      (when (stringp (map-elt state key))
+        (setf (alist-get key state) (copy-sequence (map-elt state key)))))
     (setf (alist-get :collapsed state) collapsed)
     (add-text-properties 0 (length text)
                          (list 'dsh-emacs-ui-state state
@@ -333,12 +372,17 @@ Return the exact (START . END) range, excluding surrounding spacing.
 Rendering completes before editing; failed replacements roll back and signal."
   (let* ((namespace-id (map-elt model :namespace-id))
          (block-id (map-elt model :block-id))
+         (width (dsh-emacs-ui--box-width))
+         (layout (list width (copy-sequence dsh-emacs-ui-label-separator)))
+         (changed nil)
          (window (get-buffer-window (current-buffer)))
          (saved-window-start (and window (window-start window)))
          (was-at-bottom
           (and window
-               (<= (count-lines (window-start window) (point-max))
-                   (+ (max 1 (window-text-height window)) 10)))))
+               (save-excursion
+                 (goto-char (window-start window))
+                 (forward-line (+ (max 1 (window-text-height window)) 10))
+                 (eobp)))))
     (unwind-protect
         (save-mark-and-excursion
           (let* ((inhibit-read-only t)
@@ -346,29 +390,89 @@ Rendering completes before editing; failed replacements roll back and signal."
                           (dsh-emacs-ui-find-block namespace-id block-id)))
                  (state (and block (get-text-property
                                     (car block) 'dsh-emacs-ui-state)))
-                 (text (dsh-emacs-ui--render-fragment
-                        model
-                        (if block (not (map-elt state :collapsed)) expanded))))
-            (atomic-change-group
-              (if block
+                 (entry (and block (not (buffer-narrowed-p)) dsh-emacs-ui--blocks
+                             (gethash (cons namespace-id block-id)
+                                      dsh-emacs-ui--blocks)))
+                 (text
                   (progn
-                    (delete-region (car block) (cdr block))
-                    (goto-char (car block)))
-                (if insert-before
-                    (progn
-                      (goto-char insert-before)
-                      (beginning-of-line)
-                      (dsh-emacs-ui--consume-blanks-above
-                       (dsh-emacs-ui--blank-above-preserve)))
-                  (goto-char (point-max))
-                  (unless (or (bobp)
-                              (get-text-property (1- (point)) 'dsh-emacs-ui-state))
-                    (insert (propertize "\n" 'read-only t
-                                        'front-sticky '(read-only))))))
-              (let ((start (point)))
-                (insert text)
-                (cons start (point))))))
-      (when (window-live-p window)
+                    (when (and entry
+                               (eql (nth 2 entry) (buffer-modified-tick))
+                               (equal (nth 3 entry) layout)
+                               (equal-including-properties
+                                model (assq-delete-all :collapsed
+                                                       (copy-sequence state))))
+                      (cl-return-from dsh-emacs-ui-update-fragment block))
+                    (dsh-emacs-ui--render-fragment
+                     model (if block (not (map-elt state :collapsed)) expanded)
+                     width))))
+            (when (and block
+                       (equal-including-properties
+                        text (buffer-substring (car block) (cdr block))))
+              (dsh-emacs-ui--remember-block block layout)
+              (cl-return-from dsh-emacs-ui-update-fragment block))
+            (let ((range (atomic-change-group
+                           (if block
+                               (let* ((start (car block))
+                                      (old (buffer-substring-no-properties start (cdr block)))
+                                      (comparison (compare-strings old nil nil text nil nil))
+                                      (prefix (if (eq comparison t) (length old)
+                                                (1- (abs comparison))))
+                                      (suffix 0)
+                                      (limit (- (min (length old) (length text)) prefix))
+                                      (old-end (length old))
+                                      (new-end (length text))
+                                      (pos 0))
+                                 ;; Keep the common prefix/suffix in place.  Only one
+                                 ;; contiguous middle span is replaced, without a diff index.
+                                 ;; Native substring comparisons avoid both per-character
+                                 ;; Lisp calls and reversed copies of a potentially huge body.
+                                 (while (< suffix limit)
+                                   (let ((size (/ (+ suffix limit 1) 2)))
+                                     (if (eq t (compare-strings old (- old-end size) old-end
+                                                                text (- new-end size) new-end))
+                                         (setq suffix size)
+                                       (setq limit (1- size)))))
+                                 (setq old-end (- old-end suffix)
+                                       new-end (- new-end suffix))
+                                 (delete-region (+ start prefix) (+ start old-end))
+                                 (goto-char (+ start prefix))
+                                 (when (> new-end prefix)
+                                   (insert (substring text prefix new-end)))
+                                 ;; Retained characters also need the new snapshot and
+                                 ;; exact faces/keymaps, including property-only changes.
+                                 (put-text-property start (+ start (length text))
+                                                    'dsh-emacs-ui-state
+                                                    (get-text-property 0 'dsh-emacs-ui-state text))
+                                 (while (< pos (length text))
+                                   (let* ((end (min (next-property-change pos text (length text))
+                                                    (- (next-property-change
+                                                        (+ start pos) nil (+ start (length text)))
+                                                       start)))
+                                          (props (text-properties-at pos text)))
+                                     (unless (equal-including-properties
+                                              props (text-properties-at (+ start pos)))
+                                       (set-text-properties (+ start pos) (+ start end) props))
+                                     (setq pos end)))
+                                 (cons start (+ start (length text))))
+                             (progn
+                               (if insert-before
+                                   (progn
+                                     (goto-char insert-before)
+                                     (beginning-of-line)
+                                     (dsh-emacs-ui--consume-blanks-above
+                                      (dsh-emacs-ui--blank-above-preserve)))
+                                 (goto-char (point-max))
+                                 (unless (or (bobp)
+                                             (get-text-property (1- (point)) 'dsh-emacs-ui-state))
+                                   (insert (propertize "\n" 'read-only t
+                                                       'front-sticky '(read-only))))))
+                             (let ((start (point)))
+                               (insert text)
+                               (cons start (point)))))))
+              (dsh-emacs-ui--remember-block range layout)
+              (setq changed t)
+              range)))
+      (when (and changed (window-live-p window))
         (if was-at-bottom
             (save-excursion
               (goto-char (point-max))
@@ -376,9 +480,19 @@ Rendering completes before editing; failed replacements roll back and signal."
               (set-window-start window (max (point-min) (point)) t))
           (set-window-start window saved-window-start t))))))
 
-(defun dsh-emacs-ui-find-block (namespace-id block-id)
+(cl-defun dsh-emacs-ui-find-block (namespace-id block-id)
   "Find the block identified by NAMESPACE-ID and BLOCK-ID in this buffer.
 Returns (START . END) or nil."
+  (let* ((key (cons namespace-id block-id))
+         (entry (and (not (buffer-narrowed-p)) dsh-emacs-ui--blocks
+                     (gethash key dsh-emacs-ui--blocks)))
+         (pos (and entry (marker-position (car entry)))))
+    (when (and pos (<= (point-min) pos) (< pos (point-max))
+               (eq (get-text-property pos 'dsh-emacs-ui-state) (nth 1 entry)))
+      (cl-return-from dsh-emacs-ui-find-block (dsh-emacs-ui--block-at pos)))
+    (when entry
+      (set-marker (car entry) nil)
+      (remhash key dsh-emacs-ui--blocks)))
   (save-mark-and-excursion
     (goto-char (point-max))
     (when-let* ((match (text-property-search-backward
@@ -387,8 +501,9 @@ Returns (START . END) or nil."
                           (and (equal (map-elt state :namespace-id) namespace-id)
                                (equal (map-elt state :block-id) block-id)))
                         t)))
-      (cons (prop-match-beginning match)
-            (prop-match-end match)))))
+      (let ((range (cons (prop-match-beginning match) (prop-match-end match))))
+        (dsh-emacs-ui--remember-block range)
+        range))))
 
 (defun dsh-emacs-ui--block-at (pos)
   "Return the contiguous fragment bounds at POS, or nil.
@@ -411,7 +526,9 @@ Local actions use property boundaries rather than searching by identity."
         (atomic-change-group
           (delete-region (car block) (cdr block))
           (goto-char (car block))
-          (insert text))))))
+          (insert text))
+        (dsh-emacs-ui--remember-block
+         (cons (car block) (+ (car block) (length text))))))))
 
 ;;;###autoload
 (defun dsh-emacs-ui-toggle-fragment ()
@@ -452,7 +569,12 @@ Silent no-op when no fragment exists at or after point."
     (let* ((inhibit-read-only t)
            (match (dsh-emacs-ui-find-block namespace-id block-id)))
       (when match
-        (delete-region (car match) (cdr match))))))
+        (delete-region (car match) (cdr match))
+        (when-let* ((entry (and dsh-emacs-ui--blocks
+                               (gethash (cons namespace-id block-id)
+                                        dsh-emacs-ui--blocks))))
+          (set-marker (car entry) nil)
+          (remhash (cons namespace-id block-id) dsh-emacs-ui--blocks))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; 导航辅助

@@ -2,6 +2,11 @@
 
 **dsh-emacs** is an Emacs frontend for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`): it talks to a running dsh web service over plain HTTP/WebSocket and renders sessions, streaming replies, tool calls, thinking blocks and slash commands with an Emacs-native UI.
 
+Live thinking shows its first delta immediately and batches subsequent text
+at 100ms intervals to reduce redisplay load. Event boundaries flush pending
+text immediately.
+
+
 It aims to be the complete, zero-friction client for dsh web — built on
 nothing but Emacs built-ins (Emacs 27.1+), with zero third-party dependencies.
 
