@@ -433,6 +433,33 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (string-match-p ") *$" txt)
     (string-match "CH92%%" txt)))
 
+(with-temp-buffer
+  (setq major-mode 'dsh-emacs-mode)
+  (let ((dsh-emacs-modeline-format-spec
+         (list :separator " " :segments '(model ctx)))
+        (model (copy-sequence "model-A"))
+        (calls 0)
+        (render (symbol-function 'dsh-emacs-modeline--render-segment)))
+    (setq dsh-emacs--modeline-model model)
+    (cl-letf (((symbol-function 'dsh-emacs-modeline--render-segment)
+               (lambda (sym) (cl-incf calls) (funcall render sym))))
+      (dotimes (_ 100) (dsh-emacs-modeline--modeinline)))
+    (dsh-test-assert "modeline-unchanged-stats-render-once" (= calls 2))
+    (aset model 6 ?B)
+    (dsh-test-assert "modeline-cache-sees-mutated-model"
+      (string-match-p "model-B" (dsh-emacs-modeline--modeinline)))
+    (dsh-emacs-modeline-set-context-snapshot 2500 10000)
+    (dsh-test-assert "modeline-cache-sees-context-update"
+      (string-match-p "25.0%%" (dsh-emacs-modeline--modeinline)))
+    (setcar (plist-get dsh-emacs-modeline-format-spec :segments) 'effort)
+    (setq dsh-emacs--modeline-effort "high")
+    (dsh-test-assert "modeline-cache-sees-mutated-format-spec"
+      (string-match-p "high" (dsh-emacs-modeline--modeinline))
+      (not (string-match-p "model-B" (dsh-emacs-modeline--modeinline))))
+    (let ((dsh-emacs-modeline-enabled nil))
+      (dsh-test-assert "modeline-cache-honors-disabled"
+        (equal "" (dsh-emacs-modeline--modeinline))))))
+
 ;; --- 测试 5e+1: mode-line 分段携带 help-echo tooltip，空值透传 ---
 (let ((dsh-emacs-modeline-format-spec '(:separator " " :segments (model effort preset ctx))))
   (setq dsh-emacs--modeline-model "m1"
@@ -10680,7 +10707,16 @@ candidates as the UI would via `all-completions', not by destructuring."
             (dsh-test-assert "queue-indicator-shows-counts"
               (string-match-p "\\[Q2 S1\\]" ind)
               (eq 'dsh-emacs-modeline-queue-face
-                  (get-text-property 0 'face ind)))))
+                  (get-text-property 0 'face ind)))
+            (dsh-test-assert "queue-indicator-reuses-text-and-keymap"
+              (eq ind (dsh-emacs-modeline--queue-indicator))
+              (eq (lookup-key (get-text-property 0 'local-map ind)
+                              [mode-line mouse-1])
+                  #'dsh-emacs-list-queue)))
+          (setq dsh-emacs--queue-items (cdr dsh-emacs--queue-items))
+          (dsh-test-assert "queue-indicator-updates-cached-counts"
+            (string-match-p "\\[Q1 S1\\]"
+                            (dsh-emacs-modeline--queue-indicator))))
         ;; 非 dsh 缓冲不碰 mode line
         (with-temp-buffer
           (dsh-test-assert "queue-indicator-outside-chat-empty"

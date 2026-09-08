@@ -228,6 +228,10 @@ minor) and stay undated until the release is cut.
   final pass, so a growing block is no longer re-parsed on every chunk
   (rationale: postmortem/028).
 
+- **Mode-line segments rebuild only when their inputs change**: the compact
+  stats string and the pending-input indicator reuse their previous text while
+  nothing they display changed, cutting redisplay work during streaming.
+
 - **Mode-line redraws allocate less**: percent escaping preserves styled
   text without repeatedly copying the entire growing status string, reducing
   garbage collection during streaming and busy-animation redraws.

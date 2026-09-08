@@ -157,6 +157,9 @@ input-area geometry relies on (not part of the mode line proper).")
 (defvar-local dsh-emacs-modeline--modeline-patched nil
   "Non-nil once dsh segments were spliced into this buffer's mode-line-format.")
 
+(defvar-local dsh-emacs-modeline--inline-cache nil
+  "Last (INPUTS . TEXT) for the compact stats segment in this buffer.")
+
 (defvar dsh-emacs-modeline--doom-segment-installed nil
   "Non-nil once the dsh stats segment is registered with doom-modeline.")
 
@@ -392,6 +395,7 @@ segments render."
 (defun dsh-emacs-modeline-update ()
   "Force re-render of the mode-line statistics. No-op outside a dsh-emacs buffer."
   (when (derived-mode-p 'dsh-emacs-mode)
+    (setq dsh-emacs-modeline--inline-cache nil)
     (force-mode-line-update)))
 
 (defun dsh-emacs-modeline-toggle ()
@@ -614,29 +618,36 @@ running (space on both sides, ready to sit right after the DSH mode name)."
                   'help-echo "dsh is running a request…"
                   'mouse-face 'mode-line-highlight))))
 
+(defvar dsh-emacs-modeline--queue-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mode-line mouse-1] #'dsh-emacs-list-queue)
+    map)
+  "Mouse binding shared by mode-line queue indicators.")
+
+(defvar-local dsh-emacs-modeline--queue-cache nil
+  "Last (COUNTS . TEXT) for this buffer's pending-input indicator.")
+
 (defun dsh-emacs-modeline--queue-indicator ()
-  "Return the pending-input queue indicator, e.g. \" [Q2 S1]\".
-Empty while nothing is pending, so the mode line is untouched; zero-count
-placements are omitted (\"[Q2]\", \"[S1]\").  Mouse-1 opens the queue
-manager.  `context' placement items (host-injected next-step content)
-are not counted, matching dsh web's QueueDock."
-  (if (derived-mode-p 'dsh-emacs-mode)
-      (let* ((counts (dsh-emacs-queue-counts))
-             (q (car counts))
-             (s (cdr counts))
-             (parts (append (unless (zerop q) (list (format "Q%d" q)))
-                            (unless (zerop s) (list (format "S%d" s))))))
-        (if parts
-            (propertize (format " [%s]" (string-join parts " "))
-                        'face 'dsh-emacs-modeline-queue-face
-                        'help-echo "Pending messages (queue/steer); mouse-1 to manage"
-                        'mouse-face 'mode-line-highlight
-                        'local-map (let ((map (make-sparse-keymap)))
-                                     (define-key map [mode-line mouse-1]
-                                                 #'dsh-emacs-list-queue)
-                                     map))
-          ""))
-    ""))
+  "Return the pending-input counts, e.g. \" [Q2 S1]\"; empty when none.
+Only queued and steering placements count.  Mouse-1 opens the queue."
+  (if (not (derived-mode-p 'dsh-emacs-mode))
+      ""
+    (let ((counts (dsh-emacs-queue-counts)))
+      (unless (equal counts (car dsh-emacs-modeline--queue-cache))
+        (pcase-let* ((`(,q . ,s) counts)
+                     (parts (append (unless (zerop q) (list (format "Q%d" q)))
+                                    (unless (zerop s) (list (format "S%d" s))))))
+          (setq dsh-emacs-modeline--queue-cache
+                (cons counts
+                      (if parts
+                          (propertize
+                           (format " [%s]" (string-join parts " "))
+                           'face 'dsh-emacs-modeline-queue-face
+                           'help-echo "Pending messages (queue/steer); mouse-1 to manage"
+                           'mouse-face 'mode-line-highlight
+                           'local-map dsh-emacs-modeline--queue-map)
+                        "")))))
+      (cdr dsh-emacs-modeline--queue-cache))))
 
 (defun dsh-emacs-modeline--escape-percent (txt)
   "Escape `%' in TXT for mode-line display, keeping text properties.
@@ -664,13 +675,49 @@ the window's right edge, where right-aligned mode lines (doom-modeline)
 clip the last visible column."
   (if (not (derived-mode-p 'dsh-emacs-mode))
       ""
-    (let ((txt (dsh-emacs-modeline-format)))
-      (if (string-empty-p txt)
-          ""
-        (let ((escaped (dsh-emacs-modeline--escape-percent txt)))
-          (concat (propertize "(" 'face 'dsh-emacs-modeline-separator-face)
-                  escaped
-                  (propertize ") " 'face 'dsh-emacs-modeline-separator-face)))))))
+    ;; INPUTS mirrors every value the segments read: a segment input missing
+    ;; here stays frozen at its cached text.
+    (let* ((spec dsh-emacs-modeline-format-spec)
+           (segments (or (plist-get spec :segments)
+                         '(cwd branch model tokens ctx cost)))
+           (inputs
+            (list dsh-emacs-modeline-enabled
+                  (or (plist-get spec :separator) " • ") segments
+                  (or dsh-emacs--modeline-model
+                      (and (boundp 'dsh-emacs-default-model)
+                           dsh-emacs-default-model))
+                  dsh-emacs--modeline-provider dsh-emacs--modeline-effort
+                  dsh-emacs--modeline-preset dsh-emacs--modeline-cwd
+                  default-directory
+                  (and (memq 'cwd segments)
+                       (or (getenv "HOME") (user-login-name)))
+                  (or dsh-emacs--modeline-branch
+                      (and dsh-emacs-modeline-enabled (memq 'branch segments)
+                           (dsh-emacs-modeline--cached-branch)))
+                  dsh-emacs--modeline-context-pressure
+                  dsh-emacs--modeline-context-window-server
+                  dsh-emacs--modeline-usage)))
+      (unless (and dsh-emacs-modeline--inline-cache
+                   (equal-including-properties
+                    inputs (car dsh-emacs-modeline--inline-cache)))
+        (let* ((txt (dsh-emacs-modeline-format))
+               (inline (if (string-empty-p txt) ""
+                         (concat
+                          (propertize "(" 'face 'dsh-emacs-modeline-separator-face)
+                          (dsh-emacs-modeline--escape-percent txt)
+                          (propertize ") " 'face 'dsh-emacs-modeline-separator-face)))))
+          ;; Snapshot caller-owned strings and lists so an in-place edit
+          ;; differs from the snapshot.  The usage plist is copied the same
+          ;; way, which also hides in-place mutation: every mutator must
+          ;; clear this cache through `dsh-emacs-modeline-update'.
+          (setq dsh-emacs-modeline--inline-cache
+                (cons (mapcar (lambda (value)
+                                (if (or (stringp value) (consp value))
+                                    (copy-sequence value)
+                                  value))
+                              inputs)
+                      inline))))
+      (cdr dsh-emacs-modeline--inline-cache))))
 
 (defun dsh-emacs-modeline--splice (base)
   "Return BASE with the dsh mode-line segments spliced in.
