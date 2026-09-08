@@ -172,7 +172,7 @@ generation and a new clientId.")
 ;; at runtime from teardown only.
 (declare-function dsh-emacs--ml-busy-clear "dsh-emacs-modeline" ())
 (declare-function dsh-emacs--ml-busy-set "dsh-emacs-modeline" (flag))
-(declare-function dsh-emacs-render--flush-stream "dsh-emacs-render" (&optional buffer))
+(declare-function dsh-emacs-render--flush-stream "dsh-emacs-render" (&optional buffer final))
 (declare-function dsh-emacs--command-spinner-clear-all "dsh-emacs-render" ())
 (declare-function dsh-emacs--command-spinner-revive "dsh-emacs-render" ())
 ;; Runtime dependencies defined in dsh-emacs.el / dsh-emacs-render.el.
@@ -838,7 +838,7 @@ reconnect is re-armed and another connect scheduled."
     (when (buffer-live-p chat)
       (with-current-buffer chat
         (when (fboundp 'dsh-emacs-render--flush-stream)
-          (dsh-emacs-render--flush-stream))
+          (dsh-emacs-render--flush-stream nil t))
         (when (timerp dsh-emacs--event-reconnect-timer)
           (cancel-timer dsh-emacs--event-reconnect-timer))
         (dsh-emacs-events--health-stop)

@@ -793,7 +793,7 @@ miss the entry is cleaned up.")
 (defun dsh-emacs-render--reset-tool-tracking ()
   "Reset tool tracking state. Called on full transcript reload."
   (dsh-emacs--command-spinner-clear-all)
-  (dsh-emacs-render--flush-stream)
+  (dsh-emacs-render--flush-stream nil t)
   (setq dsh-emacs--streaming-assistant nil
         dsh-emacs--streaming-thinking nil
         dsh-emacs--tool-states (make-hash-table :test 'equal)
@@ -864,29 +864,29 @@ miss the entry is cleaned up.")
   "Return the logical key stored in streaming STATE."
   (plist-get state :key))
 
-(defun dsh-emacs-render--stream-render-region (state &optional force)
-  "Render the Markdown body described by STATE in place.
-Only the body region is narrowed, so the prompt, other messages and tool
-blocks are never touched.  The agent-shell-style watermark and frozen
-properties make already stable spans cheap to revisit while allowing the
-last incomplete Markdown construct to be completed by a later chunk."
+(defun dsh-emacs-render--stream-render-region (state &optional force final)
+  "Format STATE's ready Markdown and apply transcript properties there.
+FORCE repairs a replaced body; FINAL also renders unfinished tables.
+Pending raw text already carries transcript properties from insertion."
   (let ((start (marker-position (plist-get state :start)))
         (end (marker-position (plist-get state :end)))
-        render-start)
+        rendered)
     (when (and start end (<= start end))
       (save-excursion
         (save-restriction
-          (goto-char start)
           (narrow-to-region start end)
-          (setq render-start (if force start
-                               (dsh-emacs-markdown--watermark-start)))
           (let ((inhibit-read-only t))
-            (dsh-emacs-markdown-replace-markup :force force))))
-      (let ((body-start render-start)
-            (body-end (marker-position (plist-get state :end)))
-            (event-id (plist-get state :event-id)))
-        (when (and body-start body-end (<= body-start body-end))
-          (let ((inhibit-read-only t))
+            (setq rendered
+                  (dsh-emacs-markdown-replace-markup
+                   :force force :final final
+                   :stream-state
+                   (or (plist-get state :markdown)
+                       (setf (plist-get state :markdown)
+                             (list :scan nil :pending nil :kind nil))))))))
+      (pcase-let ((`(,body-start . ,body-end) rendered))
+        (when (and body-start body-end (< body-start body-end))
+          (let ((inhibit-read-only t)
+                (event-id (plist-get state :event-id)))
             (put-text-property body-start body-end 'read-only t)
             (put-text-property body-start body-end 'front-sticky '(read-only))
             (put-text-property body-start body-end 'rear-nonsticky '(read-only))
@@ -896,18 +896,21 @@ last incomplete Markdown construct to be completed by a later chunk."
               (put-text-property body-start body-end
                                  'dsh-emacs-event-block event-id))))))))
 
-(defun dsh-emacs-render--flush-stream (&optional buffer)
-  "Flush BUFFER's pending Markdown pass and cancel its one-shot timer."
+(defun dsh-emacs-render--flush-stream (&optional buffer final)
+  "Flush BUFFER's pending Markdown pass and cancel its one-shot timer.
+FINAL also finishes deferred markup when no timer is pending."
   (let ((buffer (or buffer (current-buffer))))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (dsh-emacs-render--flush-thinking)
-        (when-let* ((state dsh-emacs--streaming-assistant)
-                    (timer (plist-get state :timer)))
-          (cancel-timer timer)
-          (setf (plist-get state :timer) nil)
-          (dsh-emacs-render--stream-render-region state)
-          (dsh-emacs-render--follow-stream))))))
+        (when-let* ((state dsh-emacs--streaming-assistant))
+          (let ((timer (plist-get state :timer)))
+            (when timer
+              (cancel-timer timer)
+              (setf (plist-get state :timer) nil))
+            (when (or timer final)
+              (dsh-emacs-render--stream-render-region state nil final)
+              (dsh-emacs-render--follow-stream))))))))
 
 (defun dsh-emacs-render--start-assistant-stream (event text)
   "Create or extend the live assistant stream with TEXT from EVENT."
@@ -921,7 +924,7 @@ last incomplete Markdown construct to be completed by a later chunk."
       ;; stream.
       (when (and state
                  (not (equal key (dsh-emacs-render--stream-state-key state))))
-        (dsh-emacs-render--flush-stream)
+        (dsh-emacs-render--flush-stream nil t)
         (setq state nil
               dsh-emacs--streaming-assistant nil))
       (unless state
@@ -942,7 +945,13 @@ last incomplete Markdown construct to be completed by a later chunk."
               ;; leaves a blank gap above it (tools stack the same way).
               (dsh-emacs-ui--consume-blanks-above)
               (setq start (point))
-              (insert text "\n\n")
+              (insert (propertize text
+                                  'read-only t
+                                  'front-sticky '(read-only)
+                                  'rear-nonsticky '(read-only)
+                                  'face 'dsh-emacs-assistant-body-face
+                                  'dsh-emacs-event-block event-id)
+                      "\n\n")
               (setq end (copy-marker (- (point) 2) t))))
           (setq state (list :key key
                             :start (copy-marker start nil)
@@ -983,7 +992,7 @@ pending incremental pass; changed text is replaced and rendered in full."
                       (dsh-emacs-render--stream-state-key state)))
       (let ((text (or final-text "")))
         (if (equal text (apply #'concat (reverse (plist-get state :chunks))))
-            (dsh-emacs-render--flush-stream)
+            (dsh-emacs-render--flush-stream nil t)
           (when-let* ((timer (plist-get state :timer)))
             (cancel-timer timer)
             (setf (plist-get state :timer) nil))
@@ -996,7 +1005,7 @@ pending incremental pass; changed text is replaced and rendered in full."
                 (delete-region start end)
                 (insert text)
                 (set-marker (plist-get state :end) (point)))
-              (dsh-emacs-render--stream-render-region state t)))))
+              (dsh-emacs-render--stream-render-region state t t)))))
       (set-marker (plist-get state :start) nil)
       (set-marker (plist-get state :end) nil)
       (setq dsh-emacs--streaming-assistant nil)
@@ -1916,6 +1925,7 @@ A terminal `turn/end' whose DATA.REASON.KIND is \"error\" (dsh web's
 turn-error node — the provider rejected the run: quota, rate, ...)
 renders as a visible error row; anything else just clears the running
 spinner."
+  (dsh-emacs-render--flush-stream nil t)
   (dsh-emacs-render--close-current-group)
   ;; The turn finished: stop the mode-line running spinner.
   (when (fboundp 'dsh-emacs--ml-busy-set)

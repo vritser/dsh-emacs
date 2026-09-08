@@ -206,9 +206,64 @@ For example:
     (dsh-emacs-markdown-replace-markup)
     (buffer-string)))
 
+(defun dsh-emacs-markdown--stream-end (state)
+  "Return the renderable frontier, advancing STATE over new complete lines.
+STATE is a stream-owned plist with :scan, :pending and :kind slots.
+Markers follow earlier markup replacements.  An unfinished table or fence
+stays raw; :kind is `table' or the opening fence's backtick count."
+  (save-excursion
+    (save-match-data
+      (let* ((scan (or (plist-get state :scan)
+                       (copy-marker (point-min))))
+             (pending (plist-get state :pending))
+             (kind (plist-get state :kind))
+             (pos (marker-position scan)))
+        (goto-char pos)
+        (while (search-forward "\n" nil t)
+          (let ((next (point)))
+            (goto-char pos)
+            (cond
+             ((integerp kind)
+              (when (and (looking-at "[ \t]*\\(`\\{3,\\}\\)")
+                         (>= (- (match-end 1) (match-beginning 1)) kind))
+                (set-marker pending nil)
+                (setq pending nil kind nil)))
+             (t
+              (when (and (eq kind 'table)
+                         (or (not dsh-emacs-markdown-prettify-tables)
+                             (not (looking-at-p "[ \t]*|"))))
+                (set-marker pending nil)
+                (setq pending nil kind nil))
+              (unless (or pending
+                          (get-text-property pos 'dsh-emacs-markdown-frozen))
+                (cond
+                 ((looking-at "[ \t]*\\(`\\{3,\\}\\)")
+                  (setq kind (- (match-end 1) (match-beginning 1))))
+                 ((and dsh-emacs-markdown-prettify-tables
+                       (looking-at-p "[ \t]*|"))
+                  (setq kind 'table)))
+                (when kind (setq pending (copy-marker pos t))))))
+            (setq pos next)
+            (goto-char pos)))
+        (set-marker scan pos)
+        (setf (plist-get state :scan) scan
+              (plist-get state :pending) pending
+              (plist-get state :kind) kind)
+        (goto-char pos)
+        (cond
+         (pending (marker-position pending))
+         ;; A partial opening line must not be styled as inline markup.
+         ((and (not (get-text-property pos 'dsh-emacs-markdown-frozen))
+               (or (looking-at-p "[ \t]*`\\{3,\\}")
+                   (and dsh-emacs-markdown-prettify-tables
+                        (looking-at-p "[ \t]*|"))))
+          pos)
+         (t (point-max)))))))
+
 (cl-defun dsh-emacs-markdown-replace-markup (&key force
                                                     (render-images t)
-                                                    (highlight-blocks t))
+                                                    (highlight-blocks t)
+                                                    stream-state final)
   "Replace Markdown markup in current buffer with propertized text.
 
 Rewrites the buffer in place: markup characters are removed and
@@ -243,73 +298,94 @@ file; nil leaves the markup as-is.  HIGHLIGHT-BLOCKS, when non-nil
 (the default), runs the fenced-block body through the language's
 major-mode font-lock to colour keywords / strings / etc.; nil
 strips the fences and inserts the action label but leaves the
-body un-fontified."
-  (save-excursion
-    (when force
-      (with-silent-modifications
-        (remove-text-properties (point-min) (point-max)
-                                '(dsh-emacs-markdown-watermark nil))))
-    (let ((watermark (dsh-emacs-markdown--watermark-start)))
-      (save-restriction
-        (narrow-to-region watermark (point-max))
-        (let* ((source-ranges (dsh-emacs-markdown--sort-ranges
-                               (dsh-emacs-markdown--make-markers
-                                (dsh-emacs-markdown--source-block-ranges))))
-               (rendered-ranges (dsh-emacs-markdown--make-markers
-                                 (dsh-emacs-markdown--frozen-ranges)))
-               (inline-ranges (dsh-emacs-markdown--make-markers
-                               (dsh-emacs-markdown--inline-code-ranges
-                                :avoid-ranges (dsh-emacs-markdown--sort-ranges
-                                               source-ranges rendered-ranges))))
-               (avoid-ranges (dsh-emacs-markdown--sort-ranges
-                              source-ranges rendered-ranges inline-ranges)))
-          (while (let ((italic-changed (dsh-emacs-markdown--replace-italics
-                                        :avoid-ranges avoid-ranges))
-                       (bold-changed (dsh-emacs-markdown--replace-bolds
-                                      :avoid-ranges avoid-ranges))
-                       (strike-changed (dsh-emacs-markdown--replace-strikethroughs
-                                        :avoid-ranges avoid-ranges)))
-                   (or italic-changed bold-changed strike-changed)))
-          (dsh-emacs-markdown--replace-headers :avoid-ranges avoid-ranges)
-          (dsh-emacs-markdown--style-inline-code :avoid-ranges source-ranges)
-          (dsh-emacs-markdown--replace-links :avoid-ranges avoid-ranges)
-          (when render-images
-            (dsh-emacs-markdown--replace-images :avoid-ranges avoid-ranges)
-            (dsh-emacs-markdown--replace-image-file-paths
-             :avoid-ranges avoid-ranges))
-          (dsh-emacs-markdown--style-dividers :avoid-ranges avoid-ranges)
-          (dsh-emacs-markdown--style-blockquotes :avoid-ranges avoid-ranges)
-          (dsh-emacs-markdown--style-source-blocks
-           :highlight-blocks highlight-blocks)
-          ;; Tables run last so cell content has already been processed by
-          ;; every other pass (bold, italic, links, inline code, etc.).
-          ;; The cell parser respects face and `dsh-emacs-markdown-frozen'
-          ;; so it doesn't mis-split on pipes that got swallowed by other
-          ;; markup.  AVOID-RANGES protects content inside still-open
-          ;; fenced blocks (where the closing fence hasn't streamed in
-          ;; yet) — without it a table inside a code block would render
-          ;; eagerly and the fences would then strip out, leaving a
-          ;; rendered table.  Watermark backs off past any rendered
-          ;; table whose extension is still possible (see
-          ;; `--set-watermark'), so `--find-tables' under the narrow
-          ;; always sees the existing `dsh-emacs-markdown-table-source'
-          ;; needed to fold new rows in.
-          (dsh-emacs-markdown--style-tables :avoid-ranges source-ranges)
-          ;; Mirror every `face' we composed onto `font-lock-face' so our
-          ;; styling survives `font-lock-mode' re-fontification — comint
-          ;; / shell-maker / agent-shell buffers fontify on every output
-          ;; chunk and would otherwise clear our `face' properties.
-          (dsh-emacs-markdown--mirror-face-to-font-lock-face
-           (point-min) (point-max))
-          ;; Tag rendered chars so a yank into another buffer drops the
-          ;; styling, display overrides, internal markers, and keymaps
-          ;; we layered on — paste should give plain chars, not our
-          ;; implementation cruft.
-          (put-text-property (point-min) (point-max)
-                             'yank-handler
-                             (list (lambda (s)
-                                     (insert (substring-no-properties s))))))))
-    (dsh-emacs-markdown--set-watermark)))
+body un-fontified.
+STREAM-STATE, when non-nil, is a stream-owned plist.  Pending fences and
+trailing tables remain raw until complete; FINAL renders the remaining tail
+and releases the scan markers.  Return the (START . END) formatted range."
+  (when (and stream-state (or force final))
+    (dolist (key '(:scan :pending))
+      (when-let* ((marker (plist-get stream-state key)))
+        (set-marker marker nil)
+        (setf (plist-get stream-state key) nil)))
+    (setf (plist-get stream-state :kind) nil))
+  (let* ((end (if (and stream-state (not final))
+                  (dsh-emacs-markdown--stream-end stream-state)
+                (point-max)))
+         (scan (plist-get stream-state :scan))
+         (start (if force (point-min)
+                  (dsh-emacs-markdown--watermark-start))))
+    (unwind-protect
+        (save-restriction
+          (narrow-to-region (point-min) end)
+          (when scan (set-marker-insertion-type scan t))
+          (save-excursion
+            (when force
+              (with-silent-modifications
+                (remove-text-properties (point-min) (point-max)
+                                        '(dsh-emacs-markdown-watermark nil))))
+            (let ((watermark (dsh-emacs-markdown--watermark-start)))
+              (save-restriction
+                (narrow-to-region watermark (point-max))
+                (let* ((source-ranges (dsh-emacs-markdown--sort-ranges
+                                       (dsh-emacs-markdown--make-markers
+                                        (dsh-emacs-markdown--source-block-ranges))))
+                       (rendered-ranges (dsh-emacs-markdown--make-markers
+                                         (dsh-emacs-markdown--frozen-ranges)))
+                       (inline-ranges (dsh-emacs-markdown--make-markers
+                                       (dsh-emacs-markdown--inline-code-ranges
+                                        :avoid-ranges (dsh-emacs-markdown--sort-ranges
+                                                       source-ranges rendered-ranges))))
+                       (avoid-ranges (dsh-emacs-markdown--sort-ranges
+                                      source-ranges rendered-ranges inline-ranges)))
+                  (while (let ((italic-changed (dsh-emacs-markdown--replace-italics
+                                                :avoid-ranges avoid-ranges))
+                               (bold-changed (dsh-emacs-markdown--replace-bolds
+                                              :avoid-ranges avoid-ranges))
+                               (strike-changed (dsh-emacs-markdown--replace-strikethroughs
+                                                :avoid-ranges avoid-ranges)))
+                           (or italic-changed bold-changed strike-changed)))
+                  (dsh-emacs-markdown--replace-headers :avoid-ranges avoid-ranges)
+                  (dsh-emacs-markdown--style-inline-code :avoid-ranges source-ranges)
+                  (dsh-emacs-markdown--replace-links :avoid-ranges avoid-ranges)
+                  (when render-images
+                    (dsh-emacs-markdown--replace-images :avoid-ranges avoid-ranges)
+                    (dsh-emacs-markdown--replace-image-file-paths
+                     :avoid-ranges avoid-ranges))
+                  (dsh-emacs-markdown--style-dividers :avoid-ranges avoid-ranges)
+                  (dsh-emacs-markdown--style-blockquotes :avoid-ranges avoid-ranges)
+                  (dsh-emacs-markdown--style-source-blocks
+                   :highlight-blocks highlight-blocks)
+                  ;; Tables run last so cell content has already been processed by
+                  ;; every other pass (bold, italic, links, inline code, etc.).
+                  ;; The cell parser respects face and `dsh-emacs-markdown-frozen'
+                  ;; so it doesn't mis-split on pipes that got swallowed by other
+                  ;; markup.  AVOID-RANGES protects content inside still-open
+                  ;; fenced blocks (where the closing fence hasn't streamed in
+                  ;; yet) — without it a table inside a code block would render
+                  ;; eagerly and the fences would then strip out, leaving a
+                  ;; rendered table.  Watermark backs off past any rendered
+                  ;; table whose extension is still possible (see
+                  ;; `--set-watermark'), so `--find-tables' under the narrow
+                  ;; always sees the existing `dsh-emacs-markdown-table-source'
+                  ;; needed to fold new rows in.
+                  (dsh-emacs-markdown--style-tables :avoid-ranges source-ranges)
+                  ;; Mirror every `face' we composed onto `font-lock-face' so our
+                  ;; styling survives `font-lock-mode' re-fontification — comint
+                  ;; / shell-maker / agent-shell buffers fontify on every output
+                  ;; chunk and would otherwise clear our `face' properties.
+                  (dsh-emacs-markdown--mirror-face-to-font-lock-face
+                   (point-min) (point-max))
+                  ;; Tag rendered chars so a yank into another buffer drops the
+                  ;; styling, display overrides, internal markers, and keymaps
+                  ;; we layered on — paste should give plain chars, not our
+                  ;; implementation cruft.
+                  (put-text-property (point-min) (point-max)
+                                     'yank-handler
+                                     (list (lambda (s)
+                                             (insert (substring-no-properties s))))))))
+            (dsh-emacs-markdown--set-watermark)
+            (cons start (point-max))))
+      (when scan (set-marker-insertion-type scan nil)))))
 
 (cl-defun dsh-emacs-markdown--replace-bolds (&key avoid-ranges)
   "Replace `**X**' / `__X__' spans in current buffer with bold X.

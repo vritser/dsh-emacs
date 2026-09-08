@@ -1378,6 +1378,109 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                          (if (listp bold-face) bold-face (list bold-face))))
         (dsh-test-pass "chat-prefix-and-markdown-render")))))
 
+;; Streaming tables stay raw until their boundary; open fences only scan
+;; newly arrived lines.  Finalization must still produce the complete body.
+(with-temp-buffer
+  (let* ((event '((data . ((turn . 1) (step . 1)))))
+         (header "| A | B |\n|---|---|\n")
+         (row "| alpha | beta |\n")
+         (renders 0)
+         (render (symbol-function 'dsh-emacs-markdown--render-table)))
+    (cl-letf (((symbol-function 'dsh-emacs-markdown--render-table)
+               (lambda (table) (cl-incf renders) (funcall render table))))
+      (dsh-emacs-render--start-assistant-stream event header)
+      (dotimes (_ 40)
+        (dsh-emacs-render--start-assistant-stream event row)
+        (dsh-emacs-render--flush-stream))
+      (dsh-test-assert "stream-table-defers-reflow"
+        (= renders 0)
+        (string-match-p "| alpha | beta |" (buffer-string)))
+      ;; The last timer has already fired: finalization still needs to render.
+      (dsh-emacs-render--finish-assistant-stream
+       event (concat header (apply #'concat (make-list 40 row))))
+      (dsh-test-assert "stream-table-finalizes-once-without-pending-timer"
+        (= renders 1)
+        (string-match-p "alpha" (buffer-string))
+        (text-property-not-all (point-min) (point-max)
+                               'dsh-emacs-markdown-table-source nil)))))
+
+(with-temp-buffer
+  (let* ((event '((data . ((turn . 1) (step . 1)))))
+         (header "```elisp\n")
+         (row "(message \"**literal**\")\n")
+         (scanned 0)
+         (scan (symbol-function 'dsh-emacs-markdown--source-block-ranges)))
+    (cl-letf (((symbol-function 'dsh-emacs-markdown--source-block-ranges)
+               (lambda ()
+                 (cl-incf scanned (- (point-max) (point-min)))
+                 (funcall scan))))
+      (dsh-emacs-render--start-assistant-stream event header)
+      (dotimes (_ 80)
+        (dsh-emacs-render--start-assistant-stream event row)
+        (dsh-emacs-render--flush-stream)))
+    (dsh-test-assert "stream-open-fence-avoids-repeated-full-scans"
+      (< scanned 1000)
+      (string-match-p (regexp-quote row) (buffer-string)))
+    (dsh-emacs-render--start-assistant-stream event "```\n")
+    (dsh-emacs-render--flush-stream)
+    (dsh-test-assert "stream-closed-fence-renders-with-literal-body"
+      (not (string-match-p "```" (buffer-string)))
+      (string-match-p (regexp-quote "**literal**") (buffer-string))
+      (text-property-not-all (point-min) (point-max)
+                             'dsh-emacs-markdown-source-block-body nil))
+    (dsh-emacs-render--finish-assistant-stream
+     event (concat header (apply #'concat (make-list 80 row)) "```\n"))))
+
+;; Chunk boundaries do not change final Markdown text or its visual faces.
+(cl-loop for (tag source) in
+         '(("mixed" "**before**\n| A | B |\n|---|---|\n| `a|b` | **中** |\n\nafter\n")
+           ("table-tail" "| A | B |\n|---|---|\n|x|y|")
+           ("fence" "```elisp\n(message \"**literal**\")\n```")
+           ("nested-fence" "````text\n```\nbody\n```\n````\n")
+           ("inline-and-table" "`inline`\n|a|b|\n|c|d|\n\n```text\nraw\n```\n"))
+         do
+         (let ((expected (with-temp-buffer
+                    (insert source)
+                    (dsh-emacs-markdown-replace-markup)
+                    (buffer-string))))
+    (dolist (size '(1 2 7 31))
+      (with-temp-buffer
+        (let ((state (list :scan nil :pending nil :kind nil))
+              (pos 0))
+          (while (< pos (length source))
+            (goto-char (point-max))
+            (insert (substring source pos (min (+ pos size) (length source))))
+            (setq pos (+ pos size))
+            (dsh-emacs-markdown-replace-markup :stream-state state))
+          (dsh-emacs-markdown-replace-markup :stream-state state :final t)
+          (let ((actual (buffer-string)))
+            (dsh-test-assert (format "stream-markdown-parity-%s-%s" tag size)
+              (equal (substring-no-properties actual)
+                     (substring-no-properties expected))
+              (cl-loop for i below (min (length actual) (length expected))
+                       always (equal (get-text-property i 'face actual)
+                                     (get-text-property i 'face expected)))
+              (null (plist-get state :scan))
+              (null (plist-get state :pending)))))))))
+
+;; Teardown finalizes deferred markup even after the formatting timer fired.
+(dolist (boundary '(turn-end disconnect reset switch))
+  (with-temp-buffer
+    (let ((event '((data . ((turn . 1) (step . 1)))))
+          (table "|a|b|\n|c|d|\n"))
+      (dsh-emacs-render--start-assistant-stream event table)
+      (dsh-emacs-render--flush-stream)
+      (pcase boundary
+        ('turn-end (dsh-emacs-render-turn-end '((data . nil))))
+        ('disconnect (dsh-emacs-events-disconnect))
+        ('reset (dsh-emacs-render--reset-tool-tracking))
+        ('switch (dsh-emacs-render--start-assistant-stream
+                  '((data . ((turn . 2) (step . 1)))) "next")))
+      (dsh-test-assert (format "stream-table-finalizes-on-%s" boundary)
+        (text-property-not-all (point-min) (point-max)
+                               'dsh-emacs-markdown-table-source nil))
+      (dsh-emacs-render--flush-stream nil t))))
+
 ;; --- 测试 21: assistant 流式增量渲染 ---
 (with-temp-buffer
   (dsh-emacs-mode)

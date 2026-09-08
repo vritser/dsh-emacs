@@ -190,8 +190,13 @@ a goal does not hide Next Message. Both rows share Composer's read-only region.
 Streaming text is inserted immediately. After the first chunk, Markdown
 formatting is coalesced over 50ms using one pending timer per chat; final
 messages flush it synchronously. Hidden command rows do not repaint for
-spinner animation. Large unfinished code blocks and extending tables can
-still require a substantial single formatting pass.
+spinner animation.
+
+An unfinished code fence or table stays raw source until it ends: the
+formatter stops at the block's start and reformats only the text before it, so
+a growing block is never re-parsed chunk by chunk. A table renders once — at
+the next non-table line or the final message — and a fence when its closing
+fence arrives.
 
 The Markdown renderer is modeled on `agent-shell-markdown` and uses
 replacement-style rendering: Markdown marker characters are removed and face

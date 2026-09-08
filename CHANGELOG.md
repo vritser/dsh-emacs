@@ -199,6 +199,11 @@ minor) and stay undated until the release is cut.
 
 ### Changed
 
+- **A streamed table renders when it ends, not row by row**: while rows are
+  still arriving the table shows its raw `| … |` text, then renders in one
+  pass at the next non-table line or the final message.  Unfinished code
+  fences keep showing raw source as before
+  (rationale: postmortem/028).
 - **Model-picker prompt names the current provider too**: `C-c C-m` now prompts
   `Select model (current <provider>/<model>):` instead of only the model, so a
   model id that several providers offer is unambiguous at a glance.
@@ -217,6 +222,11 @@ minor) and stay undated until the release is cut.
   editing.
 
 ### Fixed
+
+- **Streamed Markdown formats incrementally**: the live body scan advances
+  over newly arrived lines only and leaves an unfinished fence or table to the
+  final pass, so a growing block is no longer re-parsed on every chunk
+  (rationale: postmortem/028).
 
 - **Mode-line redraws allocate less**: percent escaping preserves styled
   text without repeatedly copying the entire growing status string, reducing
