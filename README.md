@@ -163,3 +163,9 @@ and flushes when the final message arrives. Hidden command rows skip
 animation redraws. During a quiet running turn, WebSocket ping/pong checks
 transport health before reconnecting, so long model or tool waits do not
 by themselves cause history replay. See [architecture](docs/architecture.md).
+
+Table width probes measure beyond the window edge and leave chat
+text, undo history and edit counters untouched on every supported Emacs
+version. Table font metrics are shared only within one render, with the
+destination window's font context. Height measurement on
+Emacs 29+ also avoids temporarily switching the displayed buffer.

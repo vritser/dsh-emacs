@@ -1,6 +1,9 @@
 # 030 — Reduce Repeated Draft and Table Work
 
-Implementation commit: `perf: avoid copying drafts for reference detection`.
+Implementation commits:
+
+- `perf: avoid copying drafts for reference detection`
+- `perf: streamline table layout measurements`
 
 ## Background
 

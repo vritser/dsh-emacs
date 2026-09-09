@@ -281,6 +281,22 @@ for comparison with the final message; an unchanged final message keeps the
 painted body. The WebSocket decoder walks each input batch by byte offset,
 retains its incomplete tail once, and joins message fragments only at FIN.
 
+Table width measurement belongs to Markdown. On Emacs 31 it uses the public
+`string-pixel-width` buffer argument and selects the destination window during
+measurement to preserve frame/font context without editing chat text.
+Older versions measure in a temporary buffer with the destination's font
+settings: Emacs 29–30 use `buffer-text-pixel-size`, while Emacs 27–28 briefly
+display the probe under a saved window configuration. Every path measures
+beyond the window width without changing the chat buffer's edit counter. See
+[034](../postmortem/034-full-table-pixel-widths.md).
+
+Font measurements are shared through one dynamically bound, render-scoped
+plist. Space widths, face ratios and character-height scales cannot outlive
+the table render. Height probes copy the destination's face remapping and
+default properties, using `buffer-text-pixel-size` where available (Emacs 29+)
+or a saved window configuration on older versions. See
+[035](../postmortem/035-table-render-metrics.md).
+
 ## Event-stream reliability
 
 - **No native compile**: `dsh-emacs-events.el` declares a file-level

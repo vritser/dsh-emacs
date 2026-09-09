@@ -199,6 +199,9 @@ minor) and stay undated until the release is cut.
 
 ### Changed
 
+- **Faster table wrapping**: each cell character's display width is measured
+  once and reused when choosing line breaks, preserving faces and existing
+  Chinese/emoji layout (rationale: postmortem/030).
 - **Faster reference detection in long drafts**: `@` completion and its typing
   watcher inspect the buffer directly and copy only the active token,
   reducing allocation and garbage collection after large pastes
@@ -227,6 +230,18 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Table measurements follow the destination font**: each render shares
+  fresh metrics, so later renders no longer reuse stale font/scale values.
+  Emacs 29+ height probes also avoid switching the displayed buffer
+  (rationale: postmortem/035).
+- **Table widths are no longer capped at the window edge**: long styled or
+  non-ASCII cells use their full pixel width. On Emacs 31, width measurement
+  also avoids temporary edits to the chat buffer; Emacs 27.1 remains supported
+  (rationale: postmortem/034).
+- **Table width probes preserve draft and undo history**: temporary measurement
+  text is removed even if pixel measurement fails; restoring the modified
+  flag no longer explicitly refreshes the mode line
+  (rationale: postmortem/033).
 - **Streamed Markdown formats incrementally**: the live body scan advances
   over newly arrived lines only and leaves an unfinished fence or table to the
   final pass, so a growing block is no longer re-parsed on every chunk

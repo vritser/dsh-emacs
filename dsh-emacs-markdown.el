@@ -808,11 +808,14 @@ left untouched."
                                '(dsh-emacs-markdown-frozen t
                                  rear-nonsticky (dsh-emacs-markdown-frozen))))))))
 
+(defvar dsh-emacs-markdown--render-window nil
+  "Destination window when preparing Markdown outside the chat buffer.")
+
 (defun dsh-emacs-markdown--display-width ()
   "Return a usable display width for divider rendering.
-Tries the selected window's body width and falls back to 80
+Uses the destination (or selected) window's body width and falls back to 80
 characters when no usable window is available (e.g. batch)."
-  (or (ignore-errors (window-body-width))
+  (or (ignore-errors (window-body-width dsh-emacs-markdown--render-window))
       80))
 
 (cl-defun dsh-emacs-markdown--style-source-blocks (&key (highlight-blocks t))
@@ -1215,52 +1218,44 @@ are still parsed as cell separators."
             (goto-char end)))))
     (nreverse cells)))
 
-(defvar-local dsh-emacs-markdown--table-char-pixel-cache nil
-  "Cons cell (FONT-WIDTH . SPACE-PIXELS).
-Caches the rendered pixel width of a single space in the buffer;
-invalidated when the font width changes (e.g. text scaling).
-Stored in the destination buffer (the one displayed in the
-window passed to the measurement helpers), so cache lookups are
-per-destination.")
+(defvar dsh-emacs-markdown--table-metrics nil
+  "Measurements shared only during one table render.
+A plist with :space, :heights and :faces slots; nil outside a render.
+Render-scoped ownership avoids stale values after font or window changes.")
+
+(declare-function string-pixel-width "subr-x" (string &optional buffer))
 
 (defun dsh-emacs-markdown--table-measure-string (str window)
-  "Return real pixel width of STR rendered at point-max of WINDOW's buffer.
-
-Briefly inserts STR, measures with `window-text-pixel-size', and
-deletes; `inhibit-modification-hooks' and the modified flag are
-preserved so callers never observe the mutation."
-  (with-current-buffer (window-buffer window)
-    (let ((inhibit-read-only t)
-          (inhibit-modification-hooks t)
-          (modified (buffer-modified-p))
-          real)
-      (save-excursion
-        (goto-char (point-max))
-        (let ((m (point-marker)))
-          (set-marker-insertion-type m nil)
+  "Return the full pixel width of STR using WINDOW's font context.
+Measure outside the destination buffer so its change ticks stay intact.
+Before Emacs 29, temporarily display the probe in WINDOW, restoring the
+window configuration even on error."
+  ;; The BUFFER argument preserving face remapping was added in Emacs 31.
+  (if (and (>= emacs-major-version 31) (fboundp 'string-pixel-width))
+      (with-selected-window window
+        (string-pixel-width str (window-buffer window)))
+    (with-selected-window window
+      (let ((source (current-buffer)))
+        (with-temp-buffer
+          (dolist (variable '(face-remapping-alist char-property-alias-alist
+                              default-text-properties))
+            (set (make-local-variable variable)
+                 (buffer-local-value variable source)))
           (insert str)
-          (setq real (car (window-text-pixel-size window m (point))))
-          (delete-region m (point))
-          (set-marker m nil)))
-      (set-buffer-modified-p modified)
-      real)))
+          (if (and (>= emacs-major-version 29) (fboundp 'buffer-text-pixel-size))
+              (car (buffer-text-pixel-size (current-buffer) window t))
+            ;; This saves the selected frame, which must be WINDOW's frame.
+            (save-window-excursion
+              (set-window-buffer window (current-buffer))
+              (car (window-text-pixel-size window (point-min) (point-max) t)))))))))
 
 (defun dsh-emacs-markdown--table-char-pixel-width (window)
-  "Return real pixel width of a single space in WINDOW, cached.
-Cache lives in the destination buffer and is invalidated when
-its font width changes."
-  (with-current-buffer (window-buffer window)
-    (let ((fw (window-font-width window)))
-      (if (and dsh-emacs-markdown--table-char-pixel-cache
-               (= fw (car dsh-emacs-markdown--table-char-pixel-cache)))
-          (cdr dsh-emacs-markdown--table-char-pixel-cache)
-        (let ((sw (dsh-emacs-markdown--table-measure-string " " window)))
-          (setq dsh-emacs-markdown--table-char-pixel-cache (cons fw sw))
-          sw)))))
-
-(defvar dsh-emacs-markdown--table-default-line-height nil
-  "Cached default line height in pixels.
-Computed once per session by `dsh-emacs-markdown--table-char-height-scale'.")
+  "Return the pixel width of a space in WINDOW, shared within this render."
+  (or (plist-get dsh-emacs-markdown--table-metrics :space)
+      (let ((width (dsh-emacs-markdown--table-measure-string " " window)))
+        (when dsh-emacs-markdown--table-metrics
+          (setf (plist-get dsh-emacs-markdown--table-metrics :space) width))
+        width)))
 
 (defconst dsh-emacs-markdown--table-min-height-scale 0.75
   "Minimum height scale factor.
@@ -1269,17 +1264,26 @@ unscaled — shrinking text below 75% makes it unreadable.  This
 allows emoji (~0.77) and CJK (~0.90) through while skipping
 scripts with tall ascenders/descenders like Arabic (~0.63).")
 
-(defvar dsh-emacs-markdown--table-height-scale-cache (make-hash-table :test 'eq)
-  "Cache of height scale factors keyed by character.")
+(declare-function buffer-text-pixel-size "xdisp.c"
+                  (&optional buffer window x-limit y-limit))
 
-(defun dsh-emacs-markdown--table-measure-line-height (win str)
-  "Return the rendered pixel height of STR as a single line in WIN."
-  (with-temp-buffer
-    (set-window-buffer win (current-buffer))
-    (insert str "\n")
-    (cdr (window-text-pixel-size win 1 3))))
+(defun dsh-emacs-markdown--table-measure-line-height (window str)
+  "Return the rendered pixel height of STR in WINDOW's font context.
+Emacs 29 can measure an undisplayed buffer; older versions preserve the
+window configuration around a temporary buffer display."
+  (let ((source (window-buffer window)))
+    (with-temp-buffer
+      (dolist (variable '(face-remapping-alist char-property-alias-alist
+                          default-text-properties))
+        (set (make-local-variable variable) (buffer-local-value variable source)))
+      (insert str)
+      (if (fboundp 'buffer-text-pixel-size)
+          (cdr (buffer-text-pixel-size (current-buffer) window t))
+        (save-window-excursion
+          (set-window-buffer window (current-buffer))
+          (cdr (window-text-pixel-size window (point-min) (point-max) t)))))))
 
-(defun dsh-emacs-markdown--table-char-height-scale (char)
+(defun dsh-emacs-markdown--table-char-height-scale (char window)
   "Return the display height scale needed for CHAR, or nil if none.
 
 Color emoji and CJK glyphs typically render taller than the default
@@ -1291,51 +1295,50 @@ column lines look broken.  Scaling tall glyphs down via the
 all rows so borders connect cleanly.
 
 The needed scale is just `default-h / char-h' — the factor that
-brings the glyph back to the default height.  Results are cached."
-  (let ((cached (gethash char dsh-emacs-markdown--table-height-scale-cache
-                         'miss)))
+brings the glyph back to the default height in WINDOW.
+Results are shared within the current table render."
+  (let* ((cache (plist-get dsh-emacs-markdown--table-metrics :heights))
+         (cached (if cache (gethash char cache 'miss) 'miss)))
     (if (eq cached 'miss)
-        (let ((scale
-               (let ((win (selected-window))
-                     (orig-buf (window-buffer)))
-                 (unwind-protect
-                     (let* ((default-h
-                             (or dsh-emacs-markdown--table-default-line-height
-                                 (setq dsh-emacs-markdown--table-default-line-height
-                                       (dsh-emacs-markdown--table-measure-line-height
-                                        win "A"))))
-                            (char-h (dsh-emacs-markdown--table-measure-line-height
-                                     win (string char))))
-                       (when (> char-h default-h)
-                         (let ((ratio (/ (float default-h) char-h)))
-                           (and (>= ratio
-                                    dsh-emacs-markdown--table-min-height-scale)
-                                ratio))))
-                   (set-window-buffer win orig-buf)))))
-          (puthash char scale dsh-emacs-markdown--table-height-scale-cache)
+        (let* ((default-h
+                (or (and cache (gethash 'default cache))
+                    (let ((height (dsh-emacs-markdown--table-measure-line-height
+                                   window "A")))
+                      (when cache (puthash 'default height cache))
+                      height)))
+               (char-h (dsh-emacs-markdown--table-measure-line-height
+                        window (string char)))
+               (scale (when (> char-h default-h)
+                        (let ((ratio (/ (float default-h) char-h)))
+                          (and (>= ratio dsh-emacs-markdown--table-min-height-scale)
+                               ratio)))))
+          (when cache (puthash char scale cache))
           scale)
       cached)))
 
-(defun dsh-emacs-markdown--table-apply-height-scaling (str)
+(defun dsh-emacs-markdown--table-apply-height-scaling (str window)
   "Add display height scaling to tall characters in STR.
 Returns a new string with `display' `(height N)' on glyphs that
 would otherwise cause uneven row heights — emoji, CJK, etc.
-ASCII-only strings short-circuit and are returned unchanged."
-  (if (or (not (display-graphic-p))
+ASCII-only strings short-circuit and are returned unchanged.
+WINDOW supplies the font context."
+  (if (or (not (window-live-p window))
+          (not (display-graphic-p (window-frame window)))
           (string-match-p (rx bos (* ascii) eos) str))
       str
     (let ((result (copy-sequence str))
           (len (length str)))
       (dotimes (i len)
         (let* ((ch (seq-elt result i))
-               (scale (dsh-emacs-markdown--table-char-height-scale ch)))
+               (scale (unless (< ch 128)
+                        (dsh-emacs-markdown--table-char-height-scale ch window))))
           ;; Also scale a base char that's about to be widened by VS-16
           ;; (forces emoji presentation, which is what makes ⚠ become ⚠️).
           (unless scale
             (when (and (< (1+ i) len)
                        (= (seq-elt result (1+ i)) #xFE0F))
               (setq scale (dsh-emacs-markdown--table-char-height-scale
-                           #xFE0F))))
+                           #xFE0F window))))
           (when scale
             (put-text-property i (1+ i) 'display
                                `(height ,scale)
@@ -1349,7 +1352,7 @@ ASCII content with no face properties uses the cheap
 `string-width'.  Non-ASCII content, or ASCII content carrying a
 `face' property (whose font may render at a different pixel
 width — e.g. a theme styling inline-code with a wider family),
-routes through `window-text-pixel-size' so column widths reflect
+uses full pixel measurement so column widths reflect
 the actual rendered pixel width rather than a `string-width'
 approximation.  Mixing the two paths within a column (some rows
 ASCII-padded, some pixel-padded) accumulates fractional drift on
@@ -1358,7 +1361,7 @@ pipes between rows."
   (if (and window
            (window-live-p window)
            (fboundp 'window-text-pixel-size)
-           (display-graphic-p)
+           (display-graphic-p (window-frame window))
            (or (not (string-match-p (rx bos (* ascii) eos) str))
                (dsh-emacs-markdown--text-has-face-p str)))
       (condition-case nil
@@ -1414,33 +1417,24 @@ different pixel width than `string-width' reports."
   (or (get-text-property 0 'face text)
       (next-single-property-change 0 'face text)))
 
-(defvar-local dsh-emacs-markdown--table-face-width-cache nil
-  "Hash table mapping face value → pixel-width ratio vs unfaced text.
-Cache lives in the destination buffer so per-buffer font settings
-(text scaling, face remapping) get their own ratios.  Lazily
-initialized.")
-
 (defun dsh-emacs-markdown--table-face-width-ratio (face window)
   "Return pixel-width ratio of FACE-styled text vs unfaced text in WINDOW.
 A ratio of 1.0 means FACE doesn't affect rendered char width.
-Cached per face in the destination buffer.
+Shared per face within the current table render.
 
 Ratios are always positive floats, so `nil' from `gethash' reliably
 means \"not cached yet\" — no sentinel needed."
-  (with-current-buffer (window-buffer window)
-    (unless dsh-emacs-markdown--table-face-width-cache
-      (setq dsh-emacs-markdown--table-face-width-cache
-            (make-hash-table :test 'equal)))
-    (or (gethash face dsh-emacs-markdown--table-face-width-cache)
+  (let ((cache (plist-get dsh-emacs-markdown--table-metrics :faces)))
+    (or (and cache (gethash face cache))
         (let* ((sample "MMMMMMMMMM")
                (plain-px (dsh-emacs-markdown--table-measure-string
-                          sample window)))
-          (puthash face
-                   (if (zerop plain-px) 1.0
-                     (/ (float (dsh-emacs-markdown--table-measure-string
-                                (propertize sample 'face face) window))
-                        plain-px))
-                   dsh-emacs-markdown--table-face-width-cache)))))
+                          sample window))
+               (ratio (if (zerop plain-px) 1.0
+                        (/ (float (dsh-emacs-markdown--table-measure-string
+                                   (propertize sample 'face face) window))
+                           plain-px))))
+          (when cache (puthash face ratio cache))
+          ratio))))
 
 (cl-defun dsh-emacs-markdown--table-wrap-char-width (text pos &optional window)
   "Return the display width contribution of the char at POS in TEXT.
@@ -1464,7 +1458,7 @@ overflow an N-cell column and push the right pipe out of line."
          (base (if (= ch #xFE0F) 1 (char-width ch))))
     (if-let* ((face (and window
                          (window-live-p window)
-                         (display-graphic-p)
+                         (display-graphic-p (window-frame window))
                          (fboundp 'window-text-pixel-size)
                          (get-text-property pos 'face text))))
         (condition-case nil
@@ -1472,18 +1466,6 @@ overflow an N-cell column and push the right pipe out of line."
                      face window))
           (error base))
       base)))
-
-(defun dsh-emacs-markdown--table-wrap-string-width (text window)
-  "Return face-aware display width of TEXT in cells.
-Like `string-width' but, when WINDOW is graphic, scales each char
-by its face's measured pixel-width ratio so the result tracks the
-rendered width rather than the unstyled char count."
-  (let ((sum 0))
-    (dotimes (i (length text))
-      (setq sum (+ sum
-                   (dsh-emacs-markdown--table-wrap-char-width
-                    text i window))))
-    sum))
 
 (cl-defun dsh-emacs-markdown--table-wrap-text (text width &optional window)
   "Wrap TEXT to fit within WIDTH, returning a list of lines.
@@ -1500,54 +1482,50 @@ any `face' property's pixel-width ratio so wrap lines fit the
 column in pixel terms — themes that style inline-code with a
 different font would otherwise produce wrap lines whose pixel
 width exceeds the column budget, drifting the right pipe."
-  (cond
-   ((or (null text) (string-empty-p text)) (list ""))
-   ((<= (dsh-emacs-markdown--table-wrap-string-width text window)
-        ;; Subtract VS-16 occurrences from WIDTH for the fit check —
-        ;; each VS-16 widens its base char by 1 cell beyond what
-        ;; `string-width' reports, so the effective budget shrinks
-        ;; by one per VS-16 present.
-        (- width
-           (seq-count (lambda (c) (= c #xFE0F)) text)))
-    (list text))
-   (t
-    (let ((lines '())
-          (pos 0)
-          (len (length text)))
-      (while (< pos len)
-        ;; Greedily consume chars until adding the next one would
-        ;; exceed WIDTH (using VS-16-aware widths).
-        (let ((end-pos pos)
-              (line-width 0))
-          (while (and (< end-pos len)
-                      (<= (+ line-width
-                             (dsh-emacs-markdown--table-wrap-char-width
-                              text end-pos window))
-                          width))
-            (setq line-width
-                  (+ line-width
-                     (dsh-emacs-markdown--table-wrap-char-width
-                      text end-pos window)))
-            (setq end-pos (1+ end-pos)))
-          ;; Make sure at least one char advances even when the very
-          ;; first char already exceeds WIDTH (e.g. wide glyph).
-          (when (= end-pos pos)
-            (setq end-pos (1+ pos)))
-          ;; Try to break at the last whitespace within [pos, end-pos).
-          (let ((break-pos end-pos))
-            (when (< end-pos len)
-              (let ((scan (1- end-pos)))
-                (while (and (> scan pos)
-                            (not (memq (seq-elt text scan) '(?\s ?\t))))
-                  (setq scan (1- scan)))
-                (when (> scan pos)
-                  (setq break-pos (1+ scan)))))
-            (push (string-trim-right (substring text pos break-pos)) lines)
-            (setq pos break-pos)
-            (while (and (< pos len)
-                        (memq (seq-elt text pos) '(?\s ?\t)))
-              (setq pos (1+ pos))))))
-      (nreverse lines)))))
+  (if (or (null text) (string-empty-p text))
+      (list "")
+    (let* ((len (length text))
+           (widths (make-vector len 0))
+           (total 0)
+           (selectors 0))
+      ;; Reuse each face-aware measurement for the fit check and wrapping,
+      ;; including characters revisited after backing up to a word boundary.
+      (dotimes (i len)
+        (let ((char-width (dsh-emacs-markdown--table-wrap-char-width text i window)))
+          (aset widths i char-width)
+          (setq total (+ total char-width)))
+        (when (= (aref text i) #xFE0F)
+          (setq selectors (1+ selectors))))
+      (if (<= total (- width selectors))
+          (list text)
+        (let ((lines nil)
+              (pos 0))
+          (while (< pos len)
+            ;; Greedily consume chars using the measured widths.
+            (let ((end-pos pos)
+                  (line-width 0))
+              (while (and (< end-pos len)
+                          (<= (+ line-width (aref widths end-pos)) width))
+                (setq line-width (+ line-width (aref widths end-pos))
+                      end-pos (1+ end-pos)))
+              ;; A glyph wider than the column must still make progress.
+              (when (= end-pos pos)
+                (setq end-pos (1+ pos)))
+              ;; Prefer the last whitespace within [pos, end-pos).
+              (let ((break-pos end-pos))
+                (when (< end-pos len)
+                  (let ((scan (1- end-pos)))
+                    (while (and (> scan pos)
+                                (not (memq (aref text scan) '(?\s ?\t))))
+                      (setq scan (1- scan)))
+                    (when (> scan pos)
+                      (setq break-pos (1+ scan)))))
+                (push (string-trim-right (substring text pos break-pos)) lines)
+                (setq pos break-pos)
+                (while (and (< pos len)
+                            (memq (aref text pos) '(?\s ?\t)))
+                  (setq pos (1+ pos))))))
+          (nreverse lines))))))
 
 (cl-defun dsh-emacs-markdown--pad-table-string (&key str width window force-pixel)
   "Pad STR with spaces to reach WIDTH columns.
@@ -1568,7 +1546,7 @@ via different paths and drift sub-pixel on their right edge."
   (if (and window
            (window-live-p window)
            (fboundp 'window-text-pixel-size)
-           (display-graphic-p)
+           (display-graphic-p (window-frame window))
            (or force-pixel
                (not (string-match-p (rx bos (* ascii) eos) str))
                (dsh-emacs-markdown--text-has-face-p str)))
@@ -1716,7 +1694,7 @@ containing emoji/CJK line up with the column's right border."
               (processed-cells nil))
           (dolist (cell cells)
             (let* ((processed (dsh-emacs-markdown--table-apply-height-scaling
-                               (map-elt cell :content)))
+                               (map-elt cell :content) window))
                    (dw (dsh-emacs-markdown--table-display-width
                         :str processed :window window)))
               (push processed processed-cells)
@@ -1771,7 +1749,8 @@ rendered region from inheriting either of our two properties."
          ;; measurement of non-ASCII cells.  This is the window into
          ;; which we're rendering; the render-table-source helper
          ;; forwards it through to width / padding measurement.
-         (window (or (get-buffer-window (current-buffer))
+         (window (or dsh-emacs-markdown--render-window
+                     (get-buffer-window (current-buffer))
                      (selected-window)))
          (rendered (dsh-emacs-markdown--render-table-source
                     :source source :window window))
@@ -1831,7 +1810,12 @@ prone to a few-pixel drift on emoji-heavy tables."
     ;; cause `forward-line' / `line-end-position' in the parsers below
     ;; to stop at field boundaries and silently drop rows.
     (setq-local inhibit-field-text-motion t)
-    (let* ((rows (dsh-emacs-markdown--collect-table-rows))
+    (let* ((dsh-emacs-markdown--render-window
+            (or window dsh-emacs-markdown--render-window))
+           (dsh-emacs-markdown--table-metrics
+            (list :space nil :heights (make-hash-table :test 'eq)
+                  :faces (make-hash-table :test 'equal)))
+           (rows (dsh-emacs-markdown--collect-table-rows))
            (separator-row-num (dsh-emacs-markdown--find-separator-row-num rows))
            (preprocessed (dsh-emacs-markdown--preprocess-table
                           :rows rows :window window))

@@ -187,6 +187,28 @@ a goal does not hide Next Message. Both rows share Composer's read-only region.
 
 ## Markdown rendering
 
+Pixel width probes measure the full string, including content wider than the
+window. Emacs 31 uses `string-pixel-width` with the destination buffer's face
+remapping and the destination window selected during measurement; this avoids
+editing the chat buffer. Older Emacs versions insert the string into a
+temporary buffer with the destination's font settings. Emacs 29–30 measure
+that buffer without displaying it; Emacs 27–28 temporarily display it under
+a saved window configuration, restored even on error. No path changes the
+chat buffer's edit counter. See
+[033](../postmortem/033-final-face-pass-and-pixel-probes.md) and
+[034](../postmortem/034-full-table-pixel-widths.md).
+
+Table metrics are reused only during one render. New renders use current
+destination fonts, text scaling and remapping; they cannot inherit a prior
+table's cached values. On Emacs 29+, height measurement uses an undisplayed
+buffer with that font context, avoiding window-buffer switches. Existing
+rendered tables are not automatically reflowed when fonts or window widths
+change. See [035](../postmortem/035-table-render-metrics.md).
+
+Table wrapping measures each character's face-aware width once per cell and
+reuses it for fit checks and word boundaries. The measurements live only for
+that wrap call, so later renders use the current text and font settings.
+
 Streaming text is inserted immediately. After the first chunk, Markdown
 formatting is coalesced over 50ms using one pending timer per chat; final
 messages flush it synchronously. Hidden command rows do not repaint for

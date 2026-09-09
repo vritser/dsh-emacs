@@ -1458,6 +1458,149 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (dsh-emacs-render--finish-assistant-stream
      event (concat header (apply #'concat (make-list 80 row)) "```\n"))))
 
+;; Pixel paths use the target frame even when it is not the selected frame.
+(let* ((window (selected-window))
+       (frame (window-frame window)))
+  (cl-letf (((symbol-function 'display-graphic-p)
+             (lambda (&optional target) (eq target frame)))
+            ((symbol-function 'dsh-emacs-markdown--table-measure-string)
+             (lambda (str _window)
+               (cond ((equal str " ") 10)
+                     ((equal str "MMMMMMMMMM")
+                      (if (get-text-property 0 'face str) 200 100))
+                     (t 30)))))
+    (dsh-test-assert "table-pixel-paths-use-the-destination-frame"
+      (= (dsh-emacs-markdown--table-display-width :str "中" :window window) 3)
+      (= (dsh-emacs-markdown--table-wrap-char-width
+          (propertize "a" 'face 'bold) 0 window) 2.0)
+      (equal (dsh-emacs-markdown--pad-table-string
+              :str "中" :width 4 :window window) "中 "))))
+
+;; Font measurements are shared within one table, never across renders.
+(save-window-excursion
+  (with-temp-buffer
+    (let* ((window (split-window-right))
+           (source (concat "| " (propertize "AAAA" 'face 'bold)
+                           " | 中文 |\n|---|---|\n| plain | 中文 |\n"))
+           (default-height 16)
+           (spaces 0)
+           (faces 0)
+           height-windows first second)
+      (set-window-buffer window (current-buffer))
+      (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+                ((symbol-function 'dsh-emacs-markdown--table-measure-line-height)
+                 (lambda (win str)
+                   (push win height-windows)
+                   (if (equal str "A") default-height 20)))
+                ((symbol-function 'dsh-emacs-markdown--table-measure-string)
+                 (lambda (str _window)
+                   (when (equal str " ") (cl-incf spaces))
+                   (when (and (equal str "MMMMMMMMMM")
+                              (get-text-property 0 'face str))
+                     (cl-incf faces))
+                   (* 10 (string-width str)))))
+        (setq first (dsh-emacs-markdown--render-table-source
+                     :source source :window window)
+              default-height 18
+              second (dsh-emacs-markdown--render-table-source
+                      :source source :window window)))
+      (dsh-test-assert "table-metrics-use-current-render-fonts"
+        (equal (get-text-property (string-match "中" first) 'display first)
+               '(height 0.8))
+        (equal (get-text-property (string-match "中" second) 'display second)
+               '(height 0.9))
+        (= spaces 2)
+        (= faces 2)
+        (cl-every (lambda (win) (eq win window)) height-windows)))))
+
+;; The compatibility pixel probe must measure beyond the window's width.
+(save-window-excursion
+  (with-temp-buffer
+    (set-window-buffer (selected-window) (current-buffer))
+    (let ((emacs-major-version 27)
+          measured)
+      (cl-letf (((symbol-function 'window-text-pixel-size)
+                 (lambda (_window _from _to &optional x-limit &rest _)
+                   (setq measured x-limit)
+                   (cons (if (eq x-limit t) 3500 560) 10))))
+        (dsh-test-assert "table-measure-full-width-on-emacs-27"
+          (= (dsh-emacs-markdown--table-measure-string
+              (make-string 500 ?W) (selected-window)) 3500)
+          (eq measured t))))))
+
+;; Emacs 31 can measure in the destination's font context without editing it.
+(save-window-excursion
+  (with-temp-buffer
+    (insert "draft")
+    (let* ((source (current-buffer))
+           (window (split-window-right))
+           (selected (selected-window))
+           (tick (buffer-modified-tick))
+           (emacs-major-version 31)
+           measured)
+      (set-window-buffer window source)
+      (cl-letf (((symbol-function 'string-pixel-width)
+                 (lambda (str buffer)
+                   (setq measured (list str buffer (selected-window)))
+                   3500)))
+        (let ((width (dsh-emacs-markdown--table-measure-string
+                      (make-string 500 ?W) window)))
+          (dsh-test-assert "table-measure-without-destination-edits"
+            (= width 3500)
+            (equal measured (list (make-string 500 ?W) source window))
+            (= tick (buffer-modified-tick))
+            (eq selected (selected-window))))))))
+
+;; Pixel measurement is temporary even when the display primitive fails.
+(dolist (fail '(nil t))
+  (dolist (modified '(nil t))
+    (save-window-excursion
+      (with-temp-buffer
+        (buffer-enable-undo)
+        (insert (propertize "draft 草稿" 'face 'italic))
+        (goto-char 3)
+        (setq-local face-remapping-alist '((default (:height 1.5) default)))
+        (set-buffer-modified-p modified)
+        (setq buffer-undo-list nil)
+        (let* ((emacs-major-version 27)
+               (selected (selected-window))
+               (window (split-window-right))
+               (source (current-buffer))
+               (tick (buffer-chars-modified-tick))
+               (before (buffer-string))
+               (end (copy-marker (point-max) t))
+               (buffer-read-only t)
+               result caught)
+          (set-window-buffer window (current-buffer))
+          (cl-letf (((symbol-function 'window-text-pixel-size)
+                     (lambda (_window from to &rest _)
+                       (unless (and (not (eq (current-buffer) source))
+                                    (equal face-remapping-alist
+                                           (buffer-local-value
+                                            'face-remapping-alist source))
+                                    (equal (buffer-substring-no-properties from to)
+                                           "probe 中文"))
+                         (error "Wrong measurement range"))
+                       (if fail (error "Measurement failed") '(42 . 10)))))
+            (condition-case err
+                (setq result (dsh-emacs-markdown--table-measure-string
+                              "probe 中文" window))
+              (error (setq caught err))))
+          (dsh-test-assert (format "table-measure-result-%s-%s" fail modified)
+            (if fail (equal caught '(error "Measurement failed"))
+              (and (null caught) (= result 42))))
+          (dsh-test-assert (format "table-measure-restores-draft-%s-%s" fail modified)
+            (equal-including-properties before (buffer-string))
+            (= tick (buffer-chars-modified-tick))
+            (eq (window-buffer window) source)
+            (eq (selected-window) selected)
+            (= (point) 3)
+            (= end (1+ (length before)))
+            (eq (buffer-modified-p) modified)
+            (null buffer-undo-list)
+            buffer-read-only)
+          (set-marker end nil))))))
+
 ;; Chunk boundaries do not change final Markdown text or its visual faces.
 (cl-loop for (tag source) in
          '(("mixed" "**before**\n| A | B |\n|---|---|\n| `a|b` | **中** |\n\nafter\n")
@@ -12428,6 +12571,36 @@ candidates as the UI would via `all-completions', not by destructuring."
        event (concat "hello" (apply #'concat (make-list 10 " world"))))
       (dsh-test-assert "stream-final-flushes-without-full-rewrite"
         (= calls 2) (= forced 0) (null dsh-emacs--streaming-assistant)))))
+
+;; Table wrapping must measure each character once, retaining layout and faces.
+(dolist (case '(("alpha beta gamma" 8 ("alpha" "beta" "gamma"))
+                ("你好世界 hello" 5 ("你好" "世界" "hello"))
+                ("a⚠️ b" 3 ("a⚠️" "b"))
+                ("abcdefgh" 3 ("abc" "def" "gh"))
+                ("a\tb" 4 ("a" "b"))
+                ("á b" 2 ("á" "b"))
+                ("ab  " 10 ("ab  "))
+                ("界" 1 ("界"))
+                ("" 4 (""))))
+  (pcase-let ((`(,text ,width ,expected) case))
+    (let ((calls 0)
+          (measure (symbol-function 'dsh-emacs-markdown--table-wrap-char-width)))
+      (cl-letf (((symbol-function 'dsh-emacs-markdown--table-wrap-char-width)
+                 (lambda (&rest args)
+                   (setq calls (1+ calls))
+                   (apply measure args))))
+        (dsh-test-assert (format "table-wrap-single-measure-%S" text)
+          (equal (dsh-emacs-markdown--table-wrap-text text width) expected)
+          (= calls (length text)))))))
+(let* ((styled (propertize "WW" 'face 'bold))
+       (text (concat styled " xx")))
+  (cl-letf (((symbol-function 'dsh-emacs-markdown--table-wrap-char-width)
+             (lambda (str pos &optional _window)
+               (if (get-text-property pos 'face str) 2 1))))
+    (dsh-test-assert "table-wrap-preserves-face-dependent-width-and-properties"
+      (equal-including-properties
+       (dsh-emacs-markdown--table-wrap-text text 4)
+       (list styled "xx")))))
 
 ;; Cursor parsing retains a partial tail and handles masks/extended lengths.
 (dolist (size '(0 3 126 65536))
