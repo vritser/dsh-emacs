@@ -55,6 +55,10 @@ another token — `mail@example` — is **not** a trigger. Paths containing
 spaces are inserted in the quoted form (`@"my dir/file"`); typing `@"`
 yourself keeps the quote open after a directory pick so completion descends.
 
+Token detection scans backward in the editable buffer and copies only the
+active token. Large pasted drafts are not copied for each completion check;
+the typing watcher also reuses its first detection result.
+
 ## Four ways to insert a reference
 
 - **Type it**: `@sr` + `C-c C-c` — the mention travels as plain text; no

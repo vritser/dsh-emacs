@@ -199,6 +199,10 @@ minor) and stay undated until the release is cut.
 
 ### Changed
 
+- **Faster reference detection in long drafts**: `@` completion and its typing
+  watcher inspect the buffer directly and copy only the active token,
+  reducing allocation and garbage collection after large pastes
+  (rationale: postmortem/030).
 - **A streamed table renders when it ends, not row by row**: while rows are
   still arriving the table shows its raw `| … |` text, then renders in one
   pass at the next non-table line or the final message.  Unfinished code

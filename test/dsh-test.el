@@ -11418,26 +11418,46 @@ candidates as the UI would via `all-completions', not by destructuring."
               dsh-emacs--reference-sessions nil
               dsh-emacs--reference-pop-token nil))
 
-;; --- 语法：at-token 对齐 web grammar.ts 的 activeAtToken ---
-(let ((t1 (dsh-emacs-reference--at-token "@"))
-      (t2 (dsh-emacs-reference--at-token "hi @fo"))
-      (t3 (dsh-emacs-reference--at-token "@\"my dir/te"))
-      (t4 (dsh-emacs-reference--at-token "a @src/")))
-  (dsh-test-assert "at-token-bare-at"
-    (equal t1 '("@" "" nil)))
-  (dsh-test-assert "at-token-after-whitespace"
-    (equal t2 '("@fo" "fo" nil)))
-  (dsh-test-assert "at-token-quoted-path"
-    (equal t3 '("@\"my dir/te" "my dir/te" t)))
-  (dsh-test-assert "at-token-dir-trailing-slash"
-    (equal t4 '("@src/" "src/" nil))))
+;; A short @ token must not copy the entire preceding draft on each keypress.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (insert (make-string 100000 ?x) " @src/file")
+  (let ((copied 0)
+        (substring (symbol-function 'buffer-substring-no-properties)))
+    (cl-letf (((symbol-function 'buffer-substring-no-properties)
+               (lambda (start end)
+                 (setq copied (+ copied (- end start)))
+                 (funcall substring start end))))
+      (dsh-test-assert "active-token-copies-only-the-token"
+        (equal (dsh-emacs-reference--active-token)
+               '("@src/file" "src/file" nil))
+        (<= copied 20)))))
 
-(let ((t1 (dsh-emacs-reference--at-token "mail@example"))
-      (t2 (dsh-emacs-reference--at-token "foo/bar"))
-      (t3 (dsh-emacs-reference--at-token "@done ")))
-  (dsh-test-assert "at-token-email-not-a-trigger" (null t1))
-  (dsh-test-assert "at-token-mid-word-not-a-trigger" (null t2))
-  (dsh-test-assert "at-token-trailing-space-closes-token" (null t3)))
+;; --- 语法：at-token 对齐 web grammar.ts 的 activeAtToken ---
+(dolist (case '(("bare-at" "@" ("@" "" nil))
+                ("after-whitespace" "hi @fo" ("@fo" "fo" nil))
+                ("quoted-path" "@\"my dir/te" ("@\"my dir/te" "my dir/te" t))
+                ("dir-trailing-slash" "a @src/" ("@src/" "src/" nil))
+                ("email-not-a-trigger" "mail@example" nil)
+                ("mid-word-not-a-trigger" "foo/bar" nil)
+                ("trailing-space-closes-token" "@done " nil)
+                ("quoted-at-is-path-text" "@\"a @b" ("@\"a @b" "a @b" t))
+                ("quote-in-other-token" "x@\"a @b" ("@b" "b" nil))
+                ("multiline-quoted-path" "@\"a\nb" ("@\"a\nb" "a\nb" t))
+                ("last-quote-opens-token" "@\"a @\"b" ("@\"b" "b" t))
+                ("closed-quote-falls-back" "@\"done\"" ("@\"done\"" "\"done\"" nil))
+                ("empty-input" "" nil)))
+  (pcase-let ((`(,name ,text ,expected) case))
+    (with-temp-buffer
+      (insert "@\"outside-input ")
+      (let ((start (point)))
+        (insert text)
+        (let ((end (point)))
+          (insert " after-cursor")
+          (goto-char start)
+          (dsh-test-assert (concat "at-token-" name)
+            (equal (dsh-emacs-reference--at-token start end) expected)
+            (= (point) start)))))))
 
 ;; --- 语法：formatFileMention 对齐 web 的 formatFileMention ---
 (let ((cases

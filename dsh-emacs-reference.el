@@ -210,21 +210,34 @@ keystrokes while an @ reference is in progress keep the cache warm.")
 ;; 语法（对齐 web 的 packages/context/file-reference/src/grammar.ts）
 ;; ---------------------------------------------------------------------------
 
-(defun dsh-emacs-reference--at-token (text)
-  "Return the active @ token ending TEXT, or nil.
+(defun dsh-emacs-reference--at-token (start end)
+  "Return the active @ token in buffer region START..END, or nil.
 Mirrors the web composer grammar (`activeAtToken'): a `@path' or
-`@\"path' token that starts at the beginning of TEXT or after
+`@\"path' token that starts at START or after
 whitespace and runs to its end.  An `@' inside another token (e.g. an
 email address) is not a trigger.  Returns (PREFIX QUERY QUOTED):
 PREFIX the raw token span (\"@…\" or \"@\"…\"), QUERY the path text
-after the marker, QUOTED non-nil for the quoted form."
-  (let ((case-fold-search nil))
-    (or (and (string-match
-              "\\(?:\\`\\|[ \t\r\n\f]\\)\\(@\"\\([^\"]*\\)\\)\\'" text)
-             (list (match-string 1 text) (match-string 2 text) t))
-        (and (string-match
-              "\\(?:\\`\\|[ \t\r\n\f]\\)\\(@\\([^ \t\r\n\f]*\\)\\)\\'" text)
-             (list (match-string 1 text) (match-string 2 text) nil)))))
+after the marker, QUOTED non-nil for the quoted form.
+Scan backward in the buffer and copy only the resulting token."
+  (save-excursion
+    (goto-char end)
+    (let* ((quote (search-backward "\"" start t))
+           ;; Only the last quote can open a quoted token reaching END.
+           (quoted (and quote (> quote start)
+                        (eq (char-before quote) ?@)
+                        (or (= (1- quote) start)
+                            (memq (char-before (1- quote))
+                                  '(?\s ?\t ?\r ?\n ?\f)))
+                        t)))
+      (if quoted
+          (backward-char)
+        (goto-char end)
+        (skip-chars-backward "^ \t\r\n\f" start))
+      (when (and (< (point) end) (eq (char-after) ?@))
+        (list (buffer-substring-no-properties (point) end)
+              (buffer-substring-no-properties
+               (+ (point) (if quoted 2 1)) end)
+              quoted)))))
 
 (defun dsh-emacs-reference--format-file-mention (path kind &optional preserve-quote)
   "Format file PATH (KIND is the wire string `file'/`directory') as prompt text.
@@ -470,9 +483,7 @@ QUOTED), see `dsh-emacs-reference--at-token'."
              (eq (marker-buffer dsh-emacs--input-marker) (current-buffer))
              (>= (point) (marker-position dsh-emacs--input-marker)))
     (let ((token (dsh-emacs-reference--at-token
-                  (buffer-substring-no-properties
-                   (marker-position dsh-emacs--input-marker)
-                   (point)))))
+                  (marker-position dsh-emacs--input-marker) (point))))
       (and token
            ;; 完成的规范 mention 文本（host 会把标签里的 `\` 与 `]` 转义成
            ;; `\\` / `\]`，口径见 harness 的 formatSessionReferenceMention）：
@@ -505,11 +516,11 @@ Text that merely contains an `@' inside another token (email addresses)
 does not match the grammar and keeps typing uninterrupted.  A trailing
 slash is an explicit directory boundary, fetched without the typing
 debounce."
-  (when (and dsh-emacs-reference-auto-complete
-             (bound-and-true-p corfu-auto)
-             (let ((token (dsh-emacs-reference--active-token)))
-               (and token (not (equal token dsh-emacs--reference-pop-token)))))
-    (setq dsh-emacs--reference-pop-token (dsh-emacs-reference--active-token))
+  (when-let* ((token (and dsh-emacs-reference-auto-complete
+                         (bound-and-true-p corfu-auto)
+                         (dsh-emacs-reference--active-token)))
+              ((not (equal token dsh-emacs--reference-pop-token))))
+    (setq dsh-emacs--reference-pop-token token)
     (let* ((buf (current-buffer))
            (delay (if (string-suffix-p "/"
                                        (nth 1 dsh-emacs--reference-pop-token))
@@ -776,8 +787,7 @@ nil outside the input area or when the token is not an @ reference."
                (markerp marker)
                (eq (marker-buffer marker) (current-buffer))
                (>= pos (marker-position marker)))
-      (let* ((text (buffer-substring-no-properties (marker-position marker) pos))
-             (token (dsh-emacs-reference--at-token text))
+      (let* ((token (dsh-emacs-reference--at-token (marker-position marker) pos))
              (session-id (dsh-emacs--active-session-id)))
         (when (and token session-id)
           (let* ((query (nth 1 token))
