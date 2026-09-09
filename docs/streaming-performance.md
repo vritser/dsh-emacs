@@ -321,3 +321,41 @@ ticks; it does not repeatedly rearm an already elapsed idle deadline.
   suite, silent clean load and repository hygiene. The real-server e2e path
   is unchanged and was not exercised. Emacs 27.1 compatibility is retained
   in the API choices; runtime measurements here use Emacs 31.1.50.
+
+## Continuation: GUI event loop and viewport correction (037)
+
+The live Emacs 31.1.50 investigation found process-triggered redisplay and
+competing viewport corrections in addition to Markdown work. Ready chat
+sockets now batch reads over 50ms; their received frames retain their order.
+The running indicator shares pending text redraws. Native `recenter -1`
+accounts for line spacing and the selected draft point when pinning input.
+See [037](../postmortem/037-streaming-display-cpu.md) for the decision and
+rejected alternatives.
+
+Three alternating before/after runs used the same live GUI configuration,
+with profilers stopped and the normal GC threshold. A local TCP producer
+sent WebSocket frames with TCP_NODELAY: 100 reasoning deltas, 300 text deltas
+and `turn/end`, roughly 10ms apart. Text mixed Chinese, English and bold
+markup, with a newline every eighth delta. Each run displayed a fresh chat
+buffer and preserved a draft. CPU was measured with `current-cpu-time` over
+the whole replay, including redisplay and GC. Before runs used the staged
+function definitions; after runs used the final working-tree definitions.
+
+| Measurement | Before | After |
+|---|---:|---:|
+| CPU / wall time, median | 48.1% | 33.8% |
+| Input callbacks, median | 148 | 51 |
+| Events received, every run | 401 | 401 |
+| Final transcript SHA-256 | Identical | Identical |
+| Pending text / busy flag at completion | None | None |
+
+The CPU reduction is about 30% for this workload. Absolute CPU use varies
+with frame geometry, fonts, other windows and arrival rate; this is not a
+promise that every real reply will use the measured percentage.
+
+A separate GUI reproduction required no new text: follow/redisplay pairs
+alternated window start between 794 and 885 with empty input, and between
+794 and 911 with a multiline draft. After native recentering, those starts
+remained at 885 and 911 respectively. The old character-row calculation
+ignored the chat's line spacing and left the cursor offscreen, causing Emacs
+to correct scrolling on the next redisplay.

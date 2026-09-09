@@ -290,14 +290,34 @@ deltas, which are inserted together before formatting. An unchanged final
 message keeps the painted body. See [decision record 029](../postmortem/029-stream-write-batching.md).
 The WebSocket decoder walks each input batch by byte offset,
 retains its incomplete tail once, and joins message fragments only at FIN.
-Viewport following uses `vertical-motion` with each destination window for
-both bottom detection and pinning, so wrapped lines count as screen rows.
+Viewport bottom detection uses `vertical-motion` with each destination
+window, so wrapped lines count as screen rows.
 Stream insertion, timer flushes and corrected final replies capture the
 following window list immediately before editing, then pin that list after
 formatting. This avoids mistaking a large insertion for a manual scroll;
 there is no saved follow state between callbacks. Per-event calls still skip
 pending batches. The selected draft point and excluded reading windows remain
 untouched. Hidden buffers skip prompt lookup for following altogether.
+The selected reading window is excluded before any screen-row measurement.
+Pinning uses `recenter -1` in the destination window, targeting the selected
+draft point or the inactive window's input anchor. Counting backwards by
+`window-text-height` overestimates capacity with extra line spacing or larger
+faces; the resulting offscreen cursor made Emacs scroll back on every redraw.
+The transcript's after-change hook uses `restore-buffer-modified-p` so text
+and property edits do not repeatedly invalidate the mode line. The animation
+advances during pending text batches without forcing a separate redraw.
+Quiet visible turns still refresh the indicator on its normal timer.
+
+After a ready chat socket delivers input, the events module suspends further
+reads for 50ms with `set-process-filter` set to t. Bytes remain in the socket;
+each received batch still parses and dispatches synchronously in order. A
+one-shot timer restores the filter saved when reads paused. Disconnect and
+connection loss cancel that process-owned timer and clear the saved filter;
+a quiet socket has no polling timer. Handshakes and the host question/approval
+channel bypass this pacing.
+This bounds process-triggered redraws that downstream text batching cannot
+prevent, adding up to about 50ms of receive latency during bursts. See
+[037](../postmortem/037-streaming-display-cpu.md).
 See [decision record 031](../postmortem/031-stream-frontier-and-screen-rows.md)
 and [032](../postmortem/032-partial-line-styling-and-burst-follow.md), and the
 [performance audit](streaming-performance.md).

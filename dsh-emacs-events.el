@@ -575,9 +575,46 @@ mode-line ctx%, `goal' the Composer Goal Row — the same consumers as the
         (process-put process 'dsh-emacs-event-input (substring input offset)))
     (error (message "dsh WebSocket frame error: %S" err))))
 
+(defconst dsh-emacs-events--read-batch-interval 0.05
+  "Seconds to accumulate chat socket input between reads.
+Kept aligned with `dsh-emacs-render--stream-batch-interval'.")
+
+(defun dsh-emacs-events--cancel-read-timer (process)
+  "Cancel PROCESS's pending socket-read resume and clear its saved filter."
+  (when (processp process)
+    (when-let* ((timer (process-get process 'dsh-emacs-event-read-timer)))
+      (cancel-timer timer))
+    (process-put process 'dsh-emacs-event-read-timer nil)
+    (process-put process 'dsh-emacs-event-read-filter nil)))
+
+(defun dsh-emacs-events--resume-reads (process)
+  "Resume PROCESS after a short burst of chat input.
+No repeating timer is needed: a quiet socket stays normally readable."
+  (when (process-get process 'dsh-emacs-event-read-timer)
+    (let ((filter (process-get process 'dsh-emacs-event-read-filter)))
+      (dsh-emacs-events--cancel-read-timer process)
+      (when (and (process-live-p process)
+                 (buffer-live-p (process-buffer process))
+                 (eq (process-filter process) t))
+        (set-process-filter process filter)))))
+
 (defun dsh-emacs-events--filter (process string)
   "Process raw HTTP/WebSocket STRING received by PROCESS."
   (when (buffer-live-p (process-buffer process))
+    ;; Each process read can make Emacs redisplay, even when the renderer
+    ;; merely queues text.  Let the socket accumulate the next 50ms of bytes
+    ;; instead.  A filter of t suspends reads without dropping data or
+    ;; changing connection status; the first received bytes still run below.
+    ;; Keep the handshake and the host's question/approval channel immediate.
+    (when (and (process-live-p process)
+               (process-get process 'dsh-emacs-event-ready)
+               (not (process-get process 'dsh-emacs-host-stream))
+               (not (process-get process 'dsh-emacs-event-read-timer)))
+      (process-put process 'dsh-emacs-event-read-timer
+                   (run-at-time dsh-emacs-events--read-batch-interval nil
+                                #'dsh-emacs-events--resume-reads process))
+      (process-put process 'dsh-emacs-event-read-filter (process-filter process))
+      (set-process-filter process t))
     (with-current-buffer (process-buffer process)
       (let ((input (concat (or (process-get process 'dsh-emacs-event-input) "")
                            (string-to-unibyte string))))
@@ -636,6 +673,7 @@ never stack parallel reconnect timers."
 
 (defun dsh-emacs-events--lost (process)
   "Handle a closed event stream PROCESS and arrange a reconnect."
+  (dsh-emacs-events--cancel-read-timer process)
   (if (process-get process 'dsh-emacs-host-stream)
       (dsh-emacs-events--host-lost process)
     (let ((chat (dsh-emacs-events--chat process)))
@@ -845,6 +883,7 @@ reconnect is re-armed and another connect scheduled."
         (setq dsh-emacs--event-reconnect-timer nil)
         (dsh-emacs-events--watchdog-stop)
         (let ((process dsh-emacs--event-process))
+          (dsh-emacs-events--cancel-read-timer process)
           ;; Clear ownership before deleting: the sentinel must not schedule a
           ;; reconnect for an intentional session switch or buffer teardown.
           (setq dsh-emacs--event-process nil

@@ -46,6 +46,10 @@
 (declare-function dsh-emacs-queue-counts "dsh-emacs-queue" ())
 (declare-function dsh-emacs-list-queue "dsh-emacs-queue" ())
 
+;; The renderer's pending text refresh can also redraw the running indicator.
+(defvar dsh-emacs--streaming-assistant)
+(defvar dsh-emacs--streaming-thinking)
+
 ;;; ---------------------------------------------------------------------------
 
 ;;; 定制
@@ -552,9 +556,16 @@ explicitly because the timer callback may otherwise run in any buffer."
             (setq dsh-emacs--ml-busy-index
                   (mod (1+ dsh-emacs--ml-busy-index)
                        (length dsh-emacs--ml-busy-frames)))
-            ;; Only churn the mode line while the chat is actually displayed;
-            ;; an invisible buffer must not drive frame redraws at 12.5Hz.
-            (when (get-buffer-window (current-buffer) 0)
+            ;; Pending text will redraw this window shortly.  Advance the
+            ;; indicator now, but avoid a separate mode-line layout between
+            ;; text batches.  Quiet visible turns keep their animation.
+            (when (and (get-buffer-window (current-buffer) 0)
+                       (not (or (plist-get
+                                 (bound-and-true-p dsh-emacs--streaming-assistant)
+                                 :timer)
+                                (plist-get
+                                 (bound-and-true-p dsh-emacs--streaming-thinking)
+                                 :timer))))
               (force-mode-line-update)))
         ;; Buffer no longer busy (turn/end already ran): stop in place.
         (dsh-emacs--ml-busy-stop)))))

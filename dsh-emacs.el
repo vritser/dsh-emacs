@@ -1886,8 +1886,9 @@ them returns nil, the buffer is not killed\")."
 The buffer is a live session view that is never saved, so every programmatic
 insert (history render, streaming, input sync) must leave it unmodified:
 some tab/window managers query `buffer-modified-p' before closing a buffer
-and prompt \"save?\".  Clearing is cheap (a flag), not a content change."
-  (set-buffer-modified-p nil))
+and prompt \"save?\".  Restore the flag without invalidating the mode line
+after every text or property edit; session statistics refresh separately."
+  (restore-buffer-modified-p nil))
 
 (defun dsh-emacs-imenu-create-user-index ()
   "Build an imenu index of user messages in the current buffer.

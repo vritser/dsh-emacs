@@ -163,6 +163,12 @@ Markdown formatting and scrolling coalesce over 50ms. Event boundaries,
 final messages and disconnect flush pending text. Hidden command rows skip
 animation redraws. Live Markdown keeps its progress in markers so stable
 reply text stays untouched; unfinished blocks skip empty formatting passes.
+Chat socket reads also coalesce over 50ms, preserving event order; the host
+question/approval channel stays immediate. The running animation shares
+pending text redraws and keeps animating during quiet turns.
+Scroll following uses native recentering to respect line spacing, larger
+faces and multiline drafts. Windows reading history skip screen-row scans.
+Transcript edits clear the modified flag without forcing mode-line layout.
 Large stream writes preserve following from immediately before the edit;
 scrolling up while a batch is pending still stops following. Long partial
 lines skip delimiter-free emphasis searches and retain one assistant base

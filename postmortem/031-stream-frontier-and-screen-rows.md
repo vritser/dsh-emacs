@@ -6,6 +6,8 @@ Partially superseded by [032](032-partial-line-styling-and-burst-follow.md):
 large stream writes now retain following; partial-line styling does less work.
 Oversized partial-line processing is further superseded by
 [036](036-bounded-stream-markdown.md).
+Viewport pinning is superseded by [037](037-streaming-display-cpu.md), which
+uses native recentering to account for pixel heights and the draft point.
 
 ## Background
 

@@ -627,9 +627,9 @@ a following window look manually scrolled away.  No state survives the edit."
               (anchor (dsh-emacs-render--input-anchor-pos)))
     (cl-loop for window in windows
              when (and (window-live-p window)
-                       (dsh-emacs-render--window-at-bottom-p window anchor)
                        (or (not (eq window (selected-window)))
-                           (>= (window-point window) anchor)))
+                           (>= (window-point window) anchor))
+                       (dsh-emacs-render--window-at-bottom-p window anchor))
              collect window)))
 
 (cl-defun dsh-emacs-render--follow-stream
@@ -637,7 +637,7 @@ a following window look manually scrolled away.  No state survives the edit."
                 (unless (or (plist-get dsh-emacs--streaming-assistant :timer)
                             (plist-get dsh-emacs--streaming-thinking :timer))
                   (dsh-emacs-render--following-windows))))
-  "Pin WINDOWS to the newest transcript above input, preserving draft point.
+  "Pin WINDOWS to input, keeping the selected draft point visible.
 When omitted, select current following windows unless a stream batch is
 pending.  A supplied list retains the follow decision made before an edit;
 explicit nil follows no windows.  Readers outside that list stay untouched."
@@ -646,11 +646,17 @@ explicit nil follows no windows.  Readers outside that list stay untouched."
     (dolist (window windows)
       (when (and (window-live-p window)
                  (eq (window-buffer window) (current-buffer)))
-        (save-excursion
-          (goto-char anchor)
-          (vertical-motion (- (1- (max 1 (window-text-height window)))) window)
-          (unless (= (point) (window-start window))
-            (set-window-start window (point) t)))
+        ;; Character-row capacity ignores line spacing and larger faces.
+        ;; Scanning back that many rows puts input below the viewport; the
+        ;; next redisplay then scrolls it back, fighting every stream flush.
+        ;; Native recentering accounts for pixel heights and the draft point.
+        (let ((target (if (eq window (selected-window))
+                          (max anchor (window-point window))
+                        anchor)))
+          (with-selected-window window
+            (save-excursion
+              (goto-char target)
+              (recenter -1))))
         (unless (or (eq window (selected-window))
                     (= (window-point window) anchor))
           (set-window-point window anchor))))))
@@ -1077,6 +1083,10 @@ IDLE-ONLY is set by the timer; nil permits an explicit immediate attempt."
               (set-marker (plist-get state :end) nil)))))
       (dsh-emacs-render--schedule-markdown))))
 
+(defconst dsh-emacs-render--stream-batch-interval 0.05
+  "Seconds to accumulate streamed text before a scheduled flush.
+Kept aligned with `dsh-emacs-events--read-batch-interval'.")
+
 (defun dsh-emacs-render--flush-stream (&optional buffer final)
   "Insert and format BUFFER's queued text and cancel its one-shot timer.
 FINAL also finishes deferred markup when no timer is pending."
@@ -1174,7 +1184,8 @@ FINAL also finishes deferred markup when no timer is pending."
             (dsh-emacs-render--follow-stream windows))
         (unless (plist-get state :timer)
           (setf (plist-get state :timer)
-                (run-at-time 0.05 nil #'dsh-emacs-render--flush-stream
+                (run-at-time dsh-emacs-render--stream-batch-interval nil
+                             #'dsh-emacs-render--flush-stream
                              (current-buffer)))))
       state)))
 

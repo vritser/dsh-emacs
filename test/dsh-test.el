@@ -61,6 +61,37 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
       (dsh-test-assert "follow-checks-do-not-count-entire-history"
         (< counted 100)))))
 
+;; Default character rows can overestimate capacity with line spacing/fonts.
+(dolist (draft '("" "draft line one\nline two\nline three"))
+  (save-window-excursion
+    (with-temp-buffer
+      (dsh-emacs-mode)
+      (let ((inhibit-read-only t))
+        (goto-char (point-min))
+        (insert (apply #'concat (make-list 100 "history line\n"))))
+      (goto-char dsh-emacs--input-marker)
+      (insert draft)
+      (let* ((window (selected-window))
+             (draft-point (point))
+             (reported-height (+ (window-text-height window) 10)))
+        (set-window-buffer window (current-buffer))
+        (cl-letf (((symbol-function 'window-text-height)
+                   (lambda (&rest _) reported-height)))
+          (dsh-emacs-render--follow-stream (list window))
+          (let ((start (window-start window)))
+            (dsh-emacs-render--follow-stream (list window))
+            (dsh-test-assert
+                (if (string-empty-p draft) "follow-keeps-empty-input-visible"
+                  "follow-keeps-multiline-draft-visible")
+              (= (point) draft-point)
+              ;; Batch mode has no glyph matrix for visibility queries.
+              ;; Check the actual row budget, not the overstated metric.
+              (save-excursion
+                (goto-char (window-start window))
+                (vertical-motion (window-body-height window) window)
+                (>= (point) draft-point))
+              (= (window-start window) start))))))))
+
 ;; Wrapped transcript lines count as screen rows for following and pinning.
 (save-window-excursion
   (with-temp-buffer
@@ -89,6 +120,22 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
               (= (window-start window) expected)
               (> expected (point-min))
               (= (point) draft-point))))))))
+
+;; Reading the transcript rules out following before any screen-row scan.
+(save-window-excursion
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (set-window-buffer (selected-window) (current-buffer))
+    (dsh-emacs-render--start-assistant-stream
+     '((data . ((turn . 1) (step . 1)))) "visible history\n")
+    (goto-char (point-min))
+    (let ((scans 0))
+      (cl-letf (((symbol-function 'dsh-emacs-render--window-at-bottom-p)
+                 (lambda (&rest _) (cl-incf scans) t)))
+        (dsh-emacs-render--follow-stream))
+      (dsh-test-assert "follow-history-reader-skips-screen-row-scans"
+        (zerop scans)
+        (= (point) (point-min))))))
 
 ;; Large stream writes retain the windows following before the edit.
 (dolist (kind '(assistant thinking assistant-first thinking-first correction))
@@ -3545,6 +3592,21 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
   (insert "hello")
   (when (not (buffer-modified-p))
     (dsh-test-pass "chat-buffer-insert-keeps-unmodified")))
+
+;; Transcript edits clear the modified flag without forcing mode-line layout.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let ((invalidations 0)
+        (set-modified (symbol-function 'set-buffer-modified-p)))
+    (cl-letf (((symbol-function 'set-buffer-modified-p)
+               (lambda (flag)
+                 (cl-incf invalidations)
+                 (funcall set-modified flag))))
+      (insert "hello")
+      (put-text-property (- (point) 5) (point) 'face 'bold))
+    (dsh-test-assert "chat-edits-do-not-invalidate-the-mode-line"
+      (zerop invalidations)
+      (not (buffer-modified-p)))))
 
 (let ((buf (get-buffer-create " *dsh-mod-test*")))
   (unwind-protect
@@ -13054,6 +13116,113 @@ candidates as the UI would via `all-completions', not by destructuring."
             (dsh-emacs-events--watchdog-tick (current-buffer)))
           (dsh-test-assert "watchdog-disconnects-unanswered-probe" deleted))
       (delete-process process))))
+
+;; A chat socket receives its first frame immediately, then batches reads.
+(dolist (ending '(resume alternate disconnect lost))
+  (with-temp-buffer
+    (let* ((owner (current-buffer))
+           (process (make-pipe-process :name "dsh-read-batch-test"
+                                       :buffer owner :noquery t))
+           (filter (if (eq ending 'alternate) #'ignore
+                     dsh-emacs-events--filter-fn))
+           (frame (dsh-emacs-events--frame 1 "second"))
+           received timer)
+      (unwind-protect
+          (progn
+            (setq-local dsh-emacs--event-process process)
+            (process-put process 'dsh-emacs-chat-buffer owner)
+            (process-put process 'dsh-emacs-event-ready t)
+            (set-process-filter process filter)
+            (cl-letf (((symbol-function 'dsh-emacs-events--dispatch-json)
+                       (lambda (_process text) (push text received))))
+              (dsh-emacs-events--filter
+               process (concat (dsh-emacs-events--frame 1 "first")
+                               (substring frame 0 3)))
+              (setq timer (process-get process 'dsh-emacs-event-read-timer))
+              (dsh-test-assert (format "socket-read-batch-%s-first" ending)
+                (equal received '("first"))
+                (eq (process-filter process) t)
+                (eq (process-get process 'dsh-emacs-event-read-filter) filter)
+                (timerp timer)
+                (equal (process-get process 'dsh-emacs-event-input)
+                       (substring frame 0 3)))
+              (pcase ending
+                ((or 'resume 'alternate)
+                 (when (timerp timer)
+                   ;; Timer callbacks need no current-buffer assumption.
+                   (with-temp-buffer
+                     (apply (timer--function timer) (timer--args timer))))
+                 (dsh-test-assert
+                     (format "socket-read-batch-%s-restores-filter" ending)
+                   (eq (process-filter process) filter)
+                   (null (process-get process 'dsh-emacs-event-read-timer))
+                   (null (process-get process 'dsh-emacs-event-read-filter))
+                   (not (memq timer timer-list)))
+                 (dsh-emacs-events--filter
+                  process (concat (substring frame 3)
+                                  (dsh-emacs-events--frame 1 "third")))
+                 (dsh-test-assert
+                     (format "socket-read-batch-%s-keeps-fragments-and-order"
+                             ending)
+                   (equal (reverse received) '("first" "second" "third"))
+                   (timerp (process-get process 'dsh-emacs-event-read-timer))))
+                ('disconnect (dsh-emacs-events-disconnect owner))
+                ('lost
+                 (cl-letf (((symbol-function 'dsh-emacs-events--schedule-reconnect)
+                            #'ignore))
+                   (dsh-emacs-events--lost process))))
+              (unless (memq ending '(resume alternate))
+                (dsh-test-assert (format "socket-read-batch-%s-cleans-timer" ending)
+                  (null (process-get process 'dsh-emacs-event-read-timer))
+                  (null (process-get process 'dsh-emacs-event-read-filter))
+                  (not (memq timer timer-list))))))
+        (when-let* ((pending (process-get process 'dsh-emacs-event-read-timer)))
+          (cancel-timer pending))
+        (when (timerp timer) (cancel-timer timer))
+        (delete-process process)))))
+
+;; Host waterfalls keep their input path immediately readable.
+(with-temp-buffer
+  (let ((process (make-pipe-process :name "dsh-host-read-test"
+                                    :buffer (current-buffer) :noquery t)))
+    (unwind-protect
+        (progn
+          (process-put process 'dsh-emacs-host-stream t)
+          (process-put process 'dsh-emacs-event-ready t)
+          (set-process-filter process dsh-emacs-events--filter-fn)
+          (dsh-emacs-events--filter process "")
+          (dsh-test-assert "host-stream-does-not-pause-for-chat-batching"
+            (eq (process-filter process) dsh-emacs-events--filter-fn)
+            (null (process-get process 'dsh-emacs-event-read-timer))))
+      (delete-process process))))
+
+;; Pending text will redraw the busy indicator without an extra forced pass.
+(dolist (kind '(assistant thinking))
+  (with-temp-buffer
+    (let ((owner (current-buffer))
+          (redraws 0))
+      (unwind-protect
+          (progn
+            (dsh-emacs--ml-busy-set t)
+            (set (make-local-variable
+                  (if (eq kind 'assistant) 'dsh-emacs--streaming-assistant
+                    'dsh-emacs--streaming-thinking))
+                 (list :timer 'pending))
+            (cl-letf (((symbol-function 'get-buffer-window)
+                       (lambda (&rest _) (selected-window)))
+                      ((symbol-function 'force-mode-line-update)
+                       (lambda (&rest _) (cl-incf redraws))))
+              (with-temp-buffer (dsh-emacs--ml-busy-tick owner))
+              (dsh-test-assert (format "busy-%s-shares-text-redraw" kind)
+                (= dsh-emacs--ml-busy-index 1)
+                (zerop redraws))
+              (setq dsh-emacs--streaming-assistant nil
+                    dsh-emacs--streaming-thinking nil)
+              (dsh-emacs--ml-busy-tick owner)
+              (dsh-test-assert (format "busy-%s-redraws-during-text-silence" kind)
+                (= dsh-emacs--ml-busy-index 2)
+                (= redraws 1))))
+        (dsh-emacs--ml-busy-clear)))))
 
 ;; A burst writes once per flush; finalization reuses the painted body.
 (with-temp-buffer

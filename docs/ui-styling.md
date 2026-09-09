@@ -192,6 +192,12 @@ Markdown formatting and viewport following are coalesced over 50ms using
 one pending timer per chat. Event boundaries, final messages and disconnect
 flush pending text synchronously. Hidden command rows do not repaint for
 spinner animation. See [decision record 029](../postmortem/029-stream-write-batching.md).
+Chat socket reads also coalesce over 50ms; received events retain their order.
+The running indicator shares pending text redraws. Clearing the transcript's
+modified flag does not itself invalidate the mode line. Reading windows are
+excluded before screen-row scans. Native recentering keeps the selected draft
+point visible with line spacing and variable face heights, avoiding competing
+scroll corrections. See [037](../postmortem/037-streaming-display-cpu.md).
 
 The live Markdown watermark is a stream-owned marker; advancing it does not
 modify the reply's first character. When no text is ready to format, the

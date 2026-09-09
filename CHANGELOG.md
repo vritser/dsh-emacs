@@ -199,6 +199,11 @@ minor) and stay undated until the release is cut.
 
 ### Changed
 
+- **Reduce CPU use while replies stream**: chat socket reads coalesce over
+  50ms and the running animation shares pending text redraws. Following
+  respects actual line heights and multiline drafts, preventing repeated
+  scroll corrections. Transcript edits and history readers avoid redundant
+  display work (rationale: postmortem/037).
 - **Faster reference detection in long drafts**: `@` completion and its typing
   watcher inspect the buffer directly and copy only the active token,
   reducing allocation and garbage collection after large pastes

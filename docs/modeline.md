@@ -62,6 +62,10 @@ preserved:
 
 The animation lights up when a message is sent and goes out at `turn/end`; it
 is cleaned up automatically when the event stream disconnects.
+While a text refresh is pending, the animation advances without forcing an
+additional redraw; the text refresh also paints the indicator. Quiet visible
+turns keep the normal animation timer. See
+[037](../postmortem/037-streaming-display-cpu.md).
 
 ### Pending-input queue indicator
 
@@ -78,6 +82,6 @@ QueueDock.  The counts come from the `session/queue` mux frames mirrored by
 
 The branch segment has a 10-second TTL cache
 (`dsh-emacs-modeline-branch-refresh-interval`): the running spinner animation
-triggers a mode-line recomputation about every 80ms, and without caching each
+can trigger a mode-line recomputation about every 80ms, and without caching each
 tick would fork a `git rev-parse` subprocess (~30ms+), which would freeze Emacs;
 the nil result for non-git directories is cached too, so it never respawns.
