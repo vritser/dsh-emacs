@@ -187,6 +187,31 @@ a goal does not hide Next Message. Both rows share Composer's read-only region.
 
 ## Markdown rendering
 
+The first text chunk is inserted immediately. Subsequent text insertion,
+Markdown formatting and viewport following are coalesced over 50ms using
+one pending timer per chat. Event boundaries, final messages and disconnect
+flush pending text synchronously. Hidden command rows do not repaint for
+spinner animation. See [decision record 029](../postmortem/029-stream-write-batching.md).
+
+The live Markdown watermark is a stream-owned marker; advancing it does not
+modify the reply's first character. When no text is ready to format, the
+formatter skips its passes entirely. Bottom detection and scroll pinning use
+each window's screen rows, including line wrapping, while preserving the
+selected input cursor. See [031](../postmortem/031-stream-frontier-and-screen-rows.md).
+
+Large first chunks, queued reply/reasoning bursts and corrected replies keep
+the windows that were following immediately before the edit pinned afterward.
+The check happens when the text is written, so scrolling up while a timer is
+pending still takes effect. Partial-line formatting keeps one assistant base
+face on each run and avoids emphasis searches before the first delimiter;
+plain-paste behavior uses a reusable handler. See
+[032](../postmortem/032-partial-line-styling-and-burst-follow.md).
+
+`dsh-emacs-markdown-replace-markup` accepts an optional `:base-face` symbol.
+Its final pass keeps one copy of that face below all Markdown faces, then
+mirrors the complete face to `font-lock-face`. The assistant renderer supplies
+its body face here,
+so block replacements and inline text share the same layering order.
 Pixel width probes measure the full string, including content wider than the
 window. Emacs 31 uses `string-pixel-width` with the destination buffer's face
 remapping and the destination window selected during measurement; this avoids
@@ -194,7 +219,7 @@ editing the chat buffer. Older Emacs versions insert the string into a
 temporary buffer with the destination's font settings. Emacs 29–30 measure
 that buffer without displaying it; Emacs 27–28 temporarily display it under
 a saved window configuration, restored even on error. No path changes the
-chat buffer's edit counter. See
+chat buffer's edit counter, so deferred formatting can publish its result. See
 [033](../postmortem/033-final-face-pass-and-pixel-probes.md) and
 [034](../postmortem/034-full-table-pixel-widths.md).
 
@@ -205,14 +230,12 @@ buffer with that font context, avoiding window-buffer switches. Existing
 rendered tables are not automatically reflowed when fonts or window widths
 change. See [035](../postmortem/035-table-render-metrics.md).
 
-Table wrapping measures each character's face-aware width once per cell and
-reuses it for fit checks and word boundaries. The measurements live only for
-that wrap call, so later renders use the current text and font settings.
-
-Streaming text is inserted immediately. After the first chunk, Markdown
-formatting is coalesced over 50ms using one pending timer per chat; final
-messages flush it synchronously. Hidden command rows do not repaint for
-spinner animation.
+Oversized assistant Markdown uses the renderer's idle queue. Text and event
+protection appear immediately; complete styling replaces it after an
+input-interruptible preparation attempt. The default 8192-character threshold
+and synchronous override are described in
+[customization](customization.md#markdown-responsiveness). See
+[036](../postmortem/036-bounded-stream-markdown.md).
 
 An unfinished code fence or table stays raw source until it ends: the
 formatter stops at the block's start and reformats only the text before it, so
@@ -225,6 +248,10 @@ replacement-style rendering: Markdown marker characters are removed and face
 properties are kept on the visible text. It supports bold, italic,
 strikethrough, headings, inline code, code blocks, links, images, horizontal
 rules, blockquotes, and aligned tables.
+
+Table wrapping measures each character's face-aware width once per cell and
+reuses it for fit checks and word boundaries. The measurements live only for
+that wrap call, so later renders use the current text and font settings.
 
 | Face | Description |
 |---|---|

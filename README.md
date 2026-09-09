@@ -158,14 +158,30 @@ The Markdown-rendering and folding machinery builds on
 
 ### Streaming performance
 
-Reply text appears immediately; Markdown formatting coalesces over 50ms
-and flushes when the final message arrives. Hidden command rows skip
-animation redraws. During a quiet running turn, WebSocket ping/pong checks
-transport health before reconnecting, so long model or tool waits do not
-by themselves cause history replay. See [architecture](docs/architecture.md).
-
-Table width probes measure beyond the window edge and leave chat
+The first reply chunk appears immediately; subsequent text insertion,
+Markdown formatting and scrolling coalesce over 50ms. Event boundaries,
+final messages and disconnect flush pending text. Hidden command rows skip
+animation redraws. Live Markdown keeps its progress in markers so stable
+reply text stays untouched; unfinished blocks skip empty formatting passes.
+Large stream writes preserve following from immediately before the edit;
+scrolling up while a batch is pending still stops following. Long partial
+lines skip delimiter-free emphasis searches and retain one assistant base
+face per text run.
+`dsh-emacs-stream-markdown-limit` defaults to 8192 pending characters. Beyond
+that limit, long partial lines keep displaying text and finish styling at a
+newline or completion. Large ready regions, including final-only and history
+replies, format after 0.1 seconds of idle time; input interrupts preparation
+and the next idle period retries it. Set the option to nil for synchronous
+formatting. Completed results preserve positions in unchanged text where
+possible. See [customization](docs/customization.md#markdown-responsiveness).
+Base styling and font-lock mirroring share a pass, including completed code
+blocks. Table width probes measure beyond the window edge and leave chat
 text, undo history and edit counters untouched on every supported Emacs
 version. Table font metrics are shared only within one render, with the
 destination window's font context. Height measurement on
 Emacs 29+ also avoids temporarily switching the displayed buffer.
+During a quiet running turn, WebSocket ping/pong checks
+transport health before reconnecting, so long model or tool waits do not
+by themselves cause history replay. See [architecture](docs/architecture.md).
+See the [streaming performance audit](docs/streaming-performance.md) for
+measurements and remaining limits.

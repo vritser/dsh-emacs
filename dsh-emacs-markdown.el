@@ -260,10 +260,15 @@ stays raw; :kind is `table' or the opening fence's backtick count."
           pos)
          (t (point-max)))))))
 
+(defun dsh-emacs-markdown--yank-plain (text)
+  "Insert TEXT without the rendered transcript's properties when yanking."
+  (insert (substring-no-properties text)))
+
 (cl-defun dsh-emacs-markdown-replace-markup (&key force
-                                                    (render-images t)
-                                                    (highlight-blocks t)
-                                                    stream-state final)
+                                                  (render-images t)
+                                                  (highlight-blocks t)
+                                                  base-face
+                                                  stream-state final)
   "Replace Markdown markup in current buffer with propertized text.
 
 Rewrites the buffer in place: markup characters are removed and
@@ -286,9 +291,10 @@ styling, and table styling run once after the loop.
 The buffer is narrowed to the streaming watermark for the
 duration of the passes — content before the watermark is already
 rendered and stable, so every regex / property scan starts there
-instead of `point-min'.  The watermark is read off the
-`dsh-emacs-markdown-watermark' text property on the first
-character and re-stamped at the end of the call.  Pass FORCE
+instead of `point-min'.  Live streams keep the watermark in their
+state; other callers use the `dsh-emacs-markdown-watermark' text
+property on the first character.  An empty ready range skips the passes.
+Pass FORCE
 non-nil to drop the watermark and re-render the whole buffer
 (useful after mid-buffer edits, or for tests).
 
@@ -299,93 +305,114 @@ file; nil leaves the markup as-is.  HIGHLIGHT-BLOCKS, when non-nil
 major-mode font-lock to colour keywords / strings / etc.; nil
 strips the fences and inserts the action label but leaves the
 body un-fontified.
-STREAM-STATE, when non-nil, is a stream-owned plist.  Pending fences and
-trailing tables remain raw until complete; FINAL renders the remaining tail
-and releases the scan markers.  Return the (START . END) formatted range."
+BASE-FACE, when non-nil, is a face symbol appended once to each final run before
+mirroring it to `font-lock-face'.  Embedded Markdown faces keep priority.
+STREAM-STATE, when non-nil, is a stream-owned plist initialized with :scan,
+:pending, :kind and :watermark slots.  Pending fences and trailing tables
+remain raw until complete; FINAL renders the remaining tail and releases
+all stream markers.  Return the (START . END) formatted range."
   (when (and stream-state (or force final))
     (dolist (key '(:scan :pending))
       (when-let* ((marker (plist-get stream-state key)))
         (set-marker marker nil)
         (setf (plist-get stream-state key) nil)))
     (setf (plist-get stream-state :kind) nil))
+  (when (and stream-state force)
+    (when-let* ((watermark (plist-get stream-state :watermark)))
+      (set-marker watermark nil)
+      (setf (plist-get stream-state :watermark) nil)))
   (let* ((end (if (and stream-state (not final))
                   (dsh-emacs-markdown--stream-end stream-state)
                 (point-max)))
          (scan (plist-get stream-state :scan))
          (start (if force (point-min)
-                  (dsh-emacs-markdown--watermark-start))))
+                  (dsh-emacs-markdown--watermark-start stream-state))))
     (unwind-protect
-        (save-restriction
-          (narrow-to-region (point-min) end)
-          (when scan (set-marker-insertion-type scan t))
-          (save-excursion
-            (when force
-              (with-silent-modifications
-                (remove-text-properties (point-min) (point-max)
-                                        '(dsh-emacs-markdown-watermark nil))))
-            (let ((watermark (dsh-emacs-markdown--watermark-start)))
-              (save-restriction
-                (narrow-to-region watermark (point-max))
-                (let* ((source-ranges (dsh-emacs-markdown--sort-ranges
-                                       (dsh-emacs-markdown--make-markers
-                                        (dsh-emacs-markdown--source-block-ranges))))
-                       (rendered-ranges (dsh-emacs-markdown--make-markers
-                                         (dsh-emacs-markdown--frozen-ranges)))
-                       (inline-ranges (dsh-emacs-markdown--make-markers
-                                       (dsh-emacs-markdown--inline-code-ranges
-                                        :avoid-ranges (dsh-emacs-markdown--sort-ranges
-                                                       source-ranges rendered-ranges))))
-                       (avoid-ranges (dsh-emacs-markdown--sort-ranges
-                                      source-ranges rendered-ranges inline-ranges)))
-                  (while (let ((italic-changed (dsh-emacs-markdown--replace-italics
-                                                :avoid-ranges avoid-ranges))
-                               (bold-changed (dsh-emacs-markdown--replace-bolds
-                                              :avoid-ranges avoid-ranges))
-                               (strike-changed (dsh-emacs-markdown--replace-strikethroughs
-                                                :avoid-ranges avoid-ranges)))
-                           (or italic-changed bold-changed strike-changed)))
-                  (dsh-emacs-markdown--replace-headers :avoid-ranges avoid-ranges)
-                  (dsh-emacs-markdown--style-inline-code :avoid-ranges source-ranges)
-                  (dsh-emacs-markdown--replace-links :avoid-ranges avoid-ranges)
-                  (when render-images
-                    (dsh-emacs-markdown--replace-images :avoid-ranges avoid-ranges)
-                    (dsh-emacs-markdown--replace-image-file-paths
-                     :avoid-ranges avoid-ranges))
-                  (dsh-emacs-markdown--style-dividers :avoid-ranges avoid-ranges)
-                  (dsh-emacs-markdown--style-blockquotes :avoid-ranges avoid-ranges)
-                  (dsh-emacs-markdown--style-source-blocks
-                   :highlight-blocks highlight-blocks)
-                  ;; Tables run last so cell content has already been processed by
-                  ;; every other pass (bold, italic, links, inline code, etc.).
-                  ;; The cell parser respects face and `dsh-emacs-markdown-frozen'
-                  ;; so it doesn't mis-split on pipes that got swallowed by other
-                  ;; markup.  AVOID-RANGES protects content inside still-open
-                  ;; fenced blocks (where the closing fence hasn't streamed in
-                  ;; yet) — without it a table inside a code block would render
-                  ;; eagerly and the fences would then strip out, leaving a
-                  ;; rendered table.  Watermark backs off past any rendered
-                  ;; table whose extension is still possible (see
-                  ;; `--set-watermark'), so `--find-tables' under the narrow
-                  ;; always sees the existing `dsh-emacs-markdown-table-source'
-                  ;; needed to fold new rows in.
-                  (dsh-emacs-markdown--style-tables :avoid-ranges source-ranges)
-                  ;; Mirror every `face' we composed onto `font-lock-face' so our
-                  ;; styling survives `font-lock-mode' re-fontification — comint
-                  ;; / shell-maker / agent-shell buffers fontify on every output
-                  ;; chunk and would otherwise clear our `face' properties.
-                  (dsh-emacs-markdown--mirror-face-to-font-lock-face
-                   (point-min) (point-max))
-                  ;; Tag rendered chars so a yank into another buffer drops the
-                  ;; styling, display overrides, internal markers, and keymaps
-                  ;; we layered on — paste should give plain chars, not our
-                  ;; implementation cruft.
-                  (put-text-property (point-min) (point-max)
-                                     'yank-handler
-                                     (list (lambda (s)
-                                             (insert (substring-no-properties s))))))))
-            (dsh-emacs-markdown--set-watermark)
-            (cons start (point-max))))
-      (when scan (set-marker-insertion-type scan nil)))))
+        (if (= start end)
+            (cons start end)
+          (save-restriction
+            (narrow-to-region (point-min) end)
+            (when scan (set-marker-insertion-type scan t))
+            (save-excursion
+              (when force
+                (with-silent-modifications
+                  (remove-text-properties (point-min) (point-max)
+                                          '(dsh-emacs-markdown-watermark nil))))
+              (let ((watermark (dsh-emacs-markdown--watermark-start stream-state)))
+                (save-restriction
+                  (narrow-to-region watermark (point-max))
+                  (let* ((source-ranges (dsh-emacs-markdown--sort-ranges
+                                         (dsh-emacs-markdown--make-markers
+                                          (dsh-emacs-markdown--source-block-ranges))))
+                         (rendered-ranges (dsh-emacs-markdown--make-markers
+                                           (dsh-emacs-markdown--frozen-ranges)))
+                         (inline-ranges (dsh-emacs-markdown--make-markers
+                                         (dsh-emacs-markdown--inline-code-ranges
+                                          :avoid-ranges (dsh-emacs-markdown--sort-ranges
+                                                         source-ranges rendered-ranges))))
+                         (avoid-ranges (dsh-emacs-markdown--sort-ranges
+                                        source-ranges rendered-ranges inline-ranges)))
+                    (when (save-excursion
+                            (goto-char (point-min))
+                            (re-search-forward "[*_~]" nil t))
+                      (save-restriction
+                        ;; No opener precedes the first delimiter.  Retain
+                        ;; its previous character for whitespace/BOL rules.
+                        (narrow-to-region (max (point-min)
+                                               (1- (match-beginning 0)))
+                                          (point-max))
+                        (while (let ((italic-changed (dsh-emacs-markdown--replace-italics
+                                                      :avoid-ranges avoid-ranges))
+                                     (bold-changed (dsh-emacs-markdown--replace-bolds
+                                                    :avoid-ranges avoid-ranges))
+                                     (strike-changed (dsh-emacs-markdown--replace-strikethroughs
+                                                      :avoid-ranges avoid-ranges)))
+                                 (or italic-changed bold-changed strike-changed)))))
+                    (dsh-emacs-markdown--replace-headers :avoid-ranges avoid-ranges)
+                    (dsh-emacs-markdown--style-inline-code :avoid-ranges source-ranges)
+                    (dsh-emacs-markdown--replace-links :avoid-ranges avoid-ranges)
+                    (when render-images
+                      (dsh-emacs-markdown--replace-images :avoid-ranges avoid-ranges)
+                      (dsh-emacs-markdown--replace-image-file-paths
+                       :avoid-ranges avoid-ranges))
+                    (dsh-emacs-markdown--style-dividers :avoid-ranges avoid-ranges)
+                    (dsh-emacs-markdown--style-blockquotes :avoid-ranges avoid-ranges)
+                    (dsh-emacs-markdown--style-source-blocks
+                     :highlight-blocks highlight-blocks)
+                    ;; Tables run last so cell content has already been processed by
+                    ;; every other pass (bold, italic, links, inline code, etc.).
+                    ;; The cell parser respects face and `dsh-emacs-markdown-frozen'
+                    ;; so it doesn't mis-split on pipes that got swallowed by other
+                    ;; markup.  AVOID-RANGES protects content inside still-open
+                    ;; fenced blocks (where the closing fence hasn't streamed in
+                    ;; yet) — without it a table inside a code block would render
+                    ;; eagerly and the fences would then strip out, leaving a
+                    ;; rendered table.  Watermark backs off past any rendered
+                    ;; table whose extension is still possible (see
+                    ;; `--set-watermark'), so `--find-tables' under the narrow
+                    ;; always sees the existing `dsh-emacs-markdown-table-source'
+                    ;; needed to fold new rows in.
+                    (dsh-emacs-markdown--style-tables :avoid-ranges source-ranges)
+                    ;; Mirror every `face' we composed onto `font-lock-face' so our
+                    ;; styling survives `font-lock-mode' re-fontification — comint
+                    ;; / shell-maker / agent-shell buffers fontify on every output
+                    ;; chunk and would otherwise clear our `face' properties.
+                    (dsh-emacs-markdown--mirror-face-to-font-lock-face
+                     (point-min) (point-max) base-face)
+                    ;; Tag rendered chars so a yank into another buffer drops the
+                    ;; styling, display overrides, internal markers, and keymaps
+                    ;; we layered on — paste should give plain chars, not our
+                    ;; implementation cruft.
+                    (put-text-property (point-min) (point-max)
+                                       'yank-handler
+                                       '(dsh-emacs-markdown--yank-plain)))))
+              (dsh-emacs-markdown--set-watermark stream-state)
+              (cons start (point-max)))))
+      (when scan (set-marker-insertion-type scan nil))
+      (when (and stream-state final)
+        (when-let* ((watermark (plist-get stream-state :watermark)))
+          (set-marker watermark nil)
+          (setf (plist-get stream-state :watermark) nil))))))
 
 (cl-defun dsh-emacs-markdown--replace-bolds (&key avoid-ranges)
   "Replace `**X**' / `__X__' spans in current buffer with bold X.
@@ -2015,7 +2042,7 @@ caller's seeded face shows through."
                                   face))
         (setq pos next)))))
 
-(defun dsh-emacs-markdown--mirror-face-to-font-lock-face (start end)
+(defun dsh-emacs-markdown--mirror-face-to-font-lock-face (start end &optional base-face)
   "Copy each `face' run across [START, END) to `font-lock-face'.
 
 `font-lock-mode' takes ownership of the `face' property and
@@ -2031,11 +2058,22 @@ Setting both means we look right in both contexts.
 Only positions with a non-nil `face' are mirrored; positions
 already carrying a `font-lock-face' from elsewhere are
 overwritten — dsh-emacs-markdown owns the styling for the chars it
-produced."
+produced.  When BASE-FACE is non-nil, keep one copy at lowest priority,
+so both properties receive the complete face in one traversal."
   (let ((pos start))
     (while (< pos end)
       (let ((face (get-text-property pos 'face))
             (next (or (next-single-property-change pos 'face nil end) end)))
+        (when base-face
+          (let ((tail (and (listp face) (memq base-face face))))
+            (unless (or (eq face base-face) (and tail (null (cdr tail))))
+              (if tail
+                  ;; A row face can have been appended after the inherited
+                  ;; base face.  Keep the base last, below every Markdown face.
+                  (put-text-property pos next 'face
+                                     (append (remq base-face face) (list base-face)))
+                (add-face-text-property pos next base-face t))
+              (setq face (get-text-property pos 'face)))))
         (when face
           (put-text-property pos next 'font-lock-face face))
         (setq pos next)))))
@@ -2181,7 +2219,7 @@ Resolves `dsh-emacs-markdown-image-max-width' which may be an integer
                   (window-body-width window t))))
     dsh-emacs-markdown-image-max-width))
 
-(defun dsh-emacs-markdown--watermark-start ()
+(defun dsh-emacs-markdown--watermark-start (&optional stream-state)
   "Return the position the next scan should start from.
 
 Reads the `dsh-emacs-markdown-watermark' text property off the
@@ -2192,10 +2230,16 @@ first call or after the watermark anchor has been rewritten away).
 The property is stored on the rendered text itself so it travels
 with the string when callers shuttle the buffer contents around
 via `dsh-emacs-markdown-convert', avoiding a buffer-local
-variable that wouldn't survive serialization."
-  (let ((stored (and (> (point-max) (point-min))
-                     (get-text-property (point-min)
-                                        'dsh-emacs-markdown-watermark))))
+variable that wouldn't survive serialization.
+Live STREAM-STATE instead owns a marker, avoiding writes to stable text."
+  (let* ((marker (plist-get stream-state :watermark))
+         (stored (if stream-state
+                     (and (markerp marker)
+                          (eq (marker-buffer marker) (current-buffer))
+                          (marker-position marker))
+                   (and (> (point-max) (point-min))
+                        (get-text-property (point-min)
+                                           'dsh-emacs-markdown-watermark)))))
     (if (and (integerp stored)
              (>= stored (point-min))
              (<= stored (point-max)))
@@ -2260,8 +2304,10 @@ point, a table from there can no longer accumulate."
            (t (setq continue nil))))
         (or rendered-table-start pending-table-start)))))
 
-(defun dsh-emacs-markdown--set-watermark ()
-  "Stamp the safe-frontier on the first character as a text property.
+(defun dsh-emacs-markdown--set-watermark (&optional stream-state)
+  "Save the safe frontier in STREAM-STATE or on the first character.
+The live stream's marker has insertion type nil so appended text stays
+unrendered.  Non-stream callers retain the serializable text property.
 
 Safe-frontier = start of the last line in the buffer, clamped
 back to the start of:
@@ -2284,7 +2330,7 @@ only to end-of-line, so they're naturally within that zone."
             (save-restriction
               ;; Stable text cannot acquire a new open fence.  Keep this
               ;; final scan incremental too, like the rendering passes.
-              (narrow-to-region (dsh-emacs-markdown--watermark-start)
+              (narrow-to-region (dsh-emacs-markdown--watermark-start stream-state)
                                 (point-max))
               (dsh-emacs-markdown--source-block-ranges)))
            (open-fence-start
@@ -2300,9 +2346,13 @@ only to end-of-line, so they're naturally within that zone."
                             (delq nil (list last-line-start
                                             open-fence-start
                                             extending-table-start)))))
-      (with-silent-modifications
-        (put-text-property (point-min) (1+ (point-min))
-                           'dsh-emacs-markdown-watermark frontier)))))
+      (if stream-state
+          (if-let* ((marker (plist-get stream-state :watermark)))
+              (set-marker marker frontier)
+            (setf (plist-get stream-state :watermark) (copy-marker frontier)))
+        (with-silent-modifications
+          (put-text-property (point-min) (1+ (point-min))
+                             'dsh-emacs-markdown-watermark frontier))))))
 
 (defun dsh-emacs-markdown--make-markers (ranges)
   "Convert each (start . end) in RANGES to (start-marker . end-marker)."

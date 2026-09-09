@@ -61,6 +61,107 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
       (dsh-test-assert "follow-checks-do-not-count-entire-history"
         (< counted 100)))))
 
+;; Wrapped transcript lines count as screen rows for following and pinning.
+(save-window-excursion
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (let ((window (selected-window))
+          (inhibit-read-only t))
+      (set-window-buffer window (current-buffer))
+      (goto-char (point-min))
+      (insert (make-string 10000 ?x) "\n")
+      (let ((anchor (dsh-emacs-render--input-anchor-pos)))
+        (set-window-start window (point-min))
+        (goto-char (point-max))
+        (dsh-test-assert "follow-wrapped-history-is-not-at-bottom"
+          (not (dsh-emacs-render--window-at-bottom-p window anchor)))
+        (dsh-emacs-render--follow-stream)
+        (dsh-test-assert "follow-preserves-scrolled-wrapped-window"
+          (= (window-start window) (point-min)))
+        (goto-char anchor)
+        (vertical-motion (- (1- (window-text-height window))) window)
+        (let ((expected (point)))
+          (set-window-start window expected)
+          (goto-char (point-max))
+          (let ((draft-point (point)))
+            (dsh-emacs-render--follow-stream)
+            (dsh-test-assert "follow-pins-by-screen-rows-without-moving-draft"
+              (= (window-start window) expected)
+              (> expected (point-min))
+              (= (point) draft-point))))))))
+
+;; Large stream writes retain the windows following before the edit.
+(dolist (kind '(assistant thinking assistant-first thinking-first correction))
+  (save-window-excursion
+    (with-temp-buffer
+      (dsh-emacs-mode)
+      (let* ((window (selected-window))
+             (event '((data . ((turn . 1) (step . 1)))))
+             (start (if (memq kind '(thinking thinking-first))
+                        #'dsh-emacs-render--start-thinking-stream
+                      #'dsh-emacs-render--start-assistant-stream))
+             (text (apply #'concat (make-list 100 "new row\n"))))
+        (set-window-buffer window (current-buffer))
+        (goto-char (point-max))
+        (insert "draft")
+        (unless (memq kind '(assistant-first thinking-first))
+          (funcall start event "intro\n"))
+        (let ((draft-offset (- (point) dsh-emacs--input-marker)))
+          (if (eq kind 'correction)
+              (dsh-emacs-render--finish-assistant-stream event text)
+            (funcall start event text)
+            (if (eq kind 'thinking)
+                (dsh-emacs-render--flush-thinking)
+              (unless (memq kind '(assistant-first thinking-first))
+                (dsh-emacs-render--flush-stream))))
+          (dsh-test-assert (format "stream-large-%s-retains-follow" kind)
+            (= (window-start window)
+               (save-excursion
+                 (goto-char (dsh-emacs-render--input-anchor-pos))
+                 (vertical-motion (- (1- (window-text-height window))) window)
+                 (point)))
+            (> (window-start window) 1)
+            (= (- (point) dsh-emacs--input-marker) draft-offset)
+            (equal (dsh-emacs--get-input) "draft")))
+        (dsh-emacs-render--flush-stream nil t)))))
+
+;; A user scroll while a timer is pending wins over the queued output.
+(dolist (kind '(assistant thinking))
+  (save-window-excursion
+    (with-temp-buffer
+      (dsh-emacs-mode)
+      (let ((window (selected-window))
+            (event '((data . ((turn . 1) (step . 1)))))
+            (start (if (eq kind 'thinking)
+                       #'dsh-emacs-render--start-thinking-stream
+                     #'dsh-emacs-render--start-assistant-stream)))
+        (set-window-buffer window (current-buffer))
+        (funcall start event (apply #'concat (make-list 100 "history\n")))
+        (goto-char (point-max))
+        (funcall start event "queued\n")
+        (set-window-start window 1)
+        (goto-char 5)
+        (dsh-emacs-render--flush-stream)
+        (dsh-test-assert (format "stream-%s-flush-respects-new-scroll" kind)
+          (= (window-start window) 1) (= (point) 5))
+        (dsh-emacs-render--flush-stream nil t)))))
+
+;; Following must not move the cursor in an unselected history reader.
+(save-window-excursion
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (let ((reader (split-window-right))
+          (inhibit-read-only t))
+      (goto-char (point-min))
+      (insert (apply #'concat (make-list 100 "history\n")))
+      (set-window-buffer reader (current-buffer))
+      (set-window-start reader 1)
+      (set-window-point reader 10)
+      (dsh-emacs-render--follow-stream)
+      (dsh-test-assert "follow-preserves-unselected-history-cursor"
+        (= (window-start reader) 1)
+        (= (window-point reader) 10)))))
+
 ;; A displayed buffer can contain an offscreen running command.
 (with-temp-buffer
   (let ((dsh-emacs--command-spinners (make-hash-table :test 'equal))
@@ -1436,9 +1537,11 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
          (header "```elisp\n")
          (row "(message \"**literal**\")\n")
          (scanned 0)
+         (parses 0)
          (scan (symbol-function 'dsh-emacs-markdown--source-block-ranges)))
     (cl-letf (((symbol-function 'dsh-emacs-markdown--source-block-ranges)
                (lambda ()
+                 (cl-incf parses)
                  (cl-incf scanned (- (point-max) (point-min)))
                  (funcall scan))))
       (dsh-emacs-render--start-assistant-stream event header)
@@ -1448,6 +1551,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (dsh-test-assert "stream-open-fence-avoids-repeated-full-scans"
       (< scanned 1000)
       (string-match-p (regexp-quote row) (buffer-string)))
+    (dsh-test-assert "stream-open-fence-skips-empty-markdown-passes"
+      (= parses 0))
     (dsh-emacs-render--start-assistant-stream event "```\n")
     (dsh-emacs-render--flush-stream)
     (dsh-test-assert "stream-closed-fence-renders-with-literal-body"
@@ -1457,6 +1562,352 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                              'dsh-emacs-markdown-source-block-body nil))
     (dsh-emacs-render--finish-assistant-stream
      event (concat header (apply #'concat (make-list 80 row)) "```\n"))))
+
+;; Reformatting a partial line must not accumulate the assistant base face.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let ((event '((data . ((turn . 1) (step . 1))))))
+    (dotimes (_ 20)
+      (dsh-emacs-render--start-assistant-stream event "**bold** text ")
+      (dsh-emacs-render--flush-stream))
+    (let* ((start (plist-get dsh-emacs--streaming-assistant :start))
+           (face (get-text-property start 'face)))
+      (dsh-test-assert "stream-partial-line-keeps-one-assistant-base-face"
+        (equal face '(dsh-emacs-markdown-bold dsh-emacs-assistant-body-face))
+        (equal (get-text-property start 'font-lock-face) face)))
+    (dsh-emacs-render--flush-stream nil t)))
+
+;; Replacement blocks must mirror the final face, including the base face.
+(dolist (case '(("code" "```text\nbody\n```\n" "body")
+                ("table" "| A | B |\n|---|---|\n| alpha | beta |\n" "alpha")))
+  (pcase-let ((`(,kind ,text ,needle) case))
+    (with-temp-buffer
+      (dsh-emacs-mode)
+      (dsh-emacs-render--start-assistant-stream
+       '((data . ((turn . 1) (step . 1)))) text)
+      (dsh-emacs-render--flush-stream nil t)
+      (goto-char (point-min))
+      (search-forward needle)
+      (let* ((pos (- (point) (length needle)))
+             (face (get-text-property pos 'face)))
+        (dsh-test-assert (format "stream-%s-mirrors-complete-base-face" kind)
+          (= (cl-count 'dsh-emacs-assistant-body-face
+                       (if (listp face) face (list face))) 1)
+          (equal face (get-text-property pos 'font-lock-face)))))))
+
+;; Long partial lines stay visible without reparsing every subsequent delta.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let ((dsh-emacs-stream-markdown-limit 256)
+        (event '((data . ((turn . 1) (step . 1)))))
+        (formatter (symbol-function 'dsh-emacs-markdown-replace-markup))
+        (scanned 0))
+    (cl-letf (((symbol-function 'dsh-emacs-markdown-replace-markup)
+               (lambda (&rest args)
+                 (cl-incf scanned (- (point-max) (point-min)))
+                 (apply formatter args))))
+      (dotimes (_ 100)
+        (dsh-emacs-render--start-assistant-stream event "**bold** text ")
+        (dsh-emacs-render--flush-stream)))
+    (dsh-test-assert "stream-long-partial-line-has-bounded-immediate-work"
+      (< scanned 8000)
+      (string-match-p (regexp-quote "**bold** text ") (buffer-string)))
+    (let ((dsh-emacs-stream-markdown-limit nil))
+      (dsh-emacs-render--flush-stream nil t))
+    (dsh-test-assert "stream-long-partial-line-final-styling-is-complete"
+      (equal (buffer-substring-no-properties
+              (plist-get dsh-emacs--streaming-assistant :start)
+              (plist-get dsh-emacs--streaming-assistant :end))
+             (apply #'concat (make-list 100 "bold text "))))))
+
+;; Large final blocks stay visible, then receive complete styling at idle.
+(dolist (text '("```elisp\n(message \"hello\")\n```\n"
+                "| A | B |\n|---|---|\n| **alpha** | beta |\n"))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (let* ((dsh-emacs-stream-markdown-limit 8)
+           (event '((data . ((turn . 1) (step . 1)))))
+           (expected (with-temp-buffer
+                       (insert text)
+                       (dsh-emacs-markdown-replace-markup
+                        :base-face 'dsh-emacs-assistant-body-face)
+                       (buffer-string)))
+           state body-start)
+      (setq state (dsh-emacs-render--start-assistant-stream event text))
+      (setq body-start (marker-position (plist-get state :start)))
+      (dsh-emacs-render--finish-assistant-stream event text)
+      (dsh-test-assert (format "stream-large-block-is-deferred-%s" (substring text 0 3))
+        (memq state dsh-emacs--markdown-pending)
+        (and (marker-buffer (plist-get state :start))
+             (equal (buffer-substring-no-properties
+                     (plist-get state :start) (plist-get state :end)) text))
+        (null dsh-emacs--streaming-assistant))
+      (when (fboundp 'dsh-emacs-render--run-markdown)
+        (dsh-emacs-render--run-markdown (current-buffer))
+        (dsh-test-assert "stream-deferred-final-matches-synchronous-formatting"
+          (equal (substring-no-properties expected)
+                 (buffer-substring-no-properties
+                  body-start (+ body-start (length expected))))
+          (cl-loop for i below (length expected)
+                   always (and (equal (get-text-property i 'face expected)
+                                      (get-text-property (+ body-start i) 'face))
+                               (equal (get-text-property i 'font-lock-face expected)
+                                      (get-text-property (+ body-start i)
+                                                         'font-lock-face))))
+          (null dsh-emacs--markdown-pending)
+          (null dsh-emacs--markdown-timer)
+          (null (marker-buffer (plist-get state :start)))
+          (null (marker-buffer (plist-get state :end))))))))
+
+;; A large final-only/history message uses the same idle formatting path.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let ((dsh-emacs-stream-markdown-limit 8)
+        (text "```text\nfrom history\n```"))
+    (dsh-emacs-render-assistant-message
+     `((seq . 7)
+       (data . ((turn . 1) (step . 1)
+                (message . ((content . [((type . "text") (text . ,text))])))))))
+    (dsh-test-assert "assistant-final-only-message-defers-large-markdown"
+      (= (length dsh-emacs--markdown-pending) 1)
+      (string-match-p "```text" (buffer-string)))
+    (when dsh-emacs--markdown-pending
+      (let* ((state (car dsh-emacs--markdown-pending))
+             (start (marker-position (plist-get state :start)))
+             (event-id (plist-get state :event-id))
+             (expected (dsh-emacs-markdown-render text)))
+        (dsh-emacs-render--run-markdown (current-buffer))
+        (dsh-test-assert "assistant-final-only-idle-result-retains-event-identity"
+          (equal (buffer-substring-no-properties start (+ start (length expected)))
+                 (substring-no-properties expected))
+          (equal (get-text-property start 'dsh-emacs-event-block) event-id)
+          (null dsh-emacs--markdown-pending))))))
+
+;; Compatibility table probes must not invalidate the queued reply's snapshot.
+(dolist (version '(27 30))
+  (save-window-excursion
+    (with-temp-buffer
+      (dsh-emacs-mode)
+      (set-window-buffer (selected-window) (current-buffer))
+      (let ((dsh-emacs-stream-markdown-limit 8)
+            (emacs-major-version version)
+            (event '((data . ((turn . 1) (step . 1)))))
+            (text "| A | B |\n|---|---|\n| alpha | beta |\n")
+            (measurements 0))
+        (dsh-emacs-render--start-assistant-stream event text)
+        (dsh-emacs-render--finish-assistant-stream event text)
+        (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+                  ((symbol-function 'window-text-pixel-size)
+                   (lambda (_window from to &rest _)
+                     (cl-incf measurements)
+                     (cons (* 10 (- to from)) 16)))
+                  ((symbol-function 'buffer-text-pixel-size)
+                   (lambda (buffer &rest _)
+                     (cl-incf measurements)
+                     (cons (* 10 (buffer-size buffer)) 16))))
+          (dsh-emacs-render--run-markdown (current-buffer)))
+        (dsh-test-assert (format "idle-table-completes-on-emacs-%s" version)
+          (> measurements 0)
+          (text-property-not-all (point-min) (point-max)
+                                 'dsh-emacs-markdown-table-source nil)
+          (null dsh-emacs--markdown-pending)
+          (null dsh-emacs--markdown-timer))))))
+
+;; Timer attempts wait for actual idleness, without repeatedly firing at an
+;; expired idle deadline or preventing the command loop from consuming input.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let* ((dsh-emacs-stream-markdown-limit 8)
+         (state (dsh-emacs-render--start-assistant-stream
+                 '((data . ((turn . 1) (step . 1))))
+                 "```text\nqueued text\n```\n"))
+         (before (buffer-string)))
+    (cl-letf (((symbol-function 'current-idle-time) (lambda () nil)))
+      (dsh-emacs-render--run-markdown (current-buffer) t))
+    (dsh-test-assert "stream-markdown-timer-yields-while-the-user-is-active"
+      (equal-including-properties before (buffer-string))
+      (memq state dsh-emacs--markdown-pending)
+      (memq dsh-emacs--markdown-timer timer-list)
+      (not (memq dsh-emacs--markdown-timer timer-idle-list)))
+    (cl-letf (((symbol-function 'current-idle-time) (lambda () '(0 1 0 0))))
+      (dsh-emacs-render--run-markdown (current-buffer) t))
+    (dsh-test-assert "stream-markdown-timer-completes-when-idle"
+      (null dsh-emacs--markdown-pending)
+      (string-match-p "text ⧉" (buffer-string)))))
+
+;; Input can discard a partly prepared result without touching the transcript.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let* ((dsh-emacs-stream-markdown-limit 8)
+         (event '((data . ((turn . 1) (step . 1)))))
+         (text "```elisp\n(message \"hello\")\n```\n")
+         (state (dsh-emacs-render--start-assistant-stream event text))
+         (before (buffer-string))
+         (tick (buffer-chars-modified-tick)))
+    (dsh-emacs-render--finish-assistant-stream event text)
+    (cl-letf (((symbol-function 'dsh-emacs-markdown-replace-markup)
+               (lambda (&rest _)
+                 (insert "unfinished preparation")
+                 (throw throw-on-input t))))
+      (dsh-emacs-render--run-markdown (current-buffer)))
+    (dsh-test-assert "stream-interrupted-preparation-never-publishes-partial-text"
+      (equal-including-properties before (buffer-string))
+      (= tick (buffer-chars-modified-tick))
+      (memq state dsh-emacs--markdown-pending)
+      (timerp dsh-emacs--markdown-timer))
+    (dsh-emacs-render--run-markdown (current-buffer))
+    (dsh-test-assert "stream-interrupted-preparation-retries-to-completion"
+      (null dsh-emacs--markdown-pending)
+      (string-match-p "elisp ⧉" (buffer-string))
+      (not (string-match-p "unfinished preparation" (buffer-string))))))
+
+;; A corrected final reply replaces the source of queued work.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let* ((dsh-emacs-stream-markdown-limit 8)
+         (event '((data . ((turn . 1) (step . 1)))))
+         (state (dsh-emacs-render--start-assistant-stream
+                 event "```text\nobsolete\n```\n")))
+    (dsh-emacs-render--finish-assistant-stream
+     event "```text\ncorrected\n```\n")
+    (dsh-test-assert "stream-deferred-correction-is-protected-immediately"
+      (get-text-property (plist-get state :start) 'read-only)
+      (equal (get-text-property (plist-get state :start) 'dsh-emacs-event-block)
+             (plist-get state :event-id)))
+    (dsh-emacs-render--run-markdown (current-buffer))
+    (dsh-test-assert "stream-deferred-correction-cannot-publish-obsolete-text"
+      (string-match-p "corrected" (buffer-string))
+      (not (string-match-p "obsolete" (buffer-string)))
+      (null dsh-emacs--markdown-pending))))
+
+;; Completing an earlier job keeps later replies and the draft intact.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let ((dsh-emacs-stream-markdown-limit 8)
+        (inhibit-read-only t))
+    (goto-char (point-max))
+    (insert "draft")
+    (dolist (step '(1 2))
+      (let ((event `((data . ((turn . 1) (step . ,step)))))
+            (text (format "```text\nreply %s\n```\n" step)))
+        (dsh-emacs-render--start-assistant-stream event text)
+        (dsh-emacs-render--finish-assistant-stream event text)))
+    (let ((first (car dsh-emacs--markdown-pending)))
+      (dsh-test-assert "stream-queued-reply-does-not-expand-into-the-next-message"
+        (equal (buffer-substring-no-properties
+                (plist-get first :start) (plist-get first :end))
+               "```text\nreply 1\n```\n")))
+    (dsh-emacs-render--run-markdown (current-buffer))
+    (dsh-test-assert "stream-idle-callback-finishes-one-reply-at-a-time"
+      (= (length dsh-emacs--markdown-pending) 1))
+    (let ((second (car dsh-emacs--markdown-pending)))
+      (dsh-test-assert "stream-idle-publish-preserves-the-next-job-boundaries"
+        (equal (buffer-substring-no-properties
+                (plist-get second :start) (plist-get second :end))
+               "```text\nreply 2\n```\n")))
+    (dsh-emacs-render--run-markdown (current-buffer))
+    (dsh-test-assert "stream-idle-results-preserve-order-and-draft"
+      (< (string-match "reply 1" (buffer-string))
+         (string-match "reply 2" (buffer-string)))
+      (equal (dsh-emacs--get-input) "draft")
+      (null dsh-emacs--markdown-pending))))
+
+;; A completed idle job retains the partial-line frontier for later chunks.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let* ((dsh-emacs-stream-markdown-limit 16)
+         (event '((data . ((turn . 1) (step . 1)))))
+         (first "```text\nfirst block\n```\n\nafter **part")
+         (last "ial**\nlast line")
+         (state (dsh-emacs-render--start-assistant-stream event first))
+         (start (marker-position (plist-get state :start)))
+         (expected (dsh-emacs-markdown-convert (concat first last))))
+    (dsh-emacs-render--run-markdown (current-buffer))
+    (dsh-emacs-render--start-assistant-stream event last)
+    (dsh-emacs-render--finish-assistant-stream event (concat first last))
+    (when dsh-emacs--markdown-pending
+      (dsh-emacs-render--run-markdown (current-buffer)))
+    (dsh-test-assert "stream-resumes-markdown-after-a-midstream-idle-result"
+      (equal (substring-no-properties expected)
+             (buffer-substring-no-properties start (+ start (length expected))))
+      (null dsh-emacs--markdown-pending))))
+
+;; Internal preparation errors surface, leaving the raw reply intact.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let* ((dsh-emacs-stream-markdown-limit 8)
+         (event '((data . ((turn . 1) (step . 1)))))
+         (text "```text\nraw reply\n```\n")
+         (state (dsh-emacs-render--start-assistant-stream event text))
+         (before (buffer-string)) reported)
+    (dsh-emacs-render--finish-assistant-stream event text)
+    (cl-letf (((symbol-function 'dsh-emacs-markdown-replace-markup)
+               (lambda (&rest _) (error "Broken formatter")))
+              ((symbol-function 'message)
+               (lambda (format &rest args)
+                 (setq reported (apply #'format format args)))))
+      (dsh-emacs-render--run-markdown (current-buffer)))
+    (dsh-test-assert "stream-idle-errors-preserve-raw-text-and-report-failure"
+      (equal-including-properties before (buffer-string))
+      (string-match-p "Broken formatter" reported)
+      (null dsh-emacs--markdown-pending)
+      (null (marker-buffer (plist-get state :start))))))
+
+;; Publishing markup preserves positions inside unchanged code content.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let* ((dsh-emacs-stream-markdown-limit 8)
+         (event '((data . ((turn . 1) (step . 1)))))
+         (text "```text\nalpha beta gamma\n```\n")
+         marker)
+    (dsh-emacs-render--start-assistant-stream event text)
+    (save-excursion
+      (goto-char (point-min))
+      (search-forward "beta")
+      (setq marker (copy-marker (- (point) 4))))
+    (dsh-emacs-render--finish-assistant-stream event text)
+    (dsh-emacs-render--run-markdown (current-buffer))
+    (dsh-test-assert "stream-idle-publish-keeps-positions-in-unchanged-code"
+      (and (<= (+ marker 4) (point-max))
+           (equal (buffer-substring-no-properties marker (+ marker 4)) "beta")))
+    (dsh-test-assert "stream-idle-publish-does-not-poison-coding-buffers"
+      (equal (decode-coding-string (unibyte-string #xE1) 'iso-8859-1) "á"))
+    (set-marker marker nil)))
+
+;; Teardown releases pending jobs and their timers instead of publishing later.
+(dolist (boundary '(reset kill mode))
+  (let ((buffer (generate-new-buffer " *dsh-markdown-lifecycle*"))
+        state timer stream-timer caught)
+    (unwind-protect
+        (with-current-buffer buffer
+          (dsh-emacs-mode)
+          (let ((dsh-emacs-stream-markdown-limit 8))
+            (setq state (dsh-emacs-render--start-assistant-stream
+                         '((data . ((turn . 1) (step . 1))))
+                         "```text\nqueued\n```\n")
+                  timer dsh-emacs--markdown-timer)
+            (dsh-emacs-render--start-assistant-stream
+             '((data . ((turn . 1) (step . 1)))) "pending delta")
+            (setq stream-timer (plist-get state :timer)))
+          (condition-case err
+              (pcase boundary
+                ('reset (dsh-emacs-render--reset-tool-tracking))
+                ('kill (kill-buffer buffer))
+                ('mode (fundamental-mode)))
+            (error (setq caught err)))
+          (dsh-test-assert (format "stream-idle-work-cancels-on-%s" boundary)
+            (null caught)
+            (timerp stream-timer)
+            (not (memq stream-timer timer-list))
+            (null (plist-get state :pending))
+            (timerp timer)
+            (not (memq timer timer-list))
+            (null (marker-buffer (plist-get state :start)))
+            (null (marker-buffer (plist-get state :end)))))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (setq dsh-emacs--streaming-assistant nil))
+        (kill-buffer buffer)))))
 
 ;; Pixel paths use the target frame even when it is not the selected frame.
 (let* ((window (selected-window))
@@ -1601,6 +2052,64 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             buffer-read-only)
           (set-marker end nil))))))
 
+;; Emphasis scanning can skip the prefix preceding its first delimiter.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let ((event '((data . ((turn . 1) (step . 1)))))
+        (prefix (concat (make-string 3000 ?a) " "))
+        (bold (symbol-function 'dsh-emacs-markdown--replace-bolds))
+        (scanned 0))
+    (dsh-emacs-render--start-assistant-stream event prefix)
+    (cl-letf (((symbol-function 'dsh-emacs-markdown--replace-bolds)
+               (lambda (&rest args)
+                 (cl-incf scanned (- (point-max) (point-min)))
+                 (apply bold args))))
+      (dotimes (_ 20)
+        (dsh-emacs-render--start-assistant-stream event "**bold** text ")
+        (dsh-emacs-render--flush-stream)))
+    (dsh-test-assert "stream-emphasis-skips-delimiter-free-prefix"
+      (< scanned 1000)
+      (equal (buffer-substring-no-properties
+              (plist-get dsh-emacs--streaming-assistant :start)
+              (plist-get dsh-emacs--streaming-assistant :end))
+             (concat prefix (apply #'concat (make-list 20 "bold text ")))))
+    (dsh-emacs-render--flush-stream nil t)))
+(dolist (text '("word*literal*" "word_underscore_" "word**literal**"))
+  (with-temp-buffer
+    (insert text)
+    (dsh-emacs-markdown-replace-markup)
+    (dsh-test-assert (format "emphasis-keeps-real-left-context-%s" text)
+      (equal (buffer-substring-no-properties (point-min) (point-max)) text))))
+
+;; Plain text needs no emphasis passes, and repeated formatting is write-free.
+(with-temp-buffer
+  (insert "plain 中文 text\nnext line")
+  (let ((calls 0))
+    (cl-letf (((symbol-function 'dsh-emacs-markdown--replace-bolds)
+               (lambda (&rest _) (cl-incf calls) nil))
+              ((symbol-function 'dsh-emacs-markdown--replace-italics)
+               (lambda (&rest _) (cl-incf calls) nil))
+              ((symbol-function 'dsh-emacs-markdown--replace-strikethroughs)
+               (lambda (&rest _) (cl-incf calls) nil)))
+      (dsh-emacs-markdown-replace-markup))
+    (dsh-test-assert "markdown-plain-text-skips-emphasis-passes"
+      (= calls 0)
+      (equal (buffer-substring-no-properties (point-min) (point-max))
+             "plain 中文 text\nnext line")))
+  (let ((tick (buffer-modified-tick)))
+    (dsh-emacs-markdown-replace-markup)
+    (dsh-test-assert "markdown-unchanged-plain-text-does-not-write"
+      (= tick (buffer-modified-tick)))))
+(let ((styled (with-temp-buffer
+                (insert "**bold**")
+                (dsh-emacs-markdown-replace-markup)
+                (buffer-string))))
+  (with-temp-buffer
+    (insert-for-yank styled)
+    (dsh-test-assert "markdown-yank-handler-inserts-plain-text"
+      (equal (buffer-string) "bold")
+      (null (text-properties-at (point-min))))))
+
 ;; Chunk boundaries do not change final Markdown text or its visual faces.
 (cl-loop for (tag source) in
          '(("mixed" "**before**\n| A | B |\n|---|---|\n| `a|b` | **中** |\n\nafter\n")
@@ -1615,7 +2124,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                     (buffer-string))))
     (dolist (size '(1 2 7 31))
       (with-temp-buffer
-        (let ((state (list :scan nil :pending nil :kind nil))
+        (let ((state (list :scan nil :pending nil :kind nil :watermark nil))
               (pos 0))
           (while (< pos (length source))
             (goto-char (point-max))
@@ -1631,7 +2140,8 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                        always (equal (get-text-property i 'face actual)
                                      (get-text-property i 'face expected)))
               (null (plist-get state :scan))
-              (null (plist-get state :pending)))))))))
+              (null (plist-get state :pending))
+              (null (plist-get state :watermark)))))))))
 
 ;; Teardown finalizes deferred markup even after the formatting timer fired.
 (dolist (boundary '(turn-end disconnect reset switch))
@@ -12545,32 +13055,40 @@ candidates as the UI would via `all-completions', not by destructuring."
           (dsh-test-assert "watchdog-disconnects-unanswered-probe" deleted))
       (delete-process process))))
 
-;; A burst paints Markdown once, then finalization reuses the painted body.
+;; A burst writes once per flush; finalization reuses the painted body.
 (with-temp-buffer
   (dsh-emacs-mode)
   (let ((event '((data . ((turn . 1) (step . 1)))))
-        (calls 0) (forced 0)
+        (calls 0) (forced 0) (writes 0) (anchors 0)
+        (anchor (symbol-function 'dsh-emacs-render--input-anchor-pos))
         (render (symbol-function 'dsh-emacs-markdown-replace-markup)))
     (cl-letf (((symbol-function 'dsh-emacs-markdown-replace-markup)
                (lambda (&rest args)
                  (setq calls (1+ calls))
                  (when (plist-get args :force) (setq forced (1+ forced)))
-                 (apply render args))))
+                 (apply render args)))
+              ((symbol-function 'dsh-emacs-render--input-anchor-pos)
+               (lambda () (setq anchors (1+ anchors)) (funcall anchor))))
       (dsh-emacs-render--start-assistant-stream event "hello")
+      (add-hook 'after-change-functions
+                (lambda (&rest _) (setq writes (1+ writes))) nil t)
       (dotimes (_ 10)
-        (dsh-emacs-render--start-assistant-stream event " world"))
+        (dsh-emacs-render--start-assistant-stream event " world")
+        (dsh-emacs-render--follow-stream))
       (dsh-test-assert "stream-coalesces-markdown-burst" (= calls 1))
       (let* ((state dsh-emacs--streaming-assistant)
              (end (marker-position (plist-get state :end))))
-        (dsh-test-assert "stream-pending-text-is-visible-and-read-only"
+        (dsh-test-assert "stream-burst-defers-writes-and-follow"
           (equal (buffer-substring-no-properties
-                  (plist-get state :start) end)
-                 (concat "hello" (apply #'concat (make-list 10 " world"))))
+                  (plist-get state :start) end) "hello")
+          (= writes 0) (= anchors 0)
           (get-text-property (1- end) 'read-only)))
       (dsh-emacs-render--finish-assistant-stream
        event (concat "hello" (apply #'concat (make-list 10 " world"))))
       (dsh-test-assert "stream-final-flushes-without-full-rewrite"
-        (= calls 2) (= forced 0) (null dsh-emacs--streaming-assistant)))))
+        (= calls 2) (= forced 0) (null dsh-emacs--streaming-assistant)
+        (string-match-p (concat "hello" (apply #'concat (make-list 10 " world")))
+                        (buffer-string))))))
 
 ;; Table wrapping must measure each character once, retaining layout and faces.
 (dolist (case '(("alpha beta gamma" 8 ("alpha" "beta" "gamma"))
@@ -12601,6 +13119,138 @@ candidates as the UI would via `all-completions', not by destructuring."
       (equal-including-properties
        (dsh-emacs-markdown--table-wrap-text text 4)
        (list styled "xx")))))
+
+;; The renderer owns and reuses the Markdown frontier across real flushes.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let ((event '((data . ((turn . 1) (step . 1)))))
+        (scanned 0)
+        (stream-end (symbol-function 'dsh-emacs-markdown--stream-end)))
+    (cl-letf (((symbol-function 'dsh-emacs-markdown--stream-end)
+               (lambda (state)
+                 (setq scanned
+                       (+ scanned (- (point-max)
+                                     (or (plist-get state :scan) (point-min)))))
+                 (funcall stream-end state))))
+      (dsh-emacs-render--start-assistant-stream event "```text\n")
+      (let* ((markdown (plist-get dsh-emacs--streaming-assistant :markdown))
+             (scan (plist-get markdown :scan)))
+        (dotimes (_ 20)
+          (dsh-emacs-render--start-assistant-stream event "row\n")
+          (dsh-emacs-render--flush-stream))
+        (dsh-test-assert "stream-renderer-retains-incremental-frontier"
+          (= scanned (+ 8 (* 20 4)))
+          (markerp scan)
+          (eq markdown (plist-get dsh-emacs--streaming-assistant :markdown))
+          (eq scan (plist-get markdown :scan)))
+        (dsh-emacs-render--finish-assistant-stream
+         event (concat "```text\n" (apply #'concat (make-list 20 "row\n")) "```"))
+        (dsh-test-assert "stream-corrected-final-releases-frontier"
+          (null (plist-get markdown :scan))
+          (null (plist-get markdown :pending))
+          (text-property-not-all (point-min) (point-max)
+                                 'dsh-emacs-markdown-frozen nil))))))
+
+;; Advancing the live frontier must not rewrite the stable reply prefix.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let ((event '((data . ((turn . 1) (step . 1)))))
+        (put (symbol-function 'put-text-property))
+        (prefix-writes 0))
+    (dsh-emacs-render--start-assistant-stream event "**stable**\n")
+    (let* ((state dsh-emacs--streaming-assistant)
+           (markdown (plist-get state :markdown))
+           (start (marker-position (plist-get state :start)))
+           (stable (buffer-substring start (plist-get state :end))))
+      (cl-letf (((symbol-function 'put-text-property)
+                 (lambda (beg end prop value &optional object)
+                   (when (and (not object) (= beg start))
+                     (cl-incf prefix-writes))
+                   (funcall put beg end prop value object))))
+        (dotimes (_ 10)
+          (dsh-emacs-render--start-assistant-stream event "next\n")
+          (dsh-emacs-render--flush-stream)))
+      (dsh-test-assert "stream-frontier-does-not-invalidate-stable-prefix"
+        (= prefix-writes 0)
+        (equal-including-properties
+         stable (buffer-substring start (+ start (length stable)))))
+      (let ((watermark (plist-get markdown :watermark)))
+        (dsh-test-assert "stream-frontier-tracks-rendered-tail"
+          (markerp watermark)
+          (equal watermark (plist-get state :end)))
+        (dsh-emacs-render--finish-assistant-stream
+         event (concat "**stable**\n" (apply #'concat (make-list 10 "next\n"))))
+        (dsh-test-assert "stream-final-releases-render-frontier"
+          (null (plist-get markdown :watermark))
+          (or (not (markerp watermark)) (null (marker-buffer watermark))))))))
+
+;; Timer callbacks write to their owner once, preserving draft and properties.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (goto-char (point-max))
+  (insert "draft\n草稿")
+  (let ((owner (current-buffer))
+        (event '((data . ((turn . 1) (step . 1)))))
+        (insertions 0))
+    (dsh-emacs-render--start-assistant-stream event "你好")
+    (dsh-emacs-render--start-assistant-stream event " world")
+    (let ((timer (plist-get dsh-emacs--streaming-assistant :timer)))
+      (dsh-emacs-render--start-assistant-stream event "\n下一行")
+      (dsh-test-assert "stream-burst-keeps-one-timer"
+        (eq timer (plist-get dsh-emacs--streaming-assistant :timer)))
+      (add-hook 'after-change-functions
+                (lambda (start end old)
+                  (when (and (zerop old) (< start end))
+                    (setq insertions (1+ insertions)))) nil t)
+      (with-temp-buffer
+        (insert "other buffer")
+        (apply (timer--function timer) (timer--args timer))
+        (dsh-test-assert "stream-timer-does-not-write-to-current-buffer"
+          (equal (buffer-string) "other buffer")))
+      (let* ((state dsh-emacs--streaming-assistant)
+             (end (marker-position (plist-get state :end)))
+             (text (buffer-substring-no-properties (plist-get state :start) end)))
+        (dsh-test-assert "stream-timer-inserts-once-with-transcript-properties"
+          (eq owner (current-buffer)) (= insertions 1)
+          (equal text "你好 world\n下一行")
+          (get-text-property (1- end) 'read-only)
+          (equal (get-text-property (1- end) 'dsh-emacs-event-block)
+                 (plist-get state :event-id))
+          (not (memq timer timer-list))
+          (null (plist-get state :timer))
+          (equal (buffer-substring-no-properties dsh-emacs--input-marker
+                                                (point-max))
+                 "draft\n草稿")))
+      (dsh-emacs-render--flush-stream nil t))))
+
+;; Event dispatch must flush text at boundaries without unbatching reasoning.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let ((text-event '((type . "assistant/chunk")
+                      (data . ((turn . 1) (step . 1)
+                               (chunk . ((type . "text-delta") (text . "answer")))))))
+        (think-event '((type . "assistant/chunk")
+                       (data . ((turn . 1) (step . 1)
+                                (chunk . ((type . "reasoning-delta") (text . "think"))))))))
+    (dsh-emacs-render-event text-event)
+    (dsh-emacs-render-event text-event)
+    (dsh-emacs-render-event think-event)
+    (dsh-test-assert "stream-boundary-publishes-text-before-reasoning"
+      (null (plist-get dsh-emacs--streaming-assistant :timer))
+      (string-match-p "answeranswer" (buffer-string)))
+    (dsh-emacs-render-event think-event)
+    (dsh-emacs-render-event think-event)
+    (dsh-test-assert "stream-dispatch-preserves-reasoning-batching"
+      (= (length (plist-get dsh-emacs--streaming-thinking :chunks)) 2))
+    (dsh-emacs-render-event text-event)
+    (dsh-test-assert "stream-text-publishes-pending-reasoning"
+      (null (plist-get dsh-emacs--streaming-thinking :timer))
+      (string-match-p "thinkthinkthink" (buffer-string)))
+    (dsh-emacs-render--finish-assistant-stream text-event "corrected")
+    (dsh-test-assert "stream-correction-discards-unpainted-text"
+      (string-match-p "corrected" (buffer-string))
+      (not (string-match-p "answer" (buffer-string)))
+      (null dsh-emacs--streaming-assistant))))
 
 ;; Cursor parsing retains a partial tail and handles masks/extended lengths.
 (dolist (size '(0 3 126 65536))

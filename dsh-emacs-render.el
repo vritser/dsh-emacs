@@ -23,10 +23,16 @@
 
 (require 'json)
 (require 'cl-lib)
+(require 'subr-x)
 (require 'dsh-emacs-ui)
 (require 'dsh-emacs-faces)
 (require 'dsh-emacs-tokens)
 (require 'dsh-emacs-markdown)
+
+(declare-function dsh-emacs-markdown--stream-end "dsh-emacs-markdown" (state))
+(declare-function dsh-emacs-markdown--watermark-start "dsh-emacs-markdown"
+                  (&optional stream-state))
+(defvar dsh-emacs-markdown--render-window)
 
 ;; Defined in dsh-emacs-reference.el, loaded by dsh-emacs.el.  Turns completed
 ;; @ file/session mentions in a user message into clickable colored links.
@@ -66,6 +72,17 @@
   "Event renderers for `dsh-emacs'."
   :group 'dsh-emacs
   :prefix "dsh-emacs-")
+
+(defcustom dsh-emacs-stream-markdown-limit 8192
+  "Maximum pending characters to format immediately in assistant replies.
+Longer partial lines remain visible and finish styling at a newline or the
+final reply.  Large ready regions are formatted after 0.1 seconds of idle
+time, with user input interrupting the attempt until the next idle period.
+This also applies to final-only replies and messages loaded from history.
+Nil keeps all formatting synchronous."
+  :type '(choice (const :tag "Always synchronous" nil)
+                 (integer :tag "Characters"))
+  :group 'dsh-emacs)
 
 (defcustom dsh-emacs-show-reasoning t
   "Whether to show reasoning (reasoning / thinking) content in the transcript.
@@ -590,51 +607,53 @@ message is inserted strictly above it."
 
 (defun dsh-emacs-render--window-at-bottom-p (window anchor)
   "Return non-nil when WINDOW currently shows the bottom of the transcript.
-True when the anchor region is within (a window-height plus slack) of
-logical lines below the window start.  The slack absorbs message/chunk
-insertions that push the anchor down between follow passes while still
+True when the anchor is within one window height plus ten screen rows
+of the window start, respecting wrapping and display properties.
+The slack absorbs insertions that push the anchor down between passes while
 leaving manually scrolled-up windows untouched."
   (ignore-errors
     (let ((start (window-start window)))
       (and (<= start anchor)
            (save-excursion
              (goto-char start)
-             (forward-line (+ (max 1 (window-text-height window)) 10))
+             (vertical-motion (+ (max 1 (window-text-height window)) 10) window)
              (>= (point) anchor))))))
 
-(defun dsh-emacs-render--follow-stream ()
-  "Scroll transcript windows to keep the newest content visible above input.
-Agent-shell style: a window follows the stream when its bottom reaches the
-input anchor AND the user is not reading up there (the window is not
-selected, or the window's point already sits in the input area).  Windows
-the user scrolled up or clicked into are left alone.  For the selected
-window (inline input mode) the buffer point is never moved: the view is
-re-pinned via `set-window-start' while the user keeps typing."
-  (let ((anchor (and (not (plist-get dsh-emacs--streaming-thinking :timer))
-                     (dsh-emacs-render--input-anchor-pos))))
-    ;; No input prompt face run (e.g. mid re-render).  Falling back to
-    ;; point-max would park followed windows' point on the phantom display
-    ;; line beneath the input, and re-apply it on every stream redraw — the
-    ;; "cursor stuck under the input line" symptom in a split.  Without an
-    ;; anchor there is no input line to keep visible, so skip following.
-    (when anchor
-      (dolist (window (get-buffer-window-list (current-buffer) nil t))
-        (when (window-live-p window)
-          (ignore-errors
-            (when (and (dsh-emacs-render--window-at-bottom-p window anchor)
+(defun dsh-emacs-render--following-windows ()
+  "Return windows currently following this buffer's input anchor.
+Capture this immediately before a stream edit so large writes cannot make
+a following window look manually scrolled away.  No state survives the edit."
+  (when-let* ((windows (get-buffer-window-list (current-buffer) nil t))
+              (anchor (dsh-emacs-render--input-anchor-pos)))
+    (cl-loop for window in windows
+             when (and (window-live-p window)
+                       (dsh-emacs-render--window-at-bottom-p window anchor)
                        (or (not (eq window (selected-window)))
                            (>= (window-point window) anchor)))
-              (save-excursion
-                (goto-char anchor)
-                (forward-line (- (1- (max 1 (window-text-height window)))))
-                (let ((start (max (point-min) (point))))
-                  (unless (= start (window-start window))
-                    (set-window-start window start t))))
-              ;; Keep the pinned viewer's cursor at the input anchor; never move
-              ;; the buffer point of the selected inline-input window while
-              ;; typing.
-              (unless (eq window (selected-window))
-                (set-window-point window anchor)))))))))
+             collect window)))
+
+(cl-defun dsh-emacs-render--follow-stream
+    (&optional (windows
+                (unless (or (plist-get dsh-emacs--streaming-assistant :timer)
+                            (plist-get dsh-emacs--streaming-thinking :timer))
+                  (dsh-emacs-render--following-windows))))
+  "Pin WINDOWS to the newest transcript above input, preserving draft point.
+When omitted, select current following windows unless a stream batch is
+pending.  A supplied list retains the follow decision made before an edit;
+explicit nil follows no windows.  Readers outside that list stay untouched."
+  ;; Without the prompt, point-max would pin the phantom line below input.
+  (when-let* ((anchor (and windows (dsh-emacs-render--input-anchor-pos))))
+    (dolist (window windows)
+      (when (and (window-live-p window)
+                 (eq (window-buffer window) (current-buffer)))
+        (save-excursion
+          (goto-char anchor)
+          (vertical-motion (- (1- (max 1 (window-text-height window)))) window)
+          (unless (= (point) (window-start window))
+            (set-window-start window (point) t)))
+        (unless (or (eq window (selected-window))
+                    (= (window-point window) anchor))
+          (set-window-point window anchor))))))
 
 (defun dsh-emacs-render--input-insert-point ()
   "Return the start of the editable prompt line, or nil.
@@ -698,7 +717,8 @@ so subsequent messages are appended in history order.  Blank lines left by
 the previous content are consumed so everything stacks flush — except
 around a user message (USER-MESSAGE non-nil), which keeps one blank line
 above AND is marked so the NEXT insertion keeps one blank line below it
-(see `dsh-emacs-ui--blank-above-preserve')."
+(see `dsh-emacs-ui--blank-above-preserve').
+Return (START . END) for the inserted message text, excluding separators."
   (when (and (stringp text) (not (string-empty-p text)))
     ;; Rendering happens from an asynchronous callback.  Never leave point at
     ;; the transcript insertion position; the user's cursor belongs after ❯.
@@ -733,7 +753,8 @@ above AND is marked so the NEXT insertion keeps one blank line below it
               (put-text-property start text-end 'dsh-emacs-ui-space-after 1)
               (put-text-property start text-end 'dsh-emacs-user-message t))
             (when event-id
-              (put-text-property start end 'dsh-emacs-event-block event-id))))))))
+              (put-text-property start end 'dsh-emacs-event-block event-id)))
+          (cons start text-end))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; 公共助手：tool state tracking
@@ -746,10 +767,10 @@ Used for incremental rendering.")
 (defvar-local dsh-emacs--streaming-assistant nil
   "Current assistant stream state, or nil.
 The plist contains :key, :start, :end, :event-id, :chunks and :timer.
-:chunks retains raw deltas in reverse order; :timer coalesces Markdown work.
-The body between :start and :end is kept as raw Markdown while chunks
-arrive, then rewritten
-in place by `dsh-emacs-markdown-replace-markup'.")
+:chunks retains all raw deltas in reverse order for final reconciliation.
+:pending holds unpainted deltas; :timer coalesces insertion and Markdown
+work every 50ms.  :markdown owns the incremental parser's scan markers.
+The body between :start and :end contains the painted transcript.")
 
 (defvar-local dsh-emacs--streaming-thinking nil
   "Current live reasoning/Think block stream state, or nil.
@@ -759,6 +780,12 @@ Reasoning
 deltas grow a raw body below the \"✶ Think\" header; on finalization
 (`block-end' or `assistant/message') the raw region is replaced by the
 collapsible Think fragment.")
+
+(defvar-local dsh-emacs--markdown-pending nil
+  "Stream states awaiting interruptible Markdown formatting, in order.")
+
+(defvar-local dsh-emacs--markdown-timer nil
+  "One-shot idle timer for this buffer's pending Markdown.")
 
 (defvar-local dsh-emacs--tool-states (make-hash-table :test 'equal)
   "Map from toolCallId -> plist (:state :variant :title :summary :args :result).")
@@ -794,6 +821,7 @@ miss the entry is cleaned up.")
   "Reset tool tracking state. Called on full transcript reload."
   (dsh-emacs--command-spinner-clear-all)
   (dsh-emacs-render--flush-stream nil t)
+  (dsh-emacs-render--cancel-markdown)
   (setq dsh-emacs--streaming-assistant nil
         dsh-emacs--streaming-thinking nil
         dsh-emacs--tool-states (make-hash-table :test 'equal)
@@ -864,60 +892,231 @@ miss the entry is cleaned up.")
   "Return the logical key stored in streaming STATE."
   (plist-get state :key))
 
-(defun dsh-emacs-render--stream-render-region (state &optional force final)
+(defun dsh-emacs-render--reset-markdown-state (state)
+  "Release and clear STATE's parsing markers."
+  (dolist (key '(:scan :pending :watermark))
+    (when-let* ((marker (plist-get (plist-get state :markdown) key)))
+      (set-marker marker nil)
+      (setf (plist-get (plist-get state :markdown) key) nil)))
+  (setf (plist-get (plist-get state :markdown) :kind) nil))
+
+(defun dsh-emacs-render--protect-stream-region (state start end)
+  "Apply STATE's transcript protection and event identity to START..END."
+  (when (< start end)
+    (let ((inhibit-read-only t)
+          (event-id (plist-get state :event-id)))
+      (add-text-properties
+       start end
+       (append '(read-only t front-sticky (read-only)
+                 rear-nonsticky (read-only))
+               (when event-id (list 'dsh-emacs-event-block event-id)))))))
+
+(defun dsh-emacs-render--schedule-markdown ()
+  "Schedule one idle attempt for this buffer's pending Markdown."
+  (when (and dsh-emacs--markdown-pending (null dsh-emacs--markdown-timer))
+    (setq dsh-emacs--markdown-timer
+          ;; An already-expired idle deadline would spin when rearmed from
+          ;; its own callback.  Check current idleness at the next clock tick.
+          (run-at-time 0.1 nil #'dsh-emacs-render--run-markdown
+                       (current-buffer) t))))
+
+(defun dsh-emacs-render--stream-render-region (state &optional force final new-text)
   "Format STATE's ready Markdown and apply transcript properties there.
 FORCE repairs a replaced body; FINAL also renders unfinished tables.
-Pending raw text already carries transcript properties from insertion."
+Pending raw text already carries transcript properties from insertion.
+NEW-TEXT lets long partial lines skip formatting until a newline arrives."
+  (when force (dsh-emacs-render--reset-markdown-state state))
+  (when final (setf (plist-get state :render-final) t))
   (let ((start (marker-position (plist-get state :start)))
-        (end (marker-position (plist-get state :end)))
-        rendered)
-    (when (and start end (<= start end))
+        (end (marker-position (plist-get state :end))))
+    (when (and start end (<= start end)
+               (or force final (null new-text)
+                   (null dsh-emacs-stream-markdown-limit)
+                   (<= (- end (or (plist-get (plist-get state :markdown)
+                                             :watermark)
+                                  start))
+                       dsh-emacs-stream-markdown-limit)
+                   (string-match-p "\n" new-text)))
       (save-excursion
         (save-restriction
           (narrow-to-region start end)
-          (let ((inhibit-read-only t))
-            (setq rendered
-                  (dsh-emacs-markdown-replace-markup
-                   :force force :final final
-                   :stream-state
-                   (or (plist-get state :markdown)
-                       (setf (plist-get state :markdown)
-                             (list :scan nil :pending nil :kind nil))))))))
-      (pcase-let ((`(,body-start . ,body-end) rendered))
-        (when (and body-start body-end (< body-start body-end))
-          (let ((inhibit-read-only t)
-                (event-id (plist-get state :event-id)))
-            (put-text-property body-start body-end 'read-only t)
-            (put-text-property body-start body-end 'front-sticky '(read-only))
-            (put-text-property body-start body-end 'rear-nonsticky '(read-only))
-            (add-face-text-property body-start body-end
-                                    'dsh-emacs-assistant-body-face t)
-            (when event-id
-              (put-text-property body-start body-end
-                                 'dsh-emacs-event-block event-id))))))))
+          (let* ((markdown (plist-get state :markdown))
+                 (ready (if final end (dsh-emacs-markdown--stream-end markdown)))
+                 (begin (dsh-emacs-markdown--watermark-start markdown)))
+            (if (or (memq state dsh-emacs--markdown-pending)
+                    (and dsh-emacs-stream-markdown-limit
+                         (> (- ready begin) dsh-emacs-stream-markdown-limit)))
+                (progn
+                  ;; Future messages inserted at this boundary belong to
+                  ;; their own jobs.  Appending a delta advances it explicitly.
+                  (set-marker-insertion-type (plist-get state :start) t)
+                  (set-marker-insertion-type (plist-get state :end) nil)
+                  (unless (memq state dsh-emacs--markdown-pending)
+                    (setq dsh-emacs--markdown-pending
+                          (nconc dsh-emacs--markdown-pending (list state))))
+                  (dsh-emacs-render--schedule-markdown))
+              (save-excursion
+                (let* ((inhibit-read-only t)
+                       (end-marker (plist-get state :end))
+                       (insertion-type (marker-insertion-type end-marker)))
+                  (unwind-protect
+                      (progn
+                        (set-marker-insertion-type end-marker t)
+                        (pcase-let ((`(,body-start . ,body-end)
+                                     (dsh-emacs-markdown-replace-markup
+                                      :force force :final final
+                                      :base-face 'dsh-emacs-assistant-body-face
+                                      :stream-state markdown)))
+                          (dsh-emacs-render--protect-stream-region
+                           state body-start body-end)))
+                    (set-marker (plist-get state :start) start)
+                    (set-marker-insertion-type end-marker insertion-type)))))))))))
+
+(defun dsh-emacs-render--cancel-markdown ()
+  "Cancel pending Markdown when this transcript is reset or destroyed."
+  (when dsh-emacs--markdown-timer
+    (cancel-timer dsh-emacs--markdown-timer)
+    (setq dsh-emacs--markdown-timer nil))
+  (dolist (state dsh-emacs--markdown-pending)
+    (dsh-emacs-render--reset-markdown-state state)
+    (set-marker (plist-get state :start) nil)
+    (set-marker (plist-get state :end) nil))
+  (setq dsh-emacs--markdown-pending nil))
+
+(cl-defun dsh-emacs-render--run-markdown (buffer &optional idle-only)
+  "Prepare one pending reply in BUFFER, aborting work when input arrives.
+Only a complete result replaces visible text.  Interrupted work is retried
+at the next idle period; edits during preparation invalidate that attempt.
+IDLE-ONLY is set by the timer; nil permits an explicit immediate attempt."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when dsh-emacs--markdown-timer
+        (cancel-timer dsh-emacs--markdown-timer)
+        (setq dsh-emacs--markdown-timer nil))
+      (when (and idle-only
+                 (let ((idle (current-idle-time)))
+                   (or (null idle) (< (float-time idle) 0.1))))
+        (dsh-emacs-render--schedule-markdown)
+        (cl-return-from dsh-emacs-render--run-markdown nil))
+      (when-let* ((state (car dsh-emacs--markdown-pending)))
+        (let (finished)
+          (condition-case err
+              (if (not (and (marker-buffer (plist-get state :start))
+                            (marker-buffer (plist-get state :end))))
+                  (setq finished t)
+                (when (eq state dsh-emacs--streaming-assistant)
+                  (dsh-emacs-render--flush-stream))
+                (let* ((body-start (marker-position (plist-get state :start)))
+                       (start (marker-position
+                               (or (plist-get (plist-get state :markdown) :watermark)
+                                   (plist-get state :start))))
+                       (end (marker-position (plist-get state :end)))
+                       (tick (buffer-chars-modified-tick))
+                       (window (or (get-buffer-window buffer t) (selected-window)))
+                       (source (buffer-substring start end))
+                       (result
+                        (while-no-input
+                          (with-temp-buffer
+                            (let ((inhibit-read-only t)
+                                  (dsh-emacs-markdown--render-window window)
+                                  (markdown (list :scan nil :pending nil :kind nil
+                                                  :watermark nil)))
+                              (insert source)
+                              (dsh-emacs-markdown-replace-markup
+                               :stream-state markdown
+                               :final (plist-get state :render-final)
+                               :base-face 'dsh-emacs-assistant-body-face)
+                              (list (buffer-string)
+                                    (when-let* ((frontier
+                                                 (plist-get markdown :watermark)))
+                                      (- frontier (point-min)))))))))
+                  (when (and (consp result) (= tick (buffer-chars-modified-tick)))
+                    (pcase-let ((`(,text ,frontier) result)
+                                (windows (dsh-emacs-render--following-windows))
+                                (inhibit-read-only t))
+                      (save-excursion
+                        (atomic-change-group
+                          ;; Available since Emacs 27.1.  Preserve reading
+                          ;; positions and neighboring jobs; cap diff work.
+                          ;; Diff only characters: protected string properties
+                          ;; can leak into Emacs's internal coding work buffer.
+                          (replace-region-contents
+                           start end (lambda () (substring-no-properties text)) 0.01)
+                          ;; The text diff retains old properties on unchanged
+                          ;; characters.  Install the prepared display properties.
+                          (let ((pos 0))
+                            (while (< pos (length text))
+                              (let ((next (next-property-change pos text (length text))))
+                                (set-text-properties
+                                 (+ start pos) (+ start next)
+                                 (text-properties-at pos text))
+                                (setq pos next))))
+                          (dsh-emacs-render--protect-stream-region
+                           state start (+ start (length text)))))
+                      (set-marker (plist-get state :start) body-start)
+                      (set-marker (plist-get state :end) (+ start (length text)))
+                      (dsh-emacs-render--reset-markdown-state state)
+                      (when frontier
+                        (let ((markdown (plist-get state :markdown)))
+                          (setf (plist-get markdown :scan)
+                                (copy-marker (+ start frontier))
+                                (plist-get markdown :watermark)
+                                (copy-marker (+ start frontier)))))
+                      (setq finished t)
+                      (dsh-emacs-render--follow-stream windows)))))
+            (error
+             (setq finished t)
+             (message "dsh: Markdown rendering failed: %s"
+                      (error-message-string err))))
+          (when finished
+            (setq dsh-emacs--markdown-pending
+                  (delq state dsh-emacs--markdown-pending))
+            (unless (eq state dsh-emacs--streaming-assistant)
+              (dsh-emacs-render--reset-markdown-state state)
+              (set-marker (plist-get state :start) nil)
+              (set-marker (plist-get state :end) nil)))))
+      (dsh-emacs-render--schedule-markdown))))
 
 (defun dsh-emacs-render--flush-stream (&optional buffer final)
-  "Flush BUFFER's pending Markdown pass and cancel its one-shot timer.
+  "Insert and format BUFFER's queued text and cancel its one-shot timer.
 FINAL also finishes deferred markup when no timer is pending."
   (let ((buffer (or buffer (current-buffer))))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (dsh-emacs-render--flush-thinking)
         (when-let* ((state dsh-emacs--streaming-assistant))
-          (let ((timer (plist-get state :timer)))
+          (let* ((timer (plist-get state :timer))
+                 (text (when (plist-get state :pending)
+                         (apply #'concat (reverse (plist-get state :pending)))))
+                 (windows (when (or timer final)
+                            (dsh-emacs-render--following-windows))))
             (when timer
               (cancel-timer timer)
               (setf (plist-get state :timer) nil))
+            (when text
+              (let ((inhibit-read-only t))
+                (save-excursion
+                  (goto-char (plist-get state :end))
+                  (insert (propertize text
+                                      'read-only t
+                                      'front-sticky '(read-only)
+                                      'rear-nonsticky '(read-only)
+                                      'face 'dsh-emacs-assistant-body-face
+                                      'dsh-emacs-event-block
+                                      (plist-get state :event-id)))
+                  (set-marker (plist-get state :end) (point)))
+                (setf (plist-get state :pending) nil)))
             (when (or timer final)
-              (dsh-emacs-render--stream-render-region state nil final)
-              (dsh-emacs-render--follow-stream))))))))
+              (dsh-emacs-render--stream-render-region state nil final text)
+              (dsh-emacs-render--follow-stream windows))))))))
 
 (defun dsh-emacs-render--start-assistant-stream (event text)
   "Create or extend the live assistant stream with TEXT from EVENT."
   (when (and (stringp text) (not (string-empty-p text)))
     (let* ((key (dsh-emacs-render--stream-key event))
            (state dsh-emacs--streaming-assistant)
-           (new-state nil))
+           (new-state nil)
+           windows)
       ;; There is normally only one active assistant step.  If the server
       ;; starts another one before sending the previous summary, leave the
       ;; already visible body in place and move the live cursor to the new
@@ -928,6 +1127,7 @@ FINAL also finishes deferred markup when no timer is pending."
         (setq state nil
               dsh-emacs--streaming-assistant nil))
       (unless state
+        (setq windows (dsh-emacs-render--following-windows))
         (let* ((insert-point (dsh-emacs-render--input-insert-point))
                (event-id (format "%s-stream-%s"
                                  (dsh-emacs-render--make-namespace) key))
@@ -958,24 +1158,20 @@ FINAL also finishes deferred markup when no timer is pending."
                             :end end
                             :event-id event-id
                             :chunks (list text)
+                            :pending nil
+                            :markdown (list :scan nil :pending nil :kind nil
+                                            :watermark nil)
+                            :render-final nil
                             :timer nil)
                 dsh-emacs--streaming-assistant state
                 new-state t)))
       (when (and state (not new-state))
-        (let ((end (plist-get state :end))
-              (inhibit-read-only t))
-          (save-excursion
-            (goto-char end)
-            (insert (propertize text
-                                'read-only t
-                                'front-sticky '(read-only)
-                                'rear-nonsticky '(read-only)
-                                'face 'dsh-emacs-assistant-body-face
-                                'dsh-emacs-event-block
-                                (plist-get state :event-id))))
-          (push text (plist-get state :chunks))))
+        (push text (plist-get state :chunks))
+        (push text (plist-get state :pending)))
       (if new-state
-          (dsh-emacs-render--stream-render-region state)
+          (progn
+            (dsh-emacs-render--stream-render-region state nil nil text)
+            (dsh-emacs-render--follow-stream windows))
         (unless (plist-get state :timer)
           (setf (plist-get state :timer)
                 (run-at-time 0.05 nil #'dsh-emacs-render--flush-stream
@@ -998,16 +1194,22 @@ pending incremental pass; changed text is replaced and rendered in full."
             (setf (plist-get state :timer) nil))
           (let ((start (marker-position (plist-get state :start)))
                 (end (marker-position (plist-get state :end)))
+                (windows (dsh-emacs-render--following-windows))
                 (inhibit-read-only t))
             (when (and start end)
               (save-excursion
                 (goto-char start)
                 (delete-region start end)
-                (insert text)
+                (insert (propertize text 'face 'dsh-emacs-assistant-body-face))
+                (set-marker (plist-get state :start) start)
                 (set-marker (plist-get state :end) (point)))
-              (dsh-emacs-render--stream-render-region state t t)))))
-      (set-marker (plist-get state :start) nil)
-      (set-marker (plist-get state :end) nil)
+              (dsh-emacs-render--protect-stream-region
+               state start (plist-get state :end))
+              (dsh-emacs-render--stream-render-region state t t)
+              (dsh-emacs-render--follow-stream windows)))))
+      (unless (memq state dsh-emacs--markdown-pending)
+        (set-marker (plist-get state :start) nil)
+        (set-marker (plist-get state :end) nil))
       (setq dsh-emacs--streaming-assistant nil)
       t)))
 
@@ -1019,13 +1221,14 @@ pending incremental pass; changed text is replaced and rendered in full."
                   (timer (plist-get state :timer)))
         (cancel-timer timer)
         (setf (plist-get state :timer) nil)
-        (let ((text (apply #'concat (reverse (plist-get state :chunks))))
+        (let ((windows (dsh-emacs-render--following-windows))
+              (text (apply #'concat (reverse (plist-get state :chunks))))
               (inhibit-read-only t))
           (save-excursion
             (goto-char (plist-get state :end))
             (insert text))
-          (setf (plist-get state :chunks) nil))
-        (dsh-emacs-render--follow-stream)))))
+          (setf (plist-get state :chunks) nil)
+          (dsh-emacs-render--follow-stream windows))))))
 
 (defun dsh-emacs-render--thinking-stream-alive-for-p (key)
   "Return non-nil when the live thinking stream is active for KEY."
@@ -1052,6 +1255,7 @@ text arrives."
               dsh-emacs--streaming-thinking nil))
       (unless state
         (let* ((insert-point (dsh-emacs-render--input-insert-point))
+               (windows (dsh-emacs-render--following-windows))
                start end)
           (save-excursion
             (let ((inhibit-read-only t))
@@ -1070,7 +1274,8 @@ text arrives."
                             :start (copy-marker start nil)
                             :end end :chunks nil :timer nil)
                 dsh-emacs--streaming-thinking state
-                new-state t)))
+                new-state t)
+          (dsh-emacs-render--follow-stream windows)))
       (when (and state (not new-state))
         (push text (plist-get state :chunks))
         (unless (plist-get state :timer)
@@ -1385,10 +1590,22 @@ session chips; see `dsh-emacs-reference-fontify'."
            ns block-id reasoning ts (dsh-emacs-render--input-insert-point)))))
     (unless (dsh-emacs-render--finish-assistant-stream event text)
       (unless (string-empty-p text)
-        (dsh-emacs-render--insert-chat-message
-         (dsh-emacs-markdown-render text)
-         'dsh-emacs-assistant-body-face (dsh-emacs-render--input-insert-point)
-         (format "%s-%s" ns block-id))))
+        (let* ((defer (and dsh-emacs-stream-markdown-limit
+                           (> (length text) dsh-emacs-stream-markdown-limit)))
+               (event-id (format "%s-%s" ns block-id))
+               (body (if defer
+                         (if (string-suffix-p "\n" text) text (concat text "\n"))
+                       (dsh-emacs-markdown-render text)))
+               (range (dsh-emacs-render--insert-chat-message
+                       body 'dsh-emacs-assistant-body-face
+                       (dsh-emacs-render--input-insert-point) event-id)))
+          (when defer
+            (dsh-emacs-render--stream-render-region
+             (list :start (copy-marker (car range))
+                   :end (copy-marker (cdr range) t)
+                   :event-id event-id :render-final nil
+                   :markdown (list :scan nil :pending nil :kind nil :watermark nil))
+             nil t)))))
     seq))
 
 (defun dsh-emacs-render--render-thinking-block (namespace-id block-id text timestamp insert-point)
@@ -2249,13 +2466,17 @@ Returns the event seq."
 (defun dsh-emacs-render-event (event)
   "Dispatch EVENT to the appropriate renderer. Returns the event seq, or nil."
   (let* ((type (dsh-emacs-render--aget "type" event))
+         (chunk-type (and (equal type "assistant/chunk")
+                          (dsh-emacs-render--aget
+                           "type" (dsh-emacs-render--aget
+                                   "chunk" (dsh-emacs-render--event-data event)))))
          (seq nil))
-    ;; Preserve event order at boundaries; only reasoning bursts are deferred.
-    (unless (and (equal type "assistant/chunk")
-                 (equal (dsh-emacs-render--aget
-                         "type" (dsh-emacs-render--aget
-                                 "chunk" (dsh-emacs-render--event-data event)))
-                        "reasoning-delta"))
+    ;; Publish queued text before another event can insert transcript content.
+    (when (and (plist-get dsh-emacs--streaming-assistant :timer)
+               (not (equal chunk-type "text-delta")))
+      (dsh-emacs-render--flush-stream))
+    ;; Preserve event order at boundaries; reasoning has its own burst timer.
+    (unless (equal chunk-type "reasoning-delta")
       (dsh-emacs-render--flush-thinking))
     (pcase type
       ("user/message" (setq seq (dsh-emacs-render-user-message event)))

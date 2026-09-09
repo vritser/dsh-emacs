@@ -8,6 +8,7 @@ The most commonly used options, straight in your config:
 (setq dsh-emacs-history-window 30)                  ; messages fetched when opening a session (maxMessages): larger = fuller history but slower opening (GC/parsing scale with it)
 (setq dsh-emacs-show-reasoning t)                  ; show reasoning content (on by default; nil = hide, unlike dsh web)
 (setq dsh-emacs-show-tool-calls t)                 ; show tool calls
+(setq dsh-emacs-stream-markdown-limit 8192)        ; pending characters before idle formatting; nil = synchronous
 (setq dsh-emacs-default-cwd default-directory)     ; fallback working directory for new sessions (interactive ones use the current buffer's default-directory first)
 (setq dsh-emacs-new-session-auto-project t)        ; auto-detect the Emacs project of the working directory and place new sessions in its workspace (nil = always start in CWD)
 (setq dsh-emacs-default-model "claude-opus-4-5")   ; default model name
@@ -31,6 +32,27 @@ The most commonly used options, straight in your config:
 (setq dsh-emacs-reference-max-sessions nil)         ; session candidates shown in the "@" popup (nil = all host results)
 (setq dsh-emacs-modeline-enabled t)                  ; whether the mode-line stats are enabled
 ```
+
+## Markdown responsiveness
+
+`dsh-emacs-stream-markdown-limit` defaults to **8192 characters**. Reply text
+still appears through the normal stream batching. Once an unfinished line
+exceeds this pending range, its new Markdown remains literal until a newline
+or the final message. Smaller lines keep their existing live styling.
+
+Large ready regions are prepared after at least **0.1 seconds of idle time**,
+checked by a one-shot timer every 0.1 seconds while work is pending, one
+reply per callback. User input interrupts preparation; visible text remains
+intact and a later idle period retries. The complete result then replaces the
+pending region. Large final-only replies and history messages use the same
+path. Read-only protection and event navigation are present before styling.
+
+Set the option to **nil** to disable automatic deferral for new work. This is
+a character threshold, not a guaranteed frame-time budget: publishing the
+result, property installation, GC and redisplay still take synchronous work.
+An interrupted attempt may repeat computation; a formatting error is reported
+and leaves the raw reply visible. See
+[decision record 036](../postmortem/036-bounded-stream-markdown.md).
 
 ## `ask` question prompts
 

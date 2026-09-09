@@ -199,13 +199,18 @@ minor) and stay undated until the release is cut.
 
 ### Changed
 
-- **Faster table wrapping**: each cell character's display width is measured
-  once and reused when choosing line breaks, preserving faces and existing
-  Chinese/emoji layout (rationale: postmortem/030).
 - **Faster reference detection in long drafts**: `@` completion and its typing
   watcher inspect the buffer directly and copy only the active token,
   reducing allocation and garbage collection after large pastes
   (rationale: postmortem/030).
+- **Faster table wrapping**: each cell character's display width is measured
+  once and reused when choosing line breaks, preserving faces and existing
+  Chinese/emoji layout (rationale: postmortem/030).
+- **Smoother reply streaming**: the first text chunk appears immediately;
+  subsequent text writes, Markdown and scrolling share a 50ms refresh.
+  Pending text flushes at event boundaries, completion and disconnect.
+  Markdown scan state now persists across refreshes, avoiding repeated
+  scans of growing code blocks and tables (rationale: postmortem/029).
 - **A streamed table renders when it ends, not row by row**: while rows are
   still arriving the table shows its raw `| … |` text, then renders in one
   pass at the next non-table line or the final message.  Unfinished code
@@ -230,18 +235,53 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Deferred tables finish on Emacs 27–30**: width probes leave the chat
+  buffer's edit counter unchanged, so idle formatting can publish its result
+  and continue with later queued replies.
+- **Chat teardown flushes pending text before releasing markers**: closing a
+  buffer or changing its major mode no longer fails when text and Markdown
+  are both waiting to render.
+- **Large replies leave expensive Markdown work until idle**: text stays
+  visible while long partial lines wait for a newline or completion, and
+  large ready regions finish styling in an input-interruptible idle attempt.
+  This includes final-only and history replies; the new
+  `dsh-emacs-stream-markdown-limit` defaults to 8192 characters, or nil for
+  synchronous formatting (rationale: postmortem/036).
 - **Table measurements follow the destination font**: each render shares
   fresh metrics, so later renders no longer reuse stale font/scale values.
   Emacs 29+ height probes also avoid switching the displayed buffer
   (rationale: postmortem/035).
+- **Table header styling stays above the reply base face**: inherited body
+  styling no longer takes precedence over the table header
+  (rationale: postmortem/036).
 - **Table widths are no longer capped at the window edge**: long styled or
   non-ASCII cells use their full pixel width. On Emacs 31, width measurement
   also avoids temporary edits to the chat buffer; Emacs 27.1 remains supported
   (rationale: postmortem/034).
+- **Less property work during reply refresh**: base-face application and
+  font-lock mirroring share one traversal, and transcript protection is
+  applied together. Code blocks retain the complete face in both display
+  properties (rationale: postmortem/033).
 - **Table width probes preserve draft and undo history**: temporary measurement
   text is removed even if pixel measurement fails; restoring the modified
   flag no longer explicitly refreshes the mode line
   (rationale: postmortem/033).
+- **Long streamed paragraphs do less repeated styling**: emphasis matching
+  skips text before the first delimiter, assistant base faces no longer
+  accumulate on earlier text, and unchanged Markdown reuses its plain-paste
+  handler without another property write (rationale: postmortem/032).
+- **Large stream updates keep following the reply**: first chunks, queued
+  text/reasoning bursts and corrected final replies preserve the windows
+  following before the edit. Scrolling up while a flush is pending still
+  stops following (rationale: postmortem/032).
+- **Streaming refresh leaves stable reply text untouched**: the live Markdown
+  frontier uses a marker instead of rewriting the reply's first character;
+  unfinished blocks skip empty formatting passes (rationale: postmortem/031).
+- **Wrapped replies follow the actual screen rows**: bottom detection and
+  scroll positioning account for line wrapping, avoiding false bottom
+  detection and incorrect pinning on long paragraphs
+  (rationale: postmortem/031).
+
 - **Streamed Markdown formats incrementally**: the live body scan advances
   over newly arrived lines only and leaves an unfinished fence or table to the
   final pass, so a growing block is no longer re-parsed on every chunk

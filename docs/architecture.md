@@ -264,7 +264,7 @@ machinery below restores it, and until then replies appear only via manual
 refresh (`C-c C-r`):
 
 1. **user/message** → `dsh-emacs-render-user-message`: rendered as a card background
-2. **assistant/chunk** → `dsh-emacs-render-assistant-chunk`: text appears immediately; subsequent Markdown passes coalesce on a 50ms one-shot timer. Finalization, stream changes and disconnect flush the pending pass.
+2. **assistant/chunk** → `dsh-emacs-render-assistant-chunk`: the first text chunk appears immediately; subsequent insertion, Markdown and viewport following coalesce on a 50ms one-shot timer. Event boundaries, finalization, stream changes and disconnect flush pending text.
 3. **assistant/message** → `dsh-emacs-render-assistant-message`: the final snapshot is used to correct the streamed body, avoiding duplicate display
 4. **tool/call** → `dsh-emacs-render-tool-call`: rendered as a rounded box (pending state)
 5. **tool/result** → `dsh-emacs-render-tool-result`: updates the existing tool card (success/error state)
@@ -275,11 +275,43 @@ skipped and only message-aligned `event` records seed the buffer, so old
 `assistant/chunk` deltas are not replayed and the completed
 `assistant/message` is used directly; new chunks from live follow events
 are handled directly. The streamed body uses
-watermark/frozen properties so that only the not-yet-stable tail is
-re-rendered and styled. Raw deltas are retained as a list and joined once
-for comparison with the final message; an unchanged final message keeps the
-painted body. The WebSocket decoder walks each input batch by byte offset,
+a render watermark and frozen properties so that only the not-yet-stable tail is
+re-rendered and styled. The assistant stream creates and retains its Markdown
+scan state from the outset, so successive flushes scan only new complete
+lines of unfinished blocks. Its render watermark is a non-advancing marker
+owned by that state, avoiding property writes to the first character of an
+otherwise stable reply. Empty ready ranges bypass Markdown passes. Force
+replacement resets the watermark; finalization detaches it after the final
+formatting attempt. Queued replies retain their body markers until publication
+or cancellation. Non-stream Markdown conversions keep their serializable watermark
+property. Raw deltas are retained as a list and joined once
+for comparison with the final message; a second list references only unpainted
+deltas, which are inserted together before formatting. An unchanged final
+message keeps the painted body. See [decision record 029](../postmortem/029-stream-write-batching.md).
+The WebSocket decoder walks each input batch by byte offset,
 retains its incomplete tail once, and joins message fragments only at FIN.
+Viewport following uses `vertical-motion` with each destination window for
+both bottom detection and pinning, so wrapped lines count as screen rows.
+Stream insertion, timer flushes and corrected final replies capture the
+following window list immediately before editing, then pin that list after
+formatting. This avoids mistaking a large insertion for a manual scroll;
+there is no saved follow state between callbacks. Per-event calls still skip
+pending batches. The selected draft point and excluded reading windows remain
+untouched. Hidden buffers skip prompt lookup for following altogether.
+See [decision record 031](../postmortem/031-stream-frontier-and-screen-rows.md)
+and [032](../postmortem/032-partial-line-styling-and-burst-follow.md), and the
+[performance audit](streaming-performance.md).
+
+Partial-line emphasis passes narrow to the first delimiter plus its preceding
+character, preserving the existing whitespace/line-start grammar. Other
+Markdown passes retain the full ready range. The renderer supplies its assistant
+base face to Markdown's final face pass, which keeps one copy at the lowest
+priority and mirrors the complete result to `font-lock-face` in one traversal.
+The renderer
+then applies read-only, stickiness and event identity properties together.
+Repeated tail formatting cannot grow the face list. A stable named yank handler
+keeps repeated formatting from rewriting an otherwise identical property.
+See [033](../postmortem/033-final-face-pass-and-pixel-probes.md).
 
 Table width measurement belongs to Markdown. On Emacs 31 it uses the public
 `string-pixel-width` buffer argument and selects the destination window during
@@ -296,6 +328,27 @@ the table render. Height probes copy the destination's face remapping and
 default properties, using `buffer-text-pixel-size` where available (Emacs 29+)
 or a saved window configuration on older versions. See
 [035](../postmortem/035-table-render-metrics.md).
+
+The renderer owns the idle queue for expensive assistant Markdown, including
+history messages. Pending regions above `dsh-emacs-stream-markdown-limit`
+(8192 by default) wait for an idle attempt; oversized partial lines first wait
+for a newline or finalization. Ready-region detection still belongs to
+Markdown. A callback prepares one reply in a temporary buffer under
+`while-no-input`. A one-shot 100ms clock timer checks current idleness before
+each attempt, avoiding immediate re-firing of an elapsed idle deadline.
+It commits only a complete result whose source character
+tick is unchanged, and recomputes following windows just before publication.
+
+Queued body markers exclude adjoining messages; the owning edit restores its
+explicit bounds after changes. `replace-region-contents` preserves positions
+in matching text with a 10ms comparison limit, then the renderer installs the
+prepared properties. The diff receives plain characters, avoiding a reproduced
+Emacs 31 coding-buffer failure with protected strings. Reset, buffer death and
+major-mode changes cancel jobs and release their markers. Teardown hooks
+disconnect and flush pending text before releasing those markers. Errors at
+this idle callback boundary are reported while leaving the raw reply visible. This uses
+the main Emacs thread and standard idle/input machinery, not a worker thread
+or an alternate parser. See [036](../postmortem/036-bounded-stream-markdown.md).
 
 ## Event-stream reliability
 

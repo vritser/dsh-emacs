@@ -181,7 +181,7 @@ generation and a new clientId.")
 (declare-function dsh-emacs-render--consume-pending-user-message "dsh-emacs-render" (event))
 (declare-function dsh-emacs-render--event-seq "dsh-emacs-render" (event))
 (declare-function dsh-emacs-render-event "dsh-emacs-render" (event))
-(declare-function dsh-emacs-render--follow-stream "dsh-emacs-render" ())
+(declare-function dsh-emacs-render--follow-stream "dsh-emacs-render" (&optional windows))
 
 (defun dsh-emacs-events--chat (process)
   "Return the chat buffer attached to PROCESS."

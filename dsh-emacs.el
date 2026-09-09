@@ -59,6 +59,7 @@
 (require 'dsh-emacs-tokens)
 (require 'dsh-emacs-markdown)
 (require 'dsh-emacs-render)
+(declare-function dsh-emacs-render--cancel-markdown "dsh-emacs-render" ())
 (require 'dsh-emacs-composer)
 (require 'dsh-emacs-events)
 (require 'dsh-emacs-modeline)
@@ -1970,6 +1971,9 @@ vertico, etc.)."
   ;; 这里不再覆盖 mode-line-format，保留用户的默认 modeline。
 
   ;; 重置渲染状态
+  ;; add-hook 前插：先断开并刷新文本，再释放 Markdown 的正文标记。
+  (add-hook 'kill-buffer-hook #'dsh-emacs-render--cancel-markdown nil t)
+  (add-hook 'change-major-mode-hook #'dsh-emacs-render--cancel-markdown nil t)
   (add-hook 'kill-buffer-hook #'dsh-emacs-events-disconnect nil t)
   (add-hook 'change-major-mode-hook #'dsh-emacs-events-disconnect nil t)
   (add-hook 'kill-buffer-hook #'dsh-emacs--chat-buffer-untrack nil t)
