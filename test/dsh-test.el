@@ -9449,7 +9449,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (dsh-emacs--command-spinner-clear-all)
         (when (= 0 (hash-table-count dsh-emacs--command-spinners))
           (dsh-test-pass "command-spinner-revive-clear-all"))
-        ;; connect 复活：同一 chat buffer 里行还在、color-key 仍 pending
+        ;; connect 复活：同一 chat buffer 里行还在、status 仍 pending
         (dsh-emacs--command-spinner-revive)
         (when (and (gethash "rv1" dsh-emacs--command-spinners)
                    (timerp (nth 1 (gethash "rv1" dsh-emacs--command-spinners))))
@@ -9462,7 +9462,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (setq dsh-emacs--command-spinners old-spinners)
     (kill-buffer buf)))
 
-;; done 已把行换成成功色（color-key != tool-pending）：复活不得重启
+;; done 已把行换成成功色（status != tool-pending）：复活不得重启
 (let ((buf (generate-new-buffer " *dsh-cmd-revive-done*"))
       (old-spinners dsh-emacs--command-spinners))
   (unwind-protect

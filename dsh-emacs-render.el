@@ -1630,7 +1630,7 @@ session chips; see `dsh-emacs-reference-fontify'."
                      (or timestamp ""))
     :body text
     :style 'minimal
-    :color-key 'thinking
+    :status 'thinking
     :face 'dsh-emacs-thinking-face)
    :create-new t :expanded dsh-emacs-thinking-expand-by-default
    :insert-before insert-point))
@@ -1753,7 +1753,7 @@ the transcript; a nil/empty LIST or `dsh-emacs-show-todos' nil renders nothing."
         :label-right nil
         :body body
         :style 'minimal
-        :color-key 'tool-pending
+        :status 'tool-pending
         :non-foldable (and summary-only t))
        :expanded dsh-emacs-todo-expand-by-default
        :insert-before insert-point))))
@@ -1831,7 +1831,7 @@ the event seq but renders no ordinary tool card."
             :label-right label-right
             :body display-body
             :style 'minimal
-            :color-key 'tool-pending
+            :status 'tool-pending
             :header-face (when (equal variant "bash")
                            'dsh-emacs-tool-pending-face)
             :face (unless (equal variant "bash")
@@ -2069,7 +2069,7 @@ one background band (`dsh-emacs-tool-bash-panel-face', see
               :style 'minimal
               :header-face (when (equal variant "bash") face)
               :face (unless (equal variant "bash") face)
-              :color-key (pcase state
+              :status (pcase state
                            ('success 'tool-success)
                            ('error 'tool-error)
                            (_ 'tool-stopped)))
@@ -2210,7 +2210,7 @@ DATA.REASON.ERROR ({code, message, ...})."
       :label-left (propertize label 'face 'dsh-emacs-error-face)
       :body text
       :style 'minimal
-      :color-key 'info)
+      :status 'info)
      :create-new t :expanded t
      :insert-before insert-point)))
 
@@ -2295,7 +2295,7 @@ Replaces any existing animation for the same command (idempotent)."
                                " "
                                (nth next-index dsh-emacs--command-spinner-frames))
                   :style 'minimal
-                  :color-key 'tool-pending
+                  :status 'tool-pending
                   :face 'dsh-emacs-tool-pending-face))))
           (dsh-emacs--command-spinner-stop command-id))))))
 
@@ -2320,13 +2320,13 @@ Replaces any existing animation for the same command (idempotent)."
 conversation never keeps animating); when the same chat buffer reconnects
 mid-command, its rows are still on screen and still pending, so restart the
 animation for each such entry.  No-op when the command already settled
-(`command/done' restyled the row: color-key is no longer `tool-pending'),
+(`command/done' restyled the row: status is no longer `tool-pending'),
 the row no longer exists, or there is nothing to revive."
   (dolist (command-id (hash-table-keys dsh-emacs--command-blocks))
     (when-let* ((entry (gethash command-id dsh-emacs--command-blocks))
                 (block (dsh-emacs-ui-find-block (nth 0 entry) (nth 1 entry)))
                 (state (get-text-property (car block) 'dsh-emacs-ui-state))
-                ((eq (map-elt state :color-key) 'tool-pending)))
+                ((eq (map-elt state :status) 'tool-pending)))
       (dsh-emacs--command-spinner-start command-id (current-buffer)))))
 
 (defun dsh-emacs-render-command-optimistic (line)
@@ -2358,7 +2358,7 @@ the real `command/run' event when it arrives."
                        " "
                        (car dsh-emacs--command-spinner-frames))
           :style 'minimal
-          :color-key 'tool-pending
+          :status 'tool-pending
           :face 'dsh-emacs-tool-pending-face)
          :create-new t :expanded t
          :insert-before (dsh-emacs-render--input-insert-point))
@@ -2429,7 +2429,7 @@ Returns the event seq."
                                  " "
                                  (car dsh-emacs--command-spinner-frames))
                     :style 'minimal
-                    :color-key 'tool-pending
+                    :status 'tool-pending
                     :face 'dsh-emacs-tool-pending-face)
                    :create-new t :expanded nil
                    :insert-before (dsh-emacs-render--input-insert-point))
@@ -2463,7 +2463,7 @@ Returns the event seq."
                                           'dsh-emacs-tool-error-face))
                     :body (and (stringp text) (not (string-empty-p text)) text)
                     :style 'minimal
-                    :color-key (if ok 'tool-success 'tool-error)
+                    :status (if ok 'tool-success 'tool-error)
                     :face (if ok
                               'dsh-emacs-tool-success-face
                             'dsh-emacs-tool-error-face))

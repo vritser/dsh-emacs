@@ -23,8 +23,10 @@ minor) and stay undated until the release is cut.
   `dsh-emacs-ui-update-header`, `dsh-emacs-ui-restyle-block`,
   `dsh-emacs-ui-state-at`, and `dsh-emacs-ui-block-p` are removed.
   The unused `dsh-emacs-ui-body-face` and `dsh-emacs-ui-group-header-face`
-  are also removed. Extensions should supply `:face` / `:header-face`
-  with their snapshot (rationale: postmortem/022).
+  are also removed, and the `:color-key` constructor argument is renamed
+  `:status` (it never applied colors — `:face` does). Extensions should
+  supply `:face` / `:header-face` with their snapshot
+  (rationale: postmortem/022).
 
 - **dsh 0.1.2 wire protocol migration**: the client now talks the dsh 0.1.2
   RPC/stream protocol.  The realtime event surfaces moved from the old

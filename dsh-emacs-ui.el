@@ -108,12 +108,12 @@ two-space gap."
 
 (cl-defun dsh-emacs-ui-make-fragment (&key (namespace-id "global") (block-id "1")
                                            label-left label-right body
-                                           (style 'rounded) color-key
+                                           (style 'rounded) status
                                            face header-face non-foldable)
   "Create a complete fragment snapshot as an alist.
 NAMESPACE-ID and BLOCK-ID identify the block.  LABEL-LEFT, LABEL-RIGHT
 and BODY may be nil to clear their content on update.  STYLE is rounded,
-sharp or minimal.  COLOR-KEY is opaque caller metadata, not a face.
+sharp or minimal.  STATUS is opaque caller metadata, not a face.
 FACE applies to the whole block; HEADER-FACE applies only to the header.
 Both merge after embedded text faces, preserving icon and body styling.
 NON-FOLDABLE disables folding.  Updates preserve the user's fold state."
@@ -123,7 +123,7 @@ NON-FOLDABLE disables folding.  Updates preserve the user's fold state."
         (cons :label-right (dsh-emacs-ui--string-or-nil label-right))
         (cons :body (dsh-emacs-ui--string-or-nil body))
         (cons :style style)
-        (cons :color-key color-key)
+        (cons :status status)
         (cons :face face)
         (cons :header-face header-face)
         (cons :non-foldable non-foldable)))

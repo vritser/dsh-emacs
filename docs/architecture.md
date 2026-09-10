@@ -62,7 +62,7 @@ text inside `atomic-change-group`; rendering or insertion errors propagate
 while preserving the previous card. Minimal blocks need no special
 body-range editing path. The stored snapshot includes labels and
 faces as well as the full body; fold/unfold preserves embedded links, icon
-faces and body styling. `:color-key` is opaque renderer metadata and does
+faces and body styling. `:status` is opaque renderer metadata and does
 not apply colors. Renderers choose concrete `:face` / `:header-face` values;
 the UI merges those after embedded faces on every redraw. Bash terminal
 cards use a header face while retaining their own body faces.
