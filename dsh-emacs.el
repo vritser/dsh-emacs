@@ -2267,7 +2267,7 @@ cross-session list is untouched."
                 (setq own (dsh-emacs--input-history-record own text)))))))
       (puthash session-id own dsh-emacs--input-history-by-session))))
 
-(defun dsh-emacs--submit-prompt (message &optional images mode)
+(defun dsh-emacs--submit-prompt (message &optional attachments mode)
   "Submit MESSAGE to the current session.
 
 Non-nil MODE (\"queue\" or \"steer\") submits the message into a
@@ -2283,18 +2283,18 @@ Lines without attachments starting with \"!<command>\" (e.g. \"!git status\") ar
 client-side shell commands (see `dsh-emacs-shell-submit'): they run
 locally on this machine, independent of the session's busy state or
 even the server, and NEVER reach the model or `commands.execute'.
-When IMAGES is non-nil, a leading ! is ordinary caption text and the
-attachments are sent to the model.
+When ATTACHMENTS is non-nil, a leading ! is ordinary caption text and
+the attachments are sent to the model.
 Slash-command lines (leading \"/name\") are routed to `commands.execute'
 instead of the model: the host admits only registered commands, and an
 admission miss falls back to sending the line as an ordinary message
 (the same semantics as dsh web).  Other lines go through
-`dsh-emacs--submit-plain' unchanged.  IMAGES, when given, is a list of
-wire-ready attachment alists
+`dsh-emacs--submit-plain' unchanged.  ATTACHMENTS, when given, is a list
+of wire-ready attachment alists
 \((mediaType . M) (data . B64) (name . N)); they are appended to the
 `content' array of `session/prompt' as `{type: \"image\"}' parts so
 the model sees them immediately."
-  (let ((command (and (null images) (dsh-emacs-shell-parse message))))
+  (let ((command (and (null attachments) (dsh-emacs-shell-parse message))))
     (cond
      ;; 无附件的 `!' 行是本地动作；附件 caption 不进入 shell。
      (command
@@ -2302,7 +2302,7 @@ the model sees them immediately."
      ((or mode
           (and (dsh-emacs--busy-p)
                (not (eq dsh-emacs-busy-enter-behavior 'stop))))
-      (dsh-emacs--submit-deferred message images mode))
+      (dsh-emacs--submit-deferred message attachments mode))
      ((dsh-emacs-command-parse message)
       (let ((session-id (dsh-emacs--active-session-id))
             (input-buffer (current-buffer)))
@@ -2320,7 +2320,7 @@ the model sees them immediately."
           (with-current-buffer input-buffer
             (dsh-emacs-render-command-optimistic message)))
         (dsh-emacs-command-execute
-         session-id (string-trim message) images
+         session-id (string-trim message) attachments
          (lambda (ok execution err)
            ;; 回调可能运行在 process filter 里：吞掉 C-g 的 quit。
            (condition-case nil
@@ -2341,12 +2341,23 @@ the model sees them immediately."
                  (when (buffer-live-p input-buffer)
                    (with-current-buffer input-buffer
                      (dsh-emacs-render-command-cleanup-optimistic)))
-                 (dsh-emacs--submit-plain message images t))
+                 (dsh-emacs--submit-plain message attachments t))
                 (t nil))        ; 受理：乐观行由 command/run 事件替换
              (quit nil))))))
-     (t (dsh-emacs--submit-plain message images)))))
+     (t (dsh-emacs--submit-plain message attachments)))))
 
-(defun dsh-emacs--submit-deferred (message images mode)
+(defun dsh-emacs--attachments-prompt-content (message attachments)
+  "Return the `session/prompt' `content' array for MESSAGE and ATTACHMENTS.
+Each attachment is a wire-ready alist \((mediaType . M) (data . B64)
+(name? . N)); it becomes one `{type: \"image\"}' part after the leading
+`{type: \"text\"}' part, so the model sees the caption first.  The same
+parts feed the optimistic transcript echo."
+  (vconcat `(((type . "text") (text . ,message)))
+            (mapcar (lambda (attachment)
+                      (cons '(type . "image") attachment))
+                    attachments)))
+
+(defun dsh-emacs--submit-deferred (message attachments mode)
   "Submit MESSAGE into the running turn's inbox as MODE.
 MODE is `queue' (line up as the next turn) or `steer' (wake the running
 agent before its next step); nil means resolve from
@@ -2370,10 +2381,7 @@ against); genuinely parked items keep their feedback."
                  (_ (symbol-name dsh-emacs-busy-enter-behavior))))
          (session-id (dsh-emacs--active-session-id))
          (input-buffer (current-buffer))
-         (content (vconcat `(((type . "text") (text . ,message)))
-                           (mapcar (lambda (attachment)
-                                     (cons '(type . "image") attachment))
-                                   images)))
+         (content (dsh-emacs--attachments-prompt-content message attachments))
          (payload `((request . ((requestId . ,(dsh-emacs--rpc-id))
                                 (sessionId . ,session-id)
                                 (mode . ,mode)
@@ -2416,14 +2424,13 @@ against); genuinely parked items keep their feedback."
                                          (or (dsh-emacs--get-input) ""))
                                     (dsh-emacs--replace-input message)))))))))
 
-(defun dsh-emacs--submit-plain (message &optional images skip-history)
+(defun dsh-emacs--submit-plain (message &optional attachments skip-history)
   "Submit MESSAGE (a plain string) to the current session.
 
-IMAGES, when given, is a list of wire-ready attachment alists
+ATTACHMENTS, when given, is a list of wire-ready attachment alists
 \((mediaType . M) (data . B64) (name . N)); the canonical wire shape
-is part of `content' (each becomes a `{type: \"image\"}' part) — a
-top-level `images' field is stripped by the host schema and never
-reaches the model.
+is part of `content' (each becomes a `{type: \"image\"}' part) — there is
+no top-level attachment field on `session/prompt'.
 On acceptance the message is echoed into the transcript (when non-empty),
 the running spinner lights up while the run is still awaited (a fast run
 that already finished on the stream before the callback repeats must not
@@ -2444,10 +2451,7 @@ still empty (a newer draft typed meanwhile is left alone)."
                            dsh-emacs--buffer-session
                            (current-buffer)))
          (input-buffer (current-buffer))
-         (content (vconcat `(((type . "text") (text . ,message)))
-                           (mapcar (lambda (attachment)
-                                     (cons '(type . "image") attachment))
-                                   images)))
+         (content (dsh-emacs--attachments-prompt-content message attachments))
          (payload `((request . ((requestId . ,(dsh-emacs--rpc-id))
                                 (sessionId . ,session-id)
                                 (mode . "queue")
@@ -2513,7 +2517,7 @@ still empty (a newer draft typed meanwhile is left alone)."
                                       (dsh-emacs-events--watchdog-start)
                                       (unless (string-empty-p message)
                                         (dsh-emacs--render-user-message
-                                         message images))
+                                         message attachments))
                                       (dsh-emacs-render--follow-stream)
                                       (unless dsh-emacs--event-ready
                                         ;; 流不在线时自愈：连进程都不存在说明
@@ -3102,18 +3106,15 @@ prompts when `dsh-emacs-input-history-cross-session' is nil."
        (nth dsh-emacs--input-history-pos
             (dsh-emacs--input-history-active))))))
 
-(defun dsh-emacs--render-user-message (message &optional images)
-  "Render the optimistic echo of MESSAGE, with IMAGES if any.
-IMAGES is a list of wire-ready attachment alists; they become
+(defun dsh-emacs--render-user-message (message &optional attachments)
+  "Render the optimistic echo of MESSAGE, with ATTACHMENTS if any.
+ATTACHMENTS is a list of wire-ready attachment alists; they become
 `{type: \"image\"}' content blocks so the renderer displays them
 inline immediately — the bytes are already local, no
 `session/attachment' round-trip is needed."
   (let ((event `((type . "user/message")
-                 (data . ((content . ,(vconcat
-                                       `(((type . "text") (text . ,message)))
-                                       (mapcar (lambda (attachment)
-                                                 (cons '(type . "image") attachment))
-                                               images))))))))
+                 (data . ((content . ,(dsh-emacs--attachments-prompt-content
+                                       message attachments)))))))
     (dsh-emacs-render-event event)))
 
 (defun dsh-emacs-refresh ()

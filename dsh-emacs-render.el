@@ -2556,9 +2556,28 @@ a finished row never animates again."
 ;;; 顶层 dispatcher
 ;;; ---------------------------------------------------------------------------
 
+(defun dsh-emacs-render--replacement-p (event)
+  "Whether EVENT is a model-only surface replacement copy.
+A message-producing event carries `surfaceOp' either \"append\" (it entered
+the transcript at its own log position) or `{op:\"replace\", startSeq,
+endSeq}' (it shadows an existing surface range so the MODEL sees the newer
+copy).  dsh-session's `isAppendSurfaceEvent' exists for exactly that split:
+replacements are the wrong source for a human transcript, because painting
+one would show conversation the user already saw a second time.  The record
+still belongs in the log — it is the state the next request is built from.
+
+Compaction checkpoints are already skipped by the `user/message' source
+filter (their source kind is `plugin'), but a pruned `tool/result'
+replacement shares its `callId' with the record it shadows and has no
+source filter, so without this check the same tool card is painted twice."
+  (equal "replace"
+         (dsh-emacs-render--aget
+          "op" (dsh-emacs-render--aget "surfaceOp" event))))
+
 (defun dsh-emacs-render-event (event)
   "Dispatch EVENT to the appropriate renderer. Returns the event seq, or nil."
   (let* ((type (dsh-emacs-render--aget "type" event))
+         (replacement (dsh-emacs-render--replacement-p event))
          (chunk-type (and (equal type "assistant/chunk")
                           (dsh-emacs-render--aget
                            "type" (dsh-emacs-render--aget
@@ -2584,7 +2603,12 @@ a finished row never animates again."
                         (when (fboundp 'dsh-emacs-modeline-note-header)
                           (dsh-emacs-modeline-note-header event)))
       ("tool/call" (setq seq (dsh-emacs-render-tool-call event)))
-      ("tool/result" (setq seq (dsh-emacs-render-tool-result event)))
+      ;; A replacement `tool/result' rewrites what the model sees; the human
+      ;; card keeps the append-origin record.  Skipping the copy still counts
+      ;; the event as consumed (seq returned), so the dedup anchor advances.
+      ("tool/result" (if replacement
+                         (setq seq (dsh-emacs-render--event-seq event))
+                       (setq seq (dsh-emacs-render-tool-result event))))
       ("command/run" (setq seq (dsh-emacs-render-command event)))
       ("command/done" (setq seq (dsh-emacs-render-command event)))
       ("turn/start" (setq seq (dsh-emacs-render-turn-start event)))

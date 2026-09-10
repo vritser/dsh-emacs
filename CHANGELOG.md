@@ -8,6 +8,68 @@ minor) and stay undated until the release is cut.
 
 ## 0.4.0 - Unreleased
 
+### Fixed
+
+- **Pruned tool results no longer paint a second card**: a `tool/result`
+  surface record that *replaces* an earlier one (compaction's tool-result
+  pruning) shares its `callId` with the record it shadows, so the transcript
+  rendered the same tool card twice — once with the original output and once
+  with the pruned copy.  Replacements are model-only by design
+  (dsh-session's `isAppendSurfaceEvent`: the model-visible surface shadows the
+  old range while the human transcript keeps what the user already saw), so
+  the replacement copy is now consumed without rendering; the original card
+  stays as-is.  Compaction checkpoints were already invisible (their
+  `user/message` source kind is `plugin', which the user-message renderer
+  filters) and system-prompt rewrites target `system/message`, which is never
+  rendered (rationale: docs/rpc.md §7.1).
+
+- **Session list no longer reports a status the wire never sends**: the row
+  status now derives from the row's `running` flag alone.  It used to read
+  `projections.values.sessionStats.pendingInteraction`, a field no dsh
+  version puts on the list wire, so the "approval"/"pending" states were
+  unreachable code that could only ever mislabel a session.  dsh web keeps
+  that state in a client-side registry its live approval/question waterfall
+  claimants fill in, which this client cannot mirror from the same place: a
+  waterfall for a session with no open chat buffer is handed back to the
+  host with `next`, so no client state exists for it.  A waiting session
+  therefore shows as `running` (its tool call is in fact still running)
+  rather than as idle or approval (rationale: docs/rpc.md §9).
+  `dsh-protocol-session-pending-interaction` is removed with it.
+  `dsh-emacs-status-pending-face` stays defined (now documented as reserved)
+  so an existing customization is not lost when that derivation lands.
+
+- **Replies stream again under dsh 0.1.5**: the client now opens its
+  `session/follow` stream with `assistantStream: true` and consumes the
+  process-local `assistant-stream` frames.  dsh 0.1.5 dropped
+  `assistant/chunk` as a durable Session event, so before this change a reply
+  appeared only once its `assistant/message` settled — the whole turn showed
+  as silence.  Text and reasoning deltas render incrementally again (the
+  frames are rebuilt into the durable envelope the existing renderer
+  expects), a reconnect mid-reply resumes the live body from the opening
+  snapshot's accumulated attempt, and frames from an older generation are
+  dropped instead of interleaving two replies
+  (rationale: docs/rpc.md §0.2, §3.2.1).
+
+- **Slash commands work against dsh 0.1.5**: `commands/execute` now sends the
+  renamed `submittedAttachments` field (dsh 0.1.2 called it `images`), so
+  running a slash command no longer fails with
+  `gateway/arguments-invalid: missing "submittedAttachments"; unexpected
+  "images"`.  Attachments travel as one tagged union member
+  (`{type: "image", …}`) instead of a bare image object, and the command
+  catalog's input descriptor reads the host's renamed `input.attachments`
+  flag (`input.images` is gone), so commands that accept composed attachments
+  are recognized again (rationale: docs/rpc.md §0.2, §4.11).
+
+### Documentation
+
+- `docs/rpc.md` re-anchored on dsh `0.1.5-rc.1`: the 0.1.5 wire deltas are
+  recorded as a migration table (session-format V3 event vocabulary,
+  `assistant-stream` frames, the renamed `commands/execute` field and
+  `input.attachments`, `isSeeded`, the new `workspaceFiles` /
+  `fileUploads` / `sessionFeedback` namespaces and HTTP routes), and the
+  session-list status note plus the surface-replacement rendering rule are
+  documented with the evidence that settled them.
+
 ## 0.3.0 - 2026-09-10
 
 ### Breaking Changes

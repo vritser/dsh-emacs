@@ -8908,11 +8908,14 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
      (lambda (ok ex _err) (setq done (list ok ex))))
     (let* ((call (car calls))
            (params (cadr call))
-           (images (cdr (assq 'images params))))
+           (submitted (cdr (assq 'submittedAttachments params))))
       (when (and (string= "commands/execute" (car call))
                  (string= "/compact" (cdr (assq 'line params)))
                  (string= "sess-exec" (cdr (assq 'agentId params)))
-                 (vectorp images) (zerop (length images))
+                 ;; 0.1.5 host field: `images' is rejected as an unexpected
+                 ;; argument, and the value must be the tagged array.
+                 (null (assq 'images params))
+                 (vectorp submitted) (zerop (length submitted))
                  (equal done
                         (list t (dsh-protocol-command-execution--from-alist
                                  '((commandId . "c1")
@@ -8929,17 +8932,26 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
   (when (equal missed '(t nil))
     (dsh-test-pass "command-execute-miss-reports-nil")))
 
-(let ((calls nil))
+(let* ((att '((mediaType . "image/png") (data . "x")))
+       (h (dsh-emacs-command--submitted-attachments att))
+       (calls nil))
+  ;; The helper takes ONE attachment alist (nil = none) and tags it.
+  (dsh-test-assert "command-submitted-attachments-shape"
+    (vectorp h)
+    (= (length h) 1)
+    (equal (aref h 0)
+           '((type . "image") (mediaType . "image/png") (data . "x")))
+    (equal (dsh-emacs-command--submitted-attachments nil) []))
   (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
              (lambda (m p cb)
                (push (list m p) calls)
                (funcall cb t nil))))
-    (dsh-emacs-command-execute
-     "s" "/goal" '((mediaType . "image/png") (data . "x")) nil))
+    (dsh-emacs-command-execute "s" "/goal" att nil))
   (let ((params (cadr (car calls))))
-    (when (equal (cdr (assq 'images params))
-                 '((mediaType . "image/png") (data . "x")))
-      (dsh-test-pass "command-execute-passes-images"))))
+    (dsh-test-assert "command-execute-passes-attachments"
+      (null (assq 'images params))
+      (equal (append (cdr (assq 'submittedAttachments params)) nil)
+             '(((type . "image") (mediaType . "image/png") (data . "x")))))))
 
 ;; --- 测试 96: submit-prompt 分发 slash 命令 ---
 (let ((buf (generate-new-buffer " *dsh-slash-submit*"))
@@ -8981,8 +8993,25 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                  (params (cadr call)))
             (when (and (string= "commands/execute" (car call))
                        (string= "/compact" (cdr (assq 'line params)))
+                       ;; Attachment-less command still carries the required
+                       ;; 0.1.5 field as an empty tagged array.
+                       (equal (cdr (assq 'submittedAttachments params)) [])
+                       (null (assq 'images params))
                        (= (length calls) 1))
               (dsh-test-pass "submit-slash-routes-to-execute")))
+          ;; 带附件的 slash 命令：附件进 tagged `submittedAttachments'，不进
+          ;; session/prompt 的 content（caption 文本仍留在命令行里）。
+          (setq calls nil)
+          (dsh-emacs--submit-prompt "/compact"
+                                    '((mediaType . "image/png") (data . "eA==")))
+          (let* ((call (car calls))
+                 (params (cadr call)))
+            (dsh-test-assert "submit-slash-carries-tagged-attachment"
+              (string= "commands/execute" (car call))
+              (= (length calls) 1)
+              (equal (append (cdr (assq 'submittedAttachments params)) nil)
+                     '(((type . "image") (mediaType . "image/png")
+                        (data . "eA=="))))))
           ;; 未命中注册表 → 回退成普通消息（浏览器同款语义）
           (setq calls nil)
           (dsh-emacs--submit-prompt "/frobnicate")
@@ -9671,10 +9700,10 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
 
 (let* ((cmd (dsh-protocol-command--from-alist
              '((name . "goal") (description . "goal ops")
-               (input . ((hint . "[<objective>]") (images . t))))))
+               (input . ((hint . "[<objective>]") (attachments . t))))))
        (input (dsh-protocol-command-input cmd)))
   (when (and (string= "[<objective>]" (dsh-protocol-command-input-hint input))
-             (dsh-protocol-command-input-images input))
+             (dsh-protocol-command-input-attachments input))
     (dsh-test-pass "command-from-alist-with-input")))
 
 (let ((sid "sess-cat")
@@ -14963,6 +14992,226 @@ candidates as the UI would via `all-completions', not by destructuring."
   (dsh-test-assert "composer-all-markers-release-when-empty"
     (null dsh-emacs--composer-top-marker)
     (null dsh-emacs--composer-end-marker)))
+
+
+;; --- 测试 119: dsh 0.1.5 进程内 assistant-stream 帧驱动实时文本 ---
+;; `assistant/chunk' is no longer a durable Session event (dsh 0.1.5); the
+;; process-local `assistant-stream' frames are the only incremental source.
+;; A follow client must opt in with `assistantStream: true' and consume
+;; `chunk' frames through the incremental renderer.
+(let ((buf (generate-new-buffer " *dsh-stream-frame*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-frame")
+        ;; A durable-event watermark the process-local frames must not move.
+        (setq-local dsh-emacs--anchor-seq 7)
+        (dsh-emacs-events--follow-item
+         (current-buffer)
+         '((type . "assistant-stream")
+           (frame . ((type . "start") (attemptId . "a1") (revision . 1)
+                     (startedAfterSeq . 4) (turn . 1) (step . 1)))))
+        (dsh-emacs-events--follow-item
+         (current-buffer)
+         '((type . "assistant-stream")
+           (frame . ((type . "chunk") (attemptId . "a1") (revision . 1)
+                     (index . 1) (time . 5)
+                     (chunk . ((type . "text-delta") (index . 1)
+                               (text . "live-")))))))
+        (dsh-emacs-events--follow-item
+         (current-buffer)
+         '((type . "assistant-stream")
+           (frame . ((type . "chunk") (attemptId . "a1") (revision . 1)
+                     (index . 2) (time . 6)
+                     (chunk . ((type . "text-delta") (index . 1)
+                               (text . "reply")))))))
+        ;; Flush what the burst timer still owes so the assertion does not
+        ;; race it.
+        (dsh-emacs-render--flush-stream (current-buffer) t)
+        (dsh-test-assert "follow-assistant-stream-renders-live-text"
+          (string-match-p "live-reply" (buffer-string))
+          ;; Process-local frames are not durable: they carry no seq, so the
+          ;; dedup anchor must stay exactly where it was.
+          (= dsh-emacs--anchor-seq 7)))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; --- 测试 119b: 旧 revision 的 assistant-stream 帧被丢弃 ---
+;; A reconnect bumps `revision' and replays the accumulated attempt in the
+;; opening snapshot; accepting an older generation would interleave two
+;; revisions into one live body.
+(let ((buf (generate-new-buffer " *dsh-stream-revision*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-frame")
+        (dsh-emacs-events--assistant-stream-frame
+         (current-buffer)
+         '((type . "start") (revision . 2) (turn . 1) (step . 1)))
+        (dsh-emacs-events--assistant-stream-frame
+         (current-buffer)
+         '((type . "chunk") (revision . 2)
+           (chunk . ((type . "text-delta") (text . "new-gen")))))
+        (dsh-emacs-events--assistant-stream-frame
+         (current-buffer)
+         '((type . "chunk") (revision . 1)
+           (chunk . ((type . "text-delta") (text . "stale-gen")))))
+        (dsh-emacs-render--flush-stream (current-buffer) t)
+        (dsh-test-assert "follow-assistant-stream-drops-stale-revision"
+          (= 2 dsh-emacs--assistant-stream-revision)
+          (string-match-p "new-gen" (buffer-string))
+          (not (string-match-p "stale-gen" (buffer-string)))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; --- 测试 119c: follow 快照的 assistantStream 基线续接进行中的流 ---
+;; A reconnect that lands mid-attempt replays the accumulated process-local
+;; stream in the opening snapshot, so the live body continues instead of
+;; starting empty; the replay must not move the dedup anchor.
+(let ((buf (generate-new-buffer " *dsh-stream-baseline*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-frame")
+        (dsh-emacs-events--follow-snapshot
+         (current-buffer)
+         '((type . "snapshot")
+           (cursor . 42)
+           (records . [])
+           (assistantStream . ((revision . 3)
+                               (activeAttempt . ((attemptId . "a1")
+                                                 (startedAfterSeq . 40)
+                                                 (turn . 2) (step . 1)
+                                                 (nextIndex . 3)
+                                                 (stream . [((type . "text-delta")
+                                                             (text . "half-"))
+                                                            ((type . "text-delta")
+                                                             (text . "done"))])))))))
+        (dsh-emacs-render--flush-stream (current-buffer) t)
+        (dsh-test-assert "follow-snapshot-seeds-active-assistant-stream"
+          (= dsh-emacs--assistant-stream-revision 3)
+          (equal dsh-emacs--assistant-stream-position '(2 . 1))
+          (string-match-p "half-done" (buffer-string))
+          (= dsh-emacs--anchor-seq 42)
+          ;; A frame from before the reconnect generation is stale.
+          (progn
+            (dsh-emacs-events--assistant-stream-frame
+             (current-buffer)
+             '((type . "chunk") (revision . 2)
+               (chunk . ((type . "text-delta") (text . "stale")))))
+            (not (string-match-p "stale" (buffer-string))))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; --- 测试 119d: follow open 请求声明 assistantStream ---
+;; Without the opt-in the host never sends the process-local frames, and a
+;; reply would only appear once its durable `assistant/message' settles.
+(let ((proc (start-process "dsh-test-followopen" (generate-new-buffer " *fo*")
+                           "/bin/cat"))
+      (sent nil))
+  (unwind-protect
+      (progn
+        (accept-process-output proc 1)
+        (when (process-live-p proc)
+          (process-put proc 'dsh-emacs-follow-session "sess-open")
+          (cl-letf (((symbol-function 'dsh-emacs-events--frame)
+                     (lambda (_op payload) (setq sent payload) ""))
+                    ((symbol-function 'dsh-emacs-events--chat)
+                     (lambda (_p) nil)))
+            (dsh-emacs-events--follow-open proc))
+          (dsh-test-assert "follow-open-opts-into-assistant-stream"
+            (and sent
+                 (string-match-p "\"assistantStream\"" sent)
+                 (string-match-p "\"session/follow\"" sent)
+                 (string-match-p "\"sess-open\"" sent)))))
+    (when (process-live-p proc) (delete-process proc))))
+
+;; --- 测试 120: 会话状态来自 running 标志，不从 wire 发明交互态 ---
+;; `projections.values.sessionStats.pendingInteraction' does not exist on the
+;; session-list wire (never did in 0.1.2 either), so a session that waits on a
+;; tool approval must NOT be reported as approval/pending from session data:
+;; the only honest list state is running vs idle.
+(let* ((with-bogus (dsh-protocol-session--from-alist
+                    '((sessionId . "s-status")
+                      (running . :json-false)
+                      (projections . ((values . ((sessionStats . ((pendingInteraction . "approval"))))))))))
+       (running (dsh-protocol-session--from-alist
+                 '((sessionId . "s-status2") (running . t)))))
+  (dsh-test-assert "session-status-ignores-absent-interaction-projection"
+    (eq (dsh-emacs-session--compute-status with-bogus nil) 'idle)
+    (eq (dsh-emacs-session--compute-status running t) 'running)
+    ;; The lying accessor is gone entirely.
+    (not (fboundp 'dsh-protocol-session-pending-interaction))))
+
+;; --- 测试 121: 模型专用 surface 替换副本不进人类记录 ---
+;; A surface event is either `append' (entered the transcript at its own log
+;; position) or `{op:"replace"}' (shadows an existing range so the MODEL sees
+;; the newer copy). Replacements are the wrong source for a human transcript:
+;; dsh compaction checkpoints are `user/message' copies already skipped by the
+;; source-kind filter, but a pruned `tool/result' shares its `callId' with the
+;; record it shadows and has no source filter, so without this check the same
+;; tool card is painted twice.
+(dsh-test-assert "render-replacement-predicate"
+  (dsh-emacs-render--replacement-p
+   '((type . "tool/result")
+     (surfaceOp . ((op . "replace") (startSeq . 2) (endSeq . 2)))))
+  (not (dsh-emacs-render--replacement-p
+        '((type . "tool/result") (surfaceOp . "append"))))
+  (not (dsh-emacs-render--replacement-p '((type . "tool/result")))))
+
+(let ((buf (generate-new-buffer " *dsh-replacement*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs-tool-expand-by-default t)
+        (dsh-emacs-render-tool-call
+         '(("type" . "tool/call") ("seq" . 1)
+           ("data" . (("turn" . 1) ("step" . 1) ("callId" . "c-rep")
+                      ("name" . "bash")
+                      ("arguments" . "{\"command\":\"echo original\"}")))))
+        (dsh-emacs-events--dispatch-event
+         (current-buffer)
+         (list (cons "type" "tool/result") (cons "seq" 2)
+               (cons "surfaceOp" (list (cons "op" "replace")
+                                       (cons "startSeq" 2) (cons "endSeq" 2)))
+               (cons "data"
+                     (list (cons "message"
+                                 (list (cons "source" (list (cons "callId" "c-rep")))
+                                       (cons "content"
+                                             (vector (list (cons "type" "tool-result")
+                                                           (cons "isError" :json-false)
+                                                           (cons "exitCode" 0)
+                                                           (cons "content"
+                                                                 (vector (list (cons "type" "text")
+                                                                               (cons "text" "PRUNED-COPY")))))))))))))
+        (dsh-test-assert "render-skips-replacement-tool-result"
+          ;; The human card keeps the record the user already saw...
+          (not (string-search "PRUNED-COPY" (buffer-string)))
+          (string-search "echo original" (buffer-string))
+          ;; ...while the replacement still counts as consumed, so the dedup
+          ;; anchor advances and a replay cannot re-render it.
+          (= dsh-emacs--anchor-seq 2))
+        ;; Control: an append-origin result on another call still paints.
+        (dsh-emacs-render-tool-call
+         '(("type" . "tool/call") ("seq" . 3)
+           ("data" . (("turn" . 1) ("step" . 1) ("callId" . "c-app")
+                      ("name" . "bash")
+                      ("arguments" . "{\"command\":\"echo second\"}")))))
+        (dsh-emacs-events--dispatch-event
+         (current-buffer)
+         (list (cons "type" "tool/result") (cons "seq" 4)
+               (cons "surfaceOp" "append")
+               (cons "data"
+                     (list (cons "message"
+                                 (list (cons "source" (list (cons "callId" "c-app")))
+                                       (cons "content"
+                                             (vector (list (cons "type" "tool-result")
+                                                           (cons "isError" :json-false)
+                                                           (cons "exitCode" 0)
+                                                           (cons "content"
+                                                                 (vector (list (cons "type" "text")
+                                                                               (cons "text" "APPEND-COPY")))))))))))))
+        (dsh-test-assert "render-keeps-append-tool-result"
+          (string-search "APPEND-COPY" (buffer-string))
+          (= dsh-emacs--anchor-seq 4)))
+    (when (buffer-live-p buf) (kill-buffer buf))))
 
 (princ "\n===== 测试总结 =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))

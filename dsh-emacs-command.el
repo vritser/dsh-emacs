@@ -33,6 +33,18 @@
 ;; `commands/execute'，未命中注册表（admission miss）时按普通消息发回 —
 ;; 与 dsh web 的行为一致。执行结果由 `command/run' + `command/done'
 ;; 会话事件渲染（见 dsh-emacs-render.el 的 `dsh-emacs-render-command'）。
+;;
+;; 附件的线上形状（dsh 0.1.5 起）：`commands/execute' 的第三个 wire 字段是
+;; `submittedAttachments'（0.1.2 叫 `images'，0.1.5 改名并升级为 tagged
+;; union），每项必须带 `type' 判别字段：
+;;   `((type . "image") (mediaType . M) (data . B64) [name?])'
+;;   `((type . "file") (receiptId . R))'   ← 文件回执（prompt 上载产物）
+;; 本模块只处理单个图片附件：`dsh-emacs-command-execute' 收一个「附件 alist」
+;; （nil = 无附件），由 `dsh-emacs-command--submitted-attachments' 包成单元素
+;; tagged 数组。注意 `((mediaType . M) (data . B64))' 既是「一个附件 alist」
+;; 也是「两个 dotted pair 的列表」——逐项 mapcar 会把它误拆成两个附件（线上
+;; 表现为 `((type . "image") mediaType . M)' 这种 dotted 结构），所以这里
+;; 不做「附件列表」的推断。
 
 ;;; Code:
 
@@ -125,13 +137,25 @@ kept, nil when the line is exactly \"/NAME\")."
             (cons (match-string 1 trimmed)
                   (substring trimmed end))))))))
 
-(defun dsh-emacs-command-execute (session-id line &optional images on-done)
+(defun dsh-emacs-command--submitted-attachments (attachment)
+  "Return ATTACHMENT as the wire `submittedAttachments' array.
+
+ATTACHMENT is one wire-ready image alist
+\((mediaType . M) (data . B64) (name? . N)), or nil for a text-only
+command (the host field is required, so nil becomes the empty vector).
+The result holds exactly one tagged union member:
+\((type . \"image\") (mediaType . M) (data . B64) [name?])."
+  (vconcat (when attachment
+             (list (append (list (cons 'type "image")) attachment)))))
+
+(defun dsh-emacs-command-execute (session-id line &optional attachment on-done)
   "Execute slash-command LINE (e.g. \"/compact\") in SESSION-ID.
 
 Line goes to `commands/execute' — the host admits only registered
-commands.  IMAGES, when given, is a list of wire-ready image alists
-\((mediaType . M) (data . B64) (name . N)); text-only commands pass an
-empty array (the wire field is required).
+commands.  ATTACHMENT, when given, is one wire-ready image alist
+\((mediaType . M) (data . B64) (name? . N)); it rides the required
+`submittedAttachments' field as one `{type: \"image\"}' member.
+Text-only commands pass nil.
 
 ON-DONE is called as (funcall ON-DONE OK EXECUTION ERR) once the RPC
 settles: EXECUTION is a `dsh-protocol-command-execution' for an
@@ -143,7 +167,8 @@ asynchronously; returns nil."
    "commands/execute"
    `((agentId . ,session-id)
      (line . ,line)
-     (images . ,(or images [])))
+     (submittedAttachments . ,(dsh-emacs-command--submitted-attachments
+                               attachment)))
    (lambda (ok value)
      (let ((execution (and ok value
                            (dsh-protocol-command-execution--from-alist

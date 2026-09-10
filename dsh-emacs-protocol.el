@@ -37,7 +37,7 @@
 ;;                        └─ dsh-protocol-agent-preset (id trust
 ;;                             is-default name description broken)
 ;;   commands.list    → dsh-protocol-command (name description input)
-;;                        └─ dsh-protocol-command-input (hint images)
+;;                        └─ dsh-protocol-command-input (hint attachments)
 ;;   commands.execute → dsh-protocol-command-execution (command-id
 ;;                        result kind text)
 ;;   session/queue    → dsh-protocol-queue-item (id placement text kind)
@@ -97,13 +97,6 @@
                                (let ((p (cdr (assq 'projections alist))))
                                  (and p (cdr (assq 'title
                                                    (cdr (assq 'values p)))))))
-                              ;; projections.values.sessionStats.pendingInteraction
-                              (pending-interaction
-                               (let* ((p (cdr (assq 'projections alist)))
-                                      (v (and p (cdr (assq 'values p))))
-                                      (st (and v
-                                               (cdr (assq 'sessionStats v)))))
-                                 (and st (cdr (assq 'pendingInteraction st)))))
                               ;; projections.values.contextPressure —— 服务器对
                               ;; 当前上下文占用的权威估计（ctx% 段用它而不是
                               ;; 累计 token 用量，后者是会话总量、会远超窗口）
@@ -151,7 +144,6 @@
   origin
   parent-session-id
   title-value
-  pending-interaction
   context-pressure
   context-window
   context-projected
@@ -379,11 +371,12 @@ AUTHORABLE / HAS-DOCUMENT flags the management UI needs."
                              (alist
                               &aux
                               (hint (cdr (assq 'hint alist)))
-                              (images (cdr (assq 'images alist))))))
+                              (attachments (cdr (assq 'attachments alist))))))
   "The optional `input' descriptor of a command item: HINT is the argument
-placeholder, IMAGES whether the command accepts inline images."
+placeholder, ATTACHMENTS whether the command accepts composed attachments
+(images and staged file receipts)."
   hint
-  images)
+  attachments)
 
 (cl-defstruct (dsh-protocol-command
                (:constructor dsh-protocol-command--from-alist

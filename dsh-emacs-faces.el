@@ -593,7 +593,10 @@ Bold, no italic — matching dsh web's thinkingToggle style."
   `((((background light)) :foreground ,dsh-emacs-color-tool-pending-border :weight bold)
     (((background dark))  :foreground ,dsh-emacs-color-tool-pending-border-dark :weight bold)
     (t :inherit warning))
-  "Pending/approval status indicator (orange)."
+  "Reserved face for a pending/approval status indicator (currently unused).
+The session list has no wire state for \"this session waits on the user\":
+dsh web derives it client-side from live approval/question waterfalls.  Kept
+so a user customization is not lost if that derivation is added later."
   :group 'dsh-emacs-faces)
 
 (defface dsh-emacs-status-idle-face

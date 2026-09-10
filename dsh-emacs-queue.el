@@ -41,7 +41,7 @@
 (declare-function dsh-emacs--busy-p "dsh-emacs" ())
 (declare-function dsh-emacs--replace-input "dsh-emacs" (text))
 (declare-function dsh-emacs--rpc-async "dsh-emacs" (method params callback))
-(declare-function dsh-emacs--submit-prompt "dsh-emacs" (message &optional images mode))
+(declare-function dsh-emacs--submit-prompt "dsh-emacs" (message &optional attachments mode))
 (declare-function dsh-emacs-composer-render "dsh-emacs-composer" ())
 
 (defvar dsh-emacs--buffer-session)

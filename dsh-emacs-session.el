@@ -564,25 +564,19 @@ WIDTH display columns without splitting a wide character."
         (concat str (make-string (- width w) ?\s))
       (truncate-string-to-width str width))))
 
-(defun dsh-emacs-session--compute-status (session running)
-  "Compute session status: 'running, 'approval, 'pending, or 'idle.
-Uses projections data when available, falls back to running flag."
-  (let* ((pending-interaction (dsh-protocol-session-pending-interaction
-                                  session)))
-    (cond
-     ;; Pending interaction takes priority
-     ((and pending-interaction
-           (not (eq pending-interaction :json-false)))
-      (pcase (if (stringp pending-interaction) pending-interaction
-               (symbol-name pending-interaction))
-        ("approval" 'approval)
-        ("plan-review" 'approval)
-        ("question" 'pending)
-        (_ 'pending)))
-     ;; Running state
-     (running 'running)
-     ;; Default to idle
-     (t 'idle))))
+(defun dsh-emacs-session--compute-status (_session running)
+  "Compute session status: `running' or `idle'.
+RUNNING is the `session/list' row's authoritative run flag.  The list wire
+carries no per-session \"interaction pending\" state: dsh web holds that in a
+client-side registry that the `approval/request' and
+`user-questions/request' waterfall claimants fill in while a request is
+live, and this client cannot mirror it from the same place — a waterfall
+whose session has no open chat buffer is handed back to the host with
+`next' (see `dsh-emacs-events--host-dispatch'), so no client state exists
+for it.  dsh-emacs shows `running' rather than inventing a state from data
+the wire does not send; `approval/asked' -> `approval/decided' event pairs
+are the per-session source available later, if one is wanted."
+  (if running 'running 'idle))
 
 (defun dsh-emacs-session--git-branch (cwd)
   "Get current git branch in CWD, or nil."
@@ -593,12 +587,11 @@ Uses projections data when available, falls back to running flag."
           (string-trim (buffer-string)))))))
 
 (defun dsh-emacs-session--status-dot (status)
-  "Return a colored dot for STATUS."
+  "Return a colored dot for STATUS.
+STATUS is `running' or `idle' (see `dsh-emacs-session--compute-status')."
   (pcase status
-    ('running  (propertize "●" 'face 'dsh-emacs-status-running-face))
-    ('approval (propertize "●" 'face 'dsh-emacs-status-pending-face))
-    ('pending  (propertize "●" 'face 'dsh-emacs-status-pending-face))
-    (_         (propertize "●" 'face 'dsh-emacs-status-idle-face))))
+    ('running (propertize "●" 'face 'dsh-emacs-status-running-face))
+    (_        (propertize "●" 'face 'dsh-emacs-status-idle-face))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; 交互命令
@@ -739,7 +732,6 @@ session list and the follow/control projection frames)."
              (info (format "%s %s | %s | %s%s | %s | [%s]"
                            (pcase status
                              ('running "⟳")
-                             ((or 'approval 'pending) "⏳")
                              (_ "·"))
                            (or title "Untitled")
                            cwd-short
