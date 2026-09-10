@@ -258,6 +258,10 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **IN/OUT face styling**: `dsh-emacs-tool-io-face` now declares bold weight
+  separately from face inheritance, so custom renderers using it receive
+  keyword colors and bold text correctly.
+
 - **Deferred tables finish on Emacs 27–30**: width probes leave the chat
   buffer's edit counter unchanged, so idle formatting can publish its result
   and continue with later queued replies.

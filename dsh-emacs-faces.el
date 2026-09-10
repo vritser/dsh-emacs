@@ -302,9 +302,9 @@ underlined in the accent color.  RET or mouse-1 opens it (see
 	:group 'dsh-emacs-faces)
 
 (defface dsh-emacs-tool-io-face
-	'((t :inherit (font-lock-keyword-face :weight bold)))
-	"Tool card IN / OUT section labels."
-	:group 'dsh-emacs-faces)
+  '((t :inherit font-lock-keyword-face :weight bold))
+  "Tool card IN / OUT section labels."
+  :group 'dsh-emacs-faces)
 
 (defface dsh-emacs-tool-status-face
 	'((t :inherit italic))
