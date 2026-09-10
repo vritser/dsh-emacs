@@ -48,11 +48,13 @@ builds on agent-shell, the mode-line stats on pi-mono):
 | `dsh-emacs-tool-bash-prompt-face` | Bash terminal card `$` prompt glyph (same tool-purple accent) |
 | `dsh-emacs-tool-bash-panel-face` | Bash terminal card surface (the expanded card's background band, mirroring the code-block panel look) |
 | `dsh-emacs-tool-title-face` | Tool card title |
+| `dsh-emacs-tool-io-face` | ioCard `IN` / `OUT` section labels |
 
-State faces apply to the header of a bash/pwsh card and to the whole fragment
-for other variants. IN/OUT labels and output inherit the fragment's state
-face; the renderer does not apply `dsh-emacs-tool-io-face`,
-`dsh-emacs-tool-output-face`, or `dsh-emacs-tool-running-face` separately.
+State faces tint the **header row only** — variant icon/title plus the
+summary/suffix — for every tool variant, bash included; an expanded body never
+inherits them.  The ioCard body carries its own faces instead: `IN`/`OUT`
+labels use `dsh-emacs-tool-io-face`, the divider `dsh-emacs-divider-face`, and
+the args/output lines stay unstyled (`dsh-emacs-tool-output-face` is unused).
 
 Tool rows mimic dsh web's `ToolRow`: each tool call renders as one row of
 **collapsible** cards, with a header of `variant icon + title + summary`;
@@ -111,18 +113,24 @@ search→`query|pattern|url`, write/edit→`path|file_path`, code→`description
 
 | Face | Description |
 |---|---|
-| `dsh-emacs-thinking-face` | Thinking label and expanded body (bold, no italic) |
+| `dsh-emacs-thinking-face` | Think row label only (icon + "Think"; bold accent) |
+| `dsh-emacs-thinking-body-face` | Reasoning preview and expanded body (muted) |
 
 The collapsed row shows a preview of the first reasoning sentence on the right
 (`dsh-emacs-thinking-preview-max` controls the maximum length; longer content is
-truncated with `...`; set to 0 to disable).
+truncated with `...`; set to 0 to disable). The accent stays on the label row:
+the preview and the expanded reasoning body use the muted body face at normal
+weight.
 
 ## Fragment styling for extensions
 
-Fragment snapshots accept `:face` for the entire card and `:header-face`
-for the header only. These are merged after embedded text faces on every
-update and fold/unfold, so body links and icon fonts survive. Supply the
-complete snapshot on update; nil clears prior content and styling.
+Fragment snapshots accept two region-scoped faces: `:header-face` for the
+header row and `:body-face` for the expanded body — there is no whole-block
+face.  Within the header, the bold `dsh-emacs-ui-label-face` is the title face
+(left label only); the right label is a summary and takes its own or the header
+face.  Both merge after embedded text faces on every update and fold/unfold,
+so body links and icon fonts survive.  Supply the complete snapshot on update;
+nil clears prior content and styling.
 See the [fragment API](architecture.md#transcript-fragments-dsh-emacs-uiel)
 for the update contract.
 

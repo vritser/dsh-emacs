@@ -372,8 +372,15 @@ without relying on `:extend'."
     (((background dark))
      :foreground ,dsh-emacs-color-thinking-dark :weight bold)
     (t :inherit font-lock-builtin-face :weight bold))
-  "Thinking block label and expanded body (dsh web IconThink icon + Think).
-Bold, no italic — matching dsh web's thinkingToggle style."
+  "Thinking row label only (dsh web IconThink icon + \"Think\").
+Bold, no italic — matching dsh web's thinkingToggle title.  The preview and
+the body use `dsh-emacs-thinking-body-face' instead."
+  :group 'dsh-emacs-faces)
+
+(defface dsh-emacs-thinking-body-face
+  '((t :inherit shadow))
+  "Thinking block preview and expanded reasoning body.
+Muted like dsh web's `label-tertiary'."
   :group 'dsh-emacs-faces)
 
 ;;; ---------------------------------------------------------------------------

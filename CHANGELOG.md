@@ -8,7 +8,23 @@ minor) and stay undated until the release is cut.
 
 ## 0.4.0 - Unreleased
 
+### Breaking Changes
+
+- **Fragment faces are region-scoped**: `dsh-emacs-ui-make-fragment` drops the
+  whole-block `:face` for `:header-face` (header row) and `:body-face`
+  (expanded body).  The regions are disjoint, so a row/status face can no
+  longer bleed into a body; extensions that passed `:face` must pick the region
+  they meant (rationale: postmortem/039).
+
 ### Fixed
+
+- **Row accents no longer leak into card text**: expanding a Think block
+  painted its preview and reasoning body in the title's orange bold,
+  `Edit`/`Read`/… ioCards painted `IN`/`OUT` in the row's green/red/orange, and
+  every summary inherited the title's bold weight.  The accent now stays on the
+  row title — the Think label, or a tool's icon + title — the new muted
+  `dsh-emacs-thinking-body-face` styles the reasoning preview and body, and
+  command / `!command` outcome bodies stay plain (rationale: postmortem/039).
 
 - **Pruned tool results no longer paint a second card**: a `tool/result`
   surface record that *replaces* an earlier one (compaction's tool-result

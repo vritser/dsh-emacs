@@ -37,7 +37,9 @@
 
 (defface dsh-emacs-ui-label-face
   '((t :weight bold))
-  "Fragment label text."
+  "Fragment title text (the header's left label only).
+The right label is a summary and is styled by its own or the fragment's
+header face, never by this title face."
   :group 'dsh-emacs)
 
 (defface dsh-emacs-ui-fold-indicator-face
@@ -109,14 +111,16 @@ two-space gap."
 (cl-defun dsh-emacs-ui-make-fragment (&key (namespace-id "global") (block-id "1")
                                            label-left label-right body
                                            (style 'rounded) status
-                                           face header-face non-foldable)
+                                           header-face body-face non-foldable)
   "Create a complete fragment snapshot as an alist.
 NAMESPACE-ID and BLOCK-ID identify the block.  LABEL-LEFT, LABEL-RIGHT
 and BODY may be nil to clear their content on update.  STYLE is rounded,
 sharp or minimal.  STATUS is opaque caller metadata, not a face.
-FACE applies to the whole block; HEADER-FACE applies only to the header.
-Both merge after embedded text faces, preserving icon and body styling.
-NON-FOLDABLE disables folding.  Updates preserve the user's fold state."
+HEADER-FACE styles the header row only (icon, title, summary, fold
+indicator); BODY-FACE styles the expanded body only.  There is no
+whole-block face.  Both merge after embedded text faces, preserving icon
+and body styling.  NON-FOLDABLE disables folding.  Updates preserve the
+user's fold state."
   (list (cons :namespace-id namespace-id)
         (cons :block-id block-id)
         (cons :label-left (dsh-emacs-ui--string-or-nil label-left))
@@ -124,8 +128,8 @@ NON-FOLDABLE disables folding.  Updates preserve the user's fold state."
         (cons :body (dsh-emacs-ui--string-or-nil body))
         (cons :style style)
         (cons :status status)
-        (cons :face face)
         (cons :header-face header-face)
+        (cons :body-face body-face)
         (cons :non-foldable non-foldable)))
 
 ;;; ---------------------------------------------------------------------------
@@ -163,13 +167,17 @@ Applied as a `keymap' text property.  RET toggles the fragment.")
 ;;; 边框渲染
 ;;; ---------------------------------------------------------------------------
 
-(defun dsh-emacs-ui--label-merge (text &optional non-foldable)
-  "Merge the label face into TEXT and supply default fold interactions.
-Existing keymaps, local maps and button properties retain their actions.
-NON-FOLDABLE suppresses only the default folding interaction."
+(defun dsh-emacs-ui--label-merge (text &optional non-foldable title-p)
+  "Merge default fold interactions into TEXT.
+TITLE-P also merges `dsh-emacs-ui-label-face' — the header's left label is
+the title; the right label is a summary and must not inherit the title's
+weight, only its own (or the fragment's header) face.  Existing keymaps,
+local maps and button properties retain their actions.  NON-FOLDABLE
+suppresses only the default folding interaction."
   (let ((s (copy-sequence text))
         (pos 0))
-    (add-face-text-property 0 (length s) 'dsh-emacs-ui-label-face t s)
+    (when title-p
+      (add-face-text-property 0 (length s) 'dsh-emacs-ui-label-face t s))
     (unless non-foldable
       (while (< pos (length s))
         (let ((end (next-property-change pos s (length s))))
@@ -196,7 +204,7 @@ Minimal headers use WIDTH columns without framing."
                                               remaining nil nil "…")
                   ""))
          (labels (concat
-                  (dsh-emacs-ui--label-merge left non-foldable)
+                  (dsh-emacs-ui--label-merge left non-foldable t)
                   (unless (string-empty-p right)
                     (concat gap (dsh-emacs-ui--label-merge right non-foldable))))))
     (if minimal
@@ -344,8 +352,8 @@ WIDTH, when supplied, is the body width already measured by the caller."
                            (length (split-string body "\n" t)) width style))))
                  ((or body (not (eq style 'minimal)))
                   (dsh-emacs-ui--body-region body width style))))
-         (text (concat header
-                       (when lines (concat (mapconcat #'identity lines "\n") "\n"))
+         (body-text (when lines (concat (mapconcat #'identity lines "\n") "\n")))
+         (text (concat header body-text
                        (unless (eq style 'minimal)
                          (concat (dsh-emacs-ui--bottom-border style width) "\n"))))
          (state (copy-tree model)))
@@ -357,10 +365,14 @@ WIDTH, when supplied, is the body width already measured by the caller."
     (add-text-properties 0 (length text)
                          (list 'dsh-emacs-ui-state state
                                'read-only t 'front-sticky '(read-only)) text)
-    (when-let* ((face (map-elt model :face)))
-      (add-face-text-property 0 (length text) face t text))
+    ;; Region-scoped: header row and body lines are disjoint spans, and neither
+    ;; face touches the border chrome — a row/status face cannot reach the body.
     (when-let* ((face (map-elt model :header-face)))
       (add-face-text-property 0 (length header) face t text))
+    (when-let* ((face (map-elt model :body-face)))
+      (add-face-text-property (length header)
+                              (+ (length header) (length body-text))
+                              face t text))
     text))
 
 (cl-defun dsh-emacs-ui-update-fragment (model &key create-new expanded insert-before)

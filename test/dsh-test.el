@@ -36,6 +36,12 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
       (dsh-test-pass name)
     (dsh-test-fail name "断言不成立（dsh-test-assert）")))
 
+(defun dsh-test--faces-at (pos)
+  "Return the `face' property at POS as a list (nil when unset).
+Lets face assertions read uniformly whether the property holds one face
+symbol or an ordered list."
+  (ensure-list (get-text-property pos 'face)))
+
 ;; Follow checks must stop after one screen plus slack, even in long history.
 (with-temp-buffer
   (insert (make-string 20000 ?\n) "tail")
@@ -1065,7 +1071,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (model (dsh-emacs-ui-make-fragment
                 :namespace-id "flags" :block-id "a" :style 'minimal
                 :label-left "Title" :label-right "Summary" :body "body"
-                :non-foldable t :face 'bold :header-face 'italic)))
+                :non-foldable t :body-face 'bold :header-face 'italic)))
     (goto-char (point-max))
     (dsh-emacs-ui-update-fragment model :insert-before input)
     (goto-char (point-min))
@@ -1083,7 +1089,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
       (dsh-test-assert "fragment-clears-flags-style-and-faces"
         (eq (map-elt state :style) 'sharp)
         (not (map-elt state :non-foldable))
-        (not (map-elt state :face))
+        (not (map-elt state :body-face))
         (not (map-elt state :header-face))
         (not (string-match-p "Summary" (buffer-string)))
         (= (cdr range) input)
@@ -1282,7 +1288,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                        :namespace-id "failure"
                        :block-id (if (eq operation 'create) "b" "a")
                        :style 'minimal :label-left "Replacement" :body "new body"
-                       :face 'bold)
+                       :body-face 'bold)
                       :insert-before anchor))))
             (error (setq caught (equal (error-message-string err)
                                        "injected failure"))))
@@ -2723,7 +2729,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (let ((model (dsh-emacs-ui-make-fragment
                   :namespace-id "fold" :block-id "a" :style style
                   :label-left "Title" :body "before"
-                  :face 'dsh-emacs-tool-success-face
+                  :body-face 'dsh-emacs-tool-success-face
                   :header-face 'dsh-emacs-thinking-face)))
       (dsh-emacs-ui-update-fragment model)
       (setf (alist-get :body model)
@@ -2747,6 +2753,45 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                   (get-text-property (+ (point-min) 3) 'face))))
         (goto-char (point-min))
         (dsh-emacs-ui-toggle-fragment)))))
+
+;; Fragment faces are region-scoped: :header-face never reaches the expanded
+;; body and :body-face never tints the header, for any border style.  This is
+;; the general invariant behind the Think/tool-card body-tint fixes.
+(dolist (style '(minimal rounded sharp))
+  (with-temp-buffer
+    (dsh-emacs-ui-update-fragment
+     (dsh-emacs-ui-make-fragment
+      :namespace-id "scope" :block-id (format "sc-%s" style) :style style
+      :label-left "Head" :label-right "Sum" :body "Body line"
+      :header-face 'underline :body-face 'italic)
+     :create-new t :expanded t)
+    (goto-char (point-min))
+    (dsh-test-assert (format "fragment-header-face-scoped-%s" style)
+      (and (search-forward "Head" nil t)
+           (memq 'underline (dsh-test--faces-at (match-beginning 0)))
+           (not (memq 'italic (dsh-test--faces-at (match-beginning 0))))
+           ;; the left label is the title and keeps the title face
+           (memq 'dsh-emacs-ui-label-face
+                 (dsh-test--faces-at (match-beginning 0)))))
+    ;; the right label is a summary: header face but never the title face
+    (goto-char (point-min))
+    (dsh-test-assert (format "fragment-summary-keeps-title-face-off-%s" style)
+      (and (search-forward "Sum" nil t)
+           (memq 'underline (dsh-test--faces-at (match-beginning 0)))
+           (not (memq 'dsh-emacs-ui-label-face
+                      (dsh-test--faces-at (match-beginning 0))))))
+    (goto-char (point-min))
+    (dsh-test-assert (format "fragment-body-face-scoped-%s" style)
+      (and (search-forward "Body line" nil t)
+           (memq 'italic (dsh-test--faces-at (match-beginning 0)))
+           (not (memq 'underline (dsh-test--faces-at (match-beginning 0))))))
+    ;; The border chrome is neither region: a face attribute on the body must
+    ;; not reach the bottom rule either.
+    (unless (eq style 'minimal)
+      (goto-char (point-max))
+      (dsh-test-assert (format "fragment-border-keeps-own-face-%s" style)
+        (and (search-backward "─" nil t)
+             (not (memq 'italic (dsh-test--faces-at (match-beginning 0)))))))))
 
 ;; --- 测试 32: 工具名与图标解耦 —— 同图标不同名 ---
 (with-temp-buffer
@@ -4850,7 +4895,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
             (memq bg '(unspecified unspecified-bg)))
     (dsh-test-pass "thinking-face-no-background")))
 
-;; --- 测试 56: thinking 整行贴同一 face（label + body 均带 thinking-face） ---
+;; --- 测试 56: think 行只有 label 带 thinking-face；preview 与展开正文走
+;; muted 的 thinking-body-face（回归：整块盖 thinking-face，preview / body
+;; 继承了 label 的橙色粗体） ---
 (let ((buf (generate-new-buffer " *dsh-think-face*"))
       (dsh-emacs-thinking-expand-by-default t))
   (unwind-protect
@@ -4858,24 +4905,109 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
         (insert "###HEAD\n")
         (dsh-emacs-render--render-thinking-block
          "t" "b1" "first body line\nsecond body line" 1 (point-max))
-        ;; label 行（含图标）应带 thinking-face
         (goto-char (point-min))
-        (search-forward "Think" nil t)
-        (let ((faces (seq-uniq
-                      (mapcar (lambda (p) (get-text-property p 'face))
-                              (number-sequence (line-beginning-position)
-                                               (line-end-position))))))
-          (when (memq 'dsh-emacs-thinking-face faces)
-            (dsh-test-pass "thinking-block-label-gets-face")))
-        ;; body 行也应带 thinking-face
-        (forward-line 1)
-        (let ((faces (seq-uniq
-                      (mapcar (lambda (p) (get-text-property p 'face))
-                              (number-sequence (line-beginning-position)
-                                               (line-end-position))))))
-          (when (memq 'dsh-emacs-thinking-face faces)
-            (dsh-test-pass "thinking-block-body-gets-face"))))
+        (dsh-test-assert "thinking-label-gets-thinking-face"
+          (and (search-forward "Think" nil t)
+               (memq 'dsh-emacs-thinking-face
+                     (dsh-test--faces-at (match-beginning 0)))
+               ;; the title keeps the fragment title face (bold)
+               (memq 'dsh-emacs-ui-label-face
+                     (dsh-test--faces-at (match-beginning 0)))))
+        ;; 图标（label 行首）同样保留 thinking-face：终端字形回退不该变灰，
+        ;; 图形端 SVG 本来就按 thinking 色着色
+        (goto-char (point-min))
+        (dsh-test-assert "thinking-label-icon-gets-thinking-face"
+          (and (search-forward "✶" nil t)
+               (memq 'dsh-emacs-thinking-face
+                     (dsh-test--faces-at (match-beginning 0)))))
+        (goto-char (point-min))
+        (dsh-test-assert "thinking-preview-uses-body-face"
+          (and (search-forward "first body line" nil t)
+               (memq 'dsh-emacs-thinking-body-face
+                     (dsh-test--faces-at (match-beginning 0)))
+               (not (memq 'dsh-emacs-thinking-face
+                          (dsh-test--faces-at (match-beginning 0))))
+               ;; the preview is a summary, not a title: it must not inherit
+               ;; the title's bold weight
+               (not (memq 'dsh-emacs-ui-label-face
+                          (dsh-test--faces-at (match-beginning 0))))))
+        ;; 展开正文行同理：body face 而非 label face
+        (goto-char (point-min))
+        (dsh-test-assert "thinking-body-uses-body-face"
+          (and (search-forward "second body line" nil t)
+               (memq 'dsh-emacs-thinking-body-face
+                     (dsh-test--faces-at (match-beginning 0)))
+               (not (memq 'dsh-emacs-thinking-face
+                          (dsh-test--faces-at (match-beginning 0)))))))
     (kill-buffer buf)))
+
+;; 流式（等待响应）期间的 think body 同样走 muted body face，只有 header
+;; label 保留 thinking-face。
+(with-temp-buffer
+  (dsh-emacs-render--start-thinking-stream
+   '((data . ((turn . 1) (step . 1)))) "live reasoning")
+  (dsh-emacs-render--flush-thinking)
+  (goto-char (point-min))
+  (dsh-test-assert "thinking-stream-body-uses-body-face"
+    (and (search-forward "live reasoning" nil t)
+         (memq 'dsh-emacs-thinking-body-face
+               (dsh-test--faces-at (match-beginning 0)))
+         (not (memq 'dsh-emacs-thinking-face
+                    (dsh-test--faces-at (match-beginning 0)))))))
+
+;; --- 测试 56b: 工具卡的 state 着色只覆盖 header 行；展开正文（IN/OUT）
+;; 不得继承（Edit/Read 等通用 ioCard；回归：旧版整块 face 把正文也染成
+;; 绿/红粗体） ---
+(dolist (case '(("read" "{\"path\":\"foo.el\"}" nil 0 "line one\nline two")
+                ("edit" "{\"path\":\"bar.el\"}" t 1 "no match found")))
+  (let ((buf (generate-new-buffer " *dsh-tool-face*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (dsh-emacs-mode)
+          (dsh-emacs-modeline-setup)
+          ;; The card must be expanded, otherwise the body range is empty and
+          ;; the "body not tinted" assertion passes vacuously.
+          (setq-local dsh-emacs-tool-expand-by-default t)
+          (let* ((name (nth 0 case))
+                 (args (nth 1 case))
+                 (is-error (nth 2 case))
+                 (exit-code (nth 3 case))
+                 (out (nth 4 case))
+                 (state-face (if is-error
+                                 'dsh-emacs-tool-error-face
+                               'dsh-emacs-tool-success-face)))
+            (dsh-emacs-render-tool-call
+             (dsh-emacs-test--tool-call-event 1 "c1" name args))
+            (dsh-emacs-render-tool-result
+             (dsh-emacs-test--tool-result-event 2 "c1" is-error exit-code out))
+            (let* ((ns (dsh-emacs-render--make-namespace))
+                   (block (dsh-emacs-ui-find-block ns "tool-c1"))
+                   (header-end (and block
+                                    (save-excursion
+                                      (goto-char (car block))
+                                      (line-end-position))))
+                   (body-start (and block
+                                    (save-excursion
+                                      (goto-char (car block))
+                                      (forward-line 1)
+                                      (point)))))
+              (dsh-test-assert (format "tool-%s-header-tinted" name)
+                (and block header-end
+                     (seq-every-p
+                      (lambda (pos)
+                        (memq state-face (dsh-test--faces-at pos)))
+                      (number-sequence (car block) header-end))))
+              ;; 正文必须真的展开且含结果文本；空区间会让断言空转
+              (dsh-test-assert (format "tool-%s-body-not-tinted" name)
+                (and block body-start (< body-start (cdr block))
+                     (string-match-p (regexp-quote (car (split-string out "\n")))
+                                     (buffer-substring-no-properties
+                                      body-start (cdr block)))
+                     (seq-every-p
+                      (lambda (pos)
+                        (not (memq state-face (dsh-test--faces-at pos))))
+                      (number-sequence body-start (1- (cdr block)))))))))
+      (kill-buffer buf))))
 
 ;; --- 测试 57: 协议层 workspace 基线 / workspace-result / model-selection-result ---
 ;; workspace/follow 基线顶层值：items 数组→列表、archivedSessionIds 数组→列表
@@ -9406,9 +9538,9 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                (entry (gethash id dsh-emacs--command-blocks))
                (block (and entry (dsh-emacs-ui-find-block (nth 0 entry)
                                                           (nth 1 entry)))))
-          ;; 整块待定着色随快照 :face 走（不再是独立的 restyle 通道），
-          ;; 与 command/run 行一致。
-          (dsh-test-assert "shell-row-tints-pending-whole-block"
+          ;; 待定着色随快照 :header-face 走（不再是独立的 restyle 通道），
+          ;; 与 command/run 行一致；pending 行没有 body，header 即整块。
+          (dsh-test-assert "shell-row-tints-pending-header"
             (and block
                  (seq-every-p
                   (lambda (pos)
@@ -9422,16 +9554,32 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
               (string-match-p "echo hello" text)
               (string-match-p "✓ exit 0" text)
               (string-match-p "nested output" text)))
-          (let ((done-block (dsh-emacs-ui-find-block (nth 0 entry)
-                                                     (nth 1 entry))))
-            (dsh-test-assert "shell-row-tints-success-whole-block"
-              (and done-block
+          (let* ((done-block (dsh-emacs-ui-find-block (nth 0 entry)
+                                                      (nth 1 entry)))
+                 (body-start (and done-block
+                                  (save-excursion
+                                    (goto-char (car done-block))
+                                    (forward-line 1)
+                                    (point)))))
+            ;; 成功着色只落在 header 行，输出正文不得继承（body 必须真的存在）
+            (dsh-test-assert "shell-row-tints-success-header-only"
+              (and done-block body-start (< body-start (cdr done-block))
+                   (string-match-p "nested output"
+                                   (buffer-substring-no-properties
+                                    body-start (cdr done-block)))
                    (seq-every-p
                     (lambda (pos)
                       (memq 'dsh-emacs-tool-success-face
-                            (ensure-list (get-text-property pos 'face))))
+                            (dsh-test--faces-at pos)))
                     (number-sequence (car done-block)
-                                     (1- (cdr done-block))))))))
+                                     (save-excursion
+                                       (goto-char (car done-block))
+                                       (line-end-position))))
+                   (seq-every-p
+                    (lambda (pos)
+                      (not (memq 'dsh-emacs-tool-success-face
+                                 (dsh-test--faces-at pos))))
+                    (number-sequence body-start (1- (cdr done-block))))))))
         ;; 失败路径：非零退出 → 红色状态
         (let ((bad-id (dsh-emacs-render-shell-start "false")))
           (dsh-emacs-render-shell-done bad-id nil 1 nil "boom")
@@ -9872,6 +10020,48 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
            (string= "goal" (dsh-emacs-render-command-label "goal" nil)))
   (dsh-test-pass "command-render-label"))
 
+;; command/done 的结果正文同样不得继承 success/error 着色（展开后检查整段
+;; body，回归：旧版整块 face 让正文变绿/红）。
+(dolist (case '(("ok1" "success" "compacted history" dsh-emacs-tool-success-face)
+                ("bad1" "error" "unknown preset" dsh-emacs-tool-error-face)))
+  (let ((buf (generate-new-buffer " *dsh-cmd-body-face*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (dsh-emacs-mode)
+          (dsh-emacs-render-event
+           `((type . "command/run") (seq . 40)
+             (data . ((commandId . ,(nth 0 case)) (name . "compact")))))
+          (dsh-emacs-render-event
+           `((type . "command/done") (seq . 41)
+             (data . ((commandId . ,(nth 0 case))
+                      (kind . ,(nth 1 case))
+                      (text . ,(nth 2 case))))))
+          (let* ((ns (dsh-emacs-render--make-namespace))
+                 (block (dsh-emacs-ui-find-block
+                         ns (format "cmd-%s" (nth 0 case)))))
+            (when block
+              (goto-char (car block))
+              (dsh-emacs-ui-toggle-fragment))
+            (setq block (dsh-emacs-ui-find-block
+                         ns (format "cmd-%s" (nth 0 case))))
+            (let ((body-start (and block
+                                   (save-excursion
+                                     (goto-char (car block))
+                                     (forward-line 1)
+                                     (point)))))
+              ;; 正文必须真的展开且含结果文本；空区间会让断言空转
+              (dsh-test-assert (format "command-done-body-not-tinted-%s"
+                                       (nth 1 case))
+                (and block body-start (< body-start (cdr block))
+                     (string-match-p (regexp-quote (nth 2 case))
+                                     (buffer-substring-no-properties
+                                      body-start (cdr block)))
+                     (seq-every-p
+                      (lambda (pos)
+                        (not (memq (nth 3 case) (dsh-test--faces-at pos))))
+                      (number-sequence body-start (1- (cdr block)))))))))
+      (kill-buffer buf))))
+
 ;; --- 测试 98a: command row 样式 —— result 前缀 + spinner 生命周期 ---
 (let ((buf (generate-new-buffer " *dsh-cmd-prefix*"))
       (old-spinners dsh-emacs--command-spinners))
@@ -9950,7 +10140,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (setq dsh-emacs--command-spinners old-spinners)
     (kill-buffer buf)))
 
-;; --- 测试 98c: 运行中 command 行与 tool 行一致 —— 整行 pending 着色 ---
+;; --- 测试 98c: 运行中 command 行与 tool 行一致 —— header 行 pending 着色 ---
 (let ((buf (generate-new-buffer " *dsh-cmd-tint*"))
       (old-spinners dsh-emacs--command-spinners))
   (unwind-protect
@@ -9970,7 +10160,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                                      (ensure-list (get-text-property pos 'face))))
                              (number-sequence (car blk) (1- (cdr blk)))))))
           (when tinted
-            (dsh-test-pass "command-running-tints-whole-block")))
+            (dsh-test-pass "command-running-tints-header")))
         ;; spinner tick 每帧整行重建，着色必须不丢
         (dsh-emacs--command-spinner-tick (current-buffer) "tint1")
         (let* ((ns (dsh-emacs-render--make-namespace))
@@ -9986,7 +10176,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (setq dsh-emacs--command-spinners old-spinners)
     (kill-buffer buf)))
 
-;; --- 测试 98d: 乐观 command 行同样带整行 pending 着色 ---
+;; --- 测试 98d: 乐观 command 行同样带 header 行 pending 着色 ---
 (let ((buf (generate-new-buffer " *dsh-cmd-opt-tint*"))
       (old-spinners dsh-emacs--command-spinners))
   (unwind-protect
@@ -10006,7 +10196,7 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
                           (memq 'dsh-emacs-tool-pending-face
                                 (ensure-list (get-text-property pos 'face))))
                         (number-sequence (car blk) (1- (cdr blk)))))
-              (dsh-test-pass "command-optimistic-tints-whole-block")))))
+              (dsh-test-pass "command-optimistic-tints-header")))))
     (setq dsh-emacs--command-spinners old-spinners)
     (kill-buffer buf)))
 

@@ -1244,7 +1244,7 @@ pending incremental pass; changed text is replaced and rendered in full."
               (inhibit-read-only t))
           (save-excursion
             (goto-char (plist-get state :end))
-            (insert text))
+            (insert (propertize text 'face 'dsh-emacs-thinking-body-face)))
           (setf (plist-get state :chunks) nil)
           (dsh-emacs-render--follow-stream windows))))))
 
@@ -1284,9 +1284,10 @@ text arrives."
                   (goto-char (point-max))))
               (dsh-emacs-ui--consume-blanks-above)
               (setq start (point))
-              (insert (dsh-emacs-render--think-icon) " "
-                      (propertize "Think" 'face 'dsh-emacs-thinking-face) "\n")
-              (insert text "\n")
+              (insert (propertize (concat (dsh-emacs-render--think-icon) " " "Think")
+                                  'face 'dsh-emacs-thinking-face)
+                      "\n")
+              (insert (propertize text 'face 'dsh-emacs-thinking-body-face) "\n")
               (setq end (copy-marker (- (point) 1) t))))
           (setq state (list :key key
                             :start (copy-marker start nil)
@@ -1632,13 +1633,18 @@ session chips; see `dsh-emacs-reference-fontify'."
    (dsh-emacs-ui-make-fragment
     :namespace-id namespace-id
     :block-id block-id
-    :label-left (concat (dsh-emacs-render--think-icon) " " "Think")
+    :label-left (propertize (concat (dsh-emacs-render--think-icon) " " "Think")
+                            'face 'dsh-emacs-thinking-face)
     :label-right (or (dsh-emacs-render--thinking-preview text)
                      (or timestamp ""))
     :body text
     :style 'minimal
     :status 'thinking
-    :face 'dsh-emacs-thinking-face)
+    ;; Reasoning text is muted everywhere except the label: the header chrome
+    ;; (separator + preview) and the body share the body face.  The label's
+    ;; own face is embedded above, so it wins over the header face.
+    :header-face 'dsh-emacs-thinking-body-face
+    :body-face 'dsh-emacs-thinking-body-face)
    :create-new t :expanded dsh-emacs-thinking-expand-by-default
    :insert-before insert-point))
 
@@ -1839,10 +1845,9 @@ the event seq but renders no ordinary tool card."
             :body display-body
             :style 'minimal
             :status 'tool-pending
-            :header-face (when (equal variant "bash")
-                           'dsh-emacs-tool-pending-face)
-            :face (unless (equal variant "bash")
-                    'dsh-emacs-tool-pending-face))
+            ;; The state tint covers the header row only, never the body: the
+            ;; expanded IN/OUT content must not inherit the row's accent.
+            :header-face 'dsh-emacs-tool-pending-face)
            :create-new t
            :expanded dsh-emacs-tool-expand-by-default
            :insert-before insert-point)
@@ -1872,18 +1877,20 @@ colored status dot (red / warning-yellow)."
 Mirrors dsh web's ioCard: an `IN` section, then an `OUT` section.  When
 STATUS-TEXT is non-empty it is prepended as a first status line.
 Returns a multi-line body string (IN/OUT are literal labels so the fold
-toggle preserves them along with the rest of the body)."
+toggle preserves them along with the rest of the body).  Section labels and
+the divider carry their own faces; the args/output text stays unstyled —
+the tool's state face belongs to the header row, not the body."
   (let ((parts '()))
     (when (and status-text (not (string-empty-p status-text)))
       (push status-text parts))
     (when (and in-text (not (string-empty-p in-text)))
-      (push "IN" parts)
+      (push (propertize "IN" 'face 'dsh-emacs-tool-io-face) parts)
       (dolist (line (split-string (string-trim in-text) "\n"))
         (push (concat "   " line) parts)))
     (when (and out-text (not (string-empty-p out-text)))
       (when (and in-text (not (string-empty-p in-text)))
-        (push "────" parts))
-      (push "OUT" parts)
+        (push (propertize "────" 'face 'dsh-emacs-divider-face) parts))
+      (push (propertize "OUT" 'face 'dsh-emacs-tool-io-face) parts)
       (dolist (line (split-string (string-trim out-text) "\n"))
         (push (concat "   " line) parts)))
     (mapconcat #'identity (nreverse parts) "\n")))
@@ -2074,8 +2081,9 @@ one background band (`dsh-emacs-tool-bash-panel-face', see
               :label-right summary
               :body body
               :style 'minimal
-              :header-face (when (equal variant "bash") face)
-              :face (unless (equal variant "bash") face)
+              ;; State tint on the header row only: the ioCard body keeps its
+              ;; own neutral faces instead of inheriting the status accent.
+              :header-face face
               :status (pcase state
                            ('success 'tool-success)
                            ('error 'tool-error)
@@ -2303,7 +2311,7 @@ Replaces any existing animation for the same command (idempotent)."
                                (nth next-index dsh-emacs--command-spinner-frames))
                   :style 'minimal
                   :status 'tool-pending
-                  :face 'dsh-emacs-tool-pending-face))))
+                  :header-face 'dsh-emacs-tool-pending-face))))
           (dsh-emacs--command-spinner-stop command-id))))))
 
 (defun dsh-emacs--command-spinner-stop (command-id)
@@ -2366,7 +2374,7 @@ the real `command/run' event when it arrives."
                        (car dsh-emacs--command-spinner-frames))
           :style 'minimal
           :status 'tool-pending
-          :face 'dsh-emacs-tool-pending-face)
+          :header-face 'dsh-emacs-tool-pending-face)
          :create-new t :expanded t
          :insert-before (dsh-emacs-render--input-insert-point))
         (dsh-emacs--command-spinner-start temp-id
@@ -2437,7 +2445,7 @@ Returns the event seq."
                                  (car dsh-emacs--command-spinner-frames))
                     :style 'minimal
                     :status 'tool-pending
-                    :face 'dsh-emacs-tool-pending-face)
+                    :header-face 'dsh-emacs-tool-pending-face)
                    :create-new t :expanded nil
                    :insert-before (dsh-emacs-render--input-insert-point))
                   (dsh-emacs--command-spinner-start command-id
@@ -2471,9 +2479,11 @@ Returns the event seq."
                     :body (and (stringp text) (not (string-empty-p text)) text)
                     :style 'minimal
                     :status (if ok 'tool-success 'tool-error)
-                    :face (if ok
-                              'dsh-emacs-tool-success-face
-                            'dsh-emacs-tool-error-face))
+                    ;; The result body is plain text; only the header row
+                    ;; carries the success/error accent.
+                    :header-face (if ok
+                                     'dsh-emacs-tool-success-face
+                                   'dsh-emacs-tool-error-face))
                    :create-new nil))))))))
     seq))
 
@@ -2512,7 +2522,7 @@ finishes."
                    (car dsh-emacs--command-spinner-frames))
       :style 'minimal
       :status 'tool-pending
-      :face 'dsh-emacs-tool-pending-face)
+      :header-face 'dsh-emacs-tool-pending-face)
      :create-new t :expanded t
      :insert-before (dsh-emacs-render--input-insert-point))
     (dsh-emacs--command-spinner-start id (current-buffer))
@@ -2547,11 +2557,11 @@ a finished row never animates again."
         :body body
         :style 'minimal
         :status (if ok 'tool-success 'tool-error)
-        ;; The snapshot face covers the whole block (borders and body) and
-        ;; merges after embedded text faces, so the icon's :family survives.
-        :face (if ok
-                  'dsh-emacs-tool-success-face
-                'dsh-emacs-tool-error-face))
+        ;; The success/error accent covers the header row only; the command
+        ;; output body stays plain instead of inheriting the row's tint.
+        :header-face (if ok
+                         'dsh-emacs-tool-success-face
+                       'dsh-emacs-tool-error-face))
        :create-new nil :expanded t)
       (remhash id dsh-emacs--command-blocks))))
 

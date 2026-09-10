@@ -1,7 +1,8 @@
 # 022 — Complete Fragment Snapshots
 
 String-qualified identity and navigation superseded by 024; the snapshot
-contract remains in effect.
+contract remains in effect, except its whole-block face clause — superseded by
+[039](039-region-scoped-fragment-faces.md).
 
 ## Background
 

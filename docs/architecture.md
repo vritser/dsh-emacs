@@ -25,7 +25,7 @@ dsh-emacs/
 ## Transcript fragments (`dsh-emacs-ui.el`)
 
 The renderer supplies a complete alist snapshot: identity, labels, body,
-border style, optional whole-block/header faces, and the non-foldable flag.
+border style, optional header/body faces, and the non-foldable flag.
 `dsh-emacs-ui-update-fragment` replaces that snapshot while preserving the
 user's fold state. Nil fields clear previous values; this is not a patch API.
 It returns the exact `(START . END)` range, excluding surrounding spacing.
@@ -66,9 +66,11 @@ while preserving the previous card. Minimal blocks need no special
 body-range editing path. The stored snapshot includes labels and
 faces as well as the full body; fold/unfold preserves embedded links, icon
 faces and body styling. `:status` is opaque renderer metadata and does not
-apply colors. Renderers choose concrete `:face` / `:header-face` values;
-the UI merges those after embedded faces on every redraw. Bash terminal
-cards use a header face while retaining their own body faces.
+apply colors. Renderers choose concrete `:header-face` / `:body-face`
+values; the two regions are disjoint, so a row/status face can never reach
+the body and a body face never tints the row. The UI merges those faces
+after embedded faces on every redraw — which is how the bash terminal card
+keeps its own body faces under a state-tinted header.
 
 Each render measures the displaying window once and shares that body width
 between the header, body and footer. Titles take priority over summaries;
@@ -82,7 +84,9 @@ The UI does not interpret message kinds. Renderers can mark text with
 request one. Fragment lookup/navigation use the contiguous state property.
 There is no group hierarchy or append/header-only mutation API. Streaming
 assistant text remains owned by the renderer's existing stream path.
-See [decision record 022](../postmortem/022-fragment-snapshots.md).
+See [decision record 022](../postmortem/022-fragment-snapshots.md); the
+region-scoped face contract is [decision record
+039](../postmortem/039-region-scoped-fragment-faces.md).
 
 ## Composer (`dsh-emacs-composer.el`)
 
