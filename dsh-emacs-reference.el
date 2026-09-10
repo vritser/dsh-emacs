@@ -3,7 +3,7 @@
 ;; Copyright (C) 2025 vritser
 
 ;; Author: vritser
-;; Version: 0.1.0
+;; Version: 0.3.0
 ;; Package-Requires: ((emacs "27.1"))
 
 ;;; Commentary:

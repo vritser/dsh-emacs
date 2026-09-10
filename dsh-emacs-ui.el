@@ -4,7 +4,7 @@
 
 ;; Author: vritser
 ;; URL: https://github.com/vritser/dsh-emacs
-;; Version: 0.2.0
+;; Version: 0.3.0
 ;; License: GPL-3.0-or-later
 ;; Package-Requires: ((emacs "27.1"))
 
