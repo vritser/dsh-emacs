@@ -1,22 +1,23 @@
 # Architecture
 
-`dsh-emacs` is a modular design that is easy to maintain and extend:
+Module ownership:
 
 ```
 dsh-emacs/
 ├── dsh-emacs.el              # Main entry point, RPC client, session management, mode definition
 ├── dsh-emacs-protocol.el     # Typed views of dsh RPC payloads (cl-defstruct)
-├── dsh-emacs-ui.el           # UI framework (rounded borders, collapsing, fragment management)
-├── dsh-emacs-faces.el        # Unified face definitions and theme variables
+├── dsh-emacs-ui.el           # Fragment snapshots, borders, folding, fragment faces
+├── dsh-emacs-faces.el        # Shared faces and palette defaults
 ├── dsh-emacs-tokens.el       # Token tracking and formatting
 ├── dsh-emacs-markdown.el     # Markdown syntax highlighting
 ├── dsh-emacs-render.el       # Event renderer (user/assistant/tool/thinking)
 ├── dsh-emacs-events.el       # Event stream: native WebSocket + reconnect
-├── dsh-emacs-modeline.el       # Mode-line stats
+├── dsh-emacs-modeline.el     # Mode-line stats
 ├── dsh-emacs-queue.el        # Pending-input queue mirror (queue/steer)
 ├── dsh-emacs-server.el       # Server bootstrap: probe / auto-start / install / browser-session auth
 ├── dsh-emacs-command.el      # Host slash commands (commands/list + commands/execute)
 ├── dsh-emacs-shell.el        # Client-side `!command` shell commands (local execution)
+├── dsh-emacs-reference.el    # @ reference completion, chips and navigation
 ├── dsh-emacs-composer.el     # Composer chrome: Goal and Next Message rows above the input
 └── dsh-emacs-session.el      # Session list card view
 ```

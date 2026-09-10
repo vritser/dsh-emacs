@@ -1,5 +1,30 @@
 # Customization Options
 
+## Example configuration
+
+If you already use `use-package`, this is an alternative to the README's
+minimal loading configuration. Adjust `:load-path` to your checkout:
+
+```emacs-lisp
+(use-package dsh-emacs
+  :load-path "~/dsh-emacs"
+  :commands (dsh-emacs dsh-emacs-new-session)
+  :custom
+  (dsh-emacs-base-url "http://127.0.0.1:3080") ; server address
+  (dsh-emacs-default-preset "code")           ; preset for new sessions
+  (dsh-emacs-server-start-on-init t)          ; start the server eagerly
+  :bind (("C-x d" . dsh-emacs)
+         :map dsh-emacs-mode-map
+         ("C-c C-a" . dsh-emacs-attach-file)))
+```
+
+Provider credentials and model configuration belong to dsh; open its web UI
+with `M-x dsh-emacs-open-web`. Select the current session's model with
+`C-c C-m`. `dsh-emacs-default-model` supplies a display fallback and does not
+choose the model used by a session.
+
+## Common options
+
 The most commonly used options, straight in your config:
 
 ```elisp
@@ -36,6 +61,49 @@ The most commonly used options, straight in your config:
 (setq dsh-emacs-shell-null-stdin t)                 ; close `!` commands' input pipe immediately (EOF, independent of shell syntax)
 (setq dsh-emacs-shell-timeout nil)                  ; nil = no limit; positive integer seconds only (surviving background children are untracked)
 ```
+
+## Session and workspace controls
+
+These default keys apply in the session list opened by `M-x dsh-emacs`:
+
+| Key | Action |
+|---|---|
+| `RET` | Open the session under point; on a group header, toggle folding |
+| `c` / `C` | Create a session / create with a chosen agent preset |
+| `r` | Rename the session under point |
+| `d` | Archive the session without deleting it |
+| `/` | Search |
+| `g` | Refresh |
+| `TAB` | Toggle folding for the workspace group |
+| `W` | Create a workspace |
+| `R` | Rename the workspace under point |
+| `D` | Delete the workspace under point |
+| `M` | Move the session under point to another workspace |
+| `w` | Filter by workspace; empty input clears the filter |
+
+Workspace and `Ungrouped` groups start expanded by default. Set
+`dsh-emacs-workspaces-collapsed-by-default` to non-nil to start with all
+groups collapsed. `M-x dsh-emacs-collapse-workspaces` and
+`M-x dsh-emacs-expand-workspaces` fold or unfold every group in the list.
+
+## Goal actions
+
+The composer shows the session's current goal above the input. In a chat
+buffer, `C-c C-g` opens the goal-action prefix:
+
+| Key | Action |
+|---|---|
+| `C-c C-g p` | Pause the goal |
+| `C-c C-g r` | Resume the goal |
+| `C-c C-g e` | Edit the objective |
+| `C-c C-g d` | Clear the goal |
+| `C-c C-g a` | Toggle inline action buttons in this buffer |
+| `C-c C-g ?` | Show the full objective and blocked reason |
+
+`dsh-emacs-composer-goal-actions` controls whether inline action buttons are
+shown by default. Hiding them leaves the keyboard commands available.
+Steering items take priority in the separate Next Message preview; hover for
+the full text or use `C-c C-q` to manage pending messages.
 
 ## Markdown responsiveness
 

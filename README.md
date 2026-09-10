@@ -1,201 +1,188 @@
-# dsh-emacs — An Emacs client for DeepSeek Harness
+# dsh-emacs — an Emacs client for DeepSeek Harness
 
-**dsh-emacs** is an Emacs frontend for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`): it talks to a running dsh web service over plain HTTP/WebSocket and renders sessions, streaming replies, tool calls, thinking blocks and slash commands with an Emacs-native UI.
+**dsh-emacs** brings [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
+(`dsh`) into Emacs: streaming replies, tool calls, thinking blocks, slash
+commands, file/session references, and model selection. It uses Emacs
+built-ins (Emacs 27.1+) with no third-party dependencies.
 
-Live thinking shows its first delta immediately and batches subsequent text
-at 100ms intervals to reduce redisplay load. Event boundaries flush pending
-text immediately.
+![Chat buffer with streaming replies and tool calls](assets/chat.png)
 
+> The upcoming **0.3.0** release targets the **dsh 0.1.2** wire protocol
+> (server **0.1.2-rc.1 or newer**).
 
-It aims to be the complete, zero-friction client for dsh web — built on
-nothing but Emacs built-ins (Emacs 27.1+), with zero third-party dependencies.
+## Quick start
 
-## Quick Start
+You need **Emacs 27.1+** and a provider/model configured in dsh to send
+messages. dsh-emacs can install and start the dsh server for you; provider
+credentials and model configuration remain in dsh. For an existing local or
+remote server, set its address as described in [Server setup](#server-setup)
+before connecting.
 
-**Requirements:** Emacs 27.1+. The dsh CLI is optional — if it is missing, the
-first server-touching command offers to install it, then starts the server for
-you. No build step, no manual `dsh web`.
+1. Clone the repository:
 
-Install from this repository:
+   ```sh
+   git clone https://github.com/vritser/dsh-emacs.git ~/dsh-emacs
+   ```
 
-```emacs-lisp
-(add-to-list 'load-path "/path/to/dsh-emacs")
-(require 'dsh-emacs)
-```
+2. Add this to your Emacs configuration and evaluate it, or restart Emacs:
 
-Then `M-x dsh-emacs` to open the session list. That's it.
+   ```emacs-lisp
+   (add-to-list 'load-path (expand-file-name "~/dsh-emacs"))
+   (require 'dsh-emacs)
+   ```
 
-## A fuller example
+3. Run `M-x dsh-emacs` to open the session list. If no local server is
+   running, dsh-emacs starts one, offering to install the CLI if it is missing.
+   On a fresh dsh setup, use `M-x dsh-emacs-open-web` to configure your
+   provider and model before sending a message.
+4. Press `c` in the session list to create a session. Use `C-c C-m` in the
+   chat buffer to choose a model if needed.
+5. Type after the `❯` prompt and press `C-c C-c` to send your first message.
 
-This shows a typical setup — server auto-start, defaults, custom keybindings —
-and how a session lands in the right workspace: `dsh-emacs-new-session` outside
-any workspace context takes the current buffer's `default-directory` (a dired
-buffer's browsed dir, magit's repo root, a file's directory) as the session's
-working directory, auto-detects its Emacs project (project.el on Emacs 28+,
-falling back to the VC root / `.git` walk) and creates the session in that
-project's workspace, resolving it via idempotent `workspace/create` on first
-use — disable with `dsh-emacs-new-session-auto-project`.
+For an optional `use-package` setup, see
+[Example configuration](docs/customization.md#example-configuration).
 
-```emacs-lisp
-(use-package dsh-emacs
-  :load-path "/path/to/dsh-emacs"
-  :commands (dsh-emacs dsh-emacs-new-session)
-  :custom
-  (dsh-emacs-base-url "http://127.0.0.1:3080")   ; point at a remote server instead
-  (dsh-emacs-default-model "deepseek-v4-flash")
-  (dsh-emacs-default-preset "code")
-  (dsh-emacs-composer-goal-actions t)              ; show Goal Row action buttons
-  (dsh-emacs-server-start-on-init t)             ; eager background start
-  :bind (("C-x d" . dsh-emacs)                   ; open the session list
-         :map dsh-emacs-mode-map                 ; inside a chat buffer
-         ("C-c C-a" . dsh-emacs-attach-file)))
-```
+## Using it
 
-Common keys inside a chat: `C-c C-c` send — while a turn is running it
-queues the input as the next turn (`dsh-emacs-busy-enter-behavior`; `C-u`
-steers instead) and with an empty input interrupts — `C-c C-b` interrupts
-explicitly, `C-c C-q` manages the pending queue (minibuffer list, keys
-act on the highlighted item; `x` deletes all), `C-c C-g` opens the goal-action
-prefix (`p` pause, `r` resume, `e` edit, `d` clear, `a` toggle inline action
-buttons, `?` full objective and blocked reason), `C-c C-m` switch model,
-`C-c C-a` attach an image, `C-c C-r` refresh, `C-c C-s` switch session in
-this workspace (`C-c M-s` or `C-u C-c C-s` across all workspaces),
-`C-c C-f` toggle the mode-line stats, `TAB` complete `/name`, and typing
-`@` completes file/directory/session references — the web-style @ directive:
-`@src/` drills into a directory, `@session-title` inserts a canonical
-`@[label](dsh-session:…)` mention whose frozen snapshot the host injects as
-context when you send. Without attachments, a line starting with `!command`
-(e.g. `!git status`) runs **locally** in the session's workspace directory
-using Emacs's `shell-file-name` with `-c` and renders its output as a
-transcript row, including all lines of a pasted script. This works offline
-and during a running model turn. With attachments, `!` remains caption text
-sent to the model. `C-c C-!` stops the tracked shell process.
-Local output is not sent to the model and disappears on history reload; see
-[docs/shell-commands.md](docs/shell-commands.md). In the
-session list: `RET` open, `c` create, `w` workspace filter, `/` search,
-`g` refresh.  Everything else is in the [manual](#documentation).
+### Session list
 
-The Composer displays the current goal and the next pending message on
-separate read-only rows above `❯`. The Next Message preview adapts to window
-width; steering items take priority over queued messages. Hover for the full
-text, or use `C-c C-q` to manage pending messages.
+`M-x dsh-emacs` opens your sessions, grouped by workspace. Press `c` to
+create a session or `RET` to open one. See
+[Session and workspace controls](docs/customization.md#session-and-workspace-controls)
+for list management and navigation.
+
+![Session list grouped by workspace](assets/sessions.png)
+
+### Inside a chat buffer
+
+| Key | What it does |
+|---|---|
+| `C-c C-c` | Send input or interrupt; see below |
+| `C-c C-b` | Interrupt the running turn |
+| `C-c C-q` | Manage the pending queue |
+| `C-c C-g` | Open the goal-action prefix |
+| `C-c C-m` | Switch model / reasoning effort |
+| `C-c C-a` | Attach an image |
+| `C-c C-s` / `C-c M-s` | Switch session in this workspace / across all |
+| `C-c C-r` | Refresh |
+| `C-c C-f` | Toggle mode-line stats |
+| `C-c C-!` | Stop the tracked local shell process |
+| `M-p` / `M-n` | Previous / next input |
+| `TAB` | Complete a slash command |
+
+**Sending during a running turn:** by default, `C-c C-c` queues a non-empty
+message for the next turn. `C-u C-c C-c` steers the running turn instead;
+`C-c C-c` with empty input interrupts it. Configure this with
+`dsh-emacs-busy-enter-behavior`. The `C-c C-q` queue menu acts on the
+highlighted item; `x` deletes all pending items.
+
+Type **`@`** to choose file, directory or session references: `@src/` drills
+into a directory and `@session-title` mentions another session. See
+[@ references](docs/reference.md).
+
+Type **`/`**, then press **`TAB`** to complete a slash command. Automatic
+popups depend on your completion front-end and its settings: corfu/company
+can provide them with auto completion enabled; stock completion,
+vertico and icomplete require `TAB`. See
+[Slash commands](docs/slash-commands.md#three-ways-to-run-a-command).
+
+The composer shows the current goal and the next pending message above `❯`.
+Hover over the preview for its full text, or use `C-c C-q` to manage pending
+messages. Goal shortcuts and inline controls are described in
+[Goal actions](docs/customization.md#goal-actions).
+
+### Workspaces
+
+Workspaces group sessions by project/directory.
+
+New sessions use the current workspace when created from a workspace header,
+its empty New Session row, or an existing chat. Without that context, a
+**local server** can use the Emacs project of the current buffer's directory,
+creating its workspace on first use. This detection is controlled by
+`dsh-emacs-new-session-auto-project` and does not run for remote servers.
+Otherwise the new session uses the current buffer's directory.
+
+### Local shell commands
+
+Enter `!git status` and press `C-c C-c` to run a command locally in the
+session's workspace directory. Output appears in the transcript, including
+while a model turn is running. `C-c C-!` stops the tracked shell process.
+
+Shell output is not sent to the model or saved in server history; refreshing
+the transcript removes it. With attachments, a leading `!` is caption text
+sent to the model. See [Shell commands](docs/shell-commands.md) for multiline
+scripts, shell selection and process handling.
+
+### Models & presets
+
+Configure providers, models and agent presets in dsh, through
+`M-x dsh-emacs-open-web` or dsh's own configuration files. Use `C-c C-m` to
+select a session's model and reasoning effort.
+
+`dsh-emacs-default-preset` selects the preset for new sessions; nil uses the
+host default. `dsh-emacs-default-model` is a display fallback for the mode
+line and does not select the model used by a session. See
+[Model picker](docs/model-picker.md) for details.
 
 ## Server setup
 
-By default everything is managed for you: before the first RPC,
-`dsh-emacs-server-ensure` probes the base URL, locates (or offers to install)
-the `dsh` CLI, and spawns `dsh web --no-open` in the background. Set
-`dsh-emacs-server-auto-start` to nil to run the server yourself — a server you
-start is used and never killed.
+By default dsh-emacs manages a local server. To use one you run yourself, set
+`dsh-emacs-base-url` to its address. Remote addresses, including HTTPS and
+URLs with `user:pass@` Basic auth, never trigger a local server start. Set
+`dsh-emacs-server-auto-start` to nil to disable automatic startup locally.
 
-Works with remote deployments too: a non-loopback base URL — including
-`https://` and nginx Basic-Auth via `user:pass@host` — is probed and used
-directly, and dsh-emacs never spawns a local server for a remote one.
+For a server dsh-emacs starts, launch-token authentication is automatic.
+For a server you started yourself, provide the launch token from the URL it
+prints (`dsh web: …/?token=…`). You can set `dsh-emacs-server-auth-token` to
+the token, or paste the whole URL into `dsh-emacs-base-url`.
 
-Recent dsh web (0.1.2-rc.1+) requires a short-lived per-process launch token
-for every Host call.  For a server dsh-emacs starts itself, the token is
-captured automatically from the server's output and exchanged for the
-authentication cookie — nothing to configure.  For a **server you start
-yourself** (external/remote), you can tell dsh-emacs the token once per
-server start, or let it ask you: if no token is configured, dsh-emacs
-prompts for it interactively (a single question on first connect) instead
-of a Basic username/password box.  If you submit an empty token, enter an
-incorrect token, or cancel with `C-g`, run `M-x dsh-emacs` again to retry.
-After authentication succeeds, the cached cookie avoids further prompts.
-To set it yourself:
+When prompted for an external server's token, a successful answer is saved
+for reuse. After a server restart, the previous token may be stale and need
+replacing. See [Server options](docs/customization.md#server-options).
 
-- set `dsh-emacs-server-auth-token` to the `token=` value from the URL dsh
-  prints (`dsh web: …/?token=…`), or
-- paste that whole printed URL (including `?token=…`) into
-  `dsh-emacs-base-url` — dsh-emacs reads the token from the query and strips
-  it before building request paths.
+## Streaming and appearance
 
-Because the token is a fresh random value on every server start, a
-manually-set token goes stale whenever the external server is restarted;
-self-started servers avoid this by re-capturing automatically.
+Replies and thinking appear as they arrive. Large Markdown regions finish
+styling while Emacs is idle; see
+[Markdown responsiveness](docs/customization.md#markdown-responsiveness)
+for tuning options.
 
-Provider/model configuration is **owned by dsh**, not by dsh-emacs: configure
-it in the dsh web UI (`M-x dsh-emacs-open-web`) or the dsh home files
-(`~/.dsh/settings.yaml`, `~/.dsh/.credentials.yaml`).
-
-## Screenshots
-
-![Session list view](assets/sessions.png)
-
-![Chat buffer view](assets/chat.png)
+Use `M-x customize-face` or `custom-set-faces` to change the appearance.
+[UI styling](docs/ui-styling.md) lists the active faces and explains rendering;
+the [streaming performance audit](docs/streaming-performance.md) records
+measurements and remaining limits.
 
 ## Documentation
 
-- [Architecture](docs/architecture.md) — module layout, RPC API, event flow
-- [RPC protocol](docs/rpc.md) — complete dsh wire reference: methods, events, projections
-- [Slash commands](docs/slash-commands.md) — semantics, catalog, completion
-- [Shell commands](docs/shell-commands.md) — `!command`, local execution
-- [@ references](docs/reference.md) — file & session mentions, the @ directive
-- [Model picker](docs/model-picker.md) — grouping, icons, reasoning effort
-- [Mode line](docs/modeline.md) — segments, context% source, spinner
-- [UI styling](docs/ui-styling.md) — faces, dsh-web icons, markdown rendering
-- [Fragment extension API](docs/architecture.md#transcript-fragments-dsh-emacs-uiel) — complete snapshots, title actions and persistent card styling
-- [Customization](docs/customization.md) — every option
-- [Development & testing](AGENTS.md) — workflow and verification commands
+- [Customization](docs/customization.md) — configuration examples and options
+- [@ references](docs/reference.md) — file, directory and session mentions
+- [Slash commands](docs/slash-commands.md) — catalog, completion and execution
+- [Shell commands](docs/shell-commands.md) — local `!command` execution
+- [Model picker](docs/model-picker.md) — models, providers and reasoning effort
+- [Mode line](docs/modeline.md) — status, context usage and pending queue
+- [UI styling](docs/ui-styling.md) — faces and Markdown rendering
+- [Development & testing](AGENTS.md) — workflow and verification
+- [Architecture](docs/architecture.md) — module ownership and event flow
+- [RPC protocol](docs/rpc.md) — methods, events and projections
+- [Fragment extension API](docs/architecture.md#transcript-fragments-dsh-emacs-uiel) — snapshots and card styling
 - [Changelog](CHANGELOG.md)
 
 ## Contributing
 
-Changes come in via pull request; the `main` branch is protected, and each PR
-should be one topic. For non-trivial work, open an issue first to align the
-scope. Development workflow, verification commands and commit conventions are
-in [AGENTS.md](AGENTS.md) — run `scripts/verify.sh` (one-shot gate: syntax
-check, checker self-tests, full unit suite, clean load) before pushing.
+Development workflow and commit conventions are in [AGENTS.md](AGENTS.md).
+Keep pull requests focused on one topic; for non-trivial work, open an issue
+first to align the scope. Run `scripts/verify.sh` before pushing. It checks
+syntax, checker self-tests, byte compilation, the full unit suite, silent
+loading, diff whitespace, and generated-file cleanup.
 
 ## Acknowledgments
 
-The UI is designed to mirror the
-[dsh web](https://github.com/deepseek-ai/deepseek-harness) UI: tool rows reuse
-its exact SVG icons and `ToolRow` semantics (bash rows expand into a terminal
-card, other variants into an `ioCard`), and the session list, command rows and
-context meter follow dsh-web conventions.
-
-The Markdown-rendering and folding machinery builds on
-[agent-shell](https://github.com/xenodium/agent-shell) (`agent-shell-ui.el` /
-`agent-shell-markdown`), and the mode-line stats and compact token formatting follow
+The UI mirrors [dsh web](https://github.com/deepseek-ai/deepseek-harness),
+including its tool icons, session list and context meter. Markdown rendering
+and folding build on [agent-shell](https://github.com/xenodium/agent-shell);
+mode-line stats and compact token formatting follow
 [pi-mono](https://github.com/badlogic/pi-mono).
 
 ## License
 
 [GPL-3.0-or-later](LICENSE) — GNU General Public License v3 or later.
-
-### Streaming performance
-
-The first reply chunk appears immediately; subsequent text insertion,
-Markdown formatting and scrolling coalesce over 50ms. Event boundaries,
-final messages and disconnect flush pending text. Hidden command rows skip
-animation redraws. Live Markdown keeps its progress in markers so stable
-reply text stays untouched; unfinished blocks skip empty formatting passes.
-Chat socket reads also coalesce over 50ms, preserving event order; the host
-question/approval channel stays immediate. The running animation shares
-pending text redraws and keeps animating during quiet turns.
-Scroll following uses native recentering to respect line spacing, larger
-faces and multiline drafts. Windows reading history skip screen-row scans.
-Transcript edits clear the modified flag without forcing mode-line layout.
-Large stream writes preserve following from immediately before the edit;
-scrolling up while a batch is pending still stops following. Long partial
-lines skip delimiter-free emphasis searches and retain one assistant base
-face per text run.
-`dsh-emacs-stream-markdown-limit` defaults to 8192 pending characters. Beyond
-that limit, long partial lines keep displaying text and finish styling at a
-newline or completion. Large ready regions, including final-only and history
-replies, format after 0.1 seconds of idle time; input interrupts preparation
-and the next idle period retries it. Set the option to nil for synchronous
-formatting. Completed results preserve positions in unchanged text where
-possible. See [customization](docs/customization.md#markdown-responsiveness).
-Base styling and font-lock mirroring share a pass, including completed code
-blocks. Table width probes measure beyond the window edge and leave chat
-text, undo history and edit counters untouched on every supported Emacs
-version. Table font metrics are shared only within one render, with the
-destination window's font context. Height measurement on
-Emacs 29+ also avoids temporarily switching the displayed buffer.
-During a quiet running turn, WebSocket ping/pong checks
-transport health before reconnecting, so long model or tool waits do not
-by themselves cause history replay. See [architecture](docs/architecture.md).
-See the [streaming performance audit](docs/streaming-performance.md) for
-measurements and remaining limits.

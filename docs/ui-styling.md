@@ -1,7 +1,9 @@
 # UI Styling
 
-All faces are defined via `defface` and adapt automatically to light/dark
-themes.
+Shared faces and palette defaults live in `dsh-emacs-faces.el`. Fragment
+faces live in `dsh-emacs-ui.el`, and active Markdown faces live in
+`dsh-emacs-markdown.el`. Faces use light/dark specs or inherit Emacs theme
+faces; some surfaces have explicit backgrounds.
 
 ## Design language
 
@@ -10,7 +12,8 @@ icons and `ToolRow` / `ioCard` semantics, and the session list and context
 meter follow dsh-web conventions (the underlying rendering/folding machinery
 builds on agent-shell, the mode-line stats on pi-mono):
 
-- **User messages**: card background, light teal tint, timestamped
+- **User messages**: `❯` prompt followed by text, with blank-line spacing and
+  no background by default
 - **Assistant messages**: frameless design, pure Markdown rendering, separated
   by dividers
 - **Thinking blocks**: collapsible `<details>`-style items, folded by default,
@@ -29,26 +32,27 @@ builds on agent-shell, the mode-line stats on pi-mono):
 
 | Face | Description |
 |---|---|
-| `dsh-emacs-user-face` | User label "👤 You" (cyan) |
-| `dsh-emacs-user-block-face` | User message card background (light teal) |
-| `dsh-emacs-assistant-face` | Assistant label "🤖 Assistant" (magenta) |
+| `dsh-emacs-input-prompt-face` | User message and input prompt `❯` (accent color) |
+| `dsh-emacs-user-block-face` | User message body (no background by default) |
 | `dsh-emacs-assistant-body-face` | Assistant message body (no background) |
 
 ## Tool calls (dsh web style)
 
 | Face | Description |
 |---|---|
-| `dsh-emacs-tool-pending-face` | Tool running (orange border + light orange background) |
-| `dsh-emacs-tool-success-face` | Tool succeeded (green border + light green background) |
-| `dsh-emacs-tool-error-face` | Tool failed (red border + light red background) |
-| `dsh-emacs-tool-stopped-face` | Tool interrupted (purple) |
+| `dsh-emacs-tool-pending-face` | Tool running (orange text, no background) |
+| `dsh-emacs-tool-success-face` | Tool succeeded (green text, no background) |
+| `dsh-emacs-tool-error-face` | Tool failed (red text, no background) |
+| `dsh-emacs-tool-stopped-face` | Tool interrupted (inherits `font-lock-keyword-face`) |
 | `dsh-emacs-tool-icon-face` | Tool variant icon (purple, mimicking dsh web's tool purple #a78bfa) |
 | `dsh-emacs-tool-bash-prompt-face` | Bash terminal card `$` prompt glyph (same tool-purple accent) |
 | `dsh-emacs-tool-bash-panel-face` | Bash terminal card surface (the expanded card's background band, mirroring the code-block panel look) |
-| `dsh-emacs-tool-io-face` | IN / OUT section labels |
 | `dsh-emacs-tool-title-face` | Tool card title |
-| `dsh-emacs-tool-output-face` | Tool output text |
-| `dsh-emacs-tool-running-face` | Running status indicator |
+
+State faces apply to the header of a bash/pwsh card and to the whole fragment
+for other variants. IN/OUT labels and output inherit the fragment's state
+face; the renderer does not apply `dsh-emacs-tool-io-face`,
+`dsh-emacs-tool-output-face`, or `dsh-emacs-tool-running-face` separately.
 
 Tool rows mimic dsh web's `ToolRow`: each tool call renders as one row of
 **collapsible** cards, with a header of `variant icon + title + summary`;
@@ -71,8 +75,10 @@ Status semantics align with dsh web's `leadingFor`/`stateStatus`:
 - **Success** (exit 0): keeps the variant icon; ioCard rows still append
   `✓ exit 0`, a bash terminal card shows no success footer (a clean exit has
   no news to print, matching the web card whose exit-0 pill never renders)
-- **Failure** (exit≠0 / signal / isError): leading switches to the red status dot `●`, body shows `✗ exit N`
-- **Interrupted** (signal): leading switches to the yellow status dot `◐`, body shows `⏸ interrupted`
+- **Failure**: leading switches to the red status dot `●`; the body shows
+  `✗ exit N`, `✗ signal …`, or `✗ failed` according to the result
+- **Interrupted**: leading switches to `◐` in the stopped face; the body
+  shows `⏸ interrupted`
 
 Expanded bodies mirror dsh web's keyed toolviews:
 
@@ -105,8 +111,7 @@ search→`query|pattern|url`, write/edit→`path|file_path`, code→`description
 
 | Face | Description |
 |---|---|
-| `dsh-emacs-thinking-face` | Thinking label (dsh web IconThink icon + "Think") |
-| `dsh-emacs-thinking-body-face` | Thinking block body (italic, subdued) |
+| `dsh-emacs-thinking-face` | Thinking label and expanded body (bold, no italic) |
 
 The collapsed row shows a preview of the first reasoning sentence on the right
 (`dsh-emacs-thinking-preview-max` controls the maximum length; longer content is
@@ -118,8 +123,7 @@ Fragment snapshots accept `:face` for the entire card and `:header-face`
 for the header only. These are merged after embedded text faces on every
 update and fold/unfold, so body links and icon fonts survive. Supply the
 complete snapshot on update; nil clears prior content and styling.
-The unused `dsh-emacs-ui-body-face` and `dsh-emacs-ui-group-header-face`
-have been removed. See the [fragment API](architecture.md#transcript-fragments-dsh-emacs-uiel)
+See the [fragment API](architecture.md#transcript-fragments-dsh-emacs-uiel)
 for the update contract.
 
 Titles retain their own link/button keymaps; the remaining title text uses
@@ -141,8 +145,8 @@ not a working grouping surface.
 | `dsh-emacs-modeline-token-face` | Token count |
 | `dsh-emacs-modeline-cost-face` | Cost |
 | `dsh-emacs-modeline-ctx-ok-face` | Context < 50% (green) |
-| `dsh-emacs-modeline-ctx-warn-face` | Context 50-80% (yellow) |
-| `dsh-emacs-modeline-ctx-crit-face` | Context > 80% (red) |
+| `dsh-emacs-modeline-ctx-warn-face` | Context ≥ 50% and < 80% (yellow) |
+| `dsh-emacs-modeline-ctx-crit-face` | Context ≥ 80% (red) |
 
 ## Session list
 
@@ -187,11 +191,13 @@ a goal does not hide Next Message. Both rows share Composer's read-only region.
 
 ## Markdown rendering
 
-The first text chunk is inserted immediately. Subsequent text insertion,
+The first reply chunk is inserted immediately. Subsequent reply insertion,
 Markdown formatting and viewport following are coalesced over 50ms using
 one pending timer per chat. Event boundaries, final messages and disconnect
 flush pending text synchronously. Hidden command rows do not repaint for
 spinner animation. See [decision record 029](../postmortem/029-stream-write-batching.md).
+Live thinking also shows its first delta immediately, then batches subsequent
+text over 100ms; event boundaries flush it immediately.
 Chat socket reads also coalesce over 50ms; received events retain their order.
 The running indicator shares pending text redraws. Clearing the transcript's
 modified flag does not itself invalidate the mode line. Reading windows are
@@ -267,16 +273,22 @@ that wrap call, so later renders use the current text and font settings.
 | `dsh-emacs-markdown-header-1` … `-6` | Heading levels 1 through 6 |
 | `dsh-emacs-markdown-inline-code` | Inline code |
 | `dsh-emacs-markdown-source-block` | Code block background |
+| `dsh-emacs-markdown-source-block-language` | Code block language label |
 | `dsh-emacs-markdown-link` | Link text |
 | `dsh-emacs-markdown-blockquote` | Blockquote |
 | `dsh-emacs-markdown-table-header` | Table header |
 | `dsh-emacs-markdown-table-border` | Table border |
 | `dsh-emacs-markdown-table-zebra` | Table zebra striping |
 
-The legacy `dsh-emacs-markdown-*-face` faces are still kept; the new renderer
-uses the fine-grained faces above.
+Customize the faces above for transcript Markdown. The renderer does not use
+the `dsh-emacs-markdown-*-face` definitions in `dsh-emacs-faces.el`.
 
 ## Example: customize the tool card colors
+
+Use `custom-set-faces` or `M-x customize-face` to change loaded faces.
+The `dsh-emacs-color-*` variables supply defaults when the face definitions
+first load; setting those variables afterward does not recompute the faces.
+This example adds a success background; the default has none.
 
 ```elisp
 (custom-set-faces
