@@ -1531,7 +1531,7 @@ already in the event); an attachment ref is fetched via
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-render-user-message (event &optional references)
-  "Render a `user/message' event with a user-specific background color.
+  "Render a `user/message' event with a prompt and the user block face.
 The block gets one blank line before and after (see
 `dsh-emacs-render--insert-chat-message' and `dsh-emacs-ui--blank-above-preserve').
 Image content blocks render as `[image …]' placeholders on their own
@@ -1869,7 +1869,7 @@ colored status dot (red / warning-yellow)."
 Mirrors dsh web's ioCard: an `IN` section, then an `OUT` section.  When
 STATUS-TEXT is non-empty it is prepended as a first status line.
 Returns a multi-line body string (IN/OUT are literal labels so the fold
-toggle — which strips faces — keeps them readable)."
+toggle preserves them along with the rest of the body)."
   (let ((parts '()))
     (when (and status-text (not (string-empty-p status-text)))
       (push status-text parts))
