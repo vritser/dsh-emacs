@@ -9083,7 +9083,584 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
     (setq dsh-emacs--input-history old-hist
           dsh-emacs--input-history-pos old-pos)))
 
-;; --- 测试 97: 命令目录（commands.list）解析与缓存 ---
+;; --- 测试 96e: `!' 行 ⇒ 本地执行（不经 session/prompt / commands/execute） ---
+(let ((buf (generate-new-buffer " *dsh-shell-submit*"))
+      (runs nil)
+      (calls nil)
+      (parse-count 0)
+      (parse-function (symbol-function 'dsh-emacs-shell-parse))
+      (old-hist dsh-emacs--input-history)
+      (old-pos dsh-emacs--input-history-pos))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq dsh-emacs--current-session "sess-shell")
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method params cb)
+                     (push (list method params) calls)
+                     (funcall cb t '((accepted . t)))))
+                  ((symbol-function 'dsh-emacs--ml-busy-set)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'dsh-emacs-events-connect)
+                   (lambda (_c) nil))
+                  ((symbol-function 'dsh-emacs-events--watchdog-start)
+                   (lambda () nil))
+                  ((symbol-function 'dsh-emacs-shell-parse)
+                   (lambda (line)
+                     (setq parse-count (1+ parse-count))
+                     (funcall parse-function line)))
+                  ((symbol-function 'dsh-emacs-shell-run)
+                   (lambda (command buffer)
+                     (push (list command buffer) runs))))
+          ;; `!command' 行 → 本地 run，零 RPC；`! <cmd>' 也接受
+          (dsh-emacs--submit-prompt "!echo hi")
+          (dsh-test-assert "submit-shell-runs-locally"
+            (equal "echo hi" (caar runs))
+            (eq buf (nth 1 (car runs)))
+            (= parse-count 1)
+            (null calls))
+          (dsh-test-assert "submit-shell-records-history-once"
+            (= 1 (cl-count "!echo hi" dsh-emacs--input-history
+                           :test #'string=)))
+          (setq calls nil runs nil parse-count 0)
+          (dsh-emacs--replace-input "! ls -la")
+          (dsh-emacs-send-or-stop)
+          (dsh-test-assert "interactive-shell-tolerates-space-and-parses-once"
+            (equal "ls -la" (caar runs))
+            (= parse-count 1)
+            (equal "! ls -la" (car dsh-emacs--input-history))
+            (null calls))
+          ;; 裸 `!' 是普通消息（无命令可执行）
+          (setq calls nil runs nil dsh-emacs--input-history nil)
+          (dsh-emacs--submit-prompt "!")
+          (dsh-test-assert "submit-bare-bang-is-plain-message"
+            (null runs)
+            (equal "session/prompt" (caar calls)))
+          ;; busy 中提交（queue/steer）也直接本地执行，不进 inbox
+          (setq calls nil runs nil)
+          (cl-letf (((symbol-function 'dsh-emacs--busy-p)
+                     (lambda (&rest _) t)))
+            (dsh-emacs--submit-prompt "!ls" nil 'queue))
+          (dsh-test-assert "submit-shell-runs-while-busy"
+            (equal "ls" (caar runs))
+            (null calls))))
+    (kill-buffer buf)
+    (setq dsh-emacs--input-history old-hist
+          dsh-emacs--input-history-pos old-pos)))
+
+;; 附件的 ! caption 仍是模型输入；空闲、入队、steer 都保留图片。
+(dolist (mode '(nil queue steer))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (let ((dsh-emacs--current-session "shell-caption")
+          (images '(((mediaType . "image/png") (data . "cGljdHVyZQ==")
+                     (name . "picture.png"))))
+          calls runs)
+      (cl-letf (((symbol-function 'dsh-emacs--busy-p) (lambda () (not (null mode))))
+                ((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (method params _cb) (push (list method params) calls)))
+                ((symbol-function 'dsh-emacs-shell-run)
+                 (lambda (&rest args) (push args runs))))
+        (dsh-emacs--submit-prompt "!describe this image" images mode)
+        (let ((request (alist-get 'request (cadar calls))))
+          (dsh-test-assert
+           (format "shell-caption-keeps-attachment-%s" mode)
+           (null runs)
+           (= (length calls) 1)
+           (equal (caar calls) "session/prompt")
+           (equal (alist-get 'mode request) (if (eq mode 'steer) "steer" "queue"))
+           (equal (alist-get 'content request)
+                  [((type . "text") (text . "!describe this image"))
+                   ((type . "image") (mediaType . "image/png")
+                    (data . "cGljdHVyZQ==") (name . "picture.png"))])))))))
+
+;; 确认拒绝保留草稿、历史及旧进程；确认通过和默认免确认只提交一次。
+(dolist (answer '(decline accept immediate))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (let ((dsh-emacs-shell-require-confirm (not (eq answer 'immediate)))
+          (dsh-emacs--input-history '("older"))
+          (dsh-emacs--input-history-pos 1)
+          (dsh-emacs--input-history-pending "saved draft")
+          prompts runs killed)
+      (dsh-emacs--replace-input "!printf accepted")
+      (cl-letf (((symbol-function 'y-or-n-p)
+                 (lambda (prompt)
+                   (push prompt prompts)
+                   (eq answer 'accept)))
+                ((symbol-function 'dsh-emacs-shell-run)
+                 (lambda (command buffer) (push (list command buffer) runs)))
+                ((symbol-function 'dsh-emacs-shell--kill-previous)
+                 (lambda () (setq killed t))))
+        (dsh-emacs-shell-submit (dsh-emacs--get-input) "printf accepted")
+        (dsh-test-assert
+         (format "shell-confirm-prompt-%s" answer)
+         (equal prompts (unless (eq answer 'immediate)
+                          '("Run shell command: printf accepted? "))))
+        (if (eq answer 'decline)
+            (dsh-test-assert
+             "shell-confirm-decline-preserves-input-and-history"
+             (equal (dsh-emacs--get-input) "!printf accepted")
+             (equal dsh-emacs--input-history '("older"))
+             (equal dsh-emacs--input-history-pos 1)
+             (equal dsh-emacs--input-history-pending "saved draft")
+             (null runs)
+             (null killed))
+          (dsh-test-assert
+           (format "shell-confirm-submits-once-%s" answer)
+           (equal runs (list (list "printf accepted" (current-buffer))))
+           (equal (dsh-emacs--get-input) "")
+           (equal dsh-emacs--input-history '("!printf accepted" "older"))
+           (null dsh-emacs--input-history-pos)
+           (null dsh-emacs--input-history-pending)
+           killed))))))
+
+;; 交互入口必须在服务器探测及 busy-stop 分支之前识别本地命令。
+(let ((dsh-emacs-busy-enter-behavior 'stop)
+      (current-prefix-arg nil))
+  (dolist (busy '(nil t))
+    (let (runs calls failure)
+      (cl-letf (((symbol-function 'dsh-emacs-server-ensure)
+                 (lambda ()
+                   (push 'server calls)
+                   (user-error "Server offline")))
+                ((symbol-function 'dsh-emacs--busy-p) (lambda () busy))
+                ((symbol-function 'dsh-emacs--get-input)
+                 (lambda () "!printf local"))
+                ((symbol-function 'dsh-emacs-interrupt-turn)
+                 (lambda () (push 'cancel calls)))
+                ((symbol-function 'dsh-emacs-shell-submit)
+                 (lambda (line command) (push (list line command) runs))))
+        (condition-case err
+            (dsh-emacs-send-or-stop)
+          (error (setq failure err)))
+        (dsh-test-assert (format "shell-interactive-offline-busy-%s" busy)
+          (null failure)
+          (null calls)
+          (equal runs '(("!printf local" "printf local")))))))
+  (let (runs calls)
+    (cl-letf (((symbol-function 'dsh-emacs-server-ensure)
+               (lambda () (push 'server calls)))
+              ((symbol-function 'dsh-emacs--busy-p) (lambda () t))
+              ((symbol-function 'dsh-emacs--get-input)
+               (lambda () "!printf local"))
+              ((symbol-function 'dsh-emacs-interrupt-turn)
+               (lambda () (push 'cancel calls)))
+              ((symbol-function 'dsh-emacs-shell-submit)
+               (lambda (line command) (push (list line command) runs))))
+      (dsh-emacs-send-or-stop)
+      (dsh-test-assert "shell-interactive-bypasses-busy-stop"
+        (null calls)
+        (equal runs '(("!printf local" "printf local")))))))
+
+;; --- 测试 96f: `!' 行解析（纯函数） ---
+(dsh-test-assert "shell-parse-admission"
+  (equal "echo hi" (dsh-emacs-shell-parse "!echo hi"))
+  (equal "ls -la" (dsh-emacs-shell-parse "!   ls -la"))
+  (equal "ls -la" (dsh-emacs-shell-parse " ! ls -la  "))
+  (equal "git status" (dsh-emacs-shell-parse "!git status"))
+  (null (dsh-emacs-shell-parse "!"))
+  (null (dsh-emacs-shell-parse "!   "))
+  (null (dsh-emacs-shell-parse "/compact"))
+  (null (dsh-emacs-shell-parse "hi"))
+  (null (dsh-emacs-shell-parse nil)))
+
+(dsh-test-assert "shell-parse-preserves-multiline-command"
+  (equal "printf first\nprintf second"
+         (dsh-emacs-shell-parse "!printf first\nprintf second"))
+  (equal "cat <<'EOF'\n  indented body\nEOF"
+         (dsh-emacs-shell-parse "! cat <<'EOF'\n  indented body\nEOF")))
+
+;; --- 测试 96g: `!' 行真实异步执行：退出码 + stdout/stderr 合并渲染 ---
+(let ((buf (generate-new-buffer " *dsh-shell-run*"))
+      (done nil))
+  (unwind-protect
+      (progn
+        (with-current-buffer buf
+          (dsh-emacs-mode)
+          (setq dsh-emacs--current-session "sess-run"))
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_m _p _cb) nil))  ; 屏蔽早前测试残留的目录预取定时器
+                  ((symbol-function 'dsh-emacs--rpc-request)
+                   (lambda (&rest _) (cons nil nil)))
+                  ((symbol-function 'dsh-emacs-render-shell-start)
+                   (lambda (_command) "test-shell-id"))
+                  ((symbol-function 'dsh-emacs-render-shell-done)
+                   (lambda (id ok exit-code signal output)
+                     (setq done (list id ok exit-code signal output)))))
+          ;; exit 3 → ok=nil；stdout/stderr 合并进同一正文
+          (let* ((proc (with-current-buffer buf
+                         (dsh-emacs-shell-run
+                          (dsh-emacs-shell-parse
+                           (concat "!printf SHELLOK\ncat <<'EOF'\nSHELLDOC\n"
+                                   "EOF\nprintf SHELLERR >&2\nexit 3"))
+                          buf)))
+                 (deadline (time-add (current-time) (seconds-to-time 8))))
+            (while (and (null done)
+                        (time-less-p (current-time) deadline))
+              (accept-process-output proc 0.2))
+            (dsh-test-assert "shell-run-finished-output-and-exit"
+              (equal "test-shell-id" (car done))
+              (null (nth 1 done))
+              (equal 3 (nth 2 done))
+              (null (nth 3 done))
+              (equal "SHELLOKSHELLDOC\nSHELLERR" (nth 4 done))))
+          ;; exit 0 + 超长输出 → 截断（max-output 在运行前绑定）
+          (let ((dsh-emacs-shell-max-output 8))
+            (setq done nil)
+            (let* ((proc2 (with-current-buffer buf
+                            (dsh-emacs-shell-run "printf abcdefghij" buf)))
+                   (deadline (time-add (current-time) (seconds-to-time 8))))
+              (while (and (null done)
+                          (time-less-p (current-time) deadline))
+                (accept-process-output proc2 0.2))
+              (dsh-test-assert "shell-run-success-truncates-output"
+                (eq t (nth 1 done))
+                (equal 0 (nth 2 done))
+                (and (string-prefix-p "abcdefgh" (nth 4 done))
+                     (string-match-p "truncated" (nth 4 done))))))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; stop/continue 通知不代表退出：保留输出、超时和跟踪，直到真正结束。
+(with-temp-buffer
+  (let ((shell-file-name "/bin/sh")
+        (dsh-emacs-shell-null-stdin nil)
+        (dsh-emacs-shell-timeout 60)
+        proc out-buffer timer done)
+    (unwind-protect
+        (cl-letf (((symbol-function 'dsh-emacs-render-shell-start)
+                   (lambda (_) "id-stop-resume"))
+                  ((symbol-function 'dsh-emacs-render-shell-done)
+                   (lambda (&rest args) (push args done))))
+          (setq proc (dsh-emacs-shell-run "printf before; kill -STOP $$; cat")
+                out-buffer (process-buffer proc)
+                timer (process-get proc 'dsh-emacs-shell-timer))
+          (let ((deadline (+ (float-time) 5)))
+            (while (and (eq (process-status proc) 'run)
+                        (< (float-time) deadline))
+              (accept-process-output proc 0.1)))
+          (dsh-test-assert "shell-stopped-process-retains-resources"
+            (eq (process-status proc) 'stop)
+            (null done)
+            (eq proc (cdr (assoc "id-stop-resume" dsh-emacs--shell-procs)))
+            (buffer-live-p out-buffer)
+            (memq timer timer-list))
+          (continue-process proc)
+          (accept-process-output proc 0.1)
+          (dsh-test-assert "shell-continued-process-retains-resources"
+            (eq (process-status proc) 'run)
+            (null done)
+            (eq proc (cdr (assoc "id-stop-resume" dsh-emacs--shell-procs)))
+            (buffer-live-p out-buffer)
+            (memq timer timer-list))
+          (process-send-string proc "after")
+          (process-send-eof proc)
+          (let ((deadline (+ (float-time) 5)))
+            (while (and (process-live-p proc) (< (float-time) deadline))
+              (accept-process-output proc 0.1)))
+          (dsh-test-assert "shell-resumed-process-finishes-once"
+            (equal done '(("id-stop-resume" t 0 nil "beforeafter")))
+            (null dsh-emacs--shell-procs)
+            (not (buffer-live-p out-buffer))
+            (not (memq timer timer-list))))
+      (when (and proc (process-live-p proc)) (delete-process proc))
+      (when timer (cancel-timer timer))
+      (when (buffer-live-p out-buffer) (kill-buffer out-buffer)))))
+
+;; --- 测试 96h: `!' 行渲染（start → done 状态着色 + 正文） ---
+(let ((buf (generate-new-buffer " *dsh-shell-render*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-modeline-setup)
+        (let* ((id (dsh-emacs-render-shell-start "echo hello"))
+               (entry (gethash id dsh-emacs--command-blocks))
+               (block (and entry (dsh-emacs-ui-find-block (nth 0 entry)
+                                                          (nth 1 entry)))))
+          ;; 整块待定着色随快照 :face 走（不再是独立的 restyle 通道），
+          ;; 与 command/run 行一致。
+          (dsh-test-assert "shell-row-tints-pending-whole-block"
+            (and block
+                 (seq-every-p
+                  (lambda (pos)
+                    (memq 'dsh-emacs-tool-pending-face
+                          (ensure-list (get-text-property pos 'face))))
+                  (number-sequence (car block) (1- (cdr block))))))
+          (dsh-emacs-render-shell-done id t 0 nil "nested output")
+          (let ((text (buffer-substring-no-properties (point-min)
+                                                      (point-max))))
+            (dsh-test-assert "shell-row-renders-outcome"
+              (string-match-p "echo hello" text)
+              (string-match-p "✓ exit 0" text)
+              (string-match-p "nested output" text)))
+          (let ((done-block (dsh-emacs-ui-find-block (nth 0 entry)
+                                                     (nth 1 entry))))
+            (dsh-test-assert "shell-row-tints-success-whole-block"
+              (and done-block
+                   (seq-every-p
+                    (lambda (pos)
+                      (memq 'dsh-emacs-tool-success-face
+                            (ensure-list (get-text-property pos 'face))))
+                    (number-sequence (car done-block)
+                                     (1- (cdr done-block))))))))
+        ;; 失败路径：非零退出 → 红色状态
+        (let ((bad-id (dsh-emacs-render-shell-start "false")))
+          (dsh-emacs-render-shell-done bad-id nil 1 nil "boom")
+          (let ((text (buffer-substring-no-properties (point-min)
+                                                      (point-max))))
+            (dsh-test-assert "shell-row-renders-failure"
+              (string-match-p "✗ exit 1" text)))))
+    (kill-buffer buf)))
+
+;; 直接取消命令及显式安装清理钩子后的 kill-buffer 都释放进程资源。
+(dolist (action '(interrupt kill-buffer))
+  (let ((buf (generate-new-buffer " *dsh-shell-kill*"))
+        (dsh-emacs-shell-null-stdin nil)
+        (dsh-emacs-shell-timeout 60)
+        proc out-buffer timer done)
+    (unwind-protect
+        (cl-letf (((symbol-function 'dsh-emacs-render-shell-start)
+                   (lambda (_) "id-kill"))
+                  ((symbol-function 'dsh-emacs-render-shell-done)
+                   (lambda (&rest args) (push args done))))
+          (with-current-buffer buf
+            (dsh-emacs-shell-mode-setup)
+            (setq proc (dsh-emacs-shell-run "cat")
+                  out-buffer (process-buffer proc)
+                  timer (process-get proc 'dsh-emacs-shell-timer)))
+          (if (eq action 'interrupt)
+              (with-current-buffer buf (dsh-emacs-shell-process-kill))
+            (kill-buffer buf))
+          (let ((deadline (+ (float-time) 3)))
+            (while (and (null done) (< (float-time) deadline))
+              (accept-process-output proc 0.1)))
+          (dsh-test-assert
+           (format "shell-process-cleanup-%s" action)
+           (not (process-live-p proc))
+           (not (buffer-live-p out-buffer))
+           (not (memq timer timer-list))
+           (= (length done) 1)
+           (equal (caar done) "id-kill")
+           (null (nth 1 (car done)))
+           (null (nth 2 (car done)))
+           (integerp (nth 3 (car done))))
+          (when (eq action 'interrupt)
+            (with-current-buffer buf
+              (let (notice)
+                (cl-letf (((symbol-function 'message)
+                           (lambda (format-string &rest args)
+                             (setq notice (apply #'format format-string args)))))
+                  (dsh-emacs-shell-process-kill))
+                (dsh-test-assert
+                 "shell-process-kill-idle-reports-no-command"
+                 (null dsh-emacs--shell-procs)
+                 (equal notice "No running shell command in this buffer"))))))
+      (when (and proc (process-live-p proc)) (delete-process proc))
+      (when timer (cancel-timer timer))
+      (when (buffer-live-p buf) (kill-buffer buf))
+      (when (buffer-live-p out-buffer) (kill-buffer out-buffer)))))
+
+;; 重新打开聊天会再次调用 mode；切换 mode 也必须先清理本地进程。
+(dolist (mode '(dsh-emacs-mode fundamental-mode))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (let ((dsh-emacs-shell-null-stdin nil)
+          (dsh-emacs-shell-timeout 60)
+          proc out-buffer timer)
+      (unwind-protect
+          (cl-letf (((symbol-function 'dsh-emacs-render-shell-start)
+                     (lambda (_) "id-mode-cleanup"))
+                    ((symbol-function 'dsh-emacs-render-shell-done) #'ignore))
+            (setq proc (dsh-emacs-shell-run "cat")
+                  out-buffer (process-buffer proc)
+                  timer (process-get proc 'dsh-emacs-shell-timer))
+            (funcall mode)
+            (dsh-test-assert (format "shell-mode-cleanup-%s" mode)
+              (not (process-live-p proc))
+              (not (buffer-live-p out-buffer))
+              (not (memq timer timer-list))
+              (null dsh-emacs--shell-procs)))
+        (when (and proc (process-live-p proc)) (delete-process proc))
+        (when timer (cancel-timer timer))
+        (when (buffer-live-p out-buffer) (kill-buffer out-buffer))))))
+
+;; 即使退出通知晚于聊天 buffer 销毁，进程资源也必须释放。
+(let ((buf (generate-new-buffer " *dsh-shell-dead-chat*"))
+      (dsh-emacs-shell-null-stdin nil)
+      (dsh-emacs-shell-timeout 60)
+      proc out-buffer timer rendered)
+  (unwind-protect
+      (cl-letf (((symbol-function 'dsh-emacs-render-shell-start)
+                 (lambda (_) "id-dead-chat"))
+                ((symbol-function 'dsh-emacs-render-shell-done)
+                 (lambda (&rest args) (push args rendered))))
+        (setq proc (dsh-emacs-shell-run "cat" buf)
+              out-buffer (process-buffer proc)
+              timer (process-get proc 'dsh-emacs-shell-timer))
+        (kill-buffer buf)
+        (delete-process proc)
+        (dsh-test-assert
+         "shell-dead-chat-releases-process-resources"
+         (not (buffer-live-p out-buffer))
+         (not (memq timer timer-list))
+         (null rendered)))
+    (when (and proc (process-live-p proc)) (delete-process proc))
+    (when timer (cancel-timer timer))
+    (when (buffer-live-p buf) (kill-buffer buf))
+    (when (buffer-live-p out-buffer) (kill-buffer out-buffer))))
+
+;; --- 测试 96i: 关闭 stdin 让 cat 立即退出，不依赖 shell 的重定向语法 ---
+(dolist (shell (delete-dups
+               (delq nil (mapcar #'executable-find
+                                 '("sh" "bash" "zsh" "csh" "tcsh" "fish")))))
+  (with-temp-buffer
+    (let ((shell-file-name shell)
+          (dsh-emacs-shell-null-stdin t)
+          proc out-buffer done)
+      (unwind-protect
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async) #'ignore)
+                    ((symbol-function 'dsh-emacs--rpc-request)
+                     (lambda (&rest _) (cons nil nil)))
+                    ((symbol-function 'dsh-emacs-render-shell-start)
+                     (lambda (_) "id-cat"))
+                    ((symbol-function 'dsh-emacs-render-shell-done)
+                     (lambda (&rest args) (setq done args))))
+            (setq proc (dsh-emacs-shell-run "cat")
+                  out-buffer (process-buffer proc))
+            (let ((deadline (+ (float-time) 3)))
+              (while (and (null done) (< (float-time) deadline))
+                (accept-process-output proc 0.1)))
+            (dsh-test-assert (format "shell-null-stdin-eof-%s" shell)
+              (equal done '("id-cat" t 0 nil ""))
+              (not (process-live-p proc))))
+        (when (and proc (process-live-p proc)) (delete-process proc))
+        (when (buffer-live-p out-buffer) (kill-buffer out-buffer))))))
+
+;; --- 测试 96j: 提交新 `!' 命令自动终止上一条运行中的命令 ---
+(let ((buf (generate-new-buffer " *dsh-shell-multi*"))
+      (done (make-hash-table :test 'equal))
+      (next-id 0))
+  (unwind-protect
+      (progn
+        (with-current-buffer buf
+          (dsh-emacs-mode)
+          (setq dsh-emacs--current-session "sess-multi"))
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_m _p _cb) nil))  ; 屏蔽早前测试残留的目录预取定时器
+                  ((symbol-function 'dsh-emacs--rpc-request)
+                   (lambda (&rest _) (cons nil nil)))
+                  ((symbol-function 'dsh-emacs-render-shell-start)
+                   (lambda (_command)
+                     (prog1 (format "id-%d" next-id)
+                       (setq next-id (1+ next-id)))))
+                  ((symbol-function 'dsh-emacs-render-shell-done)
+                   (lambda (id ok exit-code signal _output)
+                     (puthash id (list ok exit-code signal) done))))
+          (with-current-buffer buf
+            (dsh-emacs--submit-prompt "!sleep 30"))
+          (with-current-buffer buf
+            (dsh-emacs--submit-prompt "!true"))
+          (let ((deadline (time-add (current-time) (seconds-to-time 8))))
+            (while (and (< (hash-table-count done) 2)
+                        (time-less-p (current-time) deadline))
+              (accept-process-output nil 0.2)))
+          (dsh-test-assert "shell-new-command-stops-previous"
+            (and (gethash "id-0" done) (null (car (gethash "id-0" done))))
+            (equal (list t 0 nil) (gethash "id-1" done)))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; nil command 是调用方错误，必须在任何提交副作用之前拒绝。
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs--replace-input "!draft")
+  (let ((dsh-emacs-shell-require-confirm t)
+        (dsh-emacs--input-history '("older"))
+        (dsh-emacs--input-history-pos 1)
+        (dsh-emacs--input-history-pending "saved draft")
+        effects failure)
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (_) (push 'confirm effects) t))
+              ((symbol-function 'dsh-emacs-shell--kill-previous)
+               (lambda () (push 'kill effects)))
+              ((symbol-function 'dsh-emacs-shell-run)
+               (lambda (&rest _) (push 'run effects))))
+      (condition-case err
+          (dsh-emacs-shell-submit "!draft" nil)
+        (error (setq failure err)))
+      (dsh-test-assert
+       "shell-submit-rejects-nil-before-side-effects"
+       (equal failure '(error "Shell command must be non-nil"))
+       (null effects)
+       (equal (dsh-emacs--get-input) "!draft")
+       (equal dsh-emacs--input-history '("older"))
+       (equal dsh-emacs--input-history-pos 1)
+       (equal dsh-emacs--input-history-pending "saved draft")))))
+
+;; timeout 的 Custom 类型和两个执行入口都拒绝非正整数，且不清空输入。
+(require 'wid-edit)
+(let ((widget (widget-convert (get 'dsh-emacs-shell-timeout 'custom-type))))
+  (dsh-test-assert
+   "shell-timeout-custom-type"
+   (widget-apply widget :match nil)
+   (widget-apply widget :match 1)
+   (not (widget-apply widget :match 0))
+   (not (widget-apply widget :match -1))
+   (not (widget-apply widget :match 1.5))))
+(dolist (value '(0 -1 1.5 "invalid"))
+  (dolist (entry '(dsh-emacs-shell-submit dsh-emacs-shell-run))
+    (let ((dsh-emacs-shell-timeout value)
+          effects rejected)
+      (cl-letf (((symbol-function 'dsh-emacs--push-input-history)
+                 (lambda (_) (push 'history effects)))
+                ((symbol-function 'dsh-emacs--clear-input)
+                 (lambda () (push 'clear effects)))
+                ((symbol-function 'dsh-emacs-shell--kill-previous)
+                 (lambda () (push 'kill effects)))
+                ((symbol-function 'dsh-emacs-render-shell-start)
+                 (lambda (_) (push 'row effects) "id-invalid-timeout"))
+                ((symbol-function 'dsh-emacs-render-shell-done)
+                 (lambda (&rest _) (push 'done effects)))
+                ((symbol-function 'make-process)
+                 (lambda (&rest _) (push 'spawn effects) (error "Unexpected spawn"))))
+        (condition-case nil
+            (if (eq entry 'dsh-emacs-shell-submit)
+                (dsh-emacs-shell-submit "!true" "true")
+              (dsh-emacs-shell-run "true"))
+          (user-error (setq rejected t)))
+        (dsh-test-assert
+         (format "shell-invalid-timeout-%s-%s" entry value)
+         rejected
+         (null effects))))))
+
+;; --- 测试 96k: 超时强制终止（dsh-emacs-shell-timeout） ---
+(let ((buf (generate-new-buffer " *dsh-shell-timeout*"))
+      (done nil))
+  (unwind-protect
+      (progn
+        (with-current-buffer buf
+          (dsh-emacs-mode)
+          (setq dsh-emacs--current-session "sess-timeout"))
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_m _p _cb) nil))  ; 屏蔽早前测试残留的目录预取定时器
+                  ((symbol-function 'dsh-emacs--rpc-request)
+                   (lambda (&rest _) (cons nil nil)))
+                  ((symbol-function 'dsh-emacs-render-shell-start)
+                   (lambda (_command) "id-timeout"))
+                  ((symbol-function 'dsh-emacs-render-shell-done)
+                   (lambda (id ok exit-code signal output)
+                     (setq done (list id ok exit-code signal output)))))
+          (let* ((dsh-emacs-shell-timeout 1)
+                 (proc (dsh-emacs-shell-run "sleep 30" buf))
+                 (deadline (time-add (current-time) (seconds-to-time 10))))
+            (while (and (null done)
+                        (time-less-p (current-time) deadline))
+              (accept-process-output proc 0.2))
+            (dsh-test-assert "shell-timeout-kills-and-notes"
+              (null (nth 1 done))
+              (string-match-p "timed out after 1 seconds"
+                              (nth 4 done))))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
 (let* ((cmd (dsh-protocol-command--from-alist
              '((name . "compact") (description . "Compact history")))))
   (when (and (string= "compact" (dsh-protocol-command-name cmd))

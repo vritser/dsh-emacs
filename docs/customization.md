@@ -31,6 +31,10 @@ The most commonly used options, straight in your config:
 (setq dsh-emacs-reference-max-files nil)            ; file/directory candidates shown in the "@" popup (nil = all host results)
 (setq dsh-emacs-reference-max-sessions nil)         ; session candidates shown in the "@" popup (nil = all host results)
 (setq dsh-emacs-modeline-enabled t)                  ; whether the mode-line stats are enabled
+(setq dsh-emacs-shell-require-confirm nil)          ; ask y-or-n-p before running a `!` line (nil = run immediately, like M-!)
+(setq dsh-emacs-shell-max-output 50000)             ; cap on a `!` command's captured output shown in the transcript
+(setq dsh-emacs-shell-null-stdin t)                 ; close `!` commands' input pipe immediately (EOF, independent of shell syntax)
+(setq dsh-emacs-shell-timeout nil)                  ; nil = no limit; positive integer seconds only (surviving background children are untracked)
 ```
 
 ## Markdown responsiveness

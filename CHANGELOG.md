@@ -81,6 +81,22 @@ minor) and stay undated until the release is cut.
   header line; the new `dsh-emacs-tool-bash-prompt-face` colors the `$`
   prompt with the same tool-purple as the leading icon.
 
+- **`!command` local shell commands**: a line typed after `❯ ` starting with
+  `!`, without attachments, runs the full input **locally** using Emacs's
+  `shell-file-name` with `-c` in the session workspace. It works offline and
+  while the model is busy; attached images with a `!` caption still go to the
+  model. A spinning transcript row becomes expanded, collapsible output with
+  its exit status when the shell finishes. Local results are not sent to the
+  model or saved in server history and disappear on history reload.
+  `C-c C-!` (`dsh-emacs-shell-process-kill`), the next `!` command, chat
+  closure, or a major mode reset stops the tracked shell; background children
+  may outlive it. New options: `dsh-emacs-shell-require-confirm` (nil;
+  t asks before running), `dsh-emacs-shell-max-output` (50000 characters),
+  `dsh-emacs-shell-null-stdin` (t; EOF on stdin, without a guarantee that TUIs
+  exit), and `dsh-emacs-shell-timeout` (nil for no limit, or positive integer
+  seconds; other values are rejected). See `docs/shell-commands.md`
+  (rationale: postmortem/038).
+
 - **Next Message joins Composer**: pending input now has its own read-only
   row below the goal and above `❯`, with a window-width preview and full-text
   tooltip. Its text and icon use the prompt accent color, matching the former

@@ -812,9 +812,13 @@ collapsible Think fragment.")
   "Non-nil while a run submitted by this buffer awaits `turn/end'.")
 
 (defvar-local dsh-emacs--command-blocks (make-hash-table :test 'equal)
-  "Map from commandId -> (NS BLOCK-ID LABEL) of rendered slash-command nodes.
-`command/run' creates the entry and the fragment; `command/done' (matched
-by commandId) finds the entry to restyle the same node.")
+  "Map from node id -> (NS BLOCK-ID LABEL ICON) of rendered bash-command rows.
+Serverside slash commands are keyed by their `command/run' commandId;
+client-side `!command' rows (see `dsh-emacs-render-shell-start') use
+their own monotonic `shell-N' ids so the two never collide.  Both share
+the same row machinery — icon, `-\\|/' spinner, pending tint and
+success/error restyle — and both are cleared by
+`dsh-emacs-render--reset-tool-tracking'.")
 
 (defvar-local dsh-emacs--pending-command nil
   "When non-nil, an optimistic slash-command row rendered before the RPC round-trip.
@@ -2469,6 +2473,84 @@ Returns the event seq."
                             'dsh-emacs-tool-error-face))
                    :create-new nil))))))))
     seq))
+
+;; ---------------------------------------------------------------------------
+;; 渲染器：本地 `!command' 命令行（dsh-emacs-shell.el 调用）
+;; ---------------------------------------------------------------------------
+;; `!<command>' 是本机执行而不是服务器 slash 命令，但行样式与
+;; `command/run' 完全一致：bash 图标 + `-\|/' spinner + pending 着色，
+;; 完成后显示退出码并把输出收进可折叠正文。两条函数跨 buffer 唯一地
+;; 由 `dsh-emacs-render-shell-start' 返回的 id 关联。
+
+(defvar dsh-emacs--shell-seq 0
+  "Monotonic counter for local `!command' row ids.
+Ids are `shell-N' strings; the counter never repeats, so concurrent and
+consecutive runs can not collide in `dsh-emacs--command-blocks'.")
+
+(defun dsh-emacs-render-shell-start (command)
+  "Render the pending row of a local `!command' run; return its id.
+Inserts a row (bash icon + COMMAND + running spinner) above the input,
+exactly like a running slash-command row.  The caller passes the
+returned id back to `dsh-emacs-render-shell-done' once the process
+finishes."
+  (let* ((id (format "shell-%d" (setq dsh-emacs--shell-seq
+                                     (1+ dsh-emacs--shell-seq))))
+         (icon (dsh-emacs-render--tool-icon "bash"))
+         (ns (dsh-emacs-render--make-namespace))
+         (block-id (format "cmd-%s" id)))
+    (puthash id (list ns block-id command icon) dsh-emacs--command-blocks)
+    (dsh-emacs-ui-update-fragment
+     (dsh-emacs-ui-make-fragment
+      :namespace-id ns :block-id block-id
+      :label-left (concat
+                   (dsh-emacs-render--tool-leading icon 'pending)
+                   (propertize command 'face 'dsh-emacs-tool-title-face)
+                   " "
+                   (car dsh-emacs--command-spinner-frames))
+      :style 'minimal
+      :status 'tool-pending
+      :face 'dsh-emacs-tool-pending-face)
+     :create-new t :expanded t
+     :insert-before (dsh-emacs-render--input-insert-point))
+    (dsh-emacs--command-spinner-start id (current-buffer))
+    id))
+
+(defun dsh-emacs-render-shell-done (id ok exit-code signal output)
+  "Restyle the local `!command' row ID with its outcome.
+OK / EXIT-CODE / SIGNAL classify the run (success on exit 0); OUTPUT is
+the merged stdout+stderr shown as the row body, expanded and tinted with
+the tool success/error faces — mirroring `command/done' rows.  No-op when
+the row no longer exists (buffer reloaded).  Drops the tracked entry, so
+a finished row never animates again."
+  (when-let* ((entry (gethash id dsh-emacs--command-blocks)))
+    (dsh-emacs--command-spinner-stop id)
+    (let* ((state (if ok 'success 'error))
+           (entry-icon (or (nth 3 entry)
+                           (dsh-emacs-render--tool-icon "bash")))
+           (status (dsh-emacs-render--tool-status-text state exit-code signal))
+           (body (and (stringp output) (not (string-empty-p output)) output)))
+      (dsh-emacs-ui-update-fragment
+       (dsh-emacs-ui-make-fragment
+        :namespace-id (nth 0 entry) :block-id (nth 1 entry)
+        :label-left (concat
+                     (dsh-emacs-render--tool-leading entry-icon state)
+                     (propertize (nth 2 entry)
+                                 'face 'dsh-emacs-tool-title-face))
+        :label-right (propertize
+                      (or status "")
+                      'face (if ok
+                                'dsh-emacs-tool-success-face
+                              'dsh-emacs-tool-error-face))
+        :body body
+        :style 'minimal
+        :status (if ok 'tool-success 'tool-error)
+        ;; The snapshot face covers the whole block (borders and body) and
+        ;; merges after embedded text faces, so the icon's :family survives.
+        :face (if ok
+                  'dsh-emacs-tool-success-face
+                'dsh-emacs-tool-error-face))
+       :create-new nil :expanded t)
+      (remhash id dsh-emacs--command-blocks))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; 顶层 dispatcher

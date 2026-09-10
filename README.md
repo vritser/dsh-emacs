@@ -64,7 +64,14 @@ this workspace (`C-c M-s` or `C-u C-c C-s` across all workspaces),
 `@` completes file/directory/session references — the web-style @ directive:
 `@src/` drills into a directory, `@session-title` inserts a canonical
 `@[label](dsh-session:…)` mention whose frozen snapshot the host injects as
-context when you send. In the
+context when you send. Without attachments, a line starting with `!command`
+(e.g. `!git status`) runs **locally** in the session's workspace directory
+using Emacs's `shell-file-name` with `-c` and renders its output as a
+transcript row, including all lines of a pasted script. This works offline
+and during a running model turn. With attachments, `!` remains caption text
+sent to the model. `C-c C-!` stops the tracked shell process.
+Local output is not sent to the model and disappears on history reload; see
+[docs/shell-commands.md](docs/shell-commands.md). In the
 session list: `RET` open, `c` create, `w` workspace filter, `/` search,
 `g` refresh.  Everything else is in the [manual](#documentation).
 
@@ -122,6 +129,7 @@ it in the dsh web UI (`M-x dsh-emacs-open-web`) or the dsh home files
 - [Architecture](docs/architecture.md) — module layout, RPC API, event flow
 - [RPC protocol](docs/rpc.md) — complete dsh wire reference: methods, events, projections
 - [Slash commands](docs/slash-commands.md) — semantics, catalog, completion
+- [Shell commands](docs/shell-commands.md) — `!command`, local execution
 - [@ references](docs/reference.md) — file & session mentions, the @ directive
 - [Model picker](docs/model-picker.md) — grouping, icons, reasoning effort
 - [Mode line](docs/modeline.md) — segments, context% source, spinner

@@ -15,6 +15,8 @@ dsh-emacs/
 ├── dsh-emacs-modeline.el       # Mode-line stats
 ├── dsh-emacs-queue.el        # Pending-input queue mirror (queue/steer)
 ├── dsh-emacs-server.el       # Server bootstrap: probe / auto-start / install / browser-session auth
+├── dsh-emacs-command.el      # Host slash commands (commands/list + commands/execute)
+├── dsh-emacs-shell.el        # Client-side `!command` shell commands (local execution)
 ├── dsh-emacs-composer.el     # Composer chrome: Goal and Next Message rows above the input
 └── dsh-emacs-session.el      # Session list card view
 ```
@@ -62,8 +64,8 @@ text inside `atomic-change-group`; rendering or insertion errors propagate
 while preserving the previous card. Minimal blocks need no special
 body-range editing path. The stored snapshot includes labels and
 faces as well as the full body; fold/unfold preserves embedded links, icon
-faces and body styling. `:status` is opaque renderer metadata and does
-not apply colors. Renderers choose concrete `:face` / `:header-face` values;
+faces and body styling. `:status` is opaque renderer metadata and does not
+apply colors. Renderers choose concrete `:face` / `:header-face` values;
 the UI merges those after embedded faces on every redraw. Bash terminal
 cards use a header face while retaining their own body faces.
 
@@ -138,6 +140,49 @@ and releases both markers when no rows remain. A content/layout signature
 avoids rewriting unchanged rows; resize reflows Next Message even without a
 goal. The input prompt remains a plain `❯ ` run, with no queue-prefix scanning
 or text matching needed to remove stale previews.
+
+## Shell commands (`dsh-emacs-shell.el`)
+
+`!<command>` inputs without attachments are **client-side** commands:
+`dsh-emacs-send-or-stop` routes them before server and busy checks, and
+`dsh-emacs--submit-prompt`
+also intercepts them before deferred or slash-command routing. Both use
+`dsh-emacs-shell-submit` / `dsh-emacs-shell-run`, which preserve multiline
+commands and spawn Emacs's `shell-file-name` with `-c`
+asynchronously (`make-process`) with the chat buffer's `default-directory` —
+the session workspace — as working directory.  The result row is rendered by
+`dsh-emacs-render-shell-start` / `dsh-emacs-render-shell-done` in
+`dsh-emacs-render.el`, reusing the slash-command row machinery (bash icon,
+`-\|/` spinner, pending tint, success/error restyle): a `!` row rides the
+same `dsh-emacs--command-blocks` / spinner tables under its own monotonic
+`shell-N` id.  Process tracking is buffer-local (`dsh-emacs--shell-procs`).
+Killing the chat buffer or resetting its major mode kills the tracked shell
+before its tracking is discarded. `C-c C-!`
+(`dsh-emacs-shell-process-kill`) interrupts a running one, rendered as
+failed.  Because the chat has no terminal, `!` commands receive EOF through
+`process-send-eof` (`dsh-emacs-shell-null-stdin`). This supplies EOF to stdin
+readers but does not guarantee TUI termination; vim may continue running.
+Submitting a new `!` command stops the previous tracked shell, and the opt-in
+`dsh-emacs-shell-timeout` kills a tracked shell that outlives its limit.
+Only exit or signal termination finalizes a row; stop/continue notifications
+retain process tracking, captured output, and the timeout. Terminal processes
+release their output buffers and timers even if the chat buffer is already
+dead. Timeout settings are validated before either submission entry mutates
+input or process state: only nil or positive integer seconds are accepted.
+The process uses a pipe connection; closing its input leaves the original
+command unchanged for `shell-file-name -c`, including with non-POSIX shells.
+The executable follows the Emacs variable, not a fresh lookup of `$SHELL`.
+When a shell exits, its tracking entry is removed; background children that
+outlive it are not tracked or cleaned up by later buffer teardown or timeout.
+Shell rows are also absent from server history, so a full transcript reload
+discards them; reopening the session does not restore their output.
+`!` never touches `session/prompt` or `commands.execute` and does
+not depend on the server or the session's busy state — the model keeps
+running while the local command executes. With attachments, a leading `!`
+is ordinary caption text; the normal prompt path retains the images.
+Output is capped by `dsh-emacs-shell-max-output`;
+`dsh-emacs-shell-require-confirm` optionally
+gates each run behind `y-or-n-p` (see docs/shell-commands.md).
 
 ## Protocol layer (`dsh-emacs-protocol.el`)
 

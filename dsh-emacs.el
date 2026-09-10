@@ -67,6 +67,7 @@
 (require 'dsh-emacs-server)
 (require 'dsh-emacs-command)
 (require 'dsh-emacs-reference)
+(require 'dsh-emacs-shell)
 (require 'dsh-emacs-session)
 
 ;;; ---------------------------------------------------------------------------
@@ -1863,6 +1864,7 @@ repaints)."
     (define-key map (kbd "C-c C-a") #'dsh-emacs-attach-file)
     (define-key map (kbd "C-c C-m") #'dsh-emacs-select-model)
     (define-key map (kbd "C-c C-g") dsh-emacs-goal-map)
+    (define-key map (kbd "C-c C-!") #'dsh-emacs-shell-process-kill)
     (define-key map (kbd "M-p") #'dsh-emacs-input-history-back)
     (define-key map (kbd "M-n") #'dsh-emacs-input-history-forward)
     ;; 输入区以 "/" 开头时 TAB 补全 slash 命令名（无论弹出菜单是否开着）
@@ -2002,6 +2004,8 @@ vertico, etc.)."
         dsh-emacs--ws-last-probe-time nil
         dsh-emacs--ws-probe-inflight nil)
   (dsh-emacs-render--reset-tool-tracking)
+  ;; `!' 本地 shell 命令：buffer 被杀时一并杀掉运行中的进程
+  (dsh-emacs-shell-mode-setup)
 
   ;; 初始化输入区域
   (dsh-emacs--setup-input-area)
@@ -2098,6 +2102,7 @@ until the next wake (see `dsh-emacs-list-queue')."
 (defun dsh-emacs-send-or-stop ()
   "Send the input as a message, or act on the running turn.
 
+`!command' input runs locally before any server or busy-state checks.
 When idle, the text after the `❯ ' prompt is submitted.  `C-u' explicitly
 steers one nonempty message even if the local busy indicator has not caught up
 with the host.  Otherwise, while a turn is executing (the mode-line spinner is
@@ -2109,20 +2114,23 @@ interrupted, so stopping stays one key away.  Success feedback arrives via the
 `session/queue' stream; `\\[dsh-emacs-interrupt-turn]'
 (`C-c C-b') interrupts regardless of the behavior."
   (interactive)
-  (dsh-emacs-server-ensure)
-  (let* ((busy (dsh-emacs--busy-p))
-         (steer-p (consp current-prefix-arg))
-         (input (dsh-emacs--get-input))
-         (empty-p (string-empty-p (string-trim input))))
-    (cond
-     ((and steer-p (not empty-p))
-      (dsh-emacs--submit-prompt input nil 'steer))
-     (busy
-      (if (or empty-p (eq dsh-emacs-busy-enter-behavior 'stop))
-          (dsh-emacs-interrupt-turn)
-        (dsh-emacs--submit-prompt input nil dsh-emacs-busy-enter-behavior)))
-     (empty-p (message "Please enter a message"))
-     (t (dsh-emacs--submit-prompt input)))))
+  (let ((input (dsh-emacs--get-input)))
+    (if-let* ((command (dsh-emacs-shell-parse input)))
+        (dsh-emacs-shell-submit input command)
+      (dsh-emacs-server-ensure)
+      (let ((busy (dsh-emacs--busy-p))
+            (steer-p (consp current-prefix-arg))
+            (empty-p (string-empty-p (string-trim input))))
+        (cond
+         ((and steer-p (not empty-p))
+          (dsh-emacs--submit-prompt input nil 'steer))
+         (busy
+          (if (or empty-p (eq dsh-emacs-busy-enter-behavior 'stop))
+              (dsh-emacs-interrupt-turn)
+            (dsh-emacs--submit-prompt
+             input nil dsh-emacs-busy-enter-behavior)))
+         (empty-p (message "Please enter a message"))
+         (t (dsh-emacs--submit-prompt input)))))))
 
 (defun dsh-emacs--input-end ()
   "Return the end of editable input, before the mode-line separator newline."
@@ -2271,61 +2279,72 @@ busy (e.g. `C-c C-a' during a run), the configured
 path is never taken (`C-c C-c' interrupts then, attach-file keeps
 sending a plain queue-mode prompt as before).
 
-Slash-command lines (leading \"/name\") are routed to
-`commands.execute' instead of the model: the host admits only
-registered commands, and an admission miss falls back to sending the
-line as an ordinary message (the same semantics as dsh web).  Other
-lines go through `dsh-emacs--submit-plain' unchanged.  IMAGES, when
-given, is a list of wire-ready attachment alists
+Lines without attachments starting with \"!<command>\" (e.g. \"!git status\") are
+client-side shell commands (see `dsh-emacs-shell-submit'): they run
+locally on this machine, independent of the session's busy state or
+even the server, and NEVER reach the model or `commands.execute'.
+When IMAGES is non-nil, a leading ! is ordinary caption text and the
+attachments are sent to the model.
+Slash-command lines (leading \"/name\") are routed to `commands.execute'
+instead of the model: the host admits only registered commands, and an
+admission miss falls back to sending the line as an ordinary message
+(the same semantics as dsh web).  Other lines go through
+`dsh-emacs--submit-plain' unchanged.  IMAGES, when given, is a list of
+wire-ready attachment alists
 \((mediaType . M) (data . B64) (name . N)); they are appended to the
 `content' array of `session/prompt' as `{type: \"image\"}' parts so
 the model sees them immediately."
-  (if (or mode
+  (let ((command (and (null images) (dsh-emacs-shell-parse message))))
+    (cond
+     ;; 无附件的 `!' 行是本地动作；附件 caption 不进入 shell。
+     (command
+      (dsh-emacs-shell-submit message command))
+     ((or mode
           (and (dsh-emacs--busy-p)
                (not (eq dsh-emacs-busy-enter-behavior 'stop))))
-      (dsh-emacs--submit-deferred message images mode)
-    (if (dsh-emacs-command-parse message)
-        (let ((session-id (dsh-emacs--active-session-id))
-              (input-buffer (current-buffer)))
-          ;; 提交即清空输入区、记入输入历史——不等 RPC 往返（网页同款手感）：
-          ;; 命令是否被 host 受理由 `commands.execute' 的响应决定，结果由
-          ;; command/run + command/done 会话事件渲染。
-          (dsh-emacs--push-input-history message)
-          (setq dsh-emacs--input-history-pos nil
-                dsh-emacs--input-history-pending nil)
-          (when (buffer-live-p input-buffer)
-            (with-current-buffer input-buffer
-              (dsh-emacs--clear-input)))
-          ;; 立即渲染命令行（乐观路径）——不等 RPC 往返。
-          (when (buffer-live-p input-buffer)
-            (with-current-buffer input-buffer
-              (dsh-emacs-render-command-optimistic message)))
-          (dsh-emacs-command-execute
-           session-id (string-trim message) images
-           (lambda (ok execution err)
-             ;; 回调可能运行在 process filter 里：吞掉 C-g 的 quit。
-             (condition-case nil
-                 (cond
-                  ((null ok)
-                   ;; 传输失败（HTTP/解析错误）：清除乐观行，恢复原文。
-                   (when (buffer-live-p input-buffer)
-                     (with-current-buffer input-buffer
-                       (dsh-emacs-render-command-cleanup-optimistic)
-                       (when (string-empty-p
-                              (or (dsh-emacs--get-input) ""))
-                         (dsh-emacs--replace-input message))))
-                   (message "Command failed to run: %S"
-                            (or err "transport error")))
-                  ((null execution)
-                   ;; 未命中注册表 → 清除乐观行，按普通消息发送（浏览器同款语义）；
-                   ;; 历史已在提交时记录，不再重复记入。
-                   (when (buffer-live-p input-buffer)
-                     (with-current-buffer input-buffer
-                       (dsh-emacs-render-command-cleanup-optimistic)))
-                   (dsh-emacs--submit-plain message images t))
-                  (t nil))       ; 受理：乐观行由 command/run 事件替换
-               (quit nil)))))
-      (dsh-emacs--submit-plain message images))))
+      (dsh-emacs--submit-deferred message images mode))
+     ((dsh-emacs-command-parse message)
+      (let ((session-id (dsh-emacs--active-session-id))
+            (input-buffer (current-buffer)))
+        ;; 提交即清空输入区、记入输入历史——不等 RPC 往返（网页同款手感）：
+        ;; 命令是否被 host 受理由 `commands.execute' 的响应决定，结果由
+        ;; command/run + command/done 会话事件渲染。
+        (dsh-emacs--push-input-history message)
+        (setq dsh-emacs--input-history-pos nil
+              dsh-emacs--input-history-pending nil)
+        (when (buffer-live-p input-buffer)
+          (with-current-buffer input-buffer
+            (dsh-emacs--clear-input)))
+        ;; 立即渲染命令行（乐观路径）——不等 RPC 往返。
+        (when (buffer-live-p input-buffer)
+          (with-current-buffer input-buffer
+            (dsh-emacs-render-command-optimistic message)))
+        (dsh-emacs-command-execute
+         session-id (string-trim message) images
+         (lambda (ok execution err)
+           ;; 回调可能运行在 process filter 里：吞掉 C-g 的 quit。
+           (condition-case nil
+               (cond
+                ((null ok)
+                 ;; 传输失败（HTTP/解析错误）：清除乐观行，恢复原文。
+                 (when (buffer-live-p input-buffer)
+                   (with-current-buffer input-buffer
+                     (dsh-emacs-render-command-cleanup-optimistic)
+                     (when (string-empty-p
+                            (or (dsh-emacs--get-input) ""))
+                       (dsh-emacs--replace-input message))))
+                 (message "Command failed to run: %S"
+                          (or err "transport error")))
+                ((null execution)
+                 ;; 未命中注册表 → 清除乐观行，按普通消息发送（浏览器同款语义）；
+                 ;; 历史已在提交时记录，不再重复记入。
+                 (when (buffer-live-p input-buffer)
+                   (with-current-buffer input-buffer
+                     (dsh-emacs-render-command-cleanup-optimistic)))
+                 (dsh-emacs--submit-plain message images t))
+                (t nil))        ; 受理：乐观行由 command/run 事件替换
+             (quit nil))))))
+     (t (dsh-emacs--submit-plain message images)))))
 
 (defun dsh-emacs--submit-deferred (message images mode)
   "Submit MESSAGE into the running turn's inbox as MODE.
