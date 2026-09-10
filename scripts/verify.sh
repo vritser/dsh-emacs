@@ -4,8 +4,12 @@
 # 覆盖全部可机器检查的步骤：
 #   1. check-lisp 全量（dsh-check:files 默认列表）
 #   2. checker 自测（test/check-lisp-test.el）
-#   3. 生产文件 byte-compile（仅 Error 计 FAIL；Warning 按 AGENTS.md 纪律可忽略
-#      -- .elc 产物重定向到临时目录，绝不落进仓库树）
+#   3. 生产文件 byte-compile（Error 计 FAIL；"reference to free variable" 也计
+#      FAIL——它是"代码引用了不存在的变量"，正是 docstring 里裸引号提前结束
+#      字符串时的症状，读级 check-lisp 查不出来；其余 Warning（docstring 宽度、
+#      未声明的外部包函数等）按 AGENTS.md 纪律忽略。有意的跨模块引用用
+#      defvar/declare-function 声明即可消除。.elc 产物重定向到临时目录，
+#      绝不落进仓库树）
 #   4. 主测试套件（test/dsh-test.el）
 #   5. 干净加载：emacs -Q --batch -L . -l dsh-emacs.el 必须无输出且 exit 0
 #   6. git diff HEAD --check（空白错误；仅覆盖已跟踪文件）
@@ -39,7 +43,7 @@ run 'check-lisp'      check     emacs -Q --batch -l scripts/check-lisp.el
 printf '\n== checker self-tests ==\n'
 run 'check-lisp-test' selftest  emacs -Q --batch -l test/check-lisp-test.el
 
-printf '\n== byte-compile (production files; Errors fail, Warnings pass) ==\n'
+printf '\n== byte-compile (production files; Errors and free-variable warnings fail) ==\n'
 byte_files=$(ls dsh-emacs*.el 2>/dev/null)
 if [ -z "$byte_files" ]; then
   printf 'FAIL byte-compile (no dsh-emacs*.el production files)\n'
@@ -49,6 +53,15 @@ else
     --eval "(require 'bytecomp)" \
     --eval '(setq byte-compile-dest-file-function (lambda (src) (expand-file-name (concat (file-name-nondirectory src) "c") (getenv "DSH_BYTE_TMP"))))' \
     -f batch-byte-compile $byte_files
+  # A free-variable warning means the code references a variable that never
+  # exists.  Reading Lisp cannot see this (a docstring with an unescaped quote
+  # closes the string early and the rest of the line becomes code), and it is a
+  # silent runtime bug, so it is a FAIL here rather than a Warning to skip.
+  if grep -q 'reference to free variable' "$tmpdir/compile.log"; then
+    printf 'FAIL byte-compile (free variable; declare it with defvar/declare-function)\n'
+    grep 'reference to free variable' "$tmpdir/compile.log" | sed 's/^/     /'
+    fail=1
+  fi
 fi
 
 printf '\n== full unit suite ==\n'

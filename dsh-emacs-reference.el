@@ -1017,14 +1017,16 @@ session span carrying the real SESSION-ID."
         (when (> (length token) 0)
           (while (string-match (regexp-quote token) string pos)
             (let ((b (match-beginning 0))
-                  (e (match-end 0))
-                  (overlap
-                   (cl-some (lambda (s)
-                              (and (< b (nth 1 s)) (> e (nth 0 s))))
-                            spans)))
-              (unless overlap
-                (push (list b e 'session id) spans))
-              (setq pos e))))))
+                  (e (match-end 0)))
+              ;; The overlap test reads B/E, so it must not share their `let':
+              ;; a `let' runs its inits before binding, which leaves B/E free
+              ;; to the compiler (and would break the closure outright).
+              (let ((overlap (cl-some (lambda (s)
+                                        (and (< b (nth 1 s)) (> e (nth 0 s))))
+                                      spans)))
+                (unless overlap
+                  (push (list b e 'session id) spans))
+                (setq pos e)))))))
     (sort spans (lambda (a b) (< (nth 0 a) (nth 0 b))))))
 
 (defun dsh-emacs-reference--session-label-at (string beg)

@@ -32,7 +32,8 @@ ownership map in `docs/architecture.md`.
 ## Verification (run after every change — never skip)
 
 **One-shot gate: `scripts/verify.sh`** — the aggregated "definition of done"
-(check-lisp over `dsh-check:files`, checker self-tests, full unit suite, clean
+(check-lisp over `dsh-check:files`, checker self-tests, production
+byte-compile with free-variable warnings as failures, full unit suite, clean
 load silent, `git diff --check`, tree junk scan). Exit 0 only when everything
 passes; any FAIL is a blocker (see rule 6 below).
 
@@ -105,7 +106,17 @@ whole report blindly.
   batch run of `scripts/check-lisp.el` means the file is balanced)
 - Compile-time issues (undefined functions/variables, macro misuse):
   `emacs -Q --batch -L . -f batch-byte-compile <file>`
-  (only look at `Error`; `Warning` can be ignored)
+  (Errors always matter; among `Warning`s, **`reference to free variable`
+  is a real bug and fails `scripts/verify.sh`** — it is what an unescaped
+  `"` inside a docstring looks like after the string closes early, and no
+  read-level check can see it. The other warning classes — docstring width,
+  a third-party function "not known to be defined" — stay informational)
+- A variable read before it can be bound is one bug in three shapes, all of
+  which byte-compile flags: a bare quote closing a docstring early; a `let`
+  whose init reads a sibling binding from the same `let` (inits run before
+  the bindings, so use a nested `let` and keep the paren net equal); and a
+  `defvar` placed after its first reader, which makes the reader treat the
+  name as lexical (move the declaration above the reader)
 - Intentional lazy/cyclic module boundaries: add `declare-function` /
   `defvar` forward declarations rather than new top-level `require`s; a
   `declare-function` pointing at another package's private (`--`) symbols

@@ -281,6 +281,11 @@ Colored via `currentColor' mapped to the action face's foreground."
         (dsh-emacs-composer--row-width)
         (dsh-emacs-composer--icon-width)))
 
+;; Declared before its reader: ROW-WIDTH falls back to this budget when no
+;; window shows the buffer yet (mid setup / batch).
+(defvar dsh-emacs-composer--default-row-width 120
+  "Column budget for the Goal Row when no window shows the buffer yet.")
+
 (defun dsh-emacs-composer--row-width ()
   "Return the text width available for Composer rows.
 When several windows show this buffer, use the narrowest so the shared row
@@ -290,9 +295,6 @@ yet (mid setup / batch)."
     (max 1 (if windows
                (apply #'min (mapcar #'window-text-width windows))
              dsh-emacs-composer--default-row-width))))
-
-(defvar dsh-emacs-composer--default-row-width 120
-  "Column budget for the Goal Row when no window shows the buffer yet.")
 
 (defun dsh-emacs-composer--fit-objective (objective available)
   "Truncate OBJECTIVE so the whole Goal Row fits in AVAILABLE columns.

@@ -632,6 +632,26 @@ a following window look manually scrolled away.  No state survives the edit."
                        (dsh-emacs-render--window-at-bottom-p window anchor))
              collect window)))
 
+;; Declared before their first reader: the FOLLOW-STREAM default argument
+;; expression consults both for a pending batch, and a `defvar' must
+;; precede its use for the byte-compiler to treat it as special.
+(defvar-local dsh-emacs--streaming-assistant nil
+  "Current assistant stream state, or nil.
+The plist contains :key, :start, :end, :event-id, :chunks and :timer.
+:chunks retains all raw deltas in reverse order for final reconciliation.
+:pending holds unpainted deltas; :timer coalesces insertion and Markdown
+work every 50ms.  :markdown owns the incremental parser's scan markers.
+The body between :start and :end contains the painted transcript.")
+
+(defvar-local dsh-emacs--streaming-thinking nil
+  "Current live reasoning/Think block stream state, or nil.
+The plist contains :key, :start, :end, :chunks and :timer.
+Pending deltas are collected in reverse order and inserted every 100ms.
+Reasoning
+deltas grow a raw body below the \"✶ Think\" header; on finalization
+(`block-end' or `assistant/message') the raw region is replaced by the
+collapsible Think fragment.")
+
 (cl-defun dsh-emacs-render--follow-stream
     (&optional (windows
                 (unless (or (plist-get dsh-emacs--streaming-assistant :timer)
@@ -769,23 +789,6 @@ Return (START . END) for the inserted message text, excluding separators."
 (defvar-local dsh-emacs--anchor-seq 0
   "Seq of the last stably rendered event in the transcript.
 Used for incremental rendering.")
-
-(defvar-local dsh-emacs--streaming-assistant nil
-  "Current assistant stream state, or nil.
-The plist contains :key, :start, :end, :event-id, :chunks and :timer.
-:chunks retains all raw deltas in reverse order for final reconciliation.
-:pending holds unpainted deltas; :timer coalesces insertion and Markdown
-work every 50ms.  :markdown owns the incremental parser's scan markers.
-The body between :start and :end contains the painted transcript.")
-
-(defvar-local dsh-emacs--streaming-thinking nil
-  "Current live reasoning/Think block stream state, or nil.
-The plist contains :key, :start, :end, :chunks and :timer.
-Pending deltas are collected in reverse order and inserted every 100ms.
-Reasoning
-deltas grow a raw body below the \"✶ Think\" header; on finalization
-(`block-end' or `assistant/message') the raw region is replaced by the
-collapsible Think fragment.")
 
 (defvar-local dsh-emacs--markdown-pending nil
   "Stream states awaiting interruptible Markdown formatting, in order.")

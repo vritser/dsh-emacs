@@ -60,6 +60,18 @@ minor) and stay undated until the release is cut.
   flag (`input.images` is gone), so commands that accept composed attachments
   are recognized again (rationale: docs/rpc.md §0.2, §4.11).
 
+### Changed
+
+- **`scripts/verify.sh` now rejects free-variable warnings**: the
+  byte-compile step used to pass on any warning.  `reference to free
+  variable` is now a FAIL, because it means the code reads a variable that
+  never exists — the exact symptom of a docstring whose unescaped `"` closes
+  the string early and turns the rest of the line into code, a silent runtime
+  bug no read-level check can see.  Docstring width and third-party "not
+  known to be defined" warnings stay informational; an intentional
+  cross-module read is fixed by declaring it (`defvar` / `declare-function`).
+
+
 ### Documentation
 
 - `docs/rpc.md` re-anchored on dsh `0.1.5-rc.1`: the 0.1.5 wire deltas are
