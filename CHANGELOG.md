@@ -18,6 +18,26 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **HTTPS connections no longer ask for Basic credentials before using the
+  launch token**: the initial reachability probe now handles a server's 401
+  without opening a username/password prompt, allowing the configured token
+  to be exchanged for the browser-session cookie as intended.
+
+- **HTTP token authentication works behind Basic-auth proxies**: the token
+  exchange now carries the credentials configured in the server URL and
+  selects the `dsh-auth-*` cookie even when the proxy sets another cookie
+  first.
+
+- **RPC authentication failures no longer ask for a username/password**:
+  HTTP and HTTPS requests use the client's authentication cookie without
+  mixing in Emacs' global cookie jar. A rejected cookie produces an HTTP 401
+  authentication hint and is cleared for the next attempt; synchronous calls
+  no longer mistake the error page for a malformed JSON response.
+
+- **HTTP WebSocket connections on port 443 keep their authentication**:
+  the handshake now retains this non-default HTTP port in `Host` and
+  `Origin`, matching the authority used to mint the cookie.
+
 - **Row accents no longer leak into card text**: expanding a Think block
   painted its preview and reasoning body in the title's orange bold,
   `Edit`/`Read`/… ioCards painted `IN`/`OUT` in the row's green/red/orange, and

@@ -226,9 +226,12 @@ Bounded to a 5s wait: a peer that accepts TCP but never completes the
 TLS handshake (firewall/proxy wedge) must not hang the probe.  A nil
 return — timeout or `url-retrieve' refusing — reads as \"not alive\"
 and must not touch the caller's current buffer (`kill-buffer' on nil
-would delete it), hence the `when buf' guard."
-  (let ((buf (url-retrieve-synchronously
-              (concat (dsh-emacs--server-base-url) "/") t nil 5)))
+would delete it), hence the `when buf' guard.
+This probe precedes the launch-token exchange.  A 401 only means the
+server is alive; it must not ask for Basic credentials."
+  (let* ((url-request-noninteractive t)
+         (buf (url-retrieve-synchronously
+               (concat (dsh-emacs--server-base-url) "/") t nil 5)))
     (when buf
       (unwind-protect
           (with-current-buffer buf
@@ -456,9 +459,9 @@ Returns the cookie string, else nil."
       (dsh-emacs--server-auth-exchange-plain url))))
 
 (defun dsh-emacs--server-auth-exchange-plain (url)
-  "Send raw `GET URL' to the base host and return its `Set-Cookie' value.
+  "Send raw `GET URL' and return the `dsh-auth-*' cookie from its headers.
 Reuses the socket probe's pattern (`dsh-emacs--server-probe-plain'): hand-write
-the request, read the first response headers, and take the `Set-Cookie' line.
+the request with configured Basic credentials and read the response headers.
 Deliberately does NOT follow location redirects — dsh's token exchange answers
 with a 303 whose header is the only place the minted cookie appears."
   (let* ((parsed (url-generic-parse-url url))
@@ -469,6 +472,7 @@ with a 303 whose header is the only place the minted cookie appears."
          (host (dsh-emacs--server-host-name))
          (host-header (car host-port))
          (port (cdr host-port))
+         (auth (dsh-emacs-server--basic-auth-header))
          (buf (generate-new-buffer " *dsh-auth-exchange*"))
          (cookie nil))
     (unwind-protect
@@ -481,8 +485,11 @@ with a 303 whose header is the only place the minted cookie appears."
                     (goto-char (point-max))
                     (insert string))))
           (process-send-string
-           proc (format "GET %s HTTP/1.0\r\nHost: %s:%d\r\n\r\n"
-                        req-path host-header port))
+           proc (concat (format "GET %s HTTP/1.0\r\nHost: %s:%d\r\n"
+                                req-path host-header port)
+                        (when auth
+                          (format "%s: %s\r\n" (car auth) (cdr auth)))
+                        "\r\n"))
           (let ((deadline (+ (float-time) 3.0)))
             (while (and (process-live-p proc)
                         (with-current-buffer buf
@@ -493,8 +500,12 @@ with a 303 whose header is the only place the minted cookie appears."
             (delete-process proc))
           (with-current-buffer buf
             (goto-char (point-min))
-            (when (re-search-forward "^Set-Cookie: \\([_A-Za-z0-9-]+=[^;\r\n]+\\)" nil t)
-              (setq cookie (match-string 1)))))
+            (when-let* ((headers-end (re-search-forward "\r?\n\r?\n" nil t)))
+              (goto-char (point-min))
+              (when (re-search-forward
+                     "^Set-Cookie:[ \t]*\\(dsh-auth-[_A-Za-z0-9-]+=[^;\r\n]+\\)"
+                     headers-end t)
+                (setq cookie (match-string 1))))))
       (kill-buffer buf))
     cookie))
 

@@ -396,6 +396,8 @@ turns Chinese and emoji into mojibake such as `ä½\240'."
       (set-buffer-multibyte t)
       (insert body))))
 
+(defvar url-http-response-status)
+
 (defun dsh-emacs--rpc-request (method params)
   "Send an RPC request to the dsh web service.
 METHOD is the `namespace/method' endpoint (e.g. \"session/list\") and
@@ -403,22 +405,29 @@ PARAMS the wire `args' content (an alist, or nil for parameter-less
 methods).  Returns (ok-p . value) or nil."
   (let* ((url (format "%s/api/%s" (dsh-emacs--server-base-url) method))
          (json-data (dsh-emacs--wrap-request method params))
+         (url-request-noninteractive t)
          (url-request-method "POST")
          (url-request-extra-headers
           (append '(("Content-Type" . "application/json"))
                   (dsh-emacs--extra-request-headers)))
          (url-request-data (encode-coding-string json-data 'utf-8)))
     (condition-case err
-        (with-current-buffer (url-retrieve-synchronously url)
-          (goto-char (point-min))
-          (re-search-forward "^$")
-          (delete-region (point) (point-min))
-          (dsh-emacs--decode-response-body)
-          (goto-char (point-min))
-          (let* ((response (json-read))
-                 (unwrapped (dsh-emacs--unwrap-response response)))
-            (kill-buffer)
-            unwrapped))
+        ;; Auth cookies are owned by dsh, not the global URL cookie jar.
+        (let ((buf (url-retrieve-synchronously url nil t)))
+          (unless (buffer-live-p buf)
+            (error "No HTTP response from dsh server"))
+          (unwind-protect
+              (with-current-buffer buf
+                (when-let* ((status (bound-and-true-p url-http-response-status))
+                            ((>= status 400)))
+                  (signal 'error (list 'http status)))
+                (goto-char (point-min))
+                (re-search-forward "^$")
+                (delete-region (point) (point-min))
+                (dsh-emacs--decode-response-body)
+                (goto-char (point-min))
+                (dsh-emacs--unwrap-response (json-read)))
+            (kill-buffer buf)))
       (error
        ;; A 401 while we sent a cookie means the cached cookie is stale (an
        ;; out-of-band server restarted and minted a new token): drop it so the
@@ -426,7 +435,8 @@ methods).  Returns (ok-p . value) or nil."
        (when (and (dsh-emacs--server-auth-http-401-p err)
                   (fboundp 'dsh-emacs--server-auth-maybe-expire))
          (dsh-emacs--server-auth-maybe-expire))
-       (message "RPC error: %s" (error-message-string err))
+       (message "RPC error: %s%s" (error-message-string err)
+                (dsh-emacs--http-error-hint err))
        (cons nil nil)))))
 
 (defun dsh-emacs--http-error-hint (err)
@@ -458,6 +468,7 @@ METHOD is the `namespace/method' endpoint, PARAMS the wire `args'
 content — see `dsh-emacs--wrap-request'."
   (let* ((url (format "%s/api/%s" (dsh-emacs--server-base-url) method))
          (json-data (dsh-emacs--wrap-request method params))
+         (url-request-noninteractive t)
          (url-request-method "POST")
          (url-request-extra-headers
           (append '(("Content-Type" . "application/json"))
@@ -477,6 +488,7 @@ content — see `dsh-emacs--wrap-request'."
                           (gc-cons-percentage 0.6))
                       (if (plist-get status :error)
                           (let ((err (plist-get status :error)))
+                            (kill-buffer)
                             ;; A 401 while we sent a cookie means the cached
                             ;; cookie is stale (an out-of-band server restarted
                             ;; and minted a new per-process token): drop it so
@@ -521,7 +533,7 @@ content — see `dsh-emacs--wrap-request'."
                                 (condition-case nil
                                     (funcall callback ok value)
                                   (quit nil)))))))))
-                  nil t)))
+                  nil t t)))
 
 ;;; ---------------------------------------------------------------------------
 ;;;  会话管理

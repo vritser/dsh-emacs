@@ -180,6 +180,11 @@
 - dsh-emacs 路径：自己拉起的服务自动从 `*dsh-server*` 输出捕获 token 并
   mint cookie（`dsh-emacs-server-auth-token` 供手动服务）；把 cookie 加到每个
   RPC 的 `extra-request-headers` 与 `/api/remote.mux` 的 WS 握手即可。
+- HTTP 反向代理若另需 Basic 认证，URL 中的 `user:pass@` 也会随 token
+  交换请求发送；交换只选取响应头中的 `dsh-auth-*`，忽略代理自己的 cookie。
+  RPC 请求禁用 URL 库的全局 cookie jar，以免它与显式认证 cookie 混发。
+  同步和异步 RPC 的 401 都清除被拒绝的 cookie、报告认证错误；不会弹出
+  用户名／密码框。下次请求可用配置的 token 重新交换。
 
 ---
 

@@ -8449,21 +8449,41 @@ symbol or an ordered list."
               (dsh-test-pass "server-probe-https-timeout-nil-safe")))))
     (kill-buffer victim)))
 
-;; --- 测试 84i: https 探针 200/401 判活，用完即杀返回 buffer ---
-(let ((dsh-emacs-base-url "https://probe.example:443")
-      (ok t))
-  (dolist (status '("200" "401"))
-    (cl-letf (((symbol-function 'url-retrieve-synchronously)
-               (lambda (&rest _)
-                 (let ((b (generate-new-buffer " *probe-http*")))
-                   (with-current-buffer b
-                     (insert (format "HTTP/1.1 %s X\r\nContent-Length: 0\r\n\r\n"
-                                     status))
-                     b)))))
-      (unless (dsh-emacs--server-probe-https)
-        (setq ok nil))))
-  (when ok
-    (dsh-test-pass "server-probe-https-status-200-401-alive")))
+;; --- 测试 84i: HTTPS 探针在 token 交换前遇到 401 也不询问 Basic 凭据 ---
+;; 使用 url 的真实认证处理：dsh 没有 WWW-Authenticate，url 会回退到 Basic。
+(require 'url-http)
+(require 'url-auth)
+(dolist (status '("200" "401"))
+  (let ((dsh-emacs-base-url "https://probe.example:443")
+        (dsh-emacs-server-auth-token "ConfiguredToken")
+        (url-request-noninteractive nil)
+        (url-registered-auth-schemes nil)
+        (challenges nil)
+        (response nil))
+    (url-register-auth-scheme "basic" nil 4)
+    (cl-letf (((symbol-function 'url-get-authentication)
+               (lambda (_url _realm type prompt &rest _)
+                 (push (list type prompt (url-interactive-p)) challenges)
+                 nil))
+              ((symbol-function 'url-retrieve-synchronously)
+               (lambda (url &rest _)
+                 (setq response (generate-new-buffer " *probe-http*"))
+                 (with-current-buffer response
+                   (insert (format "HTTP/1.1 %s X\r\nContent-Length: 0\r\n\r\n"
+                                   status))
+                   (when (equal status "401")
+                     (setq-local url-current-object (url-generic-parse-url url))
+                     (setq-local url-http-extra-headers nil)
+                     (setq-local url-http-noninteractive url-request-noninteractive)
+                     (url-http-handle-authentication nil))
+                   response))))
+      (unwind-protect
+          (dsh-test-assert
+              (format "server-probe-https-%s-alive-without-basic-prompt" status)
+            (dsh-emacs--server-probe-https)
+            (equal challenges (and (equal status "401") '(("basic" t nil))))
+            (not (buffer-live-p response)))
+        (when (buffer-live-p response) (kill-buffer response))))))
 
 ;; --- 测试 85: 安装流程：接受 → 运行安装并返回 dsh 路径 ---
 (cl-letf (((symbol-function 'dsh-emacs--server-bin) (lambda () nil))
@@ -8604,9 +8624,10 @@ symbol or an ordered list."
 ;; exchange 走 `dsh-emacs--server-auth-exchange-plain'（raw TCP）：dsh 的成功
 ;; 交换是 303 + Set-Cookie，必须读首个 303 的头，不能跟随重定向（url-retrieve
 ;; 会跟到 / 丢掉 header）。单测用 mock socket 灌入真实的 303 响应。
-(let ((dsh-emacs-base-url "http://127.0.0.1:3080")
+(let ((dsh-emacs-base-url "http://alice:secret@127.0.0.1:3080")
       (filter nil)
-      (sent nil))
+      (sent nil)
+      (cookie-header "Set-Cookie: dsh-auth-HASH=eyJ2MSJ9.sig; Path=/\r\n"))
   (cl-letf (((symbol-function 'open-network-stream)
              (lambda (&rest _) 'fake-sock))
             ((symbol-function 'set-process-query-on-exit-flag)
@@ -8619,16 +8640,25 @@ symbol or an ordered list."
              (lambda (&rest _)
                (funcall filter 'fake-sock
                 (concat "HTTP/1.1 303 See Other\r\nLocation: /\r\n"
-                        "Set-Cookie: dsh-auth-HASH=eyJ2MSJ9.sig; Max-Age=2592000; "
-                        "Path=/; HttpOnly; SameSite=Strict\r\n\r\n"))))
+                        "Set-Cookie: proxy-route=backend-1; Path=/\r\n"
+                        cookie-header "\r\n"))))
             ((symbol-function 'process-live-p) (lambda (&rest _) t))
             ((symbol-function 'delete-process) (lambda (&rest _) nil)))
     (let ((cookie (dsh-emacs--server-auth-exchange-plain
                    "http://127.0.0.1:3080/?token=TokD")))
       (dsh-test-assert "auth-raw-exchange-hits-token-query"
         (string-match-p "GET /\\?token=TokD HTTP/1.0" sent))
+      (dsh-test-assert "auth-raw-exchange-carries-configured-basic-auth"
+        (string-match-p
+         (concat "Authorization: Basic " (base64-encode-string "alice:secret" t)
+                 "\r\n")
+         sent))
       (dsh-test-assert "auth-raw-exchange-parses-303-set-cookie"
-        (equal "dsh-auth-HASH=eyJ2MSJ9.sig" cookie)))))
+        (equal "dsh-auth-HASH=eyJ2MSJ9.sig" cookie)))
+    (setq cookie-header "")
+    (dsh-test-assert "auth-raw-exchange-rejects-unrelated-cookie"
+      (null (dsh-emacs--server-auth-exchange-plain
+             "http://127.0.0.1:3080/?token=TokD")))))
 
 ;; --- 测试 93d2: https base 的 token 交换走 url-retrieve 且解析 303 Set-Cookie ---
 ;; https 需要 TLS，只能经 url 库；实现用 `url-max-redirections 0' 让
@@ -8925,19 +8955,24 @@ symbol or an ordered list."
   (setq dsh-emacs-server-auth-token nil))
 
 ;; --- 测试 93e: WebSocket 握手携带浏览器会话 cookie ---
-(let ((dsh-emacs-base-url "http://127.0.0.1:3080")
-      (sent nil)
-      (dsh-emacs--server-auth-cookie "dsh-auth-HASH=ok.sig")
-      (dsh-emacs--server-auth-captured-token nil))
-  (cl-letf (((symbol-function 'dsh-emacs-events--random-mask)
-             (lambda () (apply #'unibyte-string (list 1 2 3 4))))
-            ((symbol-function 'process-send-string)
-             (lambda (_proc string) (setq sent string))))
-    (dsh-emacs-events--send-handshake
-     (make-pipe-process :name "ws-auth" :buffer (get-buffer-create " *ws*"))))
-  (when (and sent (string-match-p "Cookie: dsh-auth-HASH=ok\\.sig" sent))
-    (dsh-test-pass "server-websocket-handshake-carries-browser-cookie"))
-  (setq dsh-emacs--server-auth-cookie nil))
+(dolist (case '(("http://127.0.0.1:3080" "127.0.0.1:3080")
+                ("http://127.0.0.1:80" "127.0.0.1")
+                ("http://127.0.0.1:443" "127.0.0.1:443")
+                ("https://127.0.0.1:443" "127.0.0.1")))
+  (pcase-let ((`(,dsh-emacs-base-url ,authority) case))
+    (let ((sent nil)
+          (dsh-emacs--server-auth-cookie "dsh-auth-HASH=ok.sig"))
+      (cl-letf (((symbol-function 'process-send-string)
+                 (lambda (_proc string) (setq sent string))))
+        (dsh-emacs-events--send-handshake 'fake-sock))
+      (dsh-test-assert (format "websocket-auth-authority-%s" dsh-emacs-base-url)
+        (string-match-p "Cookie: dsh-auth-HASH=ok\\.sig\r\n" sent)
+        (string-match-p (regexp-quote (format "Host: %s\r\n" authority)) sent)
+        (string-match-p
+         (regexp-quote
+          (format "Origin: %s://%s\r\n"
+                  (url-type (url-generic-parse-url dsh-emacs-base-url)) authority))
+         sent)))))
 
 ;; --- 测试 93g: /api/remote.mux open 消息与下行帧信封 ---
 (let* ((json (dsh-emacs-events--open-message
@@ -8985,6 +9020,76 @@ symbol or an ordered list."
 (dsh-test-assert "http-error-hint-401-mentions-auth"
   (string-match-p "401"
                   (dsh-emacs--http-error-hint '(error http 401))))
+
+;; RPC 认证失败不进入 Basic 交互；同步路径要读 HTTP 状态而非解析错误页。
+;; 异步响应在请求的动态绑定退出后派发，模拟 url 的 buffer-local 配置。
+(dolist (mode '(sync async))
+  (dolist (status '(200 401 403))
+    (let ((dsh-emacs-base-url "http://rpc.example:3080")
+          (dsh-emacs--server-auth-cookie "dsh-auth-RPC=cached")
+          (url-request-noninteractive nil)
+          (url-registered-auth-schemes nil)
+          (response nil)
+          (pending nil)
+          (request-headers nil)
+          (inhibited-cookies nil)
+          (challenges nil)
+          (result 'not-called))
+      (url-register-auth-scheme "basic" nil 4)
+      (cl-labels
+          ((make-response (url)
+             (setq request-headers url-request-extra-headers
+                   response (generate-new-buffer " *dsh-rpc-auth-test*"))
+             (with-current-buffer response
+               (setq-local url-http-response-status status)
+               (setq-local url-current-object (url-generic-parse-url url))
+               (setq-local url-http-extra-headers request-headers)
+               (setq-local url-http-noninteractive url-request-noninteractive)
+               (insert (format "HTTP/1.1 %d Test\n\n" status)
+                       (if (= status 200)
+                           "{\"result\":{\"ok\":true,\"value\":\"accepted\"}}"
+                         "Authentication failed")))
+             response)
+           (authenticate ()
+             (when (= status 401)
+               (with-current-buffer response
+                 (url-http-handle-authentication nil)))))
+        (cl-letf (((symbol-function 'url-get-authentication)
+                   (lambda (_url _realm type prompt &rest _)
+                     (push (list type prompt (url-interactive-p)) challenges)
+                     nil))
+                  ((symbol-function 'url-retrieve-synchronously)
+                   (lambda (url &optional _silent inhibit-cookies &rest _)
+                     (setq inhibited-cookies inhibit-cookies)
+                     (make-response url)
+                     (authenticate)
+                     response))
+                  ((symbol-function 'url-retrieve)
+                   (lambda (url callback &optional _args _silent inhibit-cookies)
+                     (setq pending callback
+                           inhibited-cookies inhibit-cookies)
+                     (make-response url))))
+          (unwind-protect
+              (progn
+                (if (eq mode 'sync)
+                    (setq result (dsh-emacs--rpc-request "session/list" nil))
+                  (dsh-emacs--rpc-async
+                   "session/list" nil
+                   (lambda (ok value) (setq result (cons ok value))))
+                  (authenticate)
+                  (with-current-buffer response
+                    (funcall pending (when (>= status 400)
+                                       (list :error (list 'error 'http status))))))
+                (dsh-test-assert (format "rpc-%s-http-%s-auth-result" mode status)
+                  (equal result (if (= status 200) '(t . "accepted") '(nil)))
+                  (equal (cdr (assoc "Cookie" request-headers))
+                         "dsh-auth-RPC=cached")
+                  (eq inhibited-cookies t)
+                  (equal challenges (and (= status 401) '(("basic" t nil))))
+                  (equal dsh-emacs--server-auth-cookie
+                         (unless (= status 401) "dsh-auth-RPC=cached"))
+                  (not (buffer-live-p response))))
+            (when (buffer-live-p response) (kill-buffer response))))))))
 
 ;; --- 测试 93f2: --frame 在 unibyte 缓冲里编码 multibyte payload 仍产出 unibyte ---
 ;; 回归：`dsh-emacs-events--frame' 曾用 `(encode-coding-string p 'utf-8 t)'

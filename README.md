@@ -135,6 +135,10 @@ For a server dsh-emacs starts, launch-token authentication is automatic.
 For a server you started yourself, provide the launch token from the URL it
 prints (`dsh web: …/?token=…`). You can set `dsh-emacs-server-auth-token` to
 the token, or paste the whole URL into `dsh-emacs-base-url`.
+If a reverse proxy also requires Basic authentication, include its separate
+credentials as `http://user:pass@host:port`; the dsh launch token is still
+required. RPC authentication failures report HTTP 401 instead of asking for
+a username and password, and clear the rejected cookie before the next attempt.
 
 When prompted for an external server's token, a successful answer is saved
 for reuse. After a server restart, the previous token may be stale and need

@@ -207,20 +207,15 @@ socket; the caller opens its specific stream (a chat's
 `workspace/follow' + `$events') right after the handshake."
   (let* ((url (url-generic-parse-url dsh-emacs-base-url))
          (host (url-host url))
-         (port (or (url-port url)
-                   (if (equal (url-type url) "https") 443 80)))
-         (host-header (if (and port (not (memq port '(80 443))))
-                          (format "%s:%s" host port)
-                        host))
+         (default-port (if (equal (url-type url) "https") 443 80))
+         (port (or (url-port url) default-port))
+         (host-header (if (= port default-port) host
+                        (format "%s:%s" host port)))
          (seed (format "%s-%s-%s" (float-time) (random) (emacs-pid)))
          (key (base64-encode-string
                (substring (secure-hash 'sha1 seed nil nil t) 0 16) t))
          (path "/api/remote.mux")
-         (origin (format "%s://%s%s"
-                         (url-type url) host
-                         (if (and port (not (memq port '(80 443))))
-                             (format ":%s" port)
-                           ""))))
+         (origin (format "%s://%s" (url-type url) host-header)))
     (let* ((auth (and (fboundp 'dsh-emacs-server--basic-auth-header)
                       (dsh-emacs-server--basic-auth-header)))
            (cookie (and (fboundp 'dsh-emacs--server-auth-cookie-header)
