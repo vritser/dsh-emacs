@@ -129,8 +129,14 @@
                 10)
                "server did not confirm the optimistic user message")
               (dsh-e2e--check "send-message-rendered"
-                              (string-match-p (regexp-quote message)
-                                              (buffer-string))))
+                              ;; The stream can confirm before the RPC
+                              ;; callback paints the optimistic echo.
+                              (dsh-e2e--wait-until
+                               (lambda ()
+                                 (with-current-buffer dsh-e2e--chat
+                                   (string-match-p (regexp-quote message)
+                                                   (buffer-string))))
+                               10)))
 
             (dsh-e2e--rpc
              "session/cancel"
