@@ -289,7 +289,8 @@ dsh-emacs 的消费方式（`dsh-emacs-events.el`）：把 `chunk` 重新包成�
 `{type:"assistant/chunk", data:{turn, step, chunk}}` 事件、走普通事件路径复用原
 增量渲染器；按 `revision` 单调过滤旧代帧；快照里的 `activeAttempt.stream` 在打开
 时重放一次，使断线重连能续上同一段实时正文；`end.outcome.kind == "committed"`
-由后续持久 `assistant/message` 收口，`"abandoned"` 则就地 flush。
+由后续持久 `assistant/message`（替换正文）或 `assistant/attempt`（接管为 attempt
+卡，见 §7.4）收口，`"abandoned"` 则就地 flush。
 
 ### 3.3 `$events`：转发主机事件 + 审批/提问 waterfall
 
@@ -1133,6 +1134,18 @@ projection { type:'projection', sessionId, key, value, seq }               // �
 标题与目标/todo 等状态经投影键（`title`/`goal`/`todos`/`plan`/…，§9）而非事件
 直接取。队列/任务态来自 `session/control`（§6.1），审批/提问来自 `$events`
 waterfall（§3.3），交付文件来自 `deliverables/presented`（§10.3）。
+
+**dsh-emacs 的补齐范围（`dsh-emacs-render-event` 分派）**：以前静默丢弃的事件
+现在都有归属——`step/start` / `step/end` 是 turn 内部边界（一步 = 一次模型调用 +
+其工具执行），不进 transcript，改为喂 modeline 的 `step N` 徽标
+（`dsh-emacs-modeline-note-step`；默认关闭，开 `dsh-emacs-modeline-show-step`，
+见 docs/modeline.md）；`assistant/attempt`
+渲染成 `↻ Attempt (no committed reply)` 卡，body 由 `data.stream` 的打包记录
+（`reasoning-chunks`/`tool-call-chunks`/`text-chunks`）按序重建（reasoning 受
+`dsh-emacs-show-reasoning` 约束），若该尝试结算时还有 live 流式 body，live body
+被该卡接管而不是重复绘制；`session/end-seed` 渲染成一行 `── seed boundary`
+（fork/resume 的种子带 `inherited: true`，标 `inherited history`；全新会话不追加
+该事件）。`system/message` 仍不渲染。
 
 ---
 

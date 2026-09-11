@@ -543,8 +543,9 @@ remembered for the chunks that follow."
               chat (dsh-emacs-render--aget "chunk" frame)))
             ("end"
              ;; A committed attempt settles through its durable
-             ;; `assistant/message' (which finishes the live body); an
-             ;; abandoned one has no such event, so publish what arrived.
+             ;; `assistant/message' / `assistant/attempt' (which finishes or
+             ;; takes over the live body); an abandoned one has no such event,
+             ;; so publish what arrived.
              (let ((outcome (dsh-emacs-render--aget "outcome" frame)))
                (when (equal (dsh-emacs-render--aget "kind" outcome)
                             "abandoned")

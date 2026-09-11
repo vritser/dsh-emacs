@@ -45,6 +45,8 @@
 (declare-function dsh-emacs-modeline-note-event "dsh-emacs-modeline" (event))
 (declare-function dsh-emacs-modeline-note-request "dsh-emacs-modeline" (event))
 (declare-function dsh-emacs-modeline-note-header "dsh-emacs-modeline" (event))
+(declare-function dsh-emacs-modeline-note-step
+    "dsh-emacs-modeline" (turn step start-p))
 ;; Defined in dsh-emacs.el, which loads after this module.  Called at runtime
 ;; from the inline-image attachment path (placeholder fill / RET open).
 (declare-function dsh-emacs--active-session-id "dsh-emacs" ())
@@ -2229,6 +2231,147 @@ DATA.REASON.ERROR ({code, message, ...})."
      :create-new t :expanded t
      :insert-before insert-point)))
 
+;;; ---------------------------------------------------------------------------
+;;; 渲染器：step / attempt / seed 边界（V3 词汇补齐）
+;;; ---------------------------------------------------------------------------
+;;; `step/start' / `step/end'（一步 = 一次模型调用 + 它请求的工具执行）是 turn
+;;; 的内部边界，不是对话内容：交给 modeline 的 step 徽标（见
+;;; `dsh-emacs-modeline-note-step'），不占 transcript。
+;;; `assistant/attempt'（未提交 surface 消息的失败/重试/取消尝试，内容只存在
+;;; 于 data.stream）与 `session/end-seed'（resume/fork/replay 的种子边界）
+;;; 有正文含义，各渲染一行/一张卡。
+
+(defun dsh-emacs-render-step-event (event)
+  "Feed a `step/start' / `step/end' EVENT to the mode-line step badge.
+Steps are boundaries of a turn, not transcript content: the transcript stays
+content-only, and the badge shows which step of the running turn is active.
+Returns the event seq so the follow stream's dedup anchor advances."
+  (when (fboundp 'dsh-emacs-modeline-note-step)
+    (let ((data (dsh-emacs-render--event-data event)))
+      (dsh-emacs-modeline-note-step
+       (dsh-emacs-render--aget "turn" data)
+       (dsh-emacs-render--aget "step" data)
+       (equal (dsh-emacs-render--aget "type" event) "step/start"))))
+  (dsh-emacs-render--event-seq event))
+
+(defun dsh-emacs-render--assistant-stream-text (stream)
+  "Reconstruct the visible text of an assistant attempt STREAM.
+STREAM is the compact `AssistantStreamRecord' array of `assistant/attempt'
+(and `assistant/message'): deltas are packed into `text-chunks' /
+`reasoning-chunks' runs (parallel `texts' arrays) and tool calls into
+`tool-call-chunks'.  Reasoning is included only when reasoning display is on.
+Returns the record-ordered content as one newline-joined string."
+  (let ((parts '()))
+    (dolist (record (append stream nil))
+      (when (consp record)
+        (let ((type (dsh-emacs-render--aget "type" record)))
+          (pcase type
+            ((or "text-chunks" "reasoning-chunks")
+             (when (or dsh-emacs-show-reasoning
+                       (equal type "text-chunks"))
+               (let ((text (apply #'concat
+                                  (append (dsh-emacs-render--aget "texts" record)
+                                          nil))))
+                 (unless (string-empty-p text)
+                   (push text parts)))))
+            ("tool-call-chunks"
+             (let* ((name (dsh-emacs-render--aget "name" record))
+                    (args (apply #'concat
+                                 (append (dsh-emacs-render--aget "args" record)
+                                         nil))))
+               (push (dsh-emacs-render--trim
+                      (concat "→ " (or name "tool")
+                              (unless (string-empty-p args)
+                                (concat " " args)))
+                      dsh-emacs-tool-call-chars)
+                     parts)))))))
+    (mapconcat #'identity (nreverse parts) "\n")))
+
+(defun dsh-emacs-render--settle-live-attempt (event)
+  "Discard the live assistant body that EVENT settles; non-nil when it did.
+The attempt's own card carries the same stream, so leaving the live body in
+place would paint the text twice — and for a retry, whose turn/step key is
+identical, the next attempt's deltas would be appended to the failed body.
+Only a body whose turn/step matches EVENT is settled: a durable attempt
+replayed from history has no live body."
+  (let ((state dsh-emacs--streaming-assistant))
+    (when (and state
+               (equal (dsh-emacs-render--stream-key event)
+                      (dsh-emacs-render--stream-state-key state)))
+      (let ((start (marker-position (plist-get state :start)))
+            (end (marker-position (plist-get state :end)))
+            (timer (plist-get state :timer))
+            (windows (dsh-emacs-render--following-windows))
+            (inhibit-read-only t))
+        (when timer (cancel-timer timer))
+        ;; Pending deferred Markdown targets the region being removed; it also
+        ;; releases the state's start/end markers.
+        (dsh-emacs-render--cancel-markdown)
+        (when (and start end (< start end))
+          (save-excursion
+            (goto-char start)
+            (delete-region start end)))
+        (setq dsh-emacs--streaming-assistant nil)
+        (dsh-emacs-render--follow-stream windows)
+        t))))
+
+(defun dsh-emacs-render-assistant-attempt (event)
+  "Render an `assistant/attempt' EVENT as one muted collapsible card.
+An attempt that settled without committing a surface message (failure,
+retry, cancellation) has no `assistant/message'; its exact stream is the only
+record of what the model produced.  The card opens expanded when it replaced
+a visible live body, collapsed when replayed from history."
+  (let* ((data (dsh-emacs-render--event-data event))
+         (live (dsh-emacs-render--settle-live-attempt event))
+         (body (dsh-emacs-render--assistant-stream-text
+                (dsh-emacs-render--aget "stream" data)))
+         (empty (string-empty-p body)))
+    (dsh-emacs-ui-update-fragment
+     (dsh-emacs-ui-make-fragment
+      :namespace-id (dsh-emacs-render--make-namespace)
+      :block-id (dsh-emacs-render--make-block-id event)
+      :label-left
+      (propertize "↻ Attempt (no committed reply)" 'face 'dsh-emacs-muted-face)
+      :label-right
+      (propertize (format "turn %s step %s"
+                          (dsh-emacs-render--aget "turn" data)
+                          (dsh-emacs-render--aget "step" data))
+                  'face 'dsh-emacs-muted-face)
+      :body (unless empty body)
+      :style 'minimal
+      :status 'attempt
+      :header-face 'dsh-emacs-muted-face
+      :body-face 'dsh-emacs-thinking-body-face
+      :non-foldable empty)
+     :create-new t
+     :expanded (and live (not empty))
+     :insert-before (dsh-emacs-render--input-insert-point)))
+  (dsh-emacs-render--event-seq event))
+
+(defun dsh-emacs-render-seed-end (event)
+  "Render the `session/end-seed' boundary EVENT as one muted divider row.
+The event marks where restored seed history ends (resume, fork, replay); a
+fresh session never appends one."
+  (let* ((data (dsh-emacs-render--event-data event))
+         (inherited (dsh-emacs-render--json-bool
+                     (dsh-emacs-render--aget "inherited" data))))
+    (dsh-emacs-ui-update-fragment
+     (dsh-emacs-ui-make-fragment
+      :namespace-id (dsh-emacs-render--make-namespace)
+      :block-id (format "seed-%s"
+                        (or (dsh-emacs-render--event-seq event) "?"))
+      :label-left (propertize "── seed boundary" 'face 'dsh-emacs-muted-face)
+      :label-right (and inherited
+                        (propertize "inherited history"
+                                    'face 'dsh-emacs-muted-face))
+      :style 'minimal
+      :status 'seed
+      :header-face 'dsh-emacs-muted-face
+      :non-foldable t)
+     :create-new t
+     :insert-before (dsh-emacs-render--input-insert-point)))
+  (dsh-emacs-render--event-seq event))
+
 (defun dsh-emacs-render-command-label (name &optional _args)
   "Return the display string for slash command NAME.
 The leading \"/\" is stripped from NAME so the row reads e.g. \"compact\".
@@ -2626,6 +2769,11 @@ source filter, so without this check the same tool card is painted twice."
       ("command/done" (setq seq (dsh-emacs-render-command event)))
       ("turn/start" (setq seq (dsh-emacs-render-turn-start event)))
       ("turn/end" (setq seq (dsh-emacs-render-turn-end event)))
+      ("step/start" (setq seq (dsh-emacs-render-step-event event)))
+      ("step/end" (setq seq (dsh-emacs-render-step-event event)))
+      ("assistant/attempt"
+       (setq seq (dsh-emacs-render-assistant-attempt event)))
+      ("session/end-seed" (setq seq (dsh-emacs-render-seed-end event)))
       (_ nil))
     (when (and (integerp seq)
                (boundp 'dsh-emacs--anchor-seq)

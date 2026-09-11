@@ -16,6 +16,28 @@ minor) and stay undated until the release is cut.
   longer bleed into a body; extensions that passed `:face` must pick the region
   they meant (rationale: postmortem/039).
 
+### Added
+
+- **The remaining V3 core events reach the client**: `step/start` /
+  `step/end`, `assistant/attempt`, and `session/end-seed` — dropped silently
+  until now — are consumed (rationale: postmortem/040); `system/message` stays
+  deliberately unrendered.  A step (one model call plus its tool executions)
+  is a turn-internal boundary, not conversation, so it does not enter the
+  transcript; the new `dsh-emacs-modeline-show-step` option (default nil, off
+  so the line stays quiet) adds a `step N` badge next to the running spinner,
+  with the step's elapsed wall-clock time appended once it passes a second and
+  the full `turn N · step N` in its tooltip.  An
+  `assistant/attempt` — a failed, retried, or cancelled attempt that committed
+  no surface message and exists only in its `data.stream` — renders as a muted
+  `↻ Attempt (no committed reply)` card whose body reconstructs the packed
+  reasoning / tool-call / text records (reasoning follows
+  `dsh-emacs-show-reasoning`); when the attempt settles a live streamed body
+  the live body is taken over instead of being painted twice, and a retry
+  starts a fresh body instead of appending to the failed one.
+  `session/end-seed` marks the restore boundary with one muted
+  `── seed boundary` row (`inherited history` for a fork/resume seed); a fresh
+  session never appends one.
+
 ### Fixed
 
 - **HTTPS connections no longer ask for Basic credentials before using the

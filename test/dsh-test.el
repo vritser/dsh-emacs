@@ -2379,6 +2379,150 @@ symbol or an ordered list."
                (string-match-p "shown" text))
       (dsh-test-pass "thinking-disabled-hides-block")))))
 
+;; step/start·end feed the mode-line badge, never the transcript.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (let ((dsh-emacs-modeline-show-step t))
+    (dsh-emacs-render-event
+     (json-read-from-string
+      "{\"type\":\"turn/start\",\"seq\":1,\"time\":900,\"data\":{\"turn\":1}}"))
+    (dsh-emacs-render-event
+     (json-read-from-string
+      "{\"type\":\"step/start\",\"seq\":2,\"time\":1000,\"data\":{\"turn\":1,\"step\":2}}"))
+    (dsh-test-assert "step-start-is-mode-line-only"
+      (not (string-match-p "step"
+                           (buffer-substring-no-properties (point-min) (point-max))))
+      (equal "step 2" (dsh-emacs-modeline--step-indicator)))
+    (dsh-emacs-render-event
+     (json-read-from-string
+      "{\"type\":\"step/end\",\"seq\":3,\"time\":3000,\"data\":{\"turn\":1,\"step\":2}}"))
+    (dsh-test-assert "step-end-keeps-badge-without-fake-elapsed"
+      (equal "step 2" (dsh-emacs-modeline--step-indicator)))
+    (dsh-emacs-render-event
+     (json-read-from-string
+      "{\"type\":\"turn/end\",\"seq\":4,\"time\":4000,\"data\":{\"turn\":1,\"reason\":{\"kind\":\"completed\"}}}"))
+    (dsh-test-assert "turn-end-clears-step-badge"
+      (null dsh-emacs--modeline-step)
+      (equal "" (dsh-emacs-modeline--step-indicator)))))
+
+;; The option gates the badge: off (the default) leaves the mode line alone.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (dsh-emacs-render-event
+   (json-read-from-string
+    "{\"type\":\"turn/start\",\"seq\":1,\"time\":900,\"data\":{\"turn\":1}}"))
+  (dsh-emacs-render-event
+   (json-read-from-string
+    "{\"type\":\"step/start\",\"seq\":2,\"time\":1000,\"data\":{\"turn\":1,\"step\":2}}"))
+  (dsh-test-assert "step-badge-off-by-default"
+    (null dsh-emacs-modeline-show-step)
+    (equal 2 (plist-get dsh-emacs--modeline-step :step))
+    (equal "" (dsh-emacs-modeline--step-indicator)))
+  (dsh-emacs-render-event
+   (json-read-from-string
+    "{\"type\":\"turn/end\",\"seq\":3,\"time\":3000,\"data\":{\"turn\":1,\"reason\":{\"kind\":\"completed\"}}}")))
+
+;; The badge shows the elapsed wall-clock time of a step over a second.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (let ((dsh-emacs-modeline-show-step t))
+    (setq dsh-emacs--ml-busy t
+          dsh-emacs--modeline-step (list :turn 1 :step 2 :start 100.0 :end 103.0))
+    (dsh-test-assert "step-badge-shows-frozen-elapsed"
+      (equal "step 2 · 3s" (dsh-emacs-modeline--step-indicator)))))
+
+;; A step recorded while idle is not a status; the badge stays hidden.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (let ((dsh-emacs-modeline-show-step t))
+    (dsh-emacs-modeline-note-step 1 3 t)
+    (dsh-test-assert "step-badge-hidden-when-idle"
+      (null dsh-emacs--ml-busy)
+      (equal "" (dsh-emacs-modeline--step-indicator)))))
+
+;; A stray step/end for another step leaves the current badge alone.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (dsh-emacs-modeline-note-step 1 2 t)
+  (dsh-emacs-modeline-note-step 1 1 nil)
+  (dsh-test-assert "step-end-only-closes-its-own-step"
+    (equal 2 (plist-get dsh-emacs--modeline-step :step))
+    (null (plist-get dsh-emacs--modeline-step :end))))
+
+;; assistant/attempt: replay renders the collapsed diagnostic card.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (dsh-emacs-render-event
+   (json-read-from-string
+    "{\"type\":\"assistant/attempt\",\"seq\":4,\"time\":1000,\"data\":{\"turn\":2,\"step\":3,\"stream\":[{\"type\":\"reasoning-chunks\",\"time0\":1,\"index\":0,\"dt\":[1],\"texts\":[\"why it failed\"]},{\"type\":\"text-chunks\",\"time0\":2,\"index\":1,\"dt\":[1],\"texts\":[\"partial reply\"]}]}}"))
+  (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+    (dsh-test-assert "attempt-history-renders-collapsed-card"
+      (string-match-p "Attempt (no committed reply)" text)
+      (string-match-p "turn 2 step 3" text))))
+
+;; Packed stream records reconstruct in order, tool calls included.
+(dsh-test-assert "attempt-stream-text-reconstructs"
+  (equal (dsh-emacs-render--assistant-stream-text
+          (list (list (cons "type" "reasoning-chunks")
+                      (cons "texts" (vector "think")))
+                (list (cons "type" "tool-call-chunks")
+                      (cons "name" "bash")
+                      (cons "args" (vector "{\"command\":\"ls\"}")))
+                (list (cons "type" "text-chunks")
+                      (cons "texts" (vector "reply")))))
+         "think\n→ bash {\"command\":\"ls\"}\nreply"))
+
+(dsh-test-assert "attempt-stream-text-respects-reasoning-option"
+  (let ((dsh-emacs-show-reasoning nil))
+    (equal (dsh-emacs-render--assistant-stream-text
+            (list (list (cons "type" "reasoning-chunks")
+                        (cons "texts" (vector "hidden think")))))
+           "")))
+
+;; A live body the attempt settles is taken over, never painted twice.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (dsh-emacs-render--start-assistant-stream
+   '((data . ((turn . 1) (step . 1)))) "live partial")
+  (dsh-emacs-render-event
+   (json-read-from-string
+    "{\"type\":\"assistant/attempt\",\"seq\":5,\"time\":2000,\"data\":{\"turn\":1,\"step\":1,\"stream\":[{\"type\":\"text-chunks\",\"time0\":1,\"index\":0,\"dt\":[1],\"texts\":[\"live partial\"]}]}}"))
+  (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+    (dsh-test-assert "attempt-takes-over-live-body"
+      (null dsh-emacs--streaming-assistant)
+      (string-match-p "Attempt (no committed reply)" text)
+      (= 2 (length (split-string text "live partial" nil))))))
+
+;; session/end-seed: the restore boundary, marked when inherited.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (dsh-emacs-render-event
+   (json-read-from-string
+    "{\"type\":\"session/end-seed\",\"seq\":7,\"data\":{\"inherited\":true}}"))
+  (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+    (dsh-test-assert "seed-boundary-renders-divider"
+      (string-match-p "seed boundary" text)
+      (string-match-p "inherited history" text))))
+
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (dsh-emacs-render-event
+   (json-read-from-string
+    "{\"type\":\"session/end-seed\",\"seq\":7,\"data\":{}}"))
+  (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+    (dsh-test-assert "seed-boundary-marks-replay-without-inheritance"
+      (string-match-p "seed boundary" text)
+      (not (string-match-p "inherited history" text)))))
+
 ;; --- 测试 22: 丢失输入 marker 后消息仍插入到输入框上方 ---
 (with-temp-buffer
   (dsh-emacs-mode)

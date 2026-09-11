@@ -22,6 +22,7 @@
 ;;   (dsh-emacs-modeline-set-usage usage)     ;;  设置累计 token usage
 ;;   (dsh-emacs-modeline-add-usage usage)     ;;  累加 usage 并刷新
 ;;   (dsh-emacs-modeline-note-event event)    ;;  从 assistant/message 事件累计 usage
+;;   (dsh-emacs-modeline-note-step turn step start-p) ;; 记录当前 step 徽标
 ;;   (dsh-emacs-modeline-set-model "claude-opus-4-5") ;; 设置模型名
 ;;   (dsh-emacs-modeline-set-provider "deepseek")     ;; 设置模型所属 provider
 ;;   (dsh-emacs-modeline-set-effort "max")   ;; 设置推理 effort
@@ -62,6 +63,15 @@
 
 (defcustom dsh-emacs-modeline-enabled t
   "Whether the mode-line line is enabled."
+  :type 'boolean
+  :group 'dsh-emacs-modeline)
+
+(defcustom dsh-emacs-modeline-show-step nil
+  "Whether the mode line shows the running turn's step badge.
+A step is one model call plus the tool executions it requested
+\(`step/start' to `step/end').  While the session runs, the badge sits nextto the running animation as \"step 2\" (\"step 2 · 3s\" once the step passes
+a second) and is hidden when idle.  Off by default: the transcript already
+shows the work, and the step number is diagnostic rather than actionable."
   :type 'boolean
   :group 'dsh-emacs-modeline)
 
@@ -153,6 +163,14 @@ from the `session/list' snapshot when a chat buffer opens.  Pairs with
 
 (defvar-local dsh-emacs--modeline-usage nil
   "Latest usage struct (see `dsh-emacs-usage').")
+
+(defvar-local dsh-emacs--modeline-step nil
+  "Current step of the running turn, shown beside the running animation.
+Plist (:turn TURN :step STEP :start SECONDS :end SECONDS-OR-NIL) recorded
+from the `step/start' / `step/end' events (see
+`dsh-emacs-modeline-note-step'); nil when no step is known or the running
+flag was cleared.  Steps are turn-internal boundaries, so they live on the
+mode line instead of the transcript.")
 
 (defvar-local dsh-emacs--modeline-overlay nil
   "Overlay for the structural end-of-buffer newline that the
@@ -469,6 +487,28 @@ open, before any later context data arrives."
           (setq dsh-emacs--modeline-provider provider)))
       (dsh-emacs-modeline-update))))
 
+(defun dsh-emacs-modeline-note-step (turn step start-p)
+  "Record the running turn's step for the mode line.
+TURN and STEP are the integers from a `step/start' / `step/end' event,
+START-P non-nil for `step/start'.  Durations are measured in local wall-clock
+time rather than from the event timestamps on purpose: a reconnect or session
+reopen replays a still-open turn's `step/start' from history, and the wire
+timestamp would then report an elapsed time of hours instead of the seconds
+this process actually watched.  A `step/end' closes only the step it names,
+so a replayed or out-of-order end cannot replace a newer step; the badge is
+shown only while the running flag is set (`turn/end' clears it)."
+  (when (and (integerp turn) (integerp step))
+    (if start-p
+        (setq dsh-emacs--modeline-step
+              (list :turn turn :step step :start (float-time) :end nil))
+      (when (and dsh-emacs--modeline-step
+                 (= (plist-get dsh-emacs--modeline-step :turn) turn)
+                 (= (plist-get dsh-emacs--modeline-step :step) step))
+        (setq dsh-emacs--modeline-step
+              (plist-put dsh-emacs--modeline-step :end (float-time)))))
+    (when dsh-emacs-modeline-show-step
+      (dsh-emacs-modeline-update))))
+
 (defun dsh-emacs-modeline-set-context-snapshot (pressure window)
   "Set the server `contextPressure' projection: PRESSURE used / WINDOW total.
 Both values come from the same projection, keeping the ctx% numerator and
@@ -587,18 +627,21 @@ explicitly because the timer callback may otherwise run in any buffer."
 
 (defun dsh-emacs--ml-busy-set (flag)
   "Set the current buffer's running-state flag to FLAG.
-Starting the flag drives the mode-line spinner; clearing it stops the timer.
+Starting the flag drives the mode-line spinner; clearing it stops the timer
+and drops the turn's step badge (the turn is over).
 Call in the chat buffer whose mode-line should animate."
   (setq dsh-emacs--ml-busy (and flag t))
   (if dsh-emacs--ml-busy
       (dsh-emacs--ml-busy-start)
+    (setq dsh-emacs--modeline-step nil)
     (dsh-emacs--ml-busy-stop)))
 
 (defun dsh-emacs--ml-busy-clear ()
   "Clear the running-state flag and cancel the animation timer.
 Public teardown used when the event stream is disconnected or the chat
 buffer is being abandoned; the spinner must never keep ticking detached."
-  (setq dsh-emacs--ml-busy nil)
+  (setq dsh-emacs--ml-busy nil
+        dsh-emacs--modeline-step nil)
   (dsh-emacs--ml-busy-stop))
 
 (defun dsh-emacs--ml-busy-indicator ()
@@ -618,16 +661,57 @@ Empty string when this buffer is not executing, so the spinner is hidden."
 ;;; 结构 overlay 初始化
 ;;; ---------------------------------------------------------------------------
 
+(defun dsh-emacs-modeline--step-elapsed (state)
+  "Elapsed-time label for step STATE, or nil when under a second or unknown.
+STATE carries the boundary events' wall-clock `:start' / `:end' seconds; a
+missing end (an open step) measures against the current time, so the label
+advances with the running animation's redraws and needs no timer."
+  (let ((start (plist-get state :start)))
+    (when (numberp start)
+      (let ((seconds (floor (- (or (plist-get state :end) (float-time))
+                               start))))
+        (when (>= seconds 1)
+          (if (< seconds 60)
+              (format "%ds" seconds)
+            (format "%dm%02ds" (/ seconds 60) (% seconds 60))))))))
+
+(defun dsh-emacs-modeline--step-indicator ()
+  "Return the running turn's step badge, e.g. \"step 2 · 3s\"; empty when off.
+Hidden when `dsh-emacs-modeline-show-step' is nil, when the running animation
+is inactive (a finished turn's last step is not a status), or when no step is
+known.  The step comes from `step/start' / `step/end' events, which are
+turn-internal boundaries rather than transcript content."
+  (if (or (not dsh-emacs-modeline-show-step)
+          (not (bound-and-true-p dsh-emacs--ml-busy))
+          (null dsh-emacs--modeline-step))
+      ""
+    (let* ((state dsh-emacs--modeline-step)
+           (elapsed (dsh-emacs-modeline--step-elapsed state))
+           (text (concat "step "
+                         (number-to-string (plist-get state :step))
+                         (when elapsed (concat " · " elapsed)))))
+      (propertize text
+                  'face 'dsh-emacs-mode-line-busy-face
+                  'help-echo (format "dsh turn %s · step %s"
+                                     (plist-get state :turn)
+                                     (plist-get state :step))
+                  'mouse-face 'mode-line-highlight))))
+
 (defun dsh-emacs-modeline--ml-indicator ()
   "Return the running animation for the mode line, padded for mode-name spot.
 Empty string when idle, so the mode line is untouched; \" [██  ] \" when
-running (space on both sides, ready to sit right after the DSH mode name)."
+running (space on both sides, ready to sit right after the DSH mode name),
+followed by the turn's step badge (\"step 2 · 3s\") while one is known."
   (let ((frame (dsh-emacs--ml-busy-indicator)))
     (if (string-empty-p frame)
         ""
-      (propertize (concat " " frame " ")
-                  'help-echo "dsh is running a request…"
-                  'mouse-face 'mode-line-highlight))))
+      (concat
+       (propertize (concat " " frame " ")
+                   'help-echo "dsh is running a request…"
+                   'mouse-face 'mode-line-highlight)
+       (let ((step (dsh-emacs-modeline--step-indicator)))
+         (unless (string-empty-p step)
+           (concat step " ")))))))
 
 (defvar dsh-emacs-modeline--queue-map
   (let ((map (make-sparse-keymap)))

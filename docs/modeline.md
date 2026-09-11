@@ -67,6 +67,37 @@ additional redraw; the text refresh also paints the indicator. Quiet visible
 turns keep the normal animation timer. See
 [037](../postmortem/037-streaming-display-cpu.md).
 
+### Step badge
+
+A turn is executed in **steps**, one model call plus the tool executions it
+requested (`step/start` … `step/end`).  Steps are turn-internal boundaries,
+not conversation, so they never appear in the transcript.  With
+`dsh-emacs-modeline-show-step` enabled (**off by default** — the step number
+is diagnostic, so the mode line stays quiet unless asked), the running turn's
+step shows right after the spinner:
+
+```elisp
+(setq dsh-emacs-modeline-show-step t)
+```
+
+```
+ U:***  %b   L40  DSH [██  ] step 2 · 3s  [ deepseek-v4-flash • max • code • CH95% ]
+```
+
+- The badge comes from `dsh-emacs-modeline-note-step`, which the renderer
+  calls for every `step/start` / `step/end`.  It is hidden whenever the option
+  is off or the running animation is hidden: a finished turn's last step is
+  not a status.
+- The elapsed time (`· 3s`, then `· 1m05s`) is measured in local wall-clock
+  time, not from the event timestamps: a reconnect or session reopen replays a
+  still-open turn's `step/start` from history, and the wire timestamp would
+  then claim hours.  It appears once the step passes one second, advances with
+  the animation's redraws (no timer of its own) and freezes at `step/end`.
+- The tooltip carries the full `dsh turn N · step N`, which the badgeless
+  compact form elides.
+- A `step/end` only closes the step it names, so a replayed or out-of-order
+  end cannot replace a newer step.
+
 ### Pending-input queue indicator
 
 While messages are queued or steering, a `[Q2 S1]` indicator (queued /
