@@ -185,6 +185,8 @@
   RPC 请求禁用 URL 库的全局 cookie jar，以免它与显式认证 cookie 混发。
   同步和异步 RPC 的 401 都清除被拒绝的 cookie、报告认证错误；不会弹出
   用户名／密码框。下次请求可用配置的 token 重新交换。
+- HTTPS token 交换独立使用无请求体的 GET，不继承触发它的 RPC 的 POST
+  方法或请求头；首次调用和 cookie 失效后的按需交换都遵守同一规则。
 
 ---
 

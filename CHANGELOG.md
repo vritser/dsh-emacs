@@ -54,6 +54,11 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **HTTPS RPC calls can authenticate on demand**: obtaining or renewing the
+  session cookie during an RPC now uses an independent GET request. The token
+  exchange no longer inherits the RPC's POST method, body, or headers, which
+  could cause a 405 response followed by an authentication failure.
+
 - **HTTPS connections no longer ask for Basic credentials before using the
   launch token**: the initial reachability probe now handles a server's 401
   without opening a username/password prompt, allowing the configured token

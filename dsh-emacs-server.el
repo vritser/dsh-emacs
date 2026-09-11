@@ -451,7 +451,12 @@ Returns the cookie string, else nil."
     (if (equal (url-type (url-generic-parse-url base)) "https")
         ;; HTTPS: TLS requires the url library; disable 303 redirect-follow so
         ;; the response buffer is dsh's 303 (where the Set-Cookie lives).
-        (let ((url-max-redirections 0))
+        ;; Lazy minting can run inside an RPC's POST bindings.
+        (let ((url-request-method "GET")
+              (url-request-data nil)
+              (url-request-extra-headers nil)
+              (url-request-noninteractive t)
+              (url-max-redirections 0))
           (with-current-buffer (url-retrieve-synchronously url t t 5)
             (goto-char (point-min))
             (when (re-search-forward "^Set-Cookie: \\([_A-Za-z0-9-]+=[^;\r\n]+\\)" nil t)

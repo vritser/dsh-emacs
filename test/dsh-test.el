@@ -8934,10 +8934,19 @@ symbol or an ordered list."
 ;; --- 测试 93d2: https base 的 token 交换走 url-retrieve 且解析 303 Set-Cookie ---
 ;; https 需要 TLS，只能经 url 库；实现用 `url-max-redirections 0' 让
 ;; url-retrieve 停在首个 303，以读到 Set-Cookie（而不是跟随到 /）。
+;; RPC 内按需 mint 时，不能继承外层 POST、请求体或认证头。
 (let ((dsh-emacs-base-url "https://auth.example:3080")
+      (url-request-method "POST")
+      (url-request-data "outer-rpc-body")
+      (url-request-extra-headers '(("Cookie" . "outer-cookie")))
+      (url-request-noninteractive nil)
+      (request-context nil)
       (redirs-unbounded nil))
   (cl-letf (((symbol-function 'url-retrieve-synchronously)
              (lambda (&rest _)
+               (setq request-context
+                     (list url-request-method url-request-data
+                           url-request-extra-headers url-request-noninteractive))
                (setq redirs-unbounded (and (boundp 'url-max-redirections)
                                            (= url-max-redirections 0)))
                (with-current-buffer (generate-new-buffer " *dsh-https-mint*")
@@ -8948,6 +8957,12 @@ symbol or an ordered list."
                                                    "TokH")))
       (dsh-test-assert "auth-https-exchange-disables-redirects"
         redirs-unbounded)
+      (dsh-test-assert "auth-https-exchange-isolates-get-from-rpc-context"
+        (equal '("GET" nil nil t) request-context))
+      (dsh-test-assert "auth-https-exchange-preserves-outer-rpc-context"
+        (equal '("POST" "outer-rpc-body" (("Cookie" . "outer-cookie")) nil)
+               (list url-request-method url-request-data
+                     url-request-extra-headers url-request-noninteractive)))
       (dsh-test-assert "auth-https-exchange-parses-303-set-cookie"
         (equal "dsh-auth-ABC=v1.body.sig" cookie)))))
 
