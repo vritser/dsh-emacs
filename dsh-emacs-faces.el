@@ -292,6 +292,20 @@ underlined in the accent color.  RET or mouse-1 opens it (see
   :type 'string
   :group 'dsh-emacs-faces)
 
+(defcustom dsh-emacs-color-deliverable "#bf3989"
+  "Deliverables row title accent (magenta).
+Kept distinct from every hue the row can meet: the row's own green dot, the
+teal link face its clickable paths use, and the palette's other row colors —
+green (todo/success), orange (thinking/pending), red (error), purple (tool
+icons).  A blue accent was tried first and read as a second link color."
+  :type 'string
+  :group 'dsh-emacs-faces)
+
+(defcustom dsh-emacs-color-deliverable-dark "#f778ba"
+  "Deliverables row title accent for dark themes."
+  :type 'string
+  :group 'dsh-emacs-faces)
+
 (defface dsh-emacs-tool-icon-face
   `((((background light)) :foreground ,dsh-emacs-color-tool-icon :weight bold)
     (((background dark))  :foreground ,dsh-emacs-color-tool-icon-dark :weight bold)
@@ -360,6 +374,21 @@ without relying on `:extend'."
     (((background dark))  :foreground ,dsh-emacs-color-tool-success-border-dark)
     (t :inherit success))
   "Todo item checkbox glyph (☑/☐, green)."
+  :group 'dsh-emacs-faces)
+
+(defface dsh-emacs-deliverable-dot-face
+  `((((background light)) :foreground ,dsh-emacs-color-tool-success-border)
+    (((background dark))  :foreground ,dsh-emacs-color-tool-success-border-dark)
+    (t :inherit success))
+  "Deliverables row leading dot (●, green)."
+  :group 'dsh-emacs-faces)
+
+(defface dsh-emacs-deliverable-text-face
+  `((((background light)) :foreground ,dsh-emacs-color-deliverable)
+    (((background dark))  :foreground ,dsh-emacs-color-deliverable-dark)
+    (t :inherit bold))
+  "Deliverables row title / count text (magenta, distinct from the green dot
+and the teal link face its paths use)."
   :group 'dsh-emacs-faces)
 
 ;;; ---------------------------------------------------------------------------

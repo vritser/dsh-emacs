@@ -1145,7 +1145,10 @@ waterfall（§3.3），交付文件来自 `deliverables/presented`（§10.3）�
 `dsh-emacs-show-reasoning` 约束），若该尝试结算时还有 live 流式 body，live body
 被该卡接管而不是重复绘制；`session/end-seed` 渲染成一行 `── seed boundary`
 （fork/resume 的种子带 `inherited: true`，标 `inherited history`；全新会话不追加
-该事件）。`system/message` 仍不渲染。
+该事件）；`deliverables/presented` 在 `turn/end` 之后渲染一行默认折叠的
+`Deliverables · N files`（turnTail 位置；展开后按 path 逐行缩进列出、点击打开，
+无 body 底色；同一路径取最新 description，`write`/`edit` 的改动不并入——它们的
+工具卡已呈现）。`system/message` 仍不渲染。
 
 ---
 

@@ -1,5 +1,8 @@
 # 040 — Consuming the remaining V3 core events
 
+_Status: complete; one known limitation is lifted by 041 — `deliverables/presented`
+(a plugin event) now renders as the turn-tail deliverables row._
+
 ## Background
 
 At the `6615bfb` baseline, `dsh-emacs-render-event` dispatched nine durable

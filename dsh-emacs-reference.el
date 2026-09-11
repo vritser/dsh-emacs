@@ -963,6 +963,15 @@ matcher)."
      str)
     str))
 
+(defun dsh-emacs-reference-file-link (path)
+  "Return PATH propertized as a clickable file reference for display.
+RET / mouse-1 opens the file resolved against the session working directory
+(see `dsh-emacs-reference--open-ref').  A non-string or empty PATH is returned
+unchanged."
+  (if (and (stringp path) (not (string-empty-p path)))
+      (dsh-emacs-reference--propertize-span path 'file path)
+    (or path "")))
+
 (defun dsh-emacs-reference-fontify (string &optional references)
   "Return a copy of STRING with completed @ references made clickable.
 A session mention (`@[label](dsh-session:…)') is rewritten to display just

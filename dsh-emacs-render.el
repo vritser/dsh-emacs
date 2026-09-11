@@ -35,9 +35,11 @@
 (defvar dsh-emacs-markdown--render-window)
 
 ;; Defined in dsh-emacs-reference.el, loaded by dsh-emacs.el.  Turns completed
-;; @ file/session mentions in a user message into clickable colored links.
+;; @ file/session mentions in a user message into clickable colored links, and
+;; propertizes a standalone file path for the deliverables row's link.
 (declare-function dsh-emacs-reference-fontify "dsh-emacs-reference"
                   (string &optional references))
+(declare-function dsh-emacs-reference-file-link "dsh-emacs-reference" (path))
 
 ;; Defined in dsh-emacs-modeline.el, which loads via dsh-emacs.el after this
 ;; module.  Called at runtime from turn/end handling and event dispatch.
@@ -816,6 +818,12 @@ Used for incremental rendering.")
 (defvar-local dsh-emacs--turn-awaiting nil
   "Non-nil while a run submitted by this buffer awaits `turn/end'.")
 
+(defvar-local dsh-emacs-render--turn-deliverables nil
+  "Alist of (TURN . FILES) collected from `deliverables/presented' events.
+FILES is a list of (PATH . DESCRIPTION) cells.  The row is rendered by
+`turn/end' (`dsh-emacs-render--flush-deliverables'), so a turn's deliveries
+sit after its closing message, mirroring dsh web's turnTail placement.")
+
 (defvar-local dsh-emacs--command-blocks (make-hash-table :test 'equal)
   "Map from node id -> (NS BLOCK-ID LABEL ICON) of rendered bash-command rows.
 Serverside slash commands are keyed by their `command/run' commandId;
@@ -846,7 +854,8 @@ miss the entry is cleaned up.")
         dsh-emacs--group-counter 0
         dsh-emacs--current-group-id nil
         dsh-emacs--current-group-count 0
-        dsh-emacs--current-group-completed 0)
+        dsh-emacs--current-group-completed 0
+        dsh-emacs-render--turn-deliverables nil)
   ;; Todo strip folds its snapshot from replayed `tool/call' events, so clear
   ;; the state and the fragment; the replay rebuilds it.
   (when (boundp 'dsh-emacs--todo-namespace)
@@ -2172,6 +2181,13 @@ renders as a visible error row; anything else just clears the running
 spinner."
   (dsh-emacs-render--flush-stream nil t)
   (dsh-emacs-render--close-current-group)
+  ;; A turn's declared deliverables close the transcript after its final
+  ;; message (web's turnTail), so they are rendered here, not at their own
+  ;; event position.
+  (let ((turn (dsh-emacs-render--aget
+               "turn" (dsh-emacs-render--event-data event))))
+    (when (integerp turn)
+      (dsh-emacs-render--flush-deliverables turn)))
   ;; The turn finished: stop the mode-line running spinner.
   (when (fboundp 'dsh-emacs--ml-busy-set)
     (dsh-emacs--ml-busy-set nil))
@@ -2371,6 +2387,118 @@ fresh session never appends one."
      :create-new t
      :insert-before (dsh-emacs-render--input-insert-point)))
   (dsh-emacs-render--event-seq event))
+
+;;; ---------------------------------------------------------------------------
+;;; 渲染器：deliverables/presented（present 工具声明的交付文件）
+;;; ---------------------------------------------------------------------------
+;;; `deliverables/presented' 是 present 工具成功收口后追加的持久事件
+;;; （{turn, callId, files:[{path, description?}]}）。dsh web 把它与本 turn 的
+;;; write/edit 变动合并成 turnTail 的交付卡；这里只接显式声明的那部分——文件
+;;; 改动本身已经由 transcript 里的 write/edit 工具卡呈现。行渲染推迟到本 turn
+;;; 的 `turn/end'，让交付行落在收尾消息之后（web 的 turnTail 位置）。
+
+(defun dsh-emacs-render--deliverables-merge (files addition)
+  "Merge ADDITION into FILES, last description winning per path.
+FILES and ADDITION are (PATH . DESCRIPTION) lists; returns the new list."
+  (dolist (file addition files)
+    (let ((cell (assoc (car file) files)))
+      (if cell
+          (setcdr cell (cdr file))
+        (setq files (append files (list file)))))))
+
+(defun dsh-emacs-render--deliverables-files (data)
+  "Return the (PATH . DESCRIPTION) list of `deliverables/presented' DATA.
+Empty paths are dropped and an empty description becomes nil."
+  (let (files)
+    (dolist (file (append (dsh-emacs-render--aget "files" data) nil))
+      (when (consp file)
+        (let ((path (dsh-emacs-render--aget "path" file))
+              (description (dsh-emacs-render--aget "description" file)))
+          (when (and (stringp path) (not (string-empty-p path)))
+            (push (cons path (and (stringp description)
+                                  (not (string-empty-p description))
+                                  description))
+                  files)))))
+    (nreverse files)))
+
+(defun dsh-emacs-render-deliverables (event)
+  "Collect a `deliverables/presented' EVENT for its turn's closing row.
+The row itself is rendered by `dsh-emacs-render--flush-deliverables' from
+`turn/end' (or at the end of a history batch whose snapshot cut the turn
+before its `turn/end').  Returns the event seq."
+  (let* ((data (dsh-emacs-render--event-data event))
+         (turn (dsh-emacs-render--aget "turn" data))
+         (files (dsh-emacs-render--deliverables-files data)))
+    (when (and (integerp turn) files)
+      (let ((cell (assq turn dsh-emacs-render--turn-deliverables)))
+        (if cell
+            (setcdr cell (dsh-emacs-render--deliverables-merge
+                          (cdr cell) files))
+          (push (cons turn files) dsh-emacs-render--turn-deliverables)))))
+  (dsh-emacs-render--event-seq event))
+
+(defun dsh-emacs-render--deliverable-line (file)
+  "Return one deliverables body line for FILE, a (PATH . DESCRIPTION) cell.
+The path is a clickable file reference (RET / mouse-1 opens it).  A
+description is flattened to one line: one body line means one file, so a
+newline inside a model-written description must not fake a second entry."
+  (concat (dsh-emacs-reference-file-link (car file))
+          (when (cdr file)
+            (propertize
+             (concat " — " (string-trim
+                            (replace-regexp-in-string
+                             "[\n\r]+" " " (cdr file))))
+             'face 'dsh-emacs-muted-face))))
+
+(defun dsh-emacs-render--deliverables-body (files)
+  "Compose the expanded deliverables FILES as indented file lines.
+One `  PATH — DESCRIPTION' line per file.  No panel/background band: the
+paths carry their own clickable link face, and the row stays plain
+transcript text."
+  (mapconcat (lambda (file)
+               (concat "  " (dsh-emacs-render--deliverable-line file)))
+             files
+             "\n"))
+
+(defun dsh-emacs-render--deliverables-row (turn files)
+  "Render TURN's FILES, a (PATH . DESCRIPTION) list, as one green row.
+A green dot and green title lead the collapsed row (the produced/delivered
+marker, `dsh-emacs-deliverable-dot-face' / `-text-face'); expanding shows one
+indented line per file, with no body background."
+  (let ((count (length files)))
+    (dsh-emacs-ui-update-fragment
+     (dsh-emacs-ui-make-fragment
+      :namespace-id (dsh-emacs-render--make-namespace)
+      :block-id (format "deliverables-%s" turn)
+      :label-left (concat
+                   (propertize "● " 'face 'dsh-emacs-deliverable-dot-face)
+                   (propertize
+                    (format "Deliverables · %d file%s" count
+                            (if (= count 1) "" "s"))
+                    'face 'dsh-emacs-deliverable-text-face))
+      :body (dsh-emacs-render--deliverables-body files)
+      :style 'minimal
+      :status 'deliverables
+      :header-face 'dsh-emacs-deliverable-text-face)
+     :create-new t :expanded nil
+     :insert-before (dsh-emacs-render--input-insert-point))))
+
+(defun dsh-emacs-render--flush-deliverables (&optional turn)
+  "Render pending deliverables rows and clear them.
+With TURN, only that turn's row is rendered (its `turn/end' arrived); without
+it, every pending turn is flushed in order — the follow snapshot's
+message-aligned tail can cut a turn before its `turn/end', and the batch end
+is then the tail."
+  (let ((cells (if (integerp turn)
+                   (let ((cell (assq turn dsh-emacs-render--turn-deliverables)))
+                     (and cell (list cell)))
+                 (reverse dsh-emacs-render--turn-deliverables))))
+    (dolist (cell cells)
+      (dsh-emacs-render--deliverables-row (car cell) (cdr cell))))
+  (if (integerp turn)
+      (setq dsh-emacs-render--turn-deliverables
+            (assq-delete-all turn dsh-emacs-render--turn-deliverables))
+    (setq dsh-emacs-render--turn-deliverables nil)))
 
 (defun dsh-emacs-render-command-label (name &optional _args)
   "Return the display string for slash command NAME.
@@ -2774,6 +2902,8 @@ source filter, so without this check the same tool card is painted twice."
       ("assistant/attempt"
        (setq seq (dsh-emacs-render-assistant-attempt event)))
       ("session/end-seed" (setq seq (dsh-emacs-render-seed-end event)))
+      ("deliverables/presented"
+       (setq seq (dsh-emacs-render-deliverables event)))
       (_ nil))
     (when (and (integerp seq)
                (boundp 'dsh-emacs--anchor-seq)
@@ -2915,6 +3045,10 @@ interrupt the batch and keep the UI responsive."
           (cl-incf counter)
           (when (and (>= counter 5) (sit-for 0))
             (setq counter 0)))))
+    ;; The message-aligned tail can end mid-turn, with a collected
+    ;; `deliverables/presented' whose `turn/end' is outside the window; the
+    ;; batch end is then the turn's tail, so nothing stays buffered.
+    (dsh-emacs-render--flush-deliverables)
     (when (> rendered 0)
       (dsh-emacs-render--follow-stream)
       (dsh-emacs-render--trim-buffer))

@@ -2523,6 +2523,133 @@ symbol or an ordered list."
       (string-match-p "seed boundary" text)
       (not (string-match-p "inherited history" text)))))
 
+;; deliverables/presented: collected, rendered once at the turn's tail.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (dsh-emacs-render-event
+   (json-read-from-string
+    "{\"type\":\"assistant/message\",\"seq\":1,\"data\":{\"turn\":1,\"step\":1,\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"closing reply\"}]}}}"))
+  (dsh-emacs-render-event
+   (json-read-from-string
+    "{\"type\":\"deliverables/presented\",\"seq\":2,\"data\":{\"turn\":1,\"callId\":\"c1\",\"files\":[{\"path\":\"report.md\",\"description\":\"Final report\"},{\"path\":\"notes.txt\"}]}}"))
+  (dsh-test-assert "deliverables-deferred-until-turn-end"
+    (not (string-match-p "Deliverables"
+                         (buffer-substring-no-properties (point-min) (point-max)))))
+  (dsh-emacs-render-event
+   (json-read-from-string
+    "{\"type\":\"turn/end\",\"seq\":3,\"data\":{\"turn\":1,\"reason\":{\"kind\":\"completed\"}}}"))
+  (let* ((full (buffer-string))
+         (text (buffer-substring-no-properties (point-min) (point-max)))
+         (reply (string-match "closing reply" full))
+         (row (string-match "Deliverables" full)))
+    (dsh-test-assert "deliverables-row-at-turn-tail-collapsed"
+      (string-match-p "Deliverables · 2 files" text)
+      (not (string-match-p "report.md" text))
+      (and reply row (< reply row)))
+    (dsh-test-assert "deliverables-row-leads-with-green-dot"
+      (let ((dot (string-match "●" full)))
+        (and dot
+             (memq 'dsh-emacs-deliverable-dot-face
+                   (ensure-list (get-text-property dot 'face full))))))
+    (dsh-test-assert "deliverables-title-uses-own-face"
+      (let ((title (string-match "Deliverables" full)))
+        (and title
+             (memq 'dsh-emacs-deliverable-text-face
+                   (ensure-list (get-text-property title 'face full))))))
+    ;; Expanding shows the file lines in the bash-card panel surface.
+    (goto-char (point-min))
+    (dsh-emacs-ui-toggle-fragment)
+    (setq full (buffer-string)
+          text (buffer-substring-no-properties (point-min) (point-max)))
+    (let ((path (string-match (regexp-quote "report.md") full)))
+      (dsh-test-assert "deliverables-expanded-shows-files"
+        (string-match-p "Final report" text)
+        (string-match-p "notes.txt" text))
+      (dsh-test-assert "deliverables-path-is-clickable"
+        (equal '(file . "report.md")
+               (get-text-property path 'dsh-emacs-reference-ref full))
+        (memq 'dsh-emacs-reference-face
+              (ensure-list (get-text-property path 'face full))))
+      (dsh-test-assert "deliverables-expanded-body-has-no-panel-face"
+        (not (memq 'dsh-emacs-tool-bash-panel-face
+                   (ensure-list (get-text-property path 'face full))))))))
+
+;; Repeated declaration of one path keeps one line, latest description.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (dolist (json '("{\"type\":\"deliverables/presented\",\"seq\":1,\"data\":{\"turn\":4,\"callId\":\"a\",\"files\":[{\"path\":\"out.md\",\"description\":\"old\"}]}}"
+                  "{\"type\":\"deliverables/presented\",\"seq\":2,\"data\":{\"turn\":4,\"callId\":\"b\",\"files\":[{\"path\":\"out.md\",\"description\":\"new\"}]}}"
+                  "{\"type\":\"turn/end\",\"seq\":3,\"data\":{\"turn\":4,\"reason\":{\"kind\":\"completed\"}}}"))
+    (dsh-emacs-render-event (json-read-from-string json)))
+  (goto-char (point-min))
+  (dsh-emacs-ui-toggle-fragment)
+  (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+    (dsh-test-assert "deliverables-merge-last-wins"
+      (string-match-p "Deliverables · 1 file" text)
+      (string-match-p "new" text)
+      (not (string-match-p "old" text))
+      (= 2 (length (split-string text "out.md" nil))))))
+
+;; A snapshot tail cut before turn/end still renders the row (batch end),
+;; and the flush clears the state so a later turn/end cannot render twice.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (dsh-emacs-render-history-events
+   (list (list (cons "event"
+                     (json-read-from-string
+                      "{\"type\":\"deliverables/presented\",\"seq\":1,\"data\":{\"turn\":7,\"callId\":\"c\",\"files\":[{\"path\":\"out.txt\"}]}}"))))
+   nil)
+  (dsh-test-assert "deliverables-flushed-at-batch-end"
+    (string-match-p "Deliverables · 1 file"
+                    (buffer-substring-no-properties (point-min) (point-max))))
+  (goto-char (point-min))
+  (dsh-emacs-ui-toggle-fragment)
+  (dsh-test-assert "deliverables-batch-row-expands"
+    (string-match-p "out.txt"
+                    (buffer-substring-no-properties (point-min) (point-max))))
+  (dsh-emacs-render-event
+   (json-read-from-string
+    "{\"type\":\"turn/end\",\"seq\":2,\"data\":{\"turn\":7,\"reason\":{\"kind\":\"completed\"}}}"))
+  (dsh-test-assert "deliverables-flush-does-not-double-render"
+    (null dsh-emacs-render--turn-deliverables)
+    (= 1 (cl-count ?● (buffer-substring-no-properties (point-min) (point-max))))))
+
+;; A newline inside a model-written description cannot fake a second file.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (dolist (json '("{\"type\":\"deliverables/presented\",\"seq\":1,\"data\":{\"turn\":1,\"callId\":\"c\",\"files\":[{\"path\":\"a.md\",\"description\":\"one\\ntwo\"}]}}"
+                  "{\"type\":\"turn/end\",\"seq\":2,\"data\":{\"turn\":1,\"reason\":{\"kind\":\"completed\"}}}"))
+    (dsh-emacs-render-event (json-read-from-string json)))
+  (goto-char (point-min))
+  (dsh-emacs-ui-toggle-fragment)
+  (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+    (dsh-test-assert "deliverable-description-flattened"
+      (string-match-p "a.md — one two" text))))
+
+;; The reference module owns the clickable file-path presentation.
+(dsh-test-assert "reference-file-link-propertizes"
+  (let ((span (dsh-emacs-reference-file-link "a.md")))
+    (and (equal '(file . "a.md")
+                (get-text-property 0 'dsh-emacs-reference-ref span))
+         (eq 'dsh-emacs-reference-face (get-text-property 0 'face span))))
+  (equal "" (dsh-emacs-reference-file-link "")))
+
+;; The row title carries its own hue: it must not blend into the green dot,
+;; and must not read as a second link color next to the clickable paths.
+(dsh-test-assert "deliverables-title-color-differs-from-dot"
+  (let ((title (face-foreground 'dsh-emacs-deliverable-text-face nil t))
+        (dot (face-foreground 'dsh-emacs-deliverable-dot-face nil t)))
+    (and title dot (not (equal title dot)))))
+
+(dsh-test-assert "deliverables-title-color-differs-from-link"
+  (let ((title (face-foreground 'dsh-emacs-deliverable-text-face nil t))
+        (link (face-foreground 'dsh-emacs-reference-face nil t)))
+    (and title link (not (equal title link)))))
+
 ;; --- 测试 22: 丢失输入 marker 后消息仍插入到输入框上方 ---
 (with-temp-buffer
   (dsh-emacs-mode)

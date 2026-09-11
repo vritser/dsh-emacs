@@ -36,7 +36,21 @@ minor) and stay undated until the release is cut.
   starts a fresh body instead of appending to the failed one.
   `session/end-seed` marks the restore boundary with one muted
   `── seed boundary` row (`inherited history` for a fork/resume seed); a fresh
-  session never appends one.
+  session never appends one (rationale: postmortem/040).
+
+- **Declared deliverables close the turn**: a successful `present` call
+  appends the durable `deliverables/presented` event, which the client used to
+  drop; it now renders one collapsed `Deliverables · N files` row led by a
+  green `●` with a magenta title (`dsh-emacs-deliverable-dot-face` /
+  `dsh-emacs-deliverable-text-face`, magenta via
+  `dsh-emacs-color-deliverable`), after the turn's closing message (dsh
+  web's turnTail position).  Expanding the row lists one indented line per
+  declared path with its optional description; paths are clickable references
+  — RET or mouse-1 opens the file resolved against the session working
+  directory.  Repeated declarations
+  of one path collapse to one line with the latest description.  A turn's
+  `write`/`edit` changes are not folded in: their tool cards already show
+  them, matching dsh web's produced-files row (rationale: postmortem/041).
 
 ### Fixed
 
