@@ -18,13 +18,20 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Question tooltip updates wait for a brief pause**: the new
+  `dsh-emacs-question-tip-delay` defaults to 0.15 seconds, so rapid navigation
+  displays only the final option's explanation. Set it to 0 for immediate
+  updates; echo-area and terminal help stay immediate
+  (rationale: postmortem/042).
+
 - **Question prompts explain themselves while you answer**: digit keys toggle
   visible `[ ]` / `[x]` marks on multiple-choice `ask` prompts, `SPC` toggles
   the highlighted option, `RET` submits the marked set, and `t` still accepts
   a custom answer alongside it. A small tooltip follows the highlighted
   option at its upper right — including inside a posframe and after
   scrolling, and staying above the item on macOS — showing only the question
-  detail and that option's description. Set
+  detail and that option's description. Toggling keeps the highlight on the
+  option you just marked. Set
   `dsh-emacs-question-help-display` to `echo-area` for bottom-of-frame help,
   keep the default `tooltip`, or choose `nil` to hide explanations;
   echo-area help stays out of the message log, is trimmed to what the echo
@@ -67,6 +74,15 @@ minor) and stay undated until the release is cut.
   them, matching dsh web's produced-files row (rationale: postmortem/041).
 
 ### Fixed
+
+- **Vertico question menus stay open while toggling**: SPC and digit keys
+  update checkmarks in the existing minibuffer, keeping the highlighted
+  option on its row instead of hiding the menu and reopening it with the
+  first row selected (rationale: postmortem/042).
+
+- **Question menus no longer freeze while opening**: tooltip positioning
+  stops when Emacs repeats the last displayed row, allowing completion to
+  finish rendering (rationale: postmortem/042).
 
 - **HTTPS RPC calls can authenticate on demand**: obtaining or renewing the
   session cookie during an RPC now uses an independent GET request. The token

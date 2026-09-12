@@ -11,6 +11,8 @@
 ;; 加载所有模块
 (require 'dsh-emacs)
 
+(defvar vertico-mode nil "Stub: vertico global minor mode flag (test-only).")
+
 (defvar dsh-test-results '())
 
 (defun dsh-emacs-test--session-items (items)
@@ -7461,6 +7463,49 @@ symbol or an ordered list."
              (reverse menus))
       (null reads))))
 
+;; 切换后把刚操作的选项作为默认值交回去；Vertico setup 另行锁定高亮，
+;; 避免它将默认项移动到第一行。
+(let ((reads '("2. [ ] B" "Submit answer"))
+      (defaults nil))
+  (cl-letf (((symbol-function 'completing-read)
+             (lambda (_prompt _candidates &rest args)
+               ;; args holds the optional arguments: predicate, require-match,
+               ;; initial, history, default.
+               (push (nth 4 args) defaults)
+               (or (pop reads) (error "Unexpected chooser read")))))
+    (dsh-emacs--question-choice
+     '((id . "q2") (question . "Pick?") (multiSelect . t)
+       (options . (((label . "A")) ((label . "B"))))))
+    (dsh-test-assert "question-choice-multi-remembers-the-toggled-option"
+      (equal '("1. [ ] A" "2. [x] B") (reverse defaults)))
+    (dsh-test-assert "question-choice-multi-marks-the-remembered-option"
+      (equal "2. [x] B" (cadr (reverse defaults))))))
+
+;; Prime Vertico's candidate lock before its first completion computation.
+;; Keep the numbered roster stable while restoring checked or unchecked rows.
+(dolist (candidate '("2. [x] B" "2. [ ] B" "1. [ ] A"))
+  (with-temp-buffer
+    (let* ((vertico-mode t)
+           (minibuffer-completion-table
+            (list "1. [ ] A" (if (string-prefix-p "2." candidate)
+                                  candidate "2. [ ] B") "Type answer…"))
+           (minibuffer-default candidate)
+           (index (cl-position candidate minibuffer-completion-table :test #'equal)))
+      ;; These bindings simulate Vertico's freshly installed local state.
+      (set (make-local-variable 'vertico--input) t)
+      (set (make-local-variable 'vertico--candidates) nil)
+      (set (make-local-variable 'vertico--index) -1)
+      (set (make-local-variable 'vertico--lock-candidate) nil)
+      (use-local-map (make-sparse-keymap))
+      (cl-letf (((symbol-function 'dsh-emacs--question-tip-setup) #'ignore))
+        (dsh-emacs--question-setup-hook))
+      (dsh-test-assert (concat "question-vertico-restores-row-" candidate)
+        (equal minibuffer-completion-table (symbol-value 'vertico--candidates))
+        (equal index (symbol-value 'vertico--index))
+        (symbol-value 'vertico--lock-candidate)
+        (equal "1. [ ] A" minibuffer-default)
+        (equal index (dsh-emacs--question-highlight-index))))))
+
 (let ((reads '("1. [ ] A" "Type answer…")))
   (cl-letf (((symbol-function 'completing-read)
              (lambda (&rest _)
@@ -7677,6 +7722,55 @@ symbol or an ordered list."
         (eq #'next-line (lookup-key original-map (kbd "RET")))
         (null (lookup-key original-map (kbd "SPC")))))))
 
+;; Vertico 多选直接更新当前候选，不退出 minibuffer 再重开。
+(with-temp-buffer
+  (let ((vertico-mode t)
+        (dsh-emacs--question-pick-labels '("A" "B" "C"))
+        (dsh-emacs--question-multi t)
+        (dsh-emacs--question-selected nil))
+    (setq-local minibuffer-completion-table
+                '("1. [ ] A" "2. [ ] B" "3. [ ] C" "Type answer…")
+                vertico--candidates minibuffer-completion-table
+                vertico--input '("" . 0)
+                vertico--index 1
+                minibuffer-default (car minibuffer-completion-table))
+    (use-local-map (make-sparse-keymap))
+    (dsh-test-assert "question-vertico-space-uses-in-place-pick-command"
+      (eq #'dsh-emacs--question-pick-command
+          (lookup-key (dsh-emacs--question-chooser-keymap) (kbd "SPC"))))
+    (dolist (case '((?\s ("B") 1 ("1. [ ] A" "2. [x] B" "3. [ ] C" "Type answer…"))
+                    (?\s nil 1 ("1. [ ] A" "2. [ ] B" "3. [ ] C" "Type answer…"))
+                    (?3 ("C") 2 ("1. [ ] A" "2. [ ] B" "3. [x] C" "Type answer…"))
+                    (?1 ("A" "C") 0 ("1. [x] A" "2. [ ] B" "3. [x] C" "Type answer…"))))
+      (pcase-let ((`(,last-command-event ,selected ,index ,candidates) case))
+        (dsh-test-assert (format "question-vertico-toggle-stays-open-%S" case)
+          (eq :still-choosing
+              (catch 'dsh-emacs--question-command
+                (dsh-emacs--question-pick-command)
+                :still-choosing))
+          (equal selected dsh-emacs--question-selected)
+          (= index vertico--index)
+          (equal candidates minibuffer-completion-table)
+          (equal candidates vertico--candidates)
+          (equal (car candidates) minibuffer-default))))
+    (setq vertico--index 3)
+    (let ((last-command-event ?\s))
+      (dsh-test-assert "question-vertico-space-on-type-action-exits-to-free-input"
+        (equal "Type answer…"
+               (catch 'dsh-emacs--question-command
+                 (dsh-emacs--question-pick-command)))))
+    ;; A globally enabled mode is not enough: this reader must use Vertico.
+    (setq vertico--input nil)
+    (define-key (current-local-map) (kbd "RET") #'next-line)
+    (let ((last-command-event ?2))
+      (dsh-test-assert "question-inactive-vertico-keeps-frontend-acceptance"
+        (eq #'next-line
+            (lookup-key (dsh-emacs--question-chooser-keymap) (kbd "SPC")))
+        (equal "2. [ ] B"
+               (catch 'dsh-emacs--question-command
+                 (dsh-emacs--question-pick-command)))
+        (equal '("A" "C") dsh-emacs--question-selected)))))
+
 ;; 数字键直接返回编号候选。
 (let ((last-command-event ?2)
       (dsh-emacs--question-pick-labels '("Yes" "No" "Maybe")))
@@ -7756,7 +7850,6 @@ symbol or an ordered list."
 ;; prompt（裸 minibuffer 也能看到编号选项按数字选）。-Q 里这些 mode 变量
 ;; 不存在，defvar 桩让 let 变成动态绑定（与真实环境中各框架的 defvar
 ;; 全局 minor mode 一致），bound-and-true-p 才看得到。
-(defvar vertico-mode nil "Stub: vertico global minor mode flag (test-only).")
 (defvar icomplete-mode nil "Stub: icomplete minor mode flag (test-only).")
 (let ((prompt nil))
   (cl-letf (((symbol-function 'completing-read)
@@ -7917,6 +8010,8 @@ symbol or an ordered list."
       (selected-row 1)
       (first-y 0)
       (row-height 20)
+      (repeat-first-row nil)
+      (row-reads 0)
       (selected (propertize "B" 'face '(vertico-current default))))
   (cl-letf (((symbol-function 'redisplay) #'ignore)
             ((symbol-function 'get-buffer-window-list)
@@ -7928,8 +8023,12 @@ symbol or an ordered list."
             ((symbol-function 'window-body-width) (lambda (&rest _) 30))
             ((symbol-function 'window-line-height)
              (lambda (row _window)
-               (when (< row 4)
-                 (list row-height row (if (= row 0) first-y (* row 20)) 0))))
+               (cl-incf row-reads)
+               (when (> row 10) (error "Question row scan did not terminate"))
+               (if repeat-first-row
+                   (list row-height 0 first-y 0)
+                 (when (< row 4)
+                   (list row-height row (if (= row 0) first-y (* row 20)) 0)))))
             ((symbol-function 'posn-at-x-y)
              (lambda (x y window)
                (when (< y 0) (error "Negative glyph coordinate"))
@@ -7958,7 +8057,103 @@ symbol or an ordered list."
     (setq row-height 20)
     (put-text-property 0 1 'face 'default selected)
     (dsh-test-assert "question-tip-does-not-pin-to-input-before-candidates-render"
-      (null (dsh-emacs--question-tip-position)))))
+      (null (dsh-emacs--question-tip-position)))
+    ;; Native Emacs repeats the last displayed row for out-of-range requests.
+    ;; At setup there is only the prompt, before Vertico exhibits candidates.
+    (setq repeat-first-row t row-reads 0)
+    (dsh-test-assert "question-tip-stops-when-native-window-repeats-last-row"
+      (eq 'finished
+          (condition-case err
+              (and (null (dsh-emacs--question-tip-position)) 'finished)
+            (error err)))
+      (= row-reads 4))))
+
+;; Graphical tooltip updates wait for idle; pending work belongs to the reader.
+(condition-case err
+    (with-temp-buffer
+      (let* ((buffer (current-buffer))
+             (dsh-emacs-question-tip-delay 0.2)
+             (dsh-emacs--question-current
+              (dsh-protocol-question--from-alist
+               '((id . "delay") (detail . "Details")
+                 (options . [((label . "A") (description . "Alpha"))
+                             ((label . "B") (description . "Beta"))]))))
+             (dsh-emacs--question-options
+              (dsh-protocol-question-options dsh-emacs--question-current))
+             (minibuffer-completion-table '("A" "B"))
+             (index 0) (focused t) timers cancelled shown)
+        (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+                  ((symbol-function 'frame-focus-state) (lambda (_) focused))
+                  ((symbol-function 'active-minibuffer-window) #'selected-window)
+                  ((symbol-function 'window-buffer) (lambda (&rest _) buffer))
+                  ((symbol-function 'dsh-emacs--question-highlight-index)
+                   (lambda () index))
+                  ((symbol-function 'dsh-emacs--question-tip-position)
+                   (lambda () (list (selected-window) 20 5)))
+                  ((symbol-function 'frame-edges) (lambda (&rest _) '(0 0 800 600)))
+                  ((symbol-function 'x-show-tip)
+                   (lambda (text &rest _) (push (substring-no-properties text) shown)))
+                  ((symbol-function 'tooltip-hide) #'ignore)
+                  ((symbol-function 'run-with-idle-timer)
+                   (lambda (delay repeat function &rest args)
+                     (let ((timer (list function args delay repeat)))
+                       (push timer timers) timer)))
+                  ((symbol-function 'cancel-timer)
+                   (lambda (timer) (push timer cancelled))))
+          (unwind-protect
+              (progn
+                (dsh-emacs--question-tip-setup)
+                (dsh-test-assert "question-tip-setup-waits-for-idle"
+                  (null shown)
+                  (and (= (length timers) 1)
+                       (= 0.2 (nth 2 (car timers)))
+                       (null (nth 3 (car timers)))))
+                (setq index 1)
+                (dsh-emacs--question-tip-schedule)
+                (dsh-test-assert "question-tip-rapid-selection-replaces-pending-update"
+                  (null shown) (= (length timers) 2)
+                  (eq (cadr timers) (car cancelled)))
+                ;; Timer execution cannot rely on the caller's dynamic bindings.
+                (let ((dsh-emacs--question-current nil)
+                      (dsh-emacs--question-options nil))
+                  (apply (caar timers) (cadar timers)))
+                (dsh-test-assert "question-tip-idle-shows-only-latest-option"
+                  (equal '("Details\n\nBeta") shown)
+                  (null dsh-emacs--question-tip-timer))
+                (dsh-emacs--question-tip-schedule)
+                (setq focused nil)
+                (dsh-emacs--question-tip-focus-change)
+                (dsh-test-assert "question-tip-focus-loss-cancels-pending-show"
+                  (eq (car timers) (car cancelled))
+                  (null dsh-emacs--question-tip-timer)
+                  (not dsh-emacs--question-tip-visible))
+                (setq focused t)
+                (let ((dsh-emacs-question-tip-delay 0))
+                  (dsh-emacs--question-tip-schedule))
+                (dsh-test-assert "question-tip-zero-delay-shows-immediately"
+                  (= 2 (length shown)) (= 3 (length timers)))
+                (dsh-emacs--question-tip-schedule)
+                (dsh-emacs--question-tip-teardown)
+                (apply (caar timers) (cadar timers))
+                (dsh-test-assert "question-tip-exit-cancels-and-rejects-late-show"
+                  (eq (car timers) (car cancelled))
+                  (null dsh-emacs--question-tip-timer)
+                  (= 2 (length shown))))
+            (dsh-emacs--question-tip-teardown)))))
+  (error (dsh-test-fail "question-tip-delayed-lifecycle" (format "%S" err))))
+
+(dolist (case '((echo-area t) (tooltip nil) (nil t)))
+  (with-temp-buffer
+    (pcase-let ((`(,dsh-emacs-question-help-display ,graphical) case)
+                (rendered 0))
+      (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) graphical))
+                ((symbol-function 'dsh-emacs--question-tip-update)
+                 (lambda () (cl-incf rendered)))
+                ((symbol-function 'run-with-idle-timer)
+                 (lambda (&rest _) (error "This surface must update immediately"))))
+        (dsh-emacs--question-tip-schedule)
+        (dsh-test-assert (format "question-help-immediate-surface-%S" case)
+          (= rendered 1) (null dsh-emacs--question-tip-timer))))))
 
 ;; NS reports child edges relative to its parent and treats bottom as top.
 ;; A rendered tip must end above the row after its measured height changes.
@@ -8048,7 +8243,7 @@ symbol or an ordered list."
         (dsh-emacs--question-tip-setup)
         (dsh-test-assert "question-tip-starts-empty-with-local-hooks"
                          (null shown)
-                         (memq #'dsh-emacs--question-tip-update post-command-hook)
+                         (memq #'dsh-emacs--question-tip-schedule post-command-hook)
                          (memq #'dsh-emacs--question-tip-teardown minibuffer-exit-hook)
                          (functionp after-focus-change-function))
         (setq index 1)

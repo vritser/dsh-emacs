@@ -148,6 +148,10 @@ it with any marked options; an empty answer returns to the option menu and
 preserves the marks. Questions without options read free text directly and
 skip on empty input.
 
+In Vertico, SPC and digit toggles update the current menu in place, keeping
+the selected row and avoiding a minibuffer hide/reopen flash. Other completion
+frontends reread the menu with the toggled option as the default.
+
 Without a list-rendering completion UI (vertico, icomplete, fido, ivy), the
 numbered options and selection marks appear in the prompt itself. Digit
 shortcuts cover the first ten options; completion navigation and `SPC` let
@@ -187,7 +191,9 @@ the row. It follows the rendered row,
 including in a Vertico posframe and after scrolling, and shows only question
 detail and option description text, without numbering or titles. Vertico and
 Icomplete selection are supported. The `Type answer…` action and free-text
-input show only the question detail. With other completion frontends, documentation starts at the
+input show only the question detail. In Vertico, toggling a checkmark keeps
+the option on its original row, with its explanation following the highlight.
+With other completion frontends, documentation starts at the
 first option, anchored near the input. No window is split and focus stays in
 the minibuffer. While a supported frontend has no rendered highlight, the
 tip stays hidden instead of appearing at an unrelated input position.
@@ -200,12 +206,22 @@ colors independently of ordinary tooltips. System tooltip styling is disabled
 only for these tips; global tooltip settings remain unchanged.
 
 The tip is limited to 48 columns and 24 lines. Longer content can be clipped.
-It refreshes after each command and observes `tooltip-hide-delay`. A tip
-only appears while the input's top-level Emacs frame has confirmed focus;
+Graphical tips wait for `dsh-emacs-question-tip-delay` seconds of idle time
+(default `0.15`); rapid selections replace the pending update and show only
+the final option's explanation. Set it to `0` for immediate updates, or use
+a longer delay such as 200ms:
+
+```elisp
+(setq dsh-emacs-question-tip-delay 0.2)
+```
+
+Echo-area and terminal help remain immediate. Tips observe `tooltip-hide-delay`.
+A tip only appears while the input's top-level Emacs frame has confirmed focus;
 losing focus immediately hides an existing tip. Completion child frames do
 not need their own focus. After returning to Emacs, the next interaction
 refreshes the tip. Submission, skip, cancellation and buffer closing remove
-the tip and its temporary focus observer.
+the tip, any pending update, and its temporary focus observer. Focus loss
+also cancels a pending update.
 In `tooltip` mode, terminal frames show compact help in the minibuffer
 instead. Eldoc display settings are not involved.
 

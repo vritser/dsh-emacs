@@ -227,9 +227,15 @@ fixtures can stay on either side of the boundary. Other event-stream payloads
 stay raw for now (their shapes vary per event type).
 
 The question chooser in `dsh-emacs.el` owns completion-based selection and
-minibuffer-local help hooks. Multiple selection repeats the stock read with
-persistent checkmarks; digit shortcuts return through a scoped catch, while
-SPC uses the completion frontend's acceptance action.
+minibuffer-local help hooks. In an active Vertico multi-select menu, SPC and
+digits toggle selection and update the completion table and Vertico's cached
+roster together. Its ordinary post-command hook redraws the checkmarks; the
+minibuffer and posframe stay open. Candidate count and input are unchanged.
+Single selection, submit, skip and custom input leave through the reader's
+existing exit paths. Other frontends accept candidates and repeat the read,
+remembering the toggled label as the next default. Vertico setup still seeds
+its candidate lock when a read starts, keeping that option on its roster row
+without promoting the default to the top of the list.
 `dsh-emacs-question-help-display` selects tooltip, echo area, or no
 explanation. Both surfaces show only the question detail and the selected
 option's description. Echo-area output uses `message` with logging disabled
@@ -240,10 +246,20 @@ minibuffer remembers its last explanation, so cleanup clears only a matching
 current message and preserves unrelated command output. Vertico's roster
 index and Icomplete's rotated candidate cache identify the option.
 
+Graphical tooltip updates use a minibuffer-owned, one-shot idle timer;
+`dsh-emacs-question-tip-delay` defaults to 0.15 seconds. Each command replaces
+the pending update. The timer captures question context and verifies that
+its buffer still owns the active question minibuffer before rendering.
+Zero delay, echo-area and terminal help update synchronously. Hiding help
+also cancels pending work, including on focus loss and reader teardown.
+
 For the tooltip, the reader redraws, then locates its highlighted glyph in
 the visible buffer windows (including a posframe), so placement follows the
 rendered row through scrolling; the rightmost non-whitespace glyph anchors
-the tip to the option's upper right. NS child-frame edges are relative to
+the tip to the option's upper right. The row scan stops when the returned
+vertical row number differs from the requested one: native Emacs can repeat
+the final displayed row for out-of-range requests, including before completion
+first renders. NS child-frame edges are relative to
 their parent, so the reader adds each parent's content origin, and NS treats
 the tooltip's `bottom` parameter as `top`, so it uses the rendered tooltip
 frame's height to place its bottom above the row. Local frame parameters and

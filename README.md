@@ -97,14 +97,18 @@ Agent `ask` prompts show a numbered menu. For single-choice questions, press
 `1`–`9` (`0` for option 10) to answer, or use normal completion to choose an
 option. For multiple choices, the same digits toggle `[ ]` / `[x]` marks;
 `SPC` toggles the highlighted option and `RET` submits your selection.
+In Vertico, checkmarks update in place while the menu stays open.
 Press `t` to type an answer, `s` to skip, or `C-g` to abandon the group.
 
 A small tooltip follows the highlighted option at its upper right, including
 inside a Vertico posframe and after scrolling. Theme colors, a fine border
 and padding keep the explanation readable. It shows only the question detail and option
 description, without numbers or titles, and keeps focus in the chooser.
-It hides when its Emacs frame loses focus or answering ends. Terminal Emacs
-shows a compact minibuffer message instead. To show explanations in the echo
+It hides when its Emacs frame loses focus or answering ends.
+Graphical tips wait for 150ms of idle time to reduce
+flashing during rapid selection. Customize `dsh-emacs-question-tip-delay`
+(seconds), or set it to `0` for immediate updates. Terminal Emacs
+shows a compact minibuffer message immediately. To show explanations in the echo
 area, as with signature help, configure:
 
 ```elisp
