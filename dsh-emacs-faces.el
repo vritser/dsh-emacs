@@ -453,6 +453,11 @@ Muted like dsh web's `label-tertiary'."
   "Tool card border (inherits from border-face, overridden by tool state faces)."
   :group 'dsh-emacs-faces)
 
+(defface dsh-emacs-question-tip-face
+  '((t :inherit default))
+  "Question explanation text and background, following the current theme."
+  :group 'dsh-emacs-faces)
+
 ;;; ---------------------------------------------------------------------------
 ;;;  元信息 / 分隔线 / 输入
 ;;; ---------------------------------------------------------------------------

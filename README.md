@@ -91,6 +91,32 @@ Hover over the preview for its full text, or use `C-c C-q` to manage pending
 messages. Goal shortcuts and inline controls are described in
 [Goal actions](docs/customization.md#goal-actions).
 
+### Answering questions
+
+Agent `ask` prompts show a numbered menu. For single-choice questions, press
+`1`–`9` (`0` for option 10) to answer, or use normal completion to choose an
+option. For multiple choices, the same digits toggle `[ ]` / `[x]` marks;
+`SPC` toggles the highlighted option and `RET` submits your selection.
+Press `t` to type an answer, `s` to skip, or `C-g` to abandon the group.
+
+A small tooltip follows the highlighted option at its upper right, including
+inside a Vertico posframe and after scrolling. Theme colors, a fine border
+and padding keep the explanation readable. It shows only the question detail and option
+description, without numbers or titles, and keeps focus in the chooser.
+It hides when its Emacs frame loses focus or answering ends. Terminal Emacs
+shows a compact minibuffer message instead. To show explanations in the echo
+area, as with signature help, configure:
+
+```elisp
+(setq dsh-emacs-question-help-display 'echo-area)
+```
+
+Use `tooltip` (the default) for floating tips, or `nil` to hide explanations.
+The echo area shares space with a normal minibuffer; with a completion
+posframe, the menu and explanation remain separate.
+Try `M-x dsh-emacs-question-preview` locally, without contacting a server.
+See [Question prompts](docs/customization.md#ask-question-prompts) for details.
+
 ### Workspaces
 
 Workspaces group sessions by project/directory.

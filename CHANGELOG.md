@@ -18,6 +18,20 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Question prompts explain themselves while you answer**: digit keys toggle
+  visible `[ ]` / `[x]` marks on multiple-choice `ask` prompts, `SPC` toggles
+  the highlighted option, `RET` submits the marked set, and `t` still accepts
+  a custom answer alongside it. A small tooltip follows the highlighted
+  option at its upper right — including inside a posframe and after
+  scrolling, and staying above the item on macOS — showing only the question
+  detail and that option's description. Set
+  `dsh-emacs-question-help-display` to `echo-area` for bottom-of-frame help,
+  keep the default `tooltip`, or choose `nil` to hide explanations;
+  echo-area help stays out of the message log, is trimmed to what the echo
+  area can show with a trailing `…` instead of being cut off silently, and
+  cleanup preserves unrelated messages. `M-x dsh-emacs-question-preview`
+  demonstrates the reader locally (rationale: postmortem/042).
+
 - **The remaining V3 core events reach the client**: `step/start` /
   `step/end`, `assistant/attempt`, and `session/end-seed` — dropped silently
   until now — are consumed (rationale: postmortem/040); `system/message` stays

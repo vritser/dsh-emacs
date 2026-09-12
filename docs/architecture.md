@@ -215,13 +215,48 @@ when the server protocol changes you sync exactly one file. Covered payloads:
   description, broken)
 - `goal` session projection (§9) → `dsh-protocol-goal` (id, revision,
   objective, phase, blocked-reason, max-goal-rounds, rounds-started)
+- `user-questions/request` items → `dsh-protocol-question` (id, text, header,
+  detail, multi-select, options) → `dsh-protocol-question-option` (label,
+  description)
 
 Conversion is one-way and lossless: `session/modelCatalog` responses become a
 `dsh-protocol-model-directory` before the picker reads them; the cached
 session/workspace lists are stored as structs too. Helper `dsh-protocol--struct`
 accepts either a wire alist or an already-converted struct, so callers and
-fixtures can stay on either side of the boundary. Event-stream payloads stay raw
-for now (their shapes vary per event type).
+fixtures can stay on either side of the boundary. Other event-stream payloads
+stay raw for now (their shapes vary per event type).
+
+The question chooser in `dsh-emacs.el` owns completion-based selection and
+minibuffer-local help hooks. Multiple selection repeats the stock read with
+persistent checkmarks; digit shortcuts return through a scoped catch, while
+SPC uses the completion frontend's acceptance action.
+`dsh-emacs-question-help-display` selects tooltip, echo area, or no
+explanation. Both surfaces show only the question detail and the selected
+option's description. Echo-area output uses `message` with logging disabled
+and never inspects completion geometry; because Emacs caps that area at
+`max-mini-window-height`, the text is clamped to the remaining rows (counting
+wrapped rows, not newlines) and ends with `…` when anything is dropped. The
+minibuffer remembers its last explanation, so cleanup clears only a matching
+current message and preserves unrelated command output. Vertico's roster
+index and Icomplete's rotated candidate cache identify the option.
+
+For the tooltip, the reader redraws, then locates its highlighted glyph in
+the visible buffer windows (including a posframe), so placement follows the
+rendered row through scrolling; the rightmost non-whitespace glyph anchors
+the tip to the option's upper right. NS child-frame edges are relative to
+their parent, so the reader adds each parent's content origin, and NS treats
+the tooltip's `bottom` parameter as `top`, so it uses the rendered tooltip
+frame's height to place its bottom above the row. Local frame parameters and
+a face owned by `dsh-emacs-faces.el` control the appearance without changing
+the global tooltip face. The reader captures the owning top-level frame and
+installs a temporary `after-focus-change-function` observer; display also
+checks `frame-focus-state`, so a background update cannot re-show the tip.
+Exit and buffer-kill hooks remove the explanation and the observer. Terminal
+frames use compact minibuffer help for `tooltip`, or the echo area when
+chosen. No side window, recursive form editor, or Eldoc display override is
+involved. Protocol structs remain the only question wire decoder, and
+waterfall/RPC ownership is unchanged.
+See [decision record 042](../postmortem/042-question-prompts.md).
 
 ## RPC API
 

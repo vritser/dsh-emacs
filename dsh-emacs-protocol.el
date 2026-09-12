@@ -412,6 +412,43 @@ placeholder, ATTACHMENTS whether the command accepts composed attachments
   text)
 
 ;; ---------------------------------------------------------------------------
+;; user-questions/request waterfall items
+;; ---------------------------------------------------------------------------
+
+(cl-defstruct (dsh-protocol-question-option
+               (:constructor dsh-protocol-question-option--from-alist
+                             (alist
+                              &aux
+                              (label (cdr (assq 'label alist)))
+                              (description (cdr (assq 'description alist))))))
+  "One offered answer label and its optional supporting description."
+  label
+  description)
+
+(cl-defstruct (dsh-protocol-question
+               (:constructor dsh-protocol-question--from-alist
+                             (alist
+                              &aux
+                              (id (cdr (assq 'id alist)))
+                              (text (cdr (assq 'question alist)))
+                              (header (cdr (assq 'header alist)))
+                              (detail (cdr (assq 'detail alist)))
+                              (options
+                               (mapcar
+                                #'dsh-protocol-question-option--from-alist
+                                (dsh-protocol--list
+                                 (cdr (assq 'options alist)))))
+                              (multi-select
+                               (eq t (cdr (assq 'multiSelect alist)))))))
+  "One `user-questions/request' item, with options in their offered order."
+  id
+  text
+  header
+  detail
+  options
+  multi-select)
+
+;; ---------------------------------------------------------------------------
 ;; session/queue mux frame items
 ;; ---------------------------------------------------------------------------
 

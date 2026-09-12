@@ -129,21 +129,89 @@ and leaves the raw reply visible. See
 
 ## `ask` question prompts
 
-Answering an `ask` prompt happens in a **static key menu**, not a typing
-prompt: the numbered option list never narrows as you press keys.
+Answering an `ask` prompt with options happens in a **static key menu**:
+the numbered option list stays visible as you press keys. Completion
+navigation remains available.
 
-- `1`–`9` pick that option immediately (`0` = the 10th option);
-- `t` switches to the `Type answer…` free-text path;
-- the `dsh-emacs-question-skip-key` binding (default `s`) answers the
-  question with an empty selection and moves on;
-- `RET` confirms the preselected first option, `C-g` abandons the whole
-  group.
+| Key | Single choice | Multiple choices |
+|---|---|---|
+| `1`–`9`, `0` | Answer with that option (`0` = option 10) | Toggle that option's `[ ]` / `[x]` mark |
+| `SPC` | Normal completion binding | Toggle the highlighted option |
+| `RET` | Confirm the completion frontend's choice; defaults to the first option | Submit the marked options; no marks skips the question |
+| `t` | Open `Type answer…` | Open `Type answer…`, keeping marked options |
+| `s` (default) | Skip this question | Clear the marks and skip this question |
+| `C-g` | Abandon the whole question group | Abandon the whole question group |
 
-Multi-select questions keep plain comma-separated typing (digits are typed
-text there), and option-less questions read free text directly.  Without a
-list-rendering completion UI (vertico, icomplete, fido, ivy) the numbered
-options are embedded in the prompt itself, so the same keys work on a bare
-minibuffer.
+The skip shortcut is controlled by `dsh-emacs-question-skip-key`; nil disables
+it. Typing an answer accepts normal editing keys. A nonempty answer submits
+it with any marked options; an empty answer returns to the option menu and
+preserves the marks. Questions without options read free text directly and
+skip on empty input.
+
+Without a list-rendering completion UI (vertico, icomplete, fido, ivy), the
+numbered options and selection marks appear in the prompt itself. Digit
+shortcuts cover the first ten options; completion navigation and `SPC` let
+you mark later options.
+
+`dsh-emacs-question-help-display` selects where question details and the
+highlighted option's description appear:
+
+| Value | Display |
+|-------|---------|
+| `tooltip` (default) | Floating explanation; compact minibuffer help in a terminal |
+| `echo-area` | Explanation text in the bottom echo area, without message logging |
+| `nil` | No explanations; answer input and navigation stay available |
+
+```elisp
+(setq dsh-emacs-question-help-display 'echo-area)
+```
+
+Echo-area help follows the highlighted option and preserves line breaks.
+Emacs limits the echo area to `max-mini-window-height` (a quarter of the
+frame by default), so help longer than that is trimmed to fit and ends with
+`…` — the cut is always visible, never silent. Raise
+`max-mini-window-height` for more room, or use `tooltip` when the full text
+matters. Command errors and status messages take priority over automatic help.
+Free-text input shows only the question detail. It works in graphical and
+terminal Emacs, without requiring Eglot or changing Eldoc settings. The echo
+area shares space with a normal minibuffer: the explanation temporarily
+replaces the visible prompt until the next input. A completion posframe keeps
+the menu separate. On exit or graphical-frame focus loss, cleanup removes
+only the question's own message and preserves an unrelated message that has
+replaced it. The display setting is consulted on each question-help refresh.
+
+With `tooltip`, a small tooltip appears at the upper right of the highlighted
+option: its left edge is 12 pixels beyond the option text, and its bottom
+edge is 8 pixels above
+the row. It follows the rendered row,
+including in a Vertico posframe and after scrolling, and shows only question
+detail and option description text, without numbering or titles. Vertico and
+Icomplete selection are supported. The `Type answer…` action and free-text
+input show only the question detail. With other completion frontends, documentation starts at the
+first option, anchored near the input. No window is split and focus stays in
+the minibuffer. While a supported frontend has no rendered highlight, the
+tip stays hidden instead of appearing at an unrelated input position.
+
+Tips use Emacs-rendered tooltips with an 8-pixel inner margin, a 1-pixel
+border, and slightly increased line spacing. The `dsh-emacs-question-tip-face`
+face inherits the current theme's default text and background; the border
+uses `dsh-emacs-border-face`. Customize the question tip face to change its
+colors independently of ordinary tooltips. System tooltip styling is disabled
+only for these tips; global tooltip settings remain unchanged.
+
+The tip is limited to 48 columns and 24 lines. Longer content can be clipped.
+It refreshes after each command and observes `tooltip-hide-delay`. A tip
+only appears while the input's top-level Emacs frame has confirmed focus;
+losing focus immediately hides an existing tip. Completion child frames do
+not need their own focus. After returning to Emacs, the next interaction
+refreshes the tip. Submission, skip, cancellation and buffer closing remove
+the tip and its temporary focus observer.
+In `tooltip` mode, terminal frames show compact help in the minibuffer
+instead. Eldoc display settings are not involved.
+
+`M-x dsh-emacs-question-preview` opens a local sample question through the same
+reader and honors the display setting. It sends no RPC and prints the chosen
+answer when you finish.
 
 ## Server options
 
