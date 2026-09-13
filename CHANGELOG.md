@@ -16,28 +16,32 @@ minor) and stay undated until the release is cut.
   longer bleed into a body; extensions that passed `:face` must pick the region
   they meant (rationale: postmortem/039).
 
-### Added
-
-- **Question tooltip updates wait for a brief pause**: the new
-  `dsh-emacs-question-tip-delay` defaults to 0.15 seconds, so rapid navigation
-  displays only the final option's explanation. Set it to 0 for immediate
-  updates; echo-area and terminal help stay immediate
+- **`ask` questions are answered in one read**: multiple choice is now a
+  comma-separated answer (`2,3`) instead of a toggle menu, and the question
+  detail moves to the echo area. `dsh-emacs-question-help-display` keeps only
+  `echo-area` (the new default) and `nil`; `tooltip` is gone, along with
+  `dsh-emacs-question-tip-delay` and the `dsh-emacs-question-tip-face` face.
+  The menu no longer reopens per key, so it cannot flicker or reorder
   (rationale: postmortem/042).
 
-- **Question prompts explain themselves while you answer**: digit keys toggle
-  visible `[ ]` / `[x]` marks on multiple-choice `ask` prompts, `SPC` toggles
-  the highlighted option, `RET` submits the marked set, and `t` still accepts
-  a custom answer alongside it. A small tooltip follows the highlighted
-  option at its upper right — including inside a posframe and after
-  scrolling, and staying above the item on macOS — showing only the question
-  detail and that option's description. Toggling keeps the highlight on the
-  option you just marked. Set
-  `dsh-emacs-question-help-display` to `echo-area` for bottom-of-frame help,
-  keep the default `tooltip`, or choose `nil` to hide explanations;
-  echo-area help stays out of the message log, is trimmed to what the echo
-  area can show with a trailing `…` instead of being cut off silently, and
-  cleanup preserves unrelated messages. `M-x dsh-emacs-question-preview`
-  demonstrates the reader locally (rationale: postmortem/042).
+- **The question skip key is `C-c C-s` by default**: it was `s`, but the
+  reader's text is the answer now, so a bare letter would make that letter
+  untypable inside the answer (the free-text sentinel contains an `s`).
+  Rebind `dsh-emacs-question-skip-key` if you prefer another key
+  (rationale: postmortem/042).
+
+### Added
+
+- **Question prompts explain themselves while you answer**: an `ask` prompt is
+  one minibuffer read — the question text is the prompt, the numbered options
+  are the candidates, and each option's description is a completion
+  annotation. Multiple choice takes a comma-separated answer (`2,3` or
+  `alpha,beta`, Emacs' standard `completing-read-multiple`); single choice
+  takes one candidate; `Type answer…` reads free text; empty input and the
+  skip key skip the question; `C-g` abandons the group. The question detail
+  shows in the echo area, and cleanup preserves unrelated messages.
+  `M-x dsh-emacs-question-preview` demonstrates the reader locally
+  (rationale: postmortem/042).
 
 - **The remaining V3 core events reach the client**: `step/start` /
   `step/end`, `assistant/attempt`, and `session/end-seed` — dropped silently
@@ -74,15 +78,6 @@ minor) and stay undated until the release is cut.
   them, matching dsh web's produced-files row (rationale: postmortem/041).
 
 ### Fixed
-
-- **Vertico question menus stay open while toggling**: SPC and digit keys
-  update checkmarks in the existing minibuffer, keeping the highlighted
-  option on its row instead of hiding the menu and reopening it with the
-  first row selected (rationale: postmortem/042).
-
-- **Question menus no longer freeze while opening**: tooltip positioning
-  stops when Emacs repeats the last displayed row, allowing completion to
-  finish rendering (rationale: postmortem/042).
 
 - **HTTPS RPC calls can authenticate on demand**: obtaining or renewing the
   session cookie during an RPC now uses an independent GET request. The token

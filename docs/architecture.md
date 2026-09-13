@@ -226,52 +226,28 @@ accepts either a wire alist or an already-converted struct, so callers and
 fixtures can stay on either side of the boundary. Other event-stream payloads
 stay raw for now (their shapes vary per event type).
 
-The question chooser in `dsh-emacs.el` owns completion-based selection and
-minibuffer-local help hooks. In an active Vertico multi-select menu, SPC and
-digits toggle selection and update the completion table and Vertico's cached
-roster together. Its ordinary post-command hook redraws the checkmarks; the
-minibuffer and posframe stay open. Candidate count and input are unchanged.
-Single selection, submit, skip and custom input leave through the reader's
-existing exit paths. Other frontends accept candidates and repeat the read,
-remembering the toggled label as the next default. Vertico setup still seeds
-its candidate lock when a read starts, keeping that option on its roster row
-without promoting the default to the top of the list.
-`dsh-emacs-question-help-display` selects tooltip, echo area, or no
-explanation. Both surfaces show only the question detail and the selected
-option's description. Echo-area output uses `message` with logging disabled
-and never inspects completion geometry; because Emacs caps that area at
-`max-mini-window-height`, the text is clamped to the remaining rows (counting
-wrapped rows, not newlines) and ends with `…` when anything is dropped. The
-minibuffer remembers its last explanation, so cleanup clears only a matching
-current message and preserves unrelated command output. Vertico's roster
-index and Icomplete's rotated candidate cache identify the option.
-
-Graphical tooltip updates use a minibuffer-owned, one-shot idle timer;
-`dsh-emacs-question-tip-delay` defaults to 0.15 seconds. Each command replaces
-the pending update. The timer captures question context and verifies that
-its buffer still owns the active question minibuffer before rendering.
-Zero delay, echo-area and terminal help update synchronously. Hiding help
-also cancels pending work, including on focus loss and reader teardown.
-
-For the tooltip, the reader redraws, then locates its highlighted glyph in
-the visible buffer windows (including a posframe), so placement follows the
-rendered row through scrolling; the rightmost non-whitespace glyph anchors
-the tip to the option's upper right. The row scan stops when the returned
-vertical row number differs from the requested one: native Emacs can repeat
-the final displayed row for out-of-range requests, including before completion
-first renders. NS child-frame edges are relative to
-their parent, so the reader adds each parent's content origin, and NS treats
-the tooltip's `bottom` parameter as `top`, so it uses the rendered tooltip
-frame's height to place its bottom above the row. Local frame parameters and
-a face owned by `dsh-emacs-faces.el` control the appearance without changing
-the global tooltip face. The reader captures the owning top-level frame and
-installs a temporary `after-focus-change-function` observer; display also
-checks `frame-focus-state`, so a background update cannot re-show the tip.
-Exit and buffer-kill hooks remove the explanation and the observer. Terminal
-frames use compact minibuffer help for `tooltip`, or the echo area when
-chosen. No side window, recursive form editor, or Eldoc display override is
-involved. Protocol structs remain the only question wire decoder, and
-waterfall/RPC ownership is unchanged.
+The question reader in `dsh-emacs.el` answers each `ask` question in one
+minibuffer read. The question text and a hint are the prompt, the numbered
+options (plus `Type answer…`) are the completion candidates, and each
+candidate's description is delivered as a completion annotation through
+`completion-extra-properties`, so descriptions appear in whatever list UI the
+user has — no tooltip, geometry inspection, or frontend state is involved.
+Multiple choice uses `completing-read-multiple` from `crm.el`, the stock
+comma-separated input path; numbers, labels and unambiguous label prefixes
+all resolve back to the original labels, an ambiguous prefix is left as the
+user's own text, and the reader never guesses which option was meant. Single choice uses the same reader and takes one value. Empty input
+skips the question, the `dsh-emacs-question-skip-key` shortcut throws the
+skip sentinel out of the reader's scope, and C-g propagates to abandon the
+whole waterfall. Because every question is one read, no reader is reopened
+per key: there is no flicker, no reordering and no dependence on how a
+completion frontend highlights its candidates.
+`dsh-emacs-question-help-display` selects whether the question's own detail
+shows in the echo area (`echo-area`, the default) or not at all. Echo-area
+output uses `message` with logging disabled and never inspects completion
+geometry; the minibuffer remembers its last text, so cleanup clears only a
+matching current message and preserves unrelated command output.
+Protocol structs remain the only question wire decoder, and waterfall/RPC
+ownership is unchanged.
 See [decision record 042](../postmortem/042-question-prompts.md).
 
 ## RPC API

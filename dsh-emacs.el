@@ -55,12 +55,9 @@
 (defvar use-system-tooltips)
 (defvar x-max-tooltip-size)
 (declare-function icomplete-force-complete-and-exit "icomplete" ())
-(defvar vertico--input)
-(defvar vertico--candidates)
-(defvar vertico--index)
-(defvar vertico--lock-candidate)
 
 ;; 协议层：dsh 响应字段的 typed 访问（见 dsh-emacs-protocol.el）
+(require 'crm)
 (require 'dsh-emacs-protocol)
 
 ;; 加载核心 UI 框架(必须先加载)
@@ -229,39 +226,28 @@ of the local busy indicator."
                  (const :tag "Interrupt the turn" stop))
   :group 'dsh-emacs)
 
-(defcustom dsh-emacs-question-skip-key "s"
+(defcustom dsh-emacs-question-skip-key "C-c C-s"
   "Key that skips the current ask question (answers it with an empty
 selection, dsh web's per-question Skip) and moves to the next one.
-A single letter by default (`s' = skip): the chooser is a numbered
-key menu with inert typing.  The nested
-`Type answer…' free-text minibuffer is separate and keeps normal
-editing keys.  Bound only inside the question chooser's minibuffer, on a
-copy of the local keymap, so nothing leaks into unrelated
-`completing-read' prompts; an option-less free-text question skips on an
-EMPTY input instead, so the key is only bound where there is a candidate
-list.  Set to nil to disable the shortcut."
+A `C-c' prefix by default: the reader's text is the answer, so a bare
+letter would make that letter untypable (and the free-text sentinel
+contains several).  Bound only inside the question reader's minibuffer, so
+nothing leaks into unrelated `completing-read' prompts; every question also
+skips on an EMPTY input, and the key is only bound where there is a
+candidate list.  Set to nil to disable the shortcut."
   :type '(choice (key-sequence :tag "Key sequence")
                  (const :tag "No shortcut" nil))
   :group 'dsh-emacs)
 
-(defcustom dsh-emacs-question-help-display 'tooltip
-  "Where to display question details and the highlighted option's description.
-`tooltip' shows a floating tip (compact minibuffer help in a terminal).
-`echo-area' shows explanation text in the echo area without logging it.
-Nil disables explanations.  Selection and answer input are unchanged.
-The echo area shares space with a normal minibuffer; a completion posframe
-keeps the option menu separate from the explanation."
-  :type '(choice (const :tag "Floating tooltip" tooltip)
-                 (const :tag "Echo area" echo-area)
-                 (const :tag "No explanations" nil))
-  :group 'dsh-emacs)
-
-(defcustom dsh-emacs-question-tip-delay 0.15
-  "Idle seconds before showing the current question's graphical tooltip.
-Rapid selections replace the pending update, so only the final option's
-explanation appears.  Set to 0 to update immediately.  Echo-area and terminal
-help remain immediate."
-  :type 'number
+(defcustom dsh-emacs-question-help-display 'echo-area
+  "Whether to show the question detail while answering.
+`echo-area' shows the detail in the echo area without logging it; nil
+disables it.  Selection and answer input are unchanged, and a question
+without a detail never shows help.  Option descriptions ride along with
+the completion candidates themselves (their `:annotation-function'), so
+the echo area carries only the question's own detail."
+  :type '(choice (const :tag "Echo area" echo-area)
+                 (const :tag "No help" nil))
   :group 'dsh-emacs)
 
 ;;; ---------------------------------------------------------------------------
@@ -3458,580 +3444,239 @@ Each frame is keyed by its waterfall EVENT-ID; the answer goes to
 ;; binding a default, so the owner's own defvar is not shadowed.
 (defvar dsh-emacs-events--client-id)
 
+(defconst dsh-emacs--question-type-label "Type answer…"
+  "Candidate switching to a free-text answer; it is the last candidate.")
+
 (defconst dsh-emacs--question-skip-label "Skip this question"
   "Internal sentinel for skipping one question with an empty selection.
 The skip command returns it directly; it is not a visible candidate.")
 
-(defconst dsh-emacs--question-type-label "Type answer…"
-  "Candidate switching to a custom answer, keeping multiple selections.")
+;; Bound by `dsh-emacs--question-choice' around its reader, so the helper
+;; functions below stay parameterless and the reader sees one context.
+(defvar dsh-emacs--question-where nil
+  "Prompt prefix of the question being read (session and question number).")
 
-(defun dsh-emacs--question-candidates (labels type-option &optional multi selected)
-  "Numbered LABELS followed by TYPE-OPTION.
-For MULTI questions, mark SELECTED labels with checked boxes."
-  (append (cl-loop for l in labels for n from 1
-                   collect (format "%d. %s%s" n
-                                   (if multi
-                                       (if (member l selected) "[x] " "[ ] ")
-                                     "")
-                                   l))
-          (list type-option)))
+(defvar dsh-emacs--question-text nil
+  "Text of the question being read.")
 
-(defun dsh-emacs--question-picked-label (picked &optional multi)
-  "Return PICKED without its numbered prefix and, for MULTI, checkbox."
-  (if (string-match (if multi
-                        "\\`[0-9]+\\. \\[[ x]\\] \\(\\(?:.\\|\n\\)*\\)\\'"
-                      "\\`[0-9]+\\. \\(\\(?:.\\|\n\\)*\\)\\'")
-                    picked)
-      (match-string 1 picked)
-    picked))
+(defvar dsh-emacs--question-hint nil
+  "Input hint appended to the question prompt.")
 
-(defvar dsh-emacs--question-pick-labels nil
-  "Dynamically bound option labels for the current question's key menu.")
-
-(defvar dsh-emacs--question-multi nil
-  "Whether the current question's menu toggles multiple selections.")
-
-(defvar dsh-emacs--question-selected nil
-  "Dynamically bound selected labels for the current question's menu.")
-
-(defconst dsh-emacs--question-submit-label "Submit answer"
-  "Internal sentinel for submitting the current multiple selection.")
-
-(defvar dsh-emacs--question-current nil
-  "Dynamically bound protocol struct of the question being answered.")
+(defvar dsh-emacs--question-roster nil
+  "Plain option labels of the question being read.")
 
 (defvar dsh-emacs--question-options nil
-  "Dynamically bound option structs of the question being answered.")
+  "Option structs of the question being read.")
 
-(defvar-local dsh-emacs--question-tip-visible nil
-  "Whether this minibuffer owns the current question tooltip.")
+(defvar dsh-emacs--question-current nil
+  "Protocol struct of the question being read.")
 
-(defvar-local dsh-emacs--question-tip-timer nil
-  "Pending idle timer for this question minibuffer's tooltip.")
+(defvar dsh-emacs--question-multi nil
+  "Whether the question being read selects multiple options.")
+
+(defun dsh-emacs--question-pick-labels (labels)
+  "Return LABELS numbered from 1, the form the reader offers.
+The number is part of the option, so a comma-separated answer can name
+options by number as well as by label."
+  (cl-loop for label in labels for n from 1
+           collect (format "%d. %s" n label)))
+
+(defun dsh-emacs--question-prefix-label (prefix labels)
+  "Return the single LABELS entry PREFIX unambiguously starts, or nil.
+Matching ignores case, so a typed `alph' finds `Alpha'.  `require-match' is
+nil in the reader, so completion may hand back an unexpanded prefix instead
+of the candidate; an ambiguous prefix stays unresolved on purpose, so the
+text is never mapped to the wrong option."
+  (let ((hits (cl-remove-if-not
+               (lambda (label)
+                 (and (<= (length prefix) (length label))
+                      (eq t (compare-strings prefix 0 nil label 0 (length prefix)
+                                             t))))
+               labels)))
+    (and (= 1 (length hits)) (car hits))))
+
+(defun dsh-emacs--question-label-of (picked labels)
+  "Return the plain LABELS entry PICKED names, or nil.
+PICKED is a candidate string, a bare option number, a label, or an
+unambiguous prefix of a label.  An exact label wins over an unambiguous
+prefix, and both win over stripping a numbered prefix, so a label that
+starts with \"<number>. \" still round-trips; a bare number addresses the
+option at that position, because `completing-read-multiple' can hand back
+an element the completion engine left unexpanded."
+  (or (cl-find picked labels :test #'equal)
+      (dsh-emacs--question-prefix-label picked labels)
+      (let ((plain
+             (cond
+              ((string-match "\\`[0-9]+\\. \\(.+\\)\\'" picked)
+               (match-string 1 picked))
+              ((string-match "\\`\\([0-9]+\\)\\'" picked)
+               (let ((n (string-to-number picked)))
+                 (and (> n 0) (nth (1- n) labels)))))))
+        (and plain (cl-find plain labels :test #'equal)))))
 
 (defvar-local dsh-emacs--question-echo-message nil
-  "Last echo-area explanation owned by this question minibuffer.")
+  "Last echo-area detail this question reader showed.")
 
-(defvar-local dsh-emacs--question-tip-frame nil
-  "Top-level frame owning this question's input focus.")
-
-(defvar dsh-emacs--question-tip-buffer nil
-  "Question minibuffer observed by the temporary focus-change handler.")
-
-(defun dsh-emacs--question-highlight-index ()
-  "Return the focused option index, or nil for the custom-answer action.
-Vertico keeps roster order.  Icomplete rotates its cached candidates;
-resolve its first candidate back to the original label.  Without either
-frontend the numbered menu starts at the first option."
+(defun dsh-emacs--question-echo (text)
+  "Show TEXT as this reader's echo-area help, without logging it.
+Re-showing the same text stays quiet so repeated commands do not spam the
+echo area; an empty TEXT clears help this reader owns."
   (cond
-   ((and (bound-and-true-p vertico-mode)
-         (boundp 'vertico--index) (integerp vertico--index))
-    (when (>= vertico--index 0) vertico--index))
-   ((and (bound-and-true-p icomplete-mode)
-         (boundp 'completion-all-sorted-completions)
-         (consp completion-all-sorted-completions))
-    (let ((label (dsh-emacs--question-picked-label
-                  (car completion-all-sorted-completions)
-                  dsh-emacs--question-multi)))
-      (cl-position label dsh-emacs--question-pick-labels :test #'equal)))
-   (t 0)))
+   ((or (null dsh-emacs-question-help-display) (string-empty-p text))
+    (when (and dsh-emacs--question-echo-message
+               (equal (current-message) dsh-emacs--question-echo-message))
+      (message nil))
+    (setq dsh-emacs--question-echo-message nil))
+   ((equal text dsh-emacs--question-echo-message))
+   (t
+    (setq dsh-emacs--question-echo-message text)
+    (let ((inhibit-message t)
+          (message-log-max nil))
+      (message "%s" text)))))
 
-(defun dsh-emacs--question-help-text (highlighted)
-  "Return only detail text and the description of option HIGHLIGHTED.
-A nil index supplies only the question detail during custom input."
-  (let* ((detail (dsh-protocol-question-detail dsh-emacs--question-current))
-         (option (and highlighted (nth highlighted dsh-emacs--question-options)))
+(defun dsh-emacs--question-echo-cleanup ()
+  "Clear echo-area help this reader owns, leaving other messages alone."
+  (when (and dsh-emacs--question-echo-message
+             (equal (current-message) dsh-emacs--question-echo-message))
+    (message nil))
+  (setq dsh-emacs--question-echo-message nil))
+
+(defun dsh-emacs--question-annotation (candidate)
+  "Return CANDIDATE's option description, or an empty string.
+The description rides along with its candidate, so it is visible in the
+completion list without a tooltip."
+  (let* ((label (or (dsh-emacs--question-label-of
+                     candidate dsh-emacs--question-roster)
+                    candidate))
+         (option (cl-find label dsh-emacs--question-options
+                          :key #'dsh-protocol-question-option-label
+                          :test #'equal))
          (description (and option
                            (dsh-protocol-question-option-description option))))
-    (string-join
-     (delq nil
-           (list (and detail (not (string-empty-p detail)) detail)
-                 (and description (not (string-empty-p description))
-                      description)))
-     "\n\n")))
-
-(defun dsh-emacs--question-echo-budget ()
-  "Return the display lines echo-area help may occupy.
-The echo area grows to at most `max-mini-window-height' of the frame, and
-the minibuffer prompt already occupies lines inside it."
-  (let* ((window (minibuffer-window))
-         (frame (window-frame window))
-         (limit (let ((value max-mini-window-height))
-                  (cond ((floatp value) (floor (* (frame-height frame) value)))
-                        ((numberp value) (floor value))
-                        (t (frame-height frame))))))
-    (max 1 (- limit (1- (window-height window))))))
-
-(defun dsh-emacs--question-echo-width ()
-  "Return the echo area's width in characters."
-  (max 1 (window-body-width (minibuffer-window) t)))
-
-(defun dsh-emacs--question-display-rows (from to)
-  "Return how many display rows FROM..TO needs at echo-area width.
-Counts wrapped rows rather than newlines, so one long line measures like
-the several rows the echo area would draw.  Widths come from character
-counts, which is exact in a terminal and slightly conservative for a
-proportional font; erring high only trims the explanation sooner, and
-`dsh-emacs--question-echo-help' marks that cut."
-  (let ((rows 0)
-        (width (dsh-emacs--question-echo-width)))
-    (save-excursion
-      (goto-char from)
-      (while (< (point) to)
-        (let* ((line-end (save-excursion (end-of-visible-line) (point)))
-               (line-width (string-width
-                            (buffer-substring-no-properties (point) line-end))))
-          (cl-incf rows (max 1 (ceiling line-width width)))
-          (goto-char (max (1+ line-end) line-end)))))
-    rows))
-
-(defun dsh-emacs--question-echo-mark (line width)
-  "Append a `…' cut marker to LINE, keeping it within WIDTH characters.
-LINE already ends a source line, so a marker appended past WIDTH would wrap
-onto another echo-area row; trim text instead of overflowing."
-  (if (<= (string-width line) (1- width))
-      (concat line "…")
-    (concat (truncate-string-to-width line (1- width) nil nil "…") "…")))
-
-(defun dsh-emacs--question-echo-help (text budget)
-  "Clamp TEXT to BUDGET display rows for the echo area.
-Without clamping a long explanation is cut off silently.  Source lines are
-kept whole and BUDGET counts wrapped rows; when anything is dropped the
-result ends with `…' so the cut is visible."
-  (let ((width (dsh-emacs--question-echo-width)))
-    (with-temp-buffer
-      (insert text)
-      (if (<= (dsh-emacs--question-display-rows (point-min) (point-max))
-              budget)
-          text
-        (let ((kept nil)
-              (used 0)
-              (total (count-lines (point-min) (point-max)))
-              (n 0)
-              (done nil))
-          (goto-char (point-min))
-          (while (and (not done) (< n total))
-            (let* ((line-end (save-excursion (end-of-visible-line) (point)))
-                   (line (buffer-substring-no-properties (point) line-end))
-                   (rows (max 1 (ceiling (string-width line) width))))
-              (if (> (+ used rows) budget)
-                  (setq done t)
-                (push line kept)
-                (cl-incf used rows)
-                (cl-incf n)
-                (goto-char (max (1+ line-end) line-end)))))
-          (cond ((null kept)
-                 ;; Nothing fit whole: trim the first line into the budget.
-                 (dsh-emacs--question-echo-mark
-                  (truncate-string-to-width
-                   (car (split-string text "\n")) (1- width) nil nil)
-                  width))
-                (done
-                 (mapconcat #'identity
-                            (append (nreverse (cdr kept))
-                                    (list (dsh-emacs--question-echo-mark
-                                           (car kept) width)))
-                            "\n"))
-                (t text)))))))
-
-(defun dsh-emacs--question-tip-hide ()
-  "Remove explanation text owned by this question minibuffer."
-  (when dsh-emacs--question-tip-timer
-    (cancel-timer dsh-emacs--question-tip-timer)
-    (setq dsh-emacs--question-tip-timer nil))
-  (when dsh-emacs--question-tip-visible
-    (tooltip-hide)
-    (setq dsh-emacs--question-tip-visible nil))
-  (when dsh-emacs--question-echo-message
-    ;; A command may have replaced our explanation with an error or status.
-    (when (equal (current-message) dsh-emacs--question-echo-message)
-      (let ((message-log-max nil)) (message nil)))
-    (setq dsh-emacs--question-echo-message nil)))
-
-(defun dsh-emacs--question-tip-focus-change ()
-  "Hide the active question explanation when its owning frame loses focus."
-  (when (buffer-live-p dsh-emacs--question-tip-buffer)
-    (with-current-buffer dsh-emacs--question-tip-buffer
-      (unless (and (frame-live-p dsh-emacs--question-tip-frame)
-                   (eq t (frame-focus-state dsh-emacs--question-tip-frame)))
-        (dsh-emacs--question-tip-hide)))))
-
-(defun dsh-emacs--question-tip-teardown ()
-  "Hide this reader's tip and release its temporary focus observer."
-  (dsh-emacs--question-tip-hide)
-  (when (eq dsh-emacs--question-tip-buffer (current-buffer))
-    (remove-function after-focus-change-function
-                     #'dsh-emacs--question-tip-focus-change)
-    (setq dsh-emacs--question-tip-buffer nil
-          dsh-emacs--question-tip-frame nil)))
-
-(defun dsh-emacs--question-tip-position ()
-  "Return (WINDOW RIGHT Y) at the visible selected option's text edge.
-Inspect the displayed text, including overlay strings, so scrolling and
-posframes use the actual option row rather than the input cursor."
-  (redisplay t)
-  (catch 'position
-    (dolist (window (sort (get-buffer-window-list (current-buffer) nil 'visible)
-                          (lambda (a b)
-                            (and (frame-parent (window-frame a))
-                                 (not (frame-parent (window-frame b)))))))
-      (let ((row 0)
-            (step (max 1 (frame-char-width (window-frame window))))
-            line)
-        ;; Out-of-range requests can repeat the final row instead of nil.
-        ;; Before completion renders, that row is just the input prompt.
-        (while (and (setq line (window-line-height row window))
-                    (= row (nth 1 line)))
-          (pcase-let ((`(,height ,_vpos ,y ,_offbot) line)
-                      (edge nil) (selected-y nil))
-            (cl-loop for x from 0 below (window-body-width window t) by step
-                     ;; Vertico-posframe can fully clip the original
-                     ;; minibuffer's rows; only sample visible pixels.
-                     for position = (and (> height 0)
-                                         (posn-at-x-y
-                                          x (+ (max 0 y) (/ height 2)) window))
-                     for string = (and position (posn-string position))
-                     for point = (and position (posn-point position))
-                     for face = (cond
-                                 (string
-                                  (get-text-property (cdr string) 'face (car string)))
-                                 ((integer-or-marker-p point)
-                                  (get-char-property point 'face window)))
-                     for char = (cond
-                                 ((and string (< (cdr string) (length (car string))))
-                                  (aref (car string) (cdr string)))
-                                 ((integer-or-marker-p point) (char-after point)))
-                     when (and char (not (memq char '(?\s ?\t ?\n ?\r)))
-                               (cl-intersection
-                                (if (listp face) face (list face))
-                                '(vertico-current icomplete-selected-match
-                                                  icomplete-first-match)))
-                     do (pcase-let ((`(,glyph-x . ,glyph-y) (posn-x-y position)))
-                          (setq edge (+ glyph-x
-                                        (or (car (posn-object-width-height position))
-                                            step))
-                                selected-y (or selected-y glyph-y))))
-            (when edge (throw 'position (list window edge selected-y))))
-          (setq row (1+ row)))))
-    ;; Free input and a plain minibuffer have no rendered candidate row.
-    (unless (and minibuffer-completion-table
-                 (or (bound-and-true-p vertico-mode)
-                     (bound-and-true-p icomplete-mode)))
-      (when-let* ((position (posn-at-point)))
-        (pcase-let ((`(,x . ,y) (posn-x-y position)))
-          (list (selected-window) x y))))))
-
-(defun dsh-emacs--question-tip-update ()
-  "Display the focused option's explanation using the configured surface.
-Graphical tips are normally scheduled after idle time; other surfaces update
-after each command.  Echo-area explanations are not added to the message log."
-  (let ((text (dsh-emacs--question-help-text
-               (when minibuffer-completion-table
-                 (dsh-emacs--question-highlight-index)))))
-    (when (and dsh-emacs--question-echo-message
-               (not (eq dsh-emacs-question-help-display 'echo-area)))
-      (dsh-emacs--question-tip-hide))
-    (cond
-     ((or (null dsh-emacs-question-help-display) (string-empty-p text))
-      (dsh-emacs--question-tip-hide))
-     ((and (display-graphic-p)
-           (not (eq t (frame-focus-state (or dsh-emacs--question-tip-frame
-                                            (selected-frame))))))
-      (dsh-emacs--question-tip-hide))
-     ((eq dsh-emacs-question-help-display 'echo-area)
-      (when dsh-emacs--question-tip-visible (dsh-emacs--question-tip-hide))
-      (let ((current (current-message)))
-        (when (or (null current)
-                  (equal current dsh-emacs--question-echo-message))
-          (let* ((shown (dsh-emacs--question-echo-help
-                         text (dsh-emacs--question-echo-budget)))
-                 (message-log-max nil))
-            (message "%s" shown)
-            (setq dsh-emacs--question-echo-message shown)))))
-     ((not (display-graphic-p))
-      (minibuffer-message "%s" (replace-regexp-in-string "\n+" " · " text)))
-     (t
-      (if-let* ((position (dsh-emacs--question-tip-position)))
-          (pcase-let* ((`(,window ,x ,y) position)
-                       (frame (window-frame window))
-                       (ns-p (eq (window-system frame) 'ns))
-                       (`(,left ,top ,_right ,_bottom)
-                        (let ((edges (frame-edges frame 'native-edges))
-                              (parent (and ns-p (frame-parent frame))))
-                          ;; NS child edges are parent-relative, despite the
-                          ;; screen-coordinate contract of `frame-edges'.
-                          (while parent
-                            (pcase-let ((`(,px ,py . ,_)
-                                         (frame-edges parent 'inner-edges))
-                                        (border (or (frame-parameter
-                                                     parent 'internal-border-width)
-                                                    0)))
-                              (cl-incf (car edges) (- px border))
-                              (cl-incf (cadr edges) (- py border)))
-                            (setq parent (frame-parent parent)))
-                          edges))
-                       (`(,win-left ,win-top ,_win-right ,_win-bottom)
-                        (window-inside-pixel-edges window))
-                       (foreground (face-foreground 'dsh-emacs-question-tip-face frame t))
-                       (background (face-background 'dsh-emacs-question-tip-face frame t))
-                       (border (face-foreground 'dsh-emacs-border-face frame t))
-                       ;; Use the Emacs renderer so native OS styling cannot
-                       ;; override this question's local colors and padding.
-                       (use-system-tooltips nil)
-                       (x-max-tooltip-size '(48 . 24))
-                       (parameters
-                        (append `((left . ,(+ left win-left x 12))
-                                  (bottom . ,(- (+ top win-top y) 8))
-                                  (internal-border-width . 8)
-                                  (border-width . 1)
-                                  (foreground-color . ,foreground)
-                                  (background-color . ,background)
-                                  (border-color . ,border))
-                                (cl-remove-if
-                                 (lambda (parameter)
-                                   (memq (car parameter)
-                                         '(left right top bottom
-                                                internal-border-width border-width
-                                                foreground-color background-color
-                                                border-color)))
-                                 tooltip-frame-parameters))))
-            ;; Unlike `tooltip-show', this keeps colors local on Emacs 27
-            ;; too, without modifying the user's global tooltip face.
-            (x-show-tip (propertize text 'face 'dsh-emacs-question-tip-face
-                                    'line-spacing 0.15)
-                        frame parameters tooltip-hide-delay)
-            (setq dsh-emacs--question-tip-visible t)
-            ;; NS also interprets `bottom' as `top'.  Reposition the actual
-            ;; rendered frame: its height includes wrapping and padding.
-            ;; Tooltip frames are omitted from `frame-list', but not Z order.
-            (when ns-p
-              (let ((tip (or (cl-find-if
-                              (lambda (candidate)
-                                (frame-parameter candidate 'tooltip))
-                              (frame-list-z-order))
-                             (error "Question tooltip frame was not created"))))
-                (set-frame-position
-                 tip (alist-get 'left parameters)
-                 (- (alist-get 'bottom parameters) (frame-pixel-height tip))))))
-        (dsh-emacs--question-tip-hide))))))
-
-(defun dsh-emacs--question-tip-fire (buffer context)
-  "Render BUFFER's delayed question help using captured CONTEXT."
-  (when (and (buffer-live-p buffer)
-             (eq buffer dsh-emacs--question-tip-buffer))
-    (with-current-buffer buffer
-      (setq dsh-emacs--question-tip-timer nil)
-      (when-let* ((window (active-minibuffer-window))
-                  ((eq buffer (window-buffer window))))
-        (pcase-let ((`(,dsh-emacs--question-current
-                      ,dsh-emacs--question-options
-                      ,dsh-emacs--question-pick-labels
-                      ,dsh-emacs--question-multi) context))
-          (dsh-emacs--question-tip-update))))))
-
-(defun dsh-emacs--question-tip-schedule ()
-  "Refresh help now, or replace the pending graphical tooltip update."
-  (when dsh-emacs--question-tip-timer
-    (cancel-timer dsh-emacs--question-tip-timer)
-    (setq dsh-emacs--question-tip-timer nil))
-  (if (and (eq dsh-emacs-question-help-display 'tooltip)
-           (display-graphic-p)
-           (> dsh-emacs-question-tip-delay 0))
-      (setq dsh-emacs--question-tip-timer
-            (run-with-idle-timer
-             dsh-emacs-question-tip-delay nil #'dsh-emacs--question-tip-fire
-             (current-buffer)
-             (list dsh-emacs--question-current dsh-emacs--question-options
-                   dsh-emacs--question-pick-labels dsh-emacs--question-multi)))
-    (dsh-emacs--question-tip-update)))
-
-(defun dsh-emacs--question-tip-setup ()
-  "Install question help and cleanup in this minibuffer only."
-  (require 'tooltip)
-  (setq-local dsh-emacs--question-tip-visible nil)
-  (setq-local dsh-emacs--question-echo-message nil)
-  (setq-local dsh-emacs--question-tip-frame (selected-frame))
-  (while (frame-parent dsh-emacs--question-tip-frame)
-    (setq dsh-emacs--question-tip-frame
-          (frame-parent dsh-emacs--question-tip-frame)))
-  (setq dsh-emacs--question-tip-buffer (current-buffer))
-  (add-function :after after-focus-change-function
-                #'dsh-emacs--question-tip-focus-change)
-  (add-hook 'post-command-hook #'dsh-emacs--question-tip-schedule t t)
-  (add-hook 'minibuffer-exit-hook #'dsh-emacs--question-tip-teardown nil t)
-  (add-hook 'kill-buffer-hook #'dsh-emacs--question-tip-teardown nil t)
-  (dsh-emacs--question-tip-schedule)
-  nil)
-
-(defun dsh-emacs--question-toggle-selection (label)
-  "Toggle LABEL in this question, keeping selections in roster order."
-  (setq dsh-emacs--question-selected
-        (cl-loop for option in dsh-emacs--question-pick-labels
-                 when (if (equal option label)
-                          (not (member option dsh-emacs--question-selected))
-                        (member option dsh-emacs--question-selected))
-                 collect option)))
-
-(defun dsh-emacs--question-pick-command ()
-  "Choose or toggle an option using a digit or Vertico's highlighted row.
-Digits 1–9 select options 1–9; 0 selects the tenth.  In a Vertico multi-select
-menu, digits and SPC update checkmarks without exiting the minibuffer.
-Other selections return the candidate directly to the chooser.
-Out-of-range digits only show a message."
-  (interactive)
-  (let* ((space (eq (event-basic-type last-command-event) ?\s))
-         (index (if space
-                    (dsh-emacs--question-highlight-index)
-                  (let ((n (- (event-basic-type last-command-event) ?0)))
-                    (1- (if (= n 0) 10 n)))))
-         (label (and index (nth index dsh-emacs--question-pick-labels))))
-    (cond
-     ((and space (equal index (length dsh-emacs--question-pick-labels)))
-      (dsh-emacs--question-type-command))
-     ((null label)
-      (if space (minibuffer-message "No option highlighted")
-        (minibuffer-message "No option %d" (1+ index))))
-     ((and dsh-emacs--question-multi (bound-and-true-p vertico-mode)
-           (bound-and-true-p vertico--input))
-      (dsh-emacs--question-toggle-selection label)
-      ;; The roster and input are fixed; only checkmarks and highlight change.
-      ;; Update the table and displayed cache together.  Vertico's normal
-      ;; post-command hook redraws without running minibuffer exit/setup hooks.
-      (setq-local minibuffer-completion-table
-                  (dsh-emacs--question-candidates
-                   dsh-emacs--question-pick-labels dsh-emacs--question-type-label
-                   t dsh-emacs--question-selected)
-                  minibuffer-default (car minibuffer-completion-table)
-                  vertico--candidates minibuffer-completion-table
-                  vertico--index index
-                  vertico--lock-candidate t))
-     (t
-      (throw 'dsh-emacs--question-command
-             (nth index
-                  (dsh-emacs--question-candidates
-                   dsh-emacs--question-pick-labels dsh-emacs--question-type-label
-                   dsh-emacs--question-multi dsh-emacs--question-selected)))))))
-
-(defun dsh-emacs--question-type-command ()
-  "Return the free-text sentinel to the current question chooser."
-  (interactive)
-  (throw 'dsh-emacs--question-command dsh-emacs--question-type-label))
-
-(defun dsh-emacs--question-inert-command ()
-  "Ignore typing in the question chooser and remind the user how to answer.
-The chooser is a static key menu: printable characters are remapped
-here instead of narrowing the option list.  Briefly show the menu keys
-(digits, `t', the skip key) and leave the prompt alone; C-g still abandons
-the whole group."
-  (interactive)
-  (minibuffer-message
-   (concat (if dsh-emacs--question-multi
-               "Press a number or SPC to toggle, RET = submit, t = type an answer"
-             "Press a number to pick, t = type an answer")
-           (when dsh-emacs-question-skip-key
-             (format ", %s = skip"
-                     (key-description
-                      (if (stringp dsh-emacs-question-skip-key)
-                          (kbd dsh-emacs-question-skip-key)
-                        dsh-emacs-question-skip-key)))))))
+    (if (or (null description) (string-empty-p description))
+        ""
+      (format "  [%s]" description))))
 
 (defun dsh-emacs--question-skip-command ()
-  "Return the skip sentinel to the current question chooser.
-Bound only in the option menu via `dsh-emacs-question-skip-key'."
+  "Skip the current question with an empty selection.
+Bound from `dsh-emacs-question-skip-key' in the reader's minibuffer."
   (interactive)
   (throw 'dsh-emacs--question-command dsh-emacs--question-skip-label))
 
-(defun dsh-emacs--question-submit-command ()
-  "Submit the current question's multiple selection."
-  (interactive)
-  (throw 'dsh-emacs--question-command dsh-emacs--question-submit-label))
-
-(defun dsh-emacs--question-chooser-keymap ()
-  "Keymap for the question chooser minibuffer: a copy of the current
-local keymap (vertico's when `vertico-mode' is on — the copy keeps its
-navigation and refresh alive — the minibuffer completion map otherwise)
-plus `dsh-emacs-question-skip-key' (default `s') bound to
-`dsh-emacs--question-skip-command'.  An option question
-(`dsh-emacs--question-pick-labels' set) additionally turns the chooser
-into a STATIC key menu: digits 1–9 (and `0' for the 10th option) pick
-or toggle via `dsh-emacs--question-pick-command', `t' switches to the
-`Type answer…' free-text path, and self-insertion is remapped to
-`dsh-emacs--question-inert-command' so typing never narrows the list.
-Mounted from the setup hook, so none of this leaks into unrelated
-`completing-read' prompts.  For multiple selection, RET submits and SPC
-toggles in place with Vertico.  Other frontends accept the current completion
-using Icomplete's acceptance command or the UI's original RET binding."
+(defun dsh-emacs--question-reader-keymap ()
+  "Return the reader's minibuffer keymap: the current local map plus the
+skip shortcut (`dsh-emacs-question-skip-key', default `C-c C-s'), so
+nothing leaks into unrelated `completing-read' prompts.  The typed text is the
+answer itself (comma-separated options, see `crm-separator'), so no key
+is remapped and completion keep working."
   (let ((map (copy-keymap (current-local-map))))
     (when dsh-emacs-question-skip-key
       (define-key map (if (stringp dsh-emacs-question-skip-key)
                           (kbd dsh-emacs-question-skip-key)
                         dsh-emacs-question-skip-key)
-                #'dsh-emacs--question-skip-command))
-    (when dsh-emacs--question-pick-labels
-      (cl-loop for n from 1 to (min 9 (length dsh-emacs--question-pick-labels))
-               do (define-key map (kbd (number-to-string n))
-                               #'dsh-emacs--question-pick-command))
-      (when (>= (length dsh-emacs--question-pick-labels) 10)
-        (define-key map (kbd "0") #'dsh-emacs--question-pick-command))
-      (define-key map (kbd "t") #'dsh-emacs--question-type-command)
-      (define-key map [remap self-insert-command]
-                    #'dsh-emacs--question-inert-command)
-      (when dsh-emacs--question-multi
-        (define-key map (kbd "SPC")
-                    (cond ((and (bound-and-true-p vertico-mode)
-                                (bound-and-true-p vertico--input))
-                           #'dsh-emacs--question-pick-command)
-                          ((bound-and-true-p icomplete-mode)
-                           #'icomplete-force-complete-and-exit)
-                          (t (or (lookup-key map (kbd "RET"))
-                                 #'minibuffer-complete-and-exit))))
-        (define-key map (kbd "RET") #'dsh-emacs--question-submit-command)
-        (define-key map (kbd "<return>") #'dsh-emacs--question-submit-command)))
+                  #'dsh-emacs--question-skip-command))
     map))
 
-(defun dsh-emacs--question-setup-hook ()
-  "Tame completion sorting in the question chooser's minibuffer: the
-roster order stays put (numbered labels with the `Type answer…'
-sentinel pinned last), the first option is initially preselected, and
-Vertico restores the last toggled option without moving its row.  The
-local keymap gains `dsh-emacs-question-skip-key' (default `s';
-skip this question) plus, for option questions, the key menu bound in
-`dsh-emacs--question-chooser-keymap' (digits pick/toggle, `t' types,
-RET submits multiple selections).  Run after frontend setup so its
-navigation bindings can be preserved.  Returns nil."
-  (when (boundp 'vertico-sort-function)
-    (setq-local vertico-sort-function nil))
-  (when (boundp 'vertico-sort-override-function)
-    (setq-local vertico-sort-override-function nil))
+(defun dsh-emacs--question-reader-setup ()
+  "Install the reader's keymap, candidate annotations and echo-area help.
+Everything is minibuffer-local, so no other `completing-read' sees it.  The
+prompt is preselected instead of the first candidate: an empty answer means
+\"skip\", and a frontend that preselects the first row would otherwise turn
+a bare RET into an answer.  The same setup also serves the nested free-text
+read, where there is no question context to show."
+  ;; Keep our own previous text out of the way, but never clear a message
+  ;; this reader did not write.
+  (when (and dsh-emacs--question-echo-message
+             (equal (current-message) dsh-emacs--question-echo-message))
+    (message nil))
+  (setq-local dsh-emacs--question-echo-message nil)
   (when (boundp 'vertico-preselect)
-    (setq-local vertico-preselect 'first))
-  (when (and (bound-and-true-p vertico-mode)
-             (bound-and-true-p vertico--input))
-    (when-let* ((index (cl-position
-                       (or (car-safe minibuffer-default) minibuffer-default)
-                       minibuffer-completion-table :test #'equal)))
-      ;; Vertico moves DEFAULT to the front even with sorting disabled.
-      ;; Seed its candidate lock before the first computation instead, so
-      ;; the rebuilt checkbox keeps its row and the help index stays valid.
-      (setq-local vertico--candidates (copy-sequence minibuffer-completion-table)
-                  vertico--index index
-                  vertico--lock-candidate t
-                  minibuffer-default (car minibuffer-completion-table))))
-  (use-local-map (dsh-emacs--question-chooser-keymap))
-  (dsh-emacs--question-tip-setup)
+    (setq-local vertico-preselect 'prompt))
+  (setq-local completion-extra-properties
+              (list :annotation-function #'dsh-emacs--question-annotation))
+  (use-local-map (dsh-emacs--question-reader-keymap))
+  (add-hook 'minibuffer-exit-hook #'dsh-emacs--question-echo-cleanup nil t)
+  (dsh-emacs--question-echo
+   (let ((question dsh-emacs--question-current)
+         detail)
+     (when (dsh-protocol-question-p question)
+       (setq detail (dsh-protocol-question-detail question)))
+     (if (or (null detail) (string-empty-p detail)) "" detail)))
   nil)
+
+(defun dsh-emacs--question-answer-labels (picked labels)
+  "Return the LABELS entries PICKED names, in PICKED order.
+Each element is a candidate, a bare number, a label, or a label prefix;
+elements that name no option are dropped, and the caller treats an empty
+result as the user's own text rather than as a malformed answer."
+  (delq nil (mapcar (lambda (value)
+                      (dsh-emacs--question-label-of value labels))
+                    picked)))
+
+(defun dsh-emacs--question-read-multiple (labels)
+  "Read one comma-separated answer over numbered LABELS.
+Returns the selected candidate strings, the free-text sentinel, or nil for
+an empty answer.  `require-match' is nil on purpose: the answer is typed
+text, so an empty minibuffer must stay empty (a mandatory match lets a
+frontend turn a bare RET into its preselected candidate) and an unknown
+value is better treated as a free-text answer than rejected.  C-g
+propagates."
+  (catch 'dsh-emacs--question-command
+    (minibuffer-with-setup-hook #'dsh-emacs--question-reader-setup
+      (completing-read-multiple
+       (concat dsh-emacs--question-where dsh-emacs--question-text
+               (or dsh-emacs--question-hint "") ": ")
+       (append (dsh-emacs--question-pick-labels labels)
+               (list dsh-emacs--question-type-label))
+       nil nil nil nil nil))))
+
+(defun dsh-emacs--question-choose (labels)
+  "Read one answer over LABELS, or return the free-text sentinel.
+The prompt carries the question; the candidates carry their own
+descriptions.  An empty input is a skip, and a value that matches no option
+(and the free-text sentinel was not chosen) is the user's own text."
+  (catch 'answer
+    (let ((picked (dsh-emacs--question-read-multiple labels)))
+      (cond
+       ((equal picked dsh-emacs--question-skip-label)
+        (throw 'answer :skip))
+       ((member dsh-emacs--question-type-label picked)
+        (let ((custom
+               (minibuffer-with-setup-hook #'dsh-emacs--question-reader-setup
+                 (read-string (format "%s%s (free text, empty input = back to options): "
+                                      dsh-emacs--question-where
+                                      dsh-emacs--question-text)))))
+          (if (string-empty-p custom)
+              (message "Empty answer — back to the options")
+            (throw 'answer (cons :custom custom)))))
+       ((null picked) :skip)
+       (t
+        (let ((selected (dsh-emacs--question-answer-labels picked labels)))
+          (cond
+           ((null selected)
+            ;; Not an option: the typed text is the answer, like Emacs'
+            ;; completion prompts do with an unmatched input.
+            (throw 'answer (cons :custom (string-join picked ", "))))
+           (dsh-emacs--question-multi
+            (cons :selected selected))
+           (t
+            (cons :one (car selected))))))))))
 
 (defun dsh-emacs--question-choice (question &optional index total session-id)
   "Read one answer to QUESTION as ((id . ID) (selected . LABELS) ...).
 QUESTION accepts a protocol struct or legacy wire alist.  INDEX/TOTAL
 and SESSION-ID identify the question and its owning session in the prompt.
-Number keys choose immediately for single selection; for multiple
-selection they toggle checkboxes and RET submits.  SPC toggles the
-highlighted completion.  `t' reads a custom answer, keeping multiple
-selections; an empty custom answer returns to the current options.
-The skip key submits an empty selection and C-g abandons the whole frame.
-Questions without options read free text, with empty input meaning skip.
-A tooltip supplies the question detail and focused option description."
+Multiple selection is one comma-separated answer (for example `2,3'):
+the numbered options are the candidates, an empty input skips the
+question, and the `Type answer…' candidate reads free text instead.  Text
+that names no option is itself the answer (like an unmatched input at any
+completion prompt).  Single selection uses the first value when several are
+given.  Every question is answered by one minibuffer read, so the reader is
+never reopened per key.  The skip key
+(`dsh-emacs-question-skip-key') answers with an empty selection and C-g
+abandons the whole waterfall.  Questions without options read free text,
+with empty input meaning skip.  The question detail shows in the echo
+area; each option's description rides along with its candidate."
   (let* ((question (dsh-protocol--struct
                     #'dsh-protocol-question-p
                     #'dsh-protocol-question--from-alist question))
@@ -4039,101 +3684,50 @@ A tooltip supplies the question detail and focused option description."
          (text (or (dsh-protocol-question-text question) "Question"))
          (options (dsh-protocol-question-options question))
          (labels (mapcar #'dsh-protocol-question-option-label options))
+         (dsh-emacs--question-roster labels)
          (dsh-emacs--question-current question)
          (dsh-emacs--question-options options)
          (dsh-emacs--question-multi
           (dsh-protocol-question-multi-select question))
-         (dsh-emacs--question-selected nil)
          ;; The session label is redundant in the asking buffer.
          (same-buffer (and (boundp 'dsh-emacs--buffer-session)
                            (equal dsh-emacs--buffer-session session-id)))
-         (where (concat
-                 (if (and session-id (not (string-empty-p session-id))
-                          (not same-buffer))
-                     (format "[%s] "
-                             (dsh-emacs--question-session-label session-id))
-                   "")
-                 (if index (format "Question %d/%d — " index total) "")))
-         (free-prompt (format "%s%s (free text, empty input = back to options): "
-                              where text)))
+         (dsh-emacs--question-where
+          (concat
+           (if (and session-id (not (string-empty-p session-id))
+                    (not same-buffer))
+               (format "[%s] " (dsh-emacs--question-session-label session-id))
+             "")
+           (if index (format "Question %d/%d — " index total) "")))
+         (dsh-emacs--question-text text)
+         (dsh-emacs--question-hint
+          (if (null labels)
+              " (empty input = skip)"
+            (if dsh-emacs--question-multi
+                " (2,3 or labels; empty = skip)"
+              " (empty input = skip)"))))
     (if (null labels)
         (let ((custom
-               (minibuffer-with-setup-hook #'dsh-emacs--question-tip-setup
-                 (read-string (format "%s%s (empty input = skip): "
-                                      where text)))))
+               (minibuffer-with-setup-hook #'dsh-emacs--question-reader-setup
+                 (read-string (format "%s%s%s: "
+                                      dsh-emacs--question-where text
+                                      dsh-emacs--question-hint)))))
           (if (string-empty-p custom)
               `((id . ,id) (selected . []))
             `((id . ,id) (selected . []) (custom . ,custom))))
-      (let ((dsh-emacs--question-pick-labels labels)
-            ;; The option the last toggle acted on, so the completion frontend
-            ;; keeps it highlighted instead of jumping back to option 1.
-            (remembered nil)
-            (stock-list (not (or (bound-and-true-p vertico-mode)
-                                 (bound-and-true-p icomplete-mode)
-                                 (bound-and-true-p fido-mode)
-                                 (bound-and-true-p ivy-mode)))))
-        (catch 'answer
-          (while t
-            (let* ((candidates
-                    (dsh-emacs--question-candidates
-                     labels dsh-emacs--question-type-label
-                     dsh-emacs--question-multi dsh-emacs--question-selected))
-                   (picked
-                    (catch 'dsh-emacs--question-command
-                      (minibuffer-with-setup-hook
-                          (:append #'dsh-emacs--question-setup-hook)
-                        (completing-read
-                         (concat where text
-                                 (when dsh-emacs--question-multi
-                                   " (numbers/SPC toggle, RET submits)")
-                                 (when stock-list
-                                   (concat " ("
-                                           (mapconcat
-                                            (lambda (candidate)
-                                              (replace-regexp-in-string
-                                               "\\`\\([0-9]+\\)\\. " "(\\1) "
-                                               candidate))
-                                            (butlast candidates) " ")
-                                           ")"))
-                                 ": ")
-                         candidates nil t nil nil
-                         (or (and remembered
-                                  (nth (cl-position remembered labels
-                                                    :test #'equal)
-                                       candidates))
-                             (car candidates)))))))
-              (cond
-               ((equal picked dsh-emacs--question-skip-label)
-                (when (and index total)
-                  (message "Question %d/%d skipped" index total))
-                (throw 'answer `((id . ,id) (selected . []))))
-               ((equal picked dsh-emacs--question-type-label)
-                (let ((custom
-                       (minibuffer-with-setup-hook
-                           #'dsh-emacs--question-tip-setup
-                         (read-string free-prompt))))
-                  (if (string-empty-p custom)
-                      (message "Empty answer — back to the options")
-                    (throw 'answer
-                           `((id . ,id)
-                             (selected . ,(or dsh-emacs--question-selected []))
-                             (custom . ,custom))))))
-               ((and dsh-emacs--question-multi
-                     (equal picked dsh-emacs--question-submit-label))
-                (throw 'answer
-                       `((id . ,id)
-                         (selected . ,(or dsh-emacs--question-selected [])))))
-               (t
-                (let ((label (dsh-emacs--question-picked-label
-                              picked dsh-emacs--question-multi)))
-                  (unless (member label labels)
-                    (error "Unknown question option: %s" picked))
-                  (if (not dsh-emacs--question-multi)
-                      (throw 'answer `((id . ,id) (selected . (,label))))
-                    ;; Frontends which accept a candidate exit the reader;
-                    ;; remember that option when reopening the menu.
-                    (setq remembered label)
-                    (dsh-emacs--question-toggle-selection label))))))))))))
+      (let ((answer (dsh-emacs--question-choose labels)))
+        (pcase answer
+          (:skip
+           (when (and index total)
+             (message "Question %d/%d skipped" index total))
+           `((id . ,id) (selected . [])))
+          (`(:custom . ,custom)
+           `((id . ,id) (selected . []) (custom . ,custom)))
+          (`(:selected . ,selected)
+           `((id . ,id) (selected . ,selected)))
+          (`(:one . ,label)
+           `((id . ,id) (selected . (,label))))
+          (_ (error "Unhandled question answer: %S" answer)))))))
 
 ;;;###autoload
 (defun dsh-emacs-question-preview ()

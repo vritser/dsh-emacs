@@ -93,31 +93,27 @@ messages. Goal shortcuts and inline controls are described in
 
 ### Answering questions
 
-Agent `ask` prompts show a numbered menu. For single-choice questions, press
-`1`–`9` (`0` for option 10) to answer, or use normal completion to choose an
-option. For multiple choices, the same digits toggle `[ ]` / `[x]` marks;
-`SPC` toggles the highlighted option and `RET` submits your selection.
-In Vertico, checkmarks update in place while the menu stays open.
-Press `t` to type an answer, `s` to skip, or `C-g` to abandon the group.
+Agent `ask` prompts are answered in one minibuffer read. The question text is
+the prompt, the options are the completion candidates (each one carries its
+description as an annotation), and the question detail shows in the echo area.
 
-A small tooltip follows the highlighted option at its upper right, including
-inside a Vertico posframe and after scrolling. Theme colors, a fine border
-and padding keep the explanation readable. It shows only the question detail and option
-description, without numbers or titles, and keeps focus in the chooser.
-It hides when its Emacs frame loses focus or answering ends.
-Graphical tips wait for 150ms of idle time to reduce
-flashing during rapid selection. Customize `dsh-emacs-question-tip-delay`
-(seconds), or set it to `0` for immediate updates. Terminal Emacs
-shows a compact minibuffer message immediately. To show explanations in the echo
-area, as with signature help, configure:
+- Single choice: pick a candidate, `RET` accepts it. Empty input skips the
+  question.
+- Multiple choice: type the options comma-separated — `2,3` or `alpha,beta` —
+  and `RET` submits them (`completing-read-multiple`, Emacs' standard
+  comma-separated input path). An unambiguous prefix works too (`alph`), and
+  an ambiguous one is left as your answer text rather than guessed.
+- Anything that names no option is taken as your answer text, like at any
+  Emacs completion prompt; `Type answer…` asks for it explicitly.
+- `C-c C-s` skips the question (empty input does the same); `C-g` abandons
+  the whole group.
+
+Nothing is toggled in place and the reader never reopens: one read per
+question, so the menu cannot flicker or reorder.
 
 ```elisp
-(setq dsh-emacs-question-help-display 'echo-area)
+(setq dsh-emacs-question-help-display 'echo-area) ; default; nil hides the detail
 ```
-
-Use `tooltip` (the default) for floating tips, or `nil` to hide explanations.
-The echo area shares space with a normal minibuffer; with a completion
-posframe, the menu and explanation remain separate.
 Try `M-x dsh-emacs-question-preview` locally, without contacting a server.
 See [Question prompts](docs/customization.md#ask-question-prompts) for details.
 

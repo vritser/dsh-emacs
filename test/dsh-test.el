@@ -12,6 +12,7 @@
 (require 'dsh-emacs)
 
 (defvar vertico-mode nil "Stub: vertico global minor mode flag (test-only).")
+(defvar vertico-preselect nil "Stub: vertico preselect option (test-only).")
 
 (defvar dsh-test-results '())
 
@@ -7379,27 +7380,6 @@ symbol or an ordered list."
             (dsh-protocol-question--from-alist
              `((multiSelect . ,false-value))))))))
 
-;; 2) 候选构建：选项带序号（按数字键选择），Type answer… 垫底；skip 不再
-;; 有可见候选（只走 dsh-emacs-question-skip-key 快捷键的哨兵路径）
-(when (equal '("1. Yes" "2. No" "Type answer…")
-             (dsh-emacs--question-candidates
-              '("Yes" "No") "Type answer…"))
-  (dsh-test-pass "question-candidates-tail-type-answer"))
-
-(when (and (equal "Yes" (dsh-emacs--question-picked-label "1. Yes"))
-           (equal "Type answer…"
-                  (dsh-emacs--question-picked-label "Type answer…")))
-  (dsh-test-pass "question-picked-label-strips-number"))
-
-;; 只去除 UI 添加的序号与复选框，不改写标签自己的前缀。
-(dsh-test-assert "question-picked-label-preserves-literal-label-syntax"
-  (equal "[x] Literal"
-         (dsh-emacs--question-picked-label "1. [x] Literal"))
-  (equal "[x] Literal"
-         (dsh-emacs--question-picked-label "1. [ ] [x] Literal" t))
-  (equal "2. Version"
-         (dsh-emacs--question-picked-label "1. [x] 2. Version" t)))
-
 ;; 会话标识：优先用活跃聊天缓冲的名字；无缓冲回退到 dsh: <id> 并截断；
 ;; 无 session-id 时为空（直接调用测试不加前缀）
 (let ((buf (get-buffer-create " *dsh-test-label-buf*")))
@@ -7425,993 +7405,240 @@ symbol or an ordered list."
           (dsh-test-pass "question-session-label-nil-id-empty")))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
-;; 3) minibuffer 选择 → answer 映射
-(when (equal '((id . "q1") (selected "Yes"))
-             (cl-letf (((symbol-function 'completing-read)
-                        (lambda (&rest _) "1. Yes")))
-               (dsh-emacs--question-choice
-                '((id . "q1") (question . "Proceed?")
-                  (options . (((label . "Yes")) ((label . "No"))))))))
-  (dsh-test-pass "question-choice-single-label"))
+;; 候选：编号从 1 起，Type answer… 垫底；编号属于选项本身，所以逗号分隔的
+;; 答案既能写编号也能写标签。
+(dsh-test-assert "question-candidates-number-and-tail"
+  (equal '("1. Yes" "2. No" "Type answer…")
+         (append (dsh-emacs--question-pick-labels '("Yes" "No"))
+                 (list dsh-emacs--question-type-label))))
 
-(when (equal '((id . "q1") (selected . []) (custom . "my note"))
-             (cl-letf (((symbol-function 'completing-read)
-                        (lambda (&rest _) "Type answer…"))
-                       ((symbol-function 'read-string)
-                        (lambda (&rest _) "my note")))
-               (dsh-emacs--question-choice
-                '((id . "q1") (question . "Proceed?")
-                  (options . (((label . "Yes")) ((label . "No"))))))))
-  (dsh-test-pass "question-choice-single-type-answer"))
+;; 答案值可能是编号候选、裸标签、或标签自带数字前缀，都要还原成原标签。
+(let ((labels '("Yes" "2. Version" "[x] Literal" "A,B")))
+  (dsh-test-assert "question-label-of-accepts-number-or-label"
+    (equal "Yes" (dsh-emacs--question-label-of "1. Yes" labels))
+    (equal "Yes" (dsh-emacs--question-label-of "Yes" labels))
+    (equal "2. Version" (dsh-emacs--question-label-of "2. 2. Version" labels))
+    (equal "2. Version" (dsh-emacs--question-label-of "2. Version" labels))
+    (equal "[x] Literal" (dsh-emacs--question-label-of "3. [x] Literal" labels))
+    (equal "A,B" (dsh-emacs--question-label-of "4. A,B" labels))
+    ;; CRM 可能把未展开的元素（裸数字"2"）交回来 → 按位置解析
+    (equal "Yes" (dsh-emacs--question-label-of "1" labels))
+    (equal "2. Version" (dsh-emacs--question-label-of "2" labels))
+    (equal "[x] Literal" (dsh-emacs--question-label-of "3" labels))
+    (null (dsh-emacs--question-label-of "0" labels))
+    (null (dsh-emacs--question-label-of "9" labels))
+    (null (dsh-emacs--question-label-of "9. Nope" labels))
+    (null (dsh-emacs--question-label-of "Nope" labels))))
 
-(let ((reads '("2. [ ] B" "1. [ ] A" "Submit answer"))
-      (menus nil))
-  (cl-letf (((symbol-function 'completing-read)
-             (lambda (_prompt candidates &rest _)
-               (push candidates menus)
-               (or (pop reads) (error "Unexpected chooser read")))))
-    (dsh-test-assert "question-choice-multi-labels-in-roster-order"
-      (equal '((id . "q2") (selected "A" "B"))
+;; 未展开的前缀：唯一可判定才解析（忽略大小写），歧义前缀保持为文字。
+(dsh-test-assert "question-label-of-resolves-unambiguous-prefix"
+  (equal "Alpha" (dsh-emacs--question-label-of "alph" '("Alpha" "Beta" "Gamma")))
+  (equal "Alpha" (dsh-emacs--question-label-of "ALPH" '("Alpha" "Beta" "Gamma")))
+  (equal "Beta" (dsh-emacs--question-label-of "be" '("Alpha" "Beta" "Gamma")))
+  ;; 歧义（Alpha / Alphabet）不解析，宁可为文字也不错配
+  (null (dsh-emacs--question-label-of "A" '("Alpha" "Alphabet")))
+  (null (dsh-emacs--question-label-of "Al" '("Alpha" "Alphabet")))
+  ;; 精确匹配优先于前缀
+  (equal "Alpha" (dsh-emacs--question-label-of "Alpha" '("Alpha" "Alphabet"))))
+
+;; 每个候选的说明跟着候选走（annotation），不再是跟随高亮的 tooltip。
+(let* ((dsh-emacs--question-current
+        (dsh-protocol-question--from-alist
+         '((id . "ann") (question . "Choose?")
+           (options . [((label . "Alpha") (description . "Safe route."))
+                       ((label . "Beta"))]))))
+       (dsh-emacs--question-options
+        (dsh-protocol-question-options dsh-emacs--question-current))
+       (dsh-emacs--question-roster '("Alpha" "Beta")))
+  (dsh-test-assert "question-annotation-carries-description"
+    (equal "  [Safe route.]" (dsh-emacs--question-annotation "1. Alpha"))
+    (equal "  [Safe route.]" (dsh-emacs--question-annotation "Alpha"))
+    (equal "" (dsh-emacs--question-annotation "2. Beta"))
+    (equal "" (dsh-emacs--question-annotation dsh-emacs--question-type-label))))
+
+;; 单选：同样是一次读完（CRM 只收一个值），编号候选 → 原标签。
+(let ((reads '(("1. Yes"))))
+  (cl-letf (((symbol-function 'completing-read-multiple)
+             (lambda (&rest _) (or (pop reads) (error "Unexpected read")))))
+    (dsh-test-assert "question-choice-single-label"
+      (equal '((id . "q1") (selected "Yes"))
+             (dsh-emacs--question-choice
+              '((id . "q1") (question . "Proceed?")
+                (options . (((label . "Yes")) ((label . "No"))))))))))
+
+;; 多选：一次读完整个答案，逗号分隔的编号 → 对应标签（按作答顺序）；
+;; 元素既可能是补全后的候选，也可能是 CRM 未展开的裸数字。
+(let ((reads '(("2. B" "1"))))
+  (cl-letf (((symbol-function 'completing-read-multiple)
+             (lambda (&rest _) (or (pop reads) (error "Unexpected read")))))
+    (dsh-test-assert "question-choice-multi-reads-once"
+      (equal '((id . "q2") (selected "B" "A"))
              (dsh-emacs--question-choice
               '((id . "q2") (question . "Pick?") (multiSelect . t)
-                (options . (((label . "A")) ((label . "B"))
-                            ((label . "C"))))))))
-    (dsh-test-assert "question-choice-multi-shows-persistent-checkmarks"
-      (equal '(("1. [ ] A" "2. [ ] B" "3. [ ] C" "Type answer…")
-               ("1. [ ] A" "2. [x] B" "3. [ ] C" "Type answer…")
-               ("1. [x] A" "2. [x] B" "3. [ ] C" "Type answer…"))
-             (reverse menus))
-      (null reads))))
+                (options . (((label . "A")) ((label . "B")) ((label . "C"))))))))))
 
-;; 切换后把刚操作的选项作为默认值交回去；Vertico setup 另行锁定高亮，
-;; 避免它将默认项移动到第一行。
-(let ((reads '("2. [ ] B" "Submit answer"))
-      (defaults nil))
-  (cl-letf (((symbol-function 'completing-read)
-             (lambda (_prompt _candidates &rest args)
-               ;; args holds the optional arguments: predicate, require-match,
-               ;; initial, history, default.
-               (push (nth 4 args) defaults)
-               (or (pop reads) (error "Unexpected chooser read")))))
-    (dsh-emacs--question-choice
-     '((id . "q2") (question . "Pick?") (multiSelect . t)
-       (options . (((label . "A")) ((label . "B"))))))
-    (dsh-test-assert "question-choice-multi-remembers-the-toggled-option"
-      (equal '("1. [ ] A" "2. [x] B") (reverse defaults)))
-    (dsh-test-assert "question-choice-multi-marks-the-remembered-option"
-      (equal "2. [x] B" (cadr (reverse defaults))))))
+;; 空输入 = 跳过该题；跳过不依赖任何候选。
+(let ((reads '(nil)))
+  (cl-letf (((symbol-function 'completing-read-multiple)
+             (lambda (&rest _) (pop reads))))
+    (dsh-test-assert "question-choice-multi-empty-input-skips"
+      (equal '((id . "q3") (selected . []))
+             (dsh-emacs--question-choice
+              '((id . "q3") (question . "Pick?") (multiSelect . t)
+                (options . (((label . "A")) ((label . "B"))))))))))
 
-;; Prime Vertico's candidate lock before its first completion computation.
-;; Keep the numbered roster stable while restoring checked or unchecked rows.
-(dolist (candidate '("2. [x] B" "2. [ ] B" "1. [ ] A"))
-  (with-temp-buffer
-    (let* ((vertico-mode t)
-           (minibuffer-completion-table
-            (list "1. [ ] A" (if (string-prefix-p "2." candidate)
-                                  candidate "2. [ ] B") "Type answer…"))
-           (minibuffer-default candidate)
-           (index (cl-position candidate minibuffer-completion-table :test #'equal)))
-      ;; These bindings simulate Vertico's freshly installed local state.
-      (set (make-local-variable 'vertico--input) t)
-      (set (make-local-variable 'vertico--candidates) nil)
-      (set (make-local-variable 'vertico--index) -1)
-      (set (make-local-variable 'vertico--lock-candidate) nil)
-      (use-local-map (make-sparse-keymap))
-      (cl-letf (((symbol-function 'dsh-emacs--question-tip-setup) #'ignore))
-        (dsh-emacs--question-setup-hook))
-      (dsh-test-assert (concat "question-vertico-restores-row-" candidate)
-        (equal minibuffer-completion-table (symbol-value 'vertico--candidates))
-        (equal index (symbol-value 'vertico--index))
-        (symbol-value 'vertico--lock-candidate)
-        (equal "1. [ ] A" minibuffer-default)
-        (equal index (dsh-emacs--question-highlight-index))))))
-
-(let ((reads '("1. [ ] A" "Type answer…")))
-  (cl-letf (((symbol-function 'completing-read)
-             (lambda (&rest _)
-               (or (pop reads) (error "Unexpected chooser read"))))
+;; Type answer… 与选项混选 → 自由文本 + 已选选项并存。
+(let ((reads '(("Type answer…"))))
+  (cl-letf (((symbol-function 'completing-read-multiple)
+             (lambda (&rest _) (or (pop reads) (error "Unexpected read"))))
             ((symbol-function 'read-string) (lambda (&rest _) "extra")))
-    (dsh-test-assert "question-choice-multi-with-type-answer"
-      (equal '((id . "q2") (selected "A") (custom . "extra"))
+    (dsh-test-assert "question-choice-multi-type-answer"
+      (equal '((id . "q4") (selected . []) (custom . "extra"))
              (dsh-emacs--question-choice
-              '((id . "q2") (question . "Pick?") (multiSelect . t)
+              '((id . "q4") (question . "Pick?") (multiSelect . t)
                 (options . (((label . "A")) ((label . "B"))))))))))
 
-(when (equal '((id . "q3") (selected . []) (custom . "free text"))
-             (cl-letf (((symbol-function 'read-string)
-                        (lambda (&rest _) "free text")))
-               (dsh-emacs--question-choice
-                '((id . "q3") (question . "Say?")))))
-  (dsh-test-pass "question-choice-no-options-custom"))
-
-;; 无选项 + 空输入 → 跳过该题（{id, selected: []}，dsh web 的逐题 Skip；
-;; 要放弃整组用 C-g）
-(when (equal '((id . "q3") (selected . []))
-             (cl-letf (((symbol-function 'read-string)
-                        (lambda (&rest _) "")))
-               (dsh-emacs--question-choice
-                '((id . "q3") (question . "Say?")))))
-  (dsh-test-pass "question-choice-no-options-empty-skips"))
-
-;; 选项题走 Skip 哨兵（现在只由 dsh-emacs-question-skip-key 快捷键产生，
-;; 不再是可见候选）→ 该题空 selected，接着答下一题
-(when (equal '((id . "q1") (selected . []))
-             (cl-letf (((symbol-function 'completing-read)
-                        (lambda (&rest _) "Skip this question")))
-               (dsh-emacs--question-choice
-                '((id . "q1") (question . "Proceed?")
-                  (options . (((label . "Yes")) ((label . "No"))))))))
-  (dsh-test-pass "question-choice-single-skip"))
-
-;; 多选里按 s 键 → Skip 独占，丢弃先前勾选。
-(let ((reads '("1. [ ] A" "2. [ ] B" "Skip this question")))
-  (cl-letf (((symbol-function 'completing-read)
-             (lambda (&rest _)
-               (or (pop reads) (error "Unexpected chooser read")))))
-    (dsh-test-assert "question-choice-multi-skip-exclusive"
-      (equal '((id . "q2") (selected . []))
+;; 单选 Type answer… 同样走自由文本。
+(let ((reads '(("Type answer…"))))
+  (cl-letf (((symbol-function 'completing-read-multiple)
+             (lambda (&rest _) (or (pop reads) (error "Unexpected read"))))
+            ((symbol-function 'read-string) (lambda (&rest _) "my note")))
+    (dsh-test-assert "question-choice-single-type-answer"
+      (equal '((id . "q5") (selected . []) (custom . "my note"))
              (dsh-emacs--question-choice
-              '((id . "q2") (question . "Pick?") (multiSelect . t)
-                (options . (((label . "A")) ((label . "B"))))))))))
+              '((id . "q5") (question . "Proceed?")
+                (options . (((label . "Yes")) ((label . "No"))))))))))
 
-;; 逗号、数字、内部动作同名标签都必须原样往返。
-(let* ((labels '("A,B" "2. Version" "Submit answer" "Type answer…"
-                 "Skip this question" "[x] Literal"))
-       (reads '("1. [ ] A,B" "2. [ ] 2. Version" "3. [ ] Submit answer"
-                "4. [ ] Type answer…" "5. [ ] Skip this question"
-                "6. [ ] [x] Literal" "Submit answer")))
-  (cl-letf (((symbol-function 'completing-read)
-             (lambda (&rest _)
-               (or (pop reads) (error "Unexpected chooser read")))))
-    (let ((answer (dsh-emacs--question-choice
-                   `((id . "q-labels") (question . "Pick?")
-                     (multiSelect . t)
-                     (options . ,(mapcar (lambda (label) `((label . ,label)))
-                                        labels))))))
-      (dsh-test-assert "question-choice-multi-preserves-labels-verbatim"
-        (equal `((id . "q-labels") (selected . ,labels)) answer)
-        (null reads)))))
+;; 记不清选项、直接打文字 → 该文字就是答案（Emacs 补全提示的惯例），
+;; 而不是报错或静默丢弃。
+(dsh-test-assert "question-choice-unmatched-input-is-free-text"
+  (equal '((id . "q6") (selected . []) (custom . "just do it"))
+         (cl-letf (((symbol-function 'completing-read-multiple)
+                    (lambda (&rest _) (list "just do it"))))
+           (dsh-emacs--question-choice
+            '((id . "q6") (question . "Pick?") (multiSelect . t)
+              (options . (((label . "A")) ((label . "B"))))))))
+  (equal '((id . "q6b") (selected . []) (custom . "one, two"))
+         (cl-letf (((symbol-function 'completing-read-multiple)
+                    (lambda (&rest _) (list "one" "two"))))
+           (dsh-emacs--question-choice
+            '((id . "q6b") (question . "Pick?") (multiSelect . t)
+              (options . (((label . "A")) ((label . "B")))))))))
 
-;; 单选同样保持原始标签，不把真实选项误认成内部动作。
-(dolist (label '("A,B" "2. Version" "Submit answer" "Type answer…"
-                 "Skip this question" "[x] Literal"))
-  (cl-letf (((symbol-function 'completing-read)
-             (lambda (&rest _) (format "1. %s" label))))
-    (let ((answer (dsh-emacs--question-choice
-                   `((id . "q-single-label") (question . "Pick?")
-                     (options . (((label . ,label))))))))
-      (dsh-test-assert (format "question-choice-single-literal-%s" label)
-        (equal `((id . "q-single-label") (selected . (,label))) answer)))))
+;; 无选项题仍然是 free text：空输入 = 跳过，非空 = custom。
+(let ((customs '("free text" "")))
+  (cl-letf (((symbol-function 'read-string)
+             (lambda (&rest _) (pop customs))))
+    (dsh-test-assert "question-choice-no-options-custom"
+      (equal '((id . "q7") (selected . []) (custom . "free text"))
+             (dsh-emacs--question-choice
+              '((id . "q7") (question . "Say?")))))
+    (dsh-test-assert "question-choice-no-options-empty-skips"
+      (equal '((id . "q7") (selected . []))
+             (dsh-emacs--question-choice
+              '((id . "q7") (question . "Say?")))))))
 
-;; 再次选择已勾选项应取消它，其它选项保持勾选。
-(let ((reads '("1. [ ] A" "2. [ ] B" "1. [x] A" "Submit answer"))
-      (menus nil))
-  (cl-letf (((symbol-function 'completing-read)
-             (lambda (_prompt candidates &rest _)
-               (push candidates menus)
-               (or (pop reads) (error "Unexpected chooser read")))))
-    (let ((answer (dsh-emacs--question-choice
-                   '((id . "q-toggle") (question . "Pick?")
-                     (multiSelect . t)
-                     (options . (((label . "A")) ((label . "B"))))))))
-      (dsh-test-assert "question-choice-multi-toggle-twice-deselects"
-        (equal '((id . "q-toggle") (selected "B")) answer)
-        (equal '("1. [ ] A" "2. [x] B" "Type answer…") (car menus))
-        (null reads)))))
-
-;; 帧级：一题正常作答 + 一题跳过 → answers 覆盖整帧（跳过的题空 selected）
-(let ((picks '("1. Yes" "Skip this question")))
-  (when (equal '(((id . "qa") (selected "Yes"))
-                 ((id . "qb") (selected . [])))
-               (cl-letf (((symbol-function 'completing-read)
-                          (lambda (&rest _) (pop picks))))
-                 (dsh-emacs--collect-question-answers
-                  '(((id . "qa") (question . "A?")
-                     (options . (((label . "Yes")))))
-                    ((id . "qb") (question . "B?")
-                     (options . (((label . "Only")))))))))
-    (dsh-test-pass "question-skip-covers-frame-with-empty-selected")))
-
-;; Skip 命令直接把动作交回 chooser，不依赖前端保存 minibuffer 输入。
+;; Skip 命令直接把动作交回 reader（由 dsh-emacs-question-skip-key 触发）。
 (dsh-test-assert "question-skip-command-returns-skip-action"
   (equal "Skip this question"
          (catch 'dsh-emacs--question-command
            (dsh-emacs--question-skip-command))))
 
-;; chooser 局部 keymap：dsh-emacs-question-skip-key（默认单键 s）→ skip 命令；
-;; C-c C-s 保持空闲（chat buffer 里它切换 workspace 会话）
+;; reader 局部 keymap：默认 C-c C-s → skip（不能用裸字母，否则答案里打不出
+;; 那个字母）；改键生效；裸字母保持可输入。
 (with-temp-buffer
   (use-local-map (make-sparse-keymap))
-  (use-local-map (dsh-emacs--question-chooser-keymap))
-  (when (eq (lookup-key (current-local-map) (kbd "s"))
-            'dsh-emacs--question-skip-command)
-    (dsh-test-pass "question-chooser-binds-default-skip-key"))
-  ;; C-c C-s 保持空闲（chat buffer 里它切换 workspace 会话）；
-  ;; lookup-key 对稀疏 keymap 可能返回前缀哨兵，断言「不是 skip 命令」即可
-  (when (not (eq (lookup-key (current-local-map) (kbd "C-c C-s"))
-                 'dsh-emacs--question-skip-command))
-    (dsh-test-pass "question-chooser-keeps-c-c-c-s-free")))
-;; 用户可改键（defcustom），改后按新键生效
-(let ((dsh-emacs-question-skip-key "C-c C-s"))
+  (use-local-map (dsh-emacs--question-reader-keymap))
+  (dsh-test-assert "question-reader-binds-default-skip-key"
+    (eq (lookup-key (current-local-map) (kbd "C-c C-s"))
+        'dsh-emacs--question-skip-command)
+    (null (lookup-key (current-local-map) (kbd "s")))
+    (null (lookup-key (current-local-map) (kbd "t")))))
+
+(let ((dsh-emacs-question-skip-key "C-c s"))
   (with-temp-buffer
     (use-local-map (make-sparse-keymap))
-    (use-local-map (dsh-emacs--question-chooser-keymap))
-    (when (eq (lookup-key (current-local-map) (kbd "C-c C-s"))
-              'dsh-emacs--question-skip-command)
-      (dsh-test-pass "question-skip-key-custom-value-bound"))))
-;; nil 关闭快捷键（候选仍可用）。lookup-key 对空 keymap 可能返回字符表
-;; 前缀哨兵而非 nil，故断言「解析不出 skip 命令」即可
+    (use-local-map (dsh-emacs--question-reader-keymap))
+    (dsh-test-assert "question-reader-honors-rebound-skip-key"
+      (eq (lookup-key (current-local-map) (kbd "C-c s"))
+          'dsh-emacs--question-skip-command)
+      (null (lookup-key (current-local-map) (kbd "C-c C-s"))))))
+
 (let ((dsh-emacs-question-skip-key nil))
   (with-temp-buffer
     (use-local-map (make-sparse-keymap))
-    (use-local-map (dsh-emacs--question-chooser-keymap))
-    (when (not (eq (lookup-key (current-local-map) (kbd "s"))
-                   'dsh-emacs--question-skip-command))
-      (dsh-test-pass "question-skip-key-nil-disables-shortcut"))))
-(let ((before (copy-keymap minibuffer-local-completion-map)))
-  (with-temp-buffer
-    (use-local-map (make-sparse-keymap))
-    (use-local-map (dsh-emacs--question-chooser-keymap)))
-  (when (equal before (copy-keymap minibuffer-local-completion-map))
-    (dsh-test-pass "question-chooser-leaves-global-map-untouched")))
+    (dsh-test-assert "question-reader-skip-key-can-be-disabled"
+      ;; 未绑定的前缀键 lookup-key 返回哨兵 1，不是 nil
+      (not (eq (lookup-key (dsh-emacs--question-reader-keymap)
+                           (kbd "C-c C-s"))
+               'dsh-emacs--question-skip-command)))))
 
-;; 无过滤 keymenu：选项题把 chooser 变成静态按键菜单 —— 数字键立即选择，
-;; t 走 Type answer…，self-insert 重映射为提示（打字不会缩窄列表）
-(let ((dsh-emacs--question-pick-labels '("Yes" "No" "Maybe")))
-  (with-temp-buffer
-    (use-local-map (make-sparse-keymap))
-    (use-local-map (dsh-emacs--question-chooser-keymap))
-    (when (eq (lookup-key (current-local-map) (kbd "1"))
-              'dsh-emacs--question-pick-command)
-      (dsh-test-pass "question-keymenu-binds-digit-1"))
-    (when (eq (lookup-key (current-local-map) (kbd "3"))
-              'dsh-emacs--question-pick-command)
-      (dsh-test-pass "question-keymenu-binds-all-option-digits"))
-    (when (not (eq (lookup-key (current-local-map) (kbd "4"))
-                   'dsh-emacs--question-pick-command))
-      (dsh-test-pass "question-keymenu-leaves-out-of-range-digits-free"))
-    (when (not (eq (lookup-key (current-local-map) (kbd "0"))
-                   'dsh-emacs--question-pick-command))
-      (dsh-test-pass "question-keymenu-no-zero-below-ten-options"))
-    (when (eq (lookup-key (current-local-map) (kbd "t"))
-              'dsh-emacs--question-type-command)
-      (dsh-test-pass "question-keymenu-binds-type-key"))
-    (when (eq (lookup-key (current-local-map) [remap self-insert-command])
-              'dsh-emacs--question-inert-command)
-      (dsh-test-pass "question-keymenu-remaps-self-insert-inert"))))
-
-;; ≥10 个选项时 0 键 = 第 10 个选项
-(let ((dsh-emacs--question-pick-labels (make-list 10 "x")))
-  (with-temp-buffer
-    (use-local-map (make-sparse-keymap))
-    (use-local-map (dsh-emacs--question-chooser-keymap))
-    (when (eq (lookup-key (current-local-map) (kbd "0"))
-              'dsh-emacs--question-pick-command)
-      (dsh-test-pass "question-keymenu-binds-0-for-tenth-option"))))
-
-;; 无 pick-labels：不安装选项菜单的数字与 t，skip 键仍保留。
-(let ((dsh-emacs--question-pick-labels nil))
-  (with-temp-buffer
-    (use-local-map (make-sparse-keymap))
-    (use-local-map (dsh-emacs--question-chooser-keymap))
-    (when (not (eq (lookup-key (current-local-map) (kbd "1"))
-                   'dsh-emacs--question-pick-command))
-      (dsh-test-pass "question-keymenu-absent-without-pick-labels"))
-    (when (not (eq (lookup-key (current-local-map) (kbd "t"))
-                   'dsh-emacs--question-type-command))
-      (dsh-test-pass "question-keymenu-type-key-absent-without-labels"))
-    (when (eq (lookup-key (current-local-map) (kbd "s"))
-              'dsh-emacs--question-skip-command)
-      (dsh-test-pass "question-keymenu-absent-still-keeps-skip-key"))))
-
-;; 多选 RET 提交；SPC 沿用补全前端的选择键，不改原 keymap。
-(let ((dsh-emacs--question-pick-labels '("Yes" "No"))
-      (dsh-emacs--question-multi t)
-      (original-map (make-sparse-keymap)))
-  (define-key original-map (kbd "RET") #'next-line)
-  (with-temp-buffer
-    (use-local-map original-map)
-    (let ((map (dsh-emacs--question-chooser-keymap)))
-      (dsh-test-assert "question-multi-keymap-submit-and-toggle"
-        (eq #'dsh-emacs--question-submit-command (lookup-key map (kbd "RET")))
-        (eq #'dsh-emacs--question-submit-command
-            (lookup-key map (kbd "<return>")))
-        (eq #'next-line (lookup-key map (kbd "SPC")))
-        (eq #'dsh-emacs--question-pick-command (lookup-key map (kbd "1")))
-        (eq #'dsh-emacs--question-type-command (lookup-key map (kbd "t")))
-        (eq #'next-line (lookup-key original-map (kbd "RET")))
-        (null (lookup-key original-map (kbd "SPC")))))))
-
-;; Vertico 多选直接更新当前候选，不退出 minibuffer 再重开。
-(with-temp-buffer
-  (let ((vertico-mode t)
-        (dsh-emacs--question-pick-labels '("A" "B" "C"))
-        (dsh-emacs--question-multi t)
-        (dsh-emacs--question-selected nil))
-    (setq-local minibuffer-completion-table
-                '("1. [ ] A" "2. [ ] B" "3. [ ] C" "Type answer…")
-                vertico--candidates minibuffer-completion-table
-                vertico--input '("" . 0)
-                vertico--index 1
-                minibuffer-default (car minibuffer-completion-table))
-    (use-local-map (make-sparse-keymap))
-    (dsh-test-assert "question-vertico-space-uses-in-place-pick-command"
-      (eq #'dsh-emacs--question-pick-command
-          (lookup-key (dsh-emacs--question-chooser-keymap) (kbd "SPC"))))
-    (dolist (case '((?\s ("B") 1 ("1. [ ] A" "2. [x] B" "3. [ ] C" "Type answer…"))
-                    (?\s nil 1 ("1. [ ] A" "2. [ ] B" "3. [ ] C" "Type answer…"))
-                    (?3 ("C") 2 ("1. [ ] A" "2. [ ] B" "3. [x] C" "Type answer…"))
-                    (?1 ("A" "C") 0 ("1. [x] A" "2. [ ] B" "3. [x] C" "Type answer…"))))
-      (pcase-let ((`(,last-command-event ,selected ,index ,candidates) case))
-        (dsh-test-assert (format "question-vertico-toggle-stays-open-%S" case)
-          (eq :still-choosing
-              (catch 'dsh-emacs--question-command
-                (dsh-emacs--question-pick-command)
-                :still-choosing))
-          (equal selected dsh-emacs--question-selected)
-          (= index vertico--index)
-          (equal candidates minibuffer-completion-table)
-          (equal candidates vertico--candidates)
-          (equal (car candidates) minibuffer-default))))
-    (setq vertico--index 3)
-    (let ((last-command-event ?\s))
-      (dsh-test-assert "question-vertico-space-on-type-action-exits-to-free-input"
-        (equal "Type answer…"
-               (catch 'dsh-emacs--question-command
-                 (dsh-emacs--question-pick-command)))))
-    ;; A globally enabled mode is not enough: this reader must use Vertico.
-    (setq vertico--input nil)
-    (define-key (current-local-map) (kbd "RET") #'next-line)
-    (let ((last-command-event ?2))
-      (dsh-test-assert "question-inactive-vertico-keeps-frontend-acceptance"
-        (eq #'next-line
-            (lookup-key (dsh-emacs--question-chooser-keymap) (kbd "SPC")))
-        (equal "2. [ ] B"
-               (catch 'dsh-emacs--question-command
-                 (dsh-emacs--question-pick-command)))
-        (equal '("A" "C") dsh-emacs--question-selected)))))
-
-;; 数字键直接返回编号候选。
-(let ((last-command-event ?2)
-      (dsh-emacs--question-pick-labels '("Yes" "No" "Maybe")))
-  (dsh-test-assert "question-pick-command-selects-by-digit"
-    (equal "2. No"
-           (catch 'dsh-emacs--question-command
-             (dsh-emacs--question-pick-command)))))
-
-;; 多选数字键返回当前复选状态。
-(let ((dsh-emacs--question-pick-labels '("A" "B"))
-      (dsh-emacs--question-multi t)
-      (dsh-emacs--question-selected '("B"))
-      (last-command-event ?2))
-  (dsh-test-assert "question-multi-digit-returns-current-checked-candidate"
-    (equal "2. [x] B"
-           (catch 'dsh-emacs--question-command
-             (dsh-emacs--question-pick-command)))))
-
-;; 0 键 = 第 10 个选项
-(let ((last-command-event ?0)
-      (dsh-emacs--question-pick-labels (make-list 10 "x")))
-  (dsh-test-assert "question-pick-command-0-picks-tenth"
-    (equal "10. x"
-           (catch 'dsh-emacs--question-command
-             (dsh-emacs--question-pick-command)))))
-
-;; 越界数字：只提示，不退出
-(let ((got nil)
-      (result nil)
-      (last-command-event ?9)
-      (dsh-emacs--question-pick-labels '("Yes" "No")))
-  (cl-letf (((symbol-function 'minibuffer-message)
-             (lambda (fmt &rest args) (setq got (apply #'format fmt args)))))
-    (setq result (catch 'dsh-emacs--question-command
-                   (dsh-emacs--question-pick-command)
-                   :still-choosing)))
-  (dsh-test-assert "question-pick-command-out-of-range-messages-only"
-    (equal "No option 9" got)
-    (eq :still-choosing result)))
-
-;; t 键返回自由输入动作。
-(dsh-test-assert "question-type-command-returns-type-action"
-  (equal "Type answer…"
-         (catch 'dsh-emacs--question-command
-           (dsh-emacs--question-type-command))))
-
-;; RET 直接返回提交动作。
-(dsh-test-assert "question-submit-command-returns-submit-action"
-  (equal "Submit answer"
-         (catch 'dsh-emacs--question-command
-           (dsh-emacs--question-submit-command))))
-
-;; 惰性打字：提示按键菜单（含当前绑定的 skip 键）
-(let ((got nil))
-  (cl-letf (((symbol-function 'minibuffer-message)
-             (lambda (fmt &rest args) (setq got (apply #'format fmt args)))))
-    (with-temp-buffer
-      (let ((dsh-emacs--question-pick-labels '("Yes" "No")))
-        (dsh-emacs--question-inert-command))))
-  (when (and (string-search "Press a number to pick" got)
-             (string-search "t = type an answer" got)
-             (string-search ", s = skip" got))
-    (dsh-test-pass "question-inert-command-shows-menu-keys")))
-
-;; skip 键被禁用（nil）时提示不再提到 skip
-(let ((got nil))
-  (cl-letf (((symbol-function 'minibuffer-message)
-             (lambda (fmt &rest args) (setq got (apply #'format fmt args)))))
-    (with-temp-buffer
-      (let ((dsh-emacs-question-skip-key nil))
-        (dsh-emacs--question-inert-command))))
-  (when (and (string-search "t = type an answer" got)
-             (not (string-search "skip" got)))
-    (dsh-test-pass "question-inert-command-omits-disabled-skip-key")))
-
-;; 无渲染型补全 UI（vertico/icomplete/fido/ivy 均未加载）：选项嵌进
-;; prompt（裸 minibuffer 也能看到编号选项按数字选）。-Q 里这些 mode 变量
-;; 不存在，defvar 桩让 let 变成动态绑定（与真实环境中各框架的 defvar
-;; 全局 minor mode 一致），bound-and-true-p 才看得到。
-(defvar icomplete-mode nil "Stub: icomplete minor mode flag (test-only).")
-(let ((prompt nil))
-  (cl-letf (((symbol-function 'completing-read)
-             (lambda (p &rest _) (setq prompt p) "1. Yes")))
-    (dsh-emacs--question-choice
-     '((id . "q1") (question . "Proceed?")
-       (options . (((label . "Yes")) ((label . "No")))))))
-  (when (string-search "(1) Yes (2) No" prompt)
-    (dsh-test-pass "question-choice-embeds-options-in-prompt-without-vertico")))
-
-;; vertico 激活时列表由 minibuffer 渲染，prompt 保持干净
-(let ((prompt nil) (vertico-mode t))
-  (cl-letf (((symbol-function 'completing-read)
-             (lambda (p &rest _) (setq prompt p) "1. Yes")))
-    (dsh-emacs--question-choice
-     '((id . "q1") (question . "Proceed?")
-       (options . (((label . "Yes")) ((label . "No")))))))
-  (when (equal "Proceed?: " prompt)
-    (dsh-test-pass "question-choice-prompt-stays-clean-under-vertico")))
-
-;; icomplete 同类：自渲染列表 → 也不嵌入（一条验证 OR 判定覆盖整个家族）
-(let ((prompt nil) (icomplete-mode t))
-  (cl-letf (((symbol-function 'completing-read)
-             (lambda (p &rest _) (setq prompt p) "1. Yes")))
-    (dsh-emacs--question-choice
-     '((id . "q1") (question . "Proceed?")
-       (options . (((label . "Yes")) ((label . "No")))))))
-  (when (equal "Proceed?: " prompt)
-    (dsh-test-pass "question-choice-prompt-stays-clean-under-icomplete")))
-
-;; 补全前端先安装 keymap，再加问题菜单；命令直接返回选项与提交动作。
-(let ((reads 0)
-      (bindings nil)
-      (icomplete-mode nil)
-      (minibuffer-setup-hook
-       (list (lambda ()
-               (define-key (current-local-map) (kbd "RET") #'previous-line)))))
-  (cl-letf (((symbol-function 'completing-read)
-             (lambda (&rest _)
-               (setq reads (1+ reads))
-               (with-temp-buffer
-                 (use-local-map (make-sparse-keymap))
-                 (run-hooks 'minibuffer-setup-hook)
-                 (push (list (lookup-key (current-local-map) (kbd "RET"))
-                             (lookup-key (current-local-map) (kbd "SPC")))
-                       bindings)
-                 (unwind-protect
-                     (if (= reads 1)
-                         (let ((last-command-event ?2))
-                           (dsh-emacs--question-pick-command))
-                       (dsh-emacs--question-submit-command))
-                   (run-hooks 'minibuffer-exit-hook)))
-               (error "Chooser command did not return its action"))))
-    (let ((answer (dsh-emacs--question-choice
-                   '((id . "q-frontend") (question . "Pick?")
-                     (multiSelect . t)
-                     (options . (((label . "A")) ((label . "B"))))))))
-      (dsh-test-assert "question-menu-setup-runs-after-completion-frontend"
-        (equal '((id . "q-frontend") (selected "B")) answer)
-        (= 2 reads)
-        (equal '((dsh-emacs--question-submit-command previous-line)
-                 (dsh-emacs--question-submit-command previous-line))
-               bindings)))))
-
-;; Icomplete 的 SPC 必须接受高亮候选，不能读到空的原始 minibuffer。
-(let ((dsh-emacs--question-pick-labels '("A" "B"))
-      (dsh-emacs--question-multi t)
-      (icomplete-mode t))
-  (with-temp-buffer
-    (use-local-map (make-sparse-keymap))
-    (define-key (current-local-map) (kbd "RET") #'exit-minibuffer)
-    (let ((map (dsh-emacs--question-chooser-keymap)))
-      (dsh-test-assert "question-multi-space-confirms-icomplete-candidate"
-        (eq #'icomplete-force-complete-and-exit (lookup-key map (kbd "SPC")))
-        (eq #'dsh-emacs--question-submit-command (lookup-key map (kbd "RET")))))))
-
-;; Type answer… 空输入 → 回到选项（再轮选择）
-(let ((reads '("Type answer…" "1. Yes")))
-  (when (equal '((id . "q1") (selected "Yes"))
-               (cl-letf (((symbol-function 'completing-read)
-                          (lambda (&rest _)
-                            (if reads (pop reads) "1. Yes")))
-                         ((symbol-function 'read-string)
-                          (lambda (&rest _) "")))
-                 (dsh-emacs--question-choice
-                  '((id . "q1") (question . "Proceed?")
-                    (options . (((label . "Yes")) ((label . "No"))))))))
-    (dsh-test-pass "question-choice-type-answer-empty-backs-to-options")))
-
-;; 多选 Type answer… 空输入 → 回到多选，保留先前勾选。
-(let ((reads '("1. [ ] A" "Type answer…" "Submit answer"))
-      (menus nil))
-  (cl-letf (((symbol-function 'completing-read)
-             (lambda (_prompt candidates &rest _)
-               (push candidates menus)
-               (or (pop reads) (error "Unexpected chooser read"))))
-            ((symbol-function 'read-string) (lambda (&rest _) "")))
-    (dsh-test-assert "question-choice-multi-type-answer-empty-keeps-selection"
-      (equal '((id . "q2") (selected "A"))
-             (dsh-emacs--question-choice
-              '((id . "q2") (question . "Pick?") (multiSelect . t)
-                (options . (((label . "A")) ((label . "B")))))))
-      (equal '("1. [x] A" "2. [ ] B" "Type answer…") (car menus))
-      (null reads))))
-
-(require 'tooltip)
-
-;; 文档只取当前选项；无描述的第一项不能阻止后续选项显示提示。
+;; reader setup：候选注解 + 题干 detail 进 echo area（都只在本 minibuffer 内）。
 (let* ((dsh-emacs--question-current
         (dsh-protocol-question--from-alist
-         '((id . "tip") (question . "Choose?")
-           (detail . "Context")
-           (options . [((label . "Alpha"))
-                       ((label . "Beta") (description . "Safe route."))]))))
+         '((id . "q8") (question . "Proceed?") (detail . "Context here")
+           (options . [((label . "Yes") (description . "Go ahead"))
+                       ((label . "No"))]))))
        (dsh-emacs--question-options
-        (dsh-protocol-question-options dsh-emacs--question-current)))
-  (dsh-test-assert "question-tip-text-follows-option-and-custom-input"
-                   (equal "Context" (dsh-emacs--question-help-text 0))
-                   (equal "Context\n\nSafe route."
-                          (dsh-emacs--question-help-text 1))
-                   (equal "Context" (dsh-emacs--question-help-text nil))
-                   (equal "Context" (dsh-emacs--question-help-text 2)))
-  (setf (dsh-protocol-question-detail dsh-emacs--question-current) nil)
-  (dsh-test-assert "question-tip-no-description-is-empty"
-                   (equal "" (dsh-emacs--question-help-text 0))))
-
-;; Icomplete 的候选列表随导航旋转，必须由首项还原原始选项索引。
-(let ((dsh-emacs--question-pick-labels '("Alpha" "Beta"))
-      (dsh-emacs--question-multi t)
-      (icomplete-mode t)
-      (completion-all-sorted-completions '("2. [x] Beta" "1. [ ] Alpha")))
-  (dsh-test-assert "question-tip-follows-icomplete-rotation"
-                   (equal 1 (dsh-emacs--question-highlight-index)))
-  (setq completion-all-sorted-completions '("Type answer…" "1. [ ] Alpha"))
-  (dsh-test-assert "question-tip-icomplete-custom-has-no-option"
-                   (null (dsh-emacs--question-highlight-index))))
-
-(set 'vertico--index 1)
-(let ((vertico-mode t))
-  (dsh-test-assert "question-tip-follows-vertico"
-                   (equal 1 (dsh-emacs--question-highlight-index)))
-  (set 'vertico--index -1)
-  (dsh-test-assert "question-tip-vertico-no-selection-has-no-option"
-                   (null (dsh-emacs--question-highlight-index)))
-  (set 'vertico--index 0)
-  (let ((vertico-mode nil)
-        (icomplete-mode t)
-        (dsh-emacs--question-pick-labels '("Alpha" "Beta"))
-        (dsh-emacs--question-multi nil)
-        (completion-all-sorted-completions '("2. Beta" "1. Alpha")))
-    (dsh-test-assert "question-tip-ignores-inactive-vertico-state"
-                     (equal 1 (dsh-emacs--question-highlight-index))))
-  (makunbound 'vertico--index))
-
-;; 定位读取真实显示的高亮 glyph，优先子框架；滚动后跟随可见行。
-(let ((minibuffer-completion-table '("A" "B"))
-      (vertico-mode t)
-      (selected-row 1)
-      (first-y 0)
-      (row-height 20)
-      (repeat-first-row nil)
-      (row-reads 0)
-      (selected (propertize "B" 'face '(vertico-current default))))
-  (cl-letf (((symbol-function 'redisplay) #'ignore)
-            ((symbol-function 'get-buffer-window-list)
-             (lambda (&rest _) '(root child)))
-            ((symbol-function 'window-frame) #'identity)
-            ((symbol-function 'frame-parent)
-             (lambda (frame) (and (eq frame 'child) 'root)))
-            ((symbol-function 'frame-char-width) (lambda (_) 10))
-            ((symbol-function 'window-body-width) (lambda (&rest _) 30))
-            ((symbol-function 'window-line-height)
-             (lambda (row _window)
-               (cl-incf row-reads)
-               (when (> row 10) (error "Question row scan did not terminate"))
-               (if repeat-first-row
-                   (list row-height 0 first-y 0)
-                 (when (< row 4)
-                   (list row-height row (if (= row 0) first-y (* row 20)) 0)))))
-            ((symbol-function 'posn-at-x-y)
-             (lambda (x y window)
-               (when (< y 0) (error "Negative glyph coordinate"))
-               (when (and (= x 10) (= (/ y 20) selected-row))
-                 (list window 1 (cons x (* selected-row 20)) 0
-                       (cons selected 0)))))
-            ((symbol-function 'posn-at-point)
-             (lambda (&rest _) (error "Must locate the option, not input"))))
-    (dsh-test-assert "question-tip-anchors-to-highlight-in-child-frame"
-      (equal '(child 20 20) (dsh-emacs--question-tip-position)))
-    (setq selected-row 3)
-    (dsh-test-assert "question-tip-moves-with-highlighted-row"
-      (equal '(child 20 60) (dsh-emacs--question-tip-position)))
-    (setq selected-row 0)
-    (dsh-test-assert "question-tip-scroll-uses-visible-row"
-      (equal '(child 20 0) (dsh-emacs--question-tip-position)))
-    (put-text-property 0 1 'face 'icomplete-selected-match selected)
-    (dsh-test-assert "question-tip-finds-icomplete-highlight"
-      (equal '(child 20 0) (dsh-emacs--question-tip-position)))
-    (setq first-y -40)
-    (dsh-test-assert "question-tip-samples-visible-part-of-clipped-first-row"
-      (equal '(child 20 0) (dsh-emacs--question-tip-position)))
-    (setq row-height -20)
-    (dsh-test-assert "question-tip-skips-wholly-clipped-rows"
-      (null (dsh-emacs--question-tip-position)))
-    (setq row-height 20)
-    (put-text-property 0 1 'face 'default selected)
-    (dsh-test-assert "question-tip-does-not-pin-to-input-before-candidates-render"
-      (null (dsh-emacs--question-tip-position)))
-    ;; Native Emacs repeats the last displayed row for out-of-range requests.
-    ;; At setup there is only the prompt, before Vertico exhibits candidates.
-    (setq repeat-first-row t row-reads 0)
-    (dsh-test-assert "question-tip-stops-when-native-window-repeats-last-row"
-      (eq 'finished
-          (condition-case err
-              (and (null (dsh-emacs--question-tip-position)) 'finished)
-            (error err)))
-      (= row-reads 4))))
-
-;; Graphical tooltip updates wait for idle; pending work belongs to the reader.
-(condition-case err
+        (dsh-protocol-question-options dsh-emacs--question-current))
+       (dsh-emacs--question-roster '("Yes" "No"))
+       (echoed nil))
+  (cl-letf (((symbol-function 'message)
+             (lambda (fmt &rest args) (setq echoed (apply #'format fmt args)))))
     (with-temp-buffer
-      (let* ((buffer (current-buffer))
-             (dsh-emacs-question-tip-delay 0.2)
-             (dsh-emacs--question-current
-              (dsh-protocol-question--from-alist
-               '((id . "delay") (detail . "Details")
-                 (options . [((label . "A") (description . "Alpha"))
-                             ((label . "B") (description . "Beta"))]))))
-             (dsh-emacs--question-options
-              (dsh-protocol-question-options dsh-emacs--question-current))
-             (minibuffer-completion-table '("A" "B"))
-             (index 0) (focused t) timers cancelled shown)
-        (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
-                  ((symbol-function 'frame-focus-state) (lambda (_) focused))
-                  ((symbol-function 'active-minibuffer-window) #'selected-window)
-                  ((symbol-function 'window-buffer) (lambda (&rest _) buffer))
-                  ((symbol-function 'dsh-emacs--question-highlight-index)
-                   (lambda () index))
-                  ((symbol-function 'dsh-emacs--question-tip-position)
-                   (lambda () (list (selected-window) 20 5)))
-                  ((symbol-function 'frame-edges) (lambda (&rest _) '(0 0 800 600)))
-                  ((symbol-function 'x-show-tip)
-                   (lambda (text &rest _) (push (substring-no-properties text) shown)))
-                  ((symbol-function 'tooltip-hide) #'ignore)
-                  ((symbol-function 'run-with-idle-timer)
-                   (lambda (delay repeat function &rest args)
-                     (let ((timer (list function args delay repeat)))
-                       (push timer timers) timer)))
-                  ((symbol-function 'cancel-timer)
-                   (lambda (timer) (push timer cancelled))))
-          (unwind-protect
-              (progn
-                (dsh-emacs--question-tip-setup)
-                (dsh-test-assert "question-tip-setup-waits-for-idle"
-                  (null shown)
-                  (and (= (length timers) 1)
-                       (= 0.2 (nth 2 (car timers)))
-                       (null (nth 3 (car timers)))))
-                (setq index 1)
-                (dsh-emacs--question-tip-schedule)
-                (dsh-test-assert "question-tip-rapid-selection-replaces-pending-update"
-                  (null shown) (= (length timers) 2)
-                  (eq (cadr timers) (car cancelled)))
-                ;; Timer execution cannot rely on the caller's dynamic bindings.
-                (let ((dsh-emacs--question-current nil)
-                      (dsh-emacs--question-options nil))
-                  (apply (caar timers) (cadar timers)))
-                (dsh-test-assert "question-tip-idle-shows-only-latest-option"
-                  (equal '("Details\n\nBeta") shown)
-                  (null dsh-emacs--question-tip-timer))
-                (dsh-emacs--question-tip-schedule)
-                (setq focused nil)
-                (dsh-emacs--question-tip-focus-change)
-                (dsh-test-assert "question-tip-focus-loss-cancels-pending-show"
-                  (eq (car timers) (car cancelled))
-                  (null dsh-emacs--question-tip-timer)
-                  (not dsh-emacs--question-tip-visible))
-                (setq focused t)
-                (let ((dsh-emacs-question-tip-delay 0))
-                  (dsh-emacs--question-tip-schedule))
-                (dsh-test-assert "question-tip-zero-delay-shows-immediately"
-                  (= 2 (length shown)) (= 3 (length timers)))
-                (dsh-emacs--question-tip-schedule)
-                (dsh-emacs--question-tip-teardown)
-                (apply (caar timers) (cadar timers))
-                (dsh-test-assert "question-tip-exit-cancels-and-rejects-late-show"
-                  (eq (car timers) (car cancelled))
-                  (null dsh-emacs--question-tip-timer)
-                  (= 2 (length shown))))
-            (dsh-emacs--question-tip-teardown)))))
-  (error (dsh-test-fail "question-tip-delayed-lifecycle" (format "%S" err))))
+      (use-local-map (make-sparse-keymap))
+      (dsh-emacs--question-reader-setup)
+      (let ((annotation (plist-get completion-extra-properties
+                                   :annotation-function)))
+        (dsh-test-assert "question-reader-setup-annotations-and-echo"
+          (equal "  [Go ahead]" (funcall annotation "1. Yes"))
+          (equal "  [Go ahead]" (funcall annotation "Yes"))
+          (equal "" (funcall annotation "2. No"))
+          (equal "Context here" echoed))))))
 
-(dolist (case '((echo-area t) (tooltip nil) (nil t)))
+;; reader 必须预选 prompt 而不是第一项：预选第一项的前端会把该项插进输入框，
+;; 让"空输入 = 跳过"变成"接受第一项"（vertico 实测）。
+(let ((vertico-preselect 'first))
   (with-temp-buffer
-    (pcase-let ((`(,dsh-emacs-question-help-display ,graphical) case)
-                (rendered 0))
-      (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) graphical))
-                ((symbol-function 'dsh-emacs--question-tip-update)
-                 (lambda () (cl-incf rendered)))
-                ((symbol-function 'run-with-idle-timer)
-                 (lambda (&rest _) (error "This surface must update immediately"))))
-        (dsh-emacs--question-tip-schedule)
-        (dsh-test-assert (format "question-help-immediate-surface-%S" case)
-          (= rendered 1) (null dsh-emacs--question-tip-timer))))))
+    (use-local-map (make-sparse-keymap))
+    (cl-letf (((symbol-function 'dsh-emacs--question-echo) #'ignore))
+      (dsh-emacs--question-reader-setup))
+    (dsh-test-assert "question-reader-preselects-the-prompt"
+      (eq 'prompt vertico-preselect))))
 
-;; NS reports child edges relative to its parent and treats bottom as top.
-;; A rendered tip must end above the row after its measured height changes.
-(with-temp-buffer
-  (let* ((dsh-emacs--question-current
-          (dsh-protocol-question--from-alist
-           '((id . "native") (question . "Choose?") (detail . "Details"))))
-         (candidate-frame (selected-frame))
-         (tip-height 60)
-         shown moved)
-    (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
-              ((symbol-function 'frame-focus-state) (lambda (_) t))
-              ((symbol-function 'window-system) (lambda (&optional _) 'ns))
-              ((symbol-function 'frame-parent)
-               (lambda (frame) (and (eq frame candidate-frame) 'parent)))
-              ((symbol-function 'frame-edges)
-               (lambda (frame type)
-                 (if (eq frame 'parent)
-                     (progn (unless (eq type 'inner-edges) (error "Parent origin"))
-                            '(1005 307 1900 1000))
-                   (unless (eq type 'native-edges) (error "Window origin"))
-                   (list 200 100 500 300))))
-              ((symbol-function 'window-inside-pixel-edges)
-               (lambda (_) '(8 6 280 180)))
-              ((symbol-function 'dsh-emacs--question-tip-position)
-               (lambda () (list (selected-window) 90 40)))
-              ((symbol-function 'frame-list-z-order) (lambda (&rest _) '(tip parent)))
-              ((symbol-function 'frame-parameter)
-               (lambda (frame parameter)
-                 (pcase parameter
-                   ('tooltip (eq frame 'tip))
-                   ('internal-border-width 5))))
-              ((symbol-function 'frame-pixel-height) (lambda (_) tip-height))
-              ((symbol-function 'x-show-tip)
-               (lambda (_text _frame parameters &rest _) (setq shown parameters)))
-              ((symbol-function 'set-frame-position)
-               (lambda (frame x y) (setq moved (list frame x y)))))
-      (dsh-emacs--question-tip-update)
-      (dsh-test-assert "question-tip-ns-child-converts-to-screen"
-        (equal 1310 (alist-get 'left shown)))
-      (dsh-test-assert "question-tip-ns-bottom-uses-rendered-height"
-        (equal '(tip 1310 380) moved))
-      (setq tip-height 120)
-      (dsh-emacs--question-tip-update)
-      (dsh-test-assert "question-tip-ns-taller-text-still-ends-above-item"
-        (equal '(tip 1310 320) moved)))))
+;; 多选 prompt 带分隔符提示。
+(let ((prompt nil))
+  (cl-letf (((symbol-function 'completing-read-multiple)
+             (lambda (p &rest _) (setq prompt p) '("1. Yes"))))
+    (dsh-emacs--question-choice
+     '((id . "q8b") (question . "Proceed?") (multiSelect . t)
+       (options . (((label . "Yes") (description . "Go ahead"))
+                   ((label . "No"))))))
+    (dsh-test-assert "question-reader-multi-prompt-hint"
+      (equal "Proceed? (2,3 or labels; empty = skip): " prompt))))
 
-;; 图形界面用 tooltip：锚定选项右上，不改变窗口、不接管焦点。
-(let ((post-before (default-value 'post-command-hook))
-      (exit-before (default-value 'minibuffer-exit-hook))
-      (params-before tooltip-frame-parameters)
-      (focus-before after-focus-change-function)
-      (focused t)
-      (original-window (selected-window))
-      (shown nil)
-      (hidden 0))
-  (with-temp-buffer
-    (let* ((dsh-emacs--question-current
-            (dsh-protocol-question--from-alist
-             '((id . "tip") (question . "Choose?")
-               (options . [((label . "Alpha"))
-                           ((label . "Beta") (description . "Safe route."))]))))
-           (dsh-emacs--question-options
-            (dsh-protocol-question-options dsh-emacs--question-current))
-           (minibuffer-completion-table '("1. Alpha" "2. Beta"))
-           (index 0)
-           (candidate-y 5))
-      (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
-                ((symbol-function 'frame-focus-state)
-                 (lambda (frame)
-                   (and (eq frame dsh-emacs--question-tip-frame) focused)))
-                ((symbol-function 'frame-edges)
-                 (lambda (&rest _) '(100 200 900 800)))
-                ((symbol-function 'window-inside-pixel-edges)
-                 (lambda (&rest _) '(10 300 780 350)))
-                ((symbol-function 'dsh-emacs--question-tip-position)
-                 (lambda () (list (selected-window) 20 candidate-y)))
-                ((symbol-function 'posn-at-point)
-                 (lambda (&rest _) (error "Do not anchor to the input")))
-                ((symbol-function 'dsh-emacs--question-highlight-index)
-                 (lambda () index))
-                ((symbol-function 'x-show-tip)
-                 (lambda (text _frame parameters &rest _)
-                   (push (list text (copy-tree parameters)) shown)))
-                ((symbol-function 'tooltip-hide)
-                 (lambda (&rest _) (setq hidden (1+ hidden)))))
-        (dsh-emacs--question-tip-setup)
-        (dsh-test-assert "question-tip-starts-empty-with-local-hooks"
-                         (null shown)
-                         (memq #'dsh-emacs--question-tip-schedule post-command-hook)
-                         (memq #'dsh-emacs--question-tip-teardown minibuffer-exit-hook)
-                         (functionp after-focus-change-function))
-        (setq index 1)
-        (dsh-emacs--question-tip-update)
-        (dsh-test-assert "question-tip-opens-later-description-at-option-position"
-                         (equal "Safe route." (caar shown))
-                         (equal 142 (alist-get 'left (cadar shown)))
-                         (equal 497 (alist-get 'bottom (cadar shown)))
-                         (not (assq 'top (cadar shown)))
-                         (eq original-window (selected-window)))
-        (dsh-emacs--question-tip-update)
-        (dsh-test-assert "question-tip-redisplays-after-command-hides-it"
-                         (= 2 (length shown)))
-        (setq focused nil)
-        ;; Focus notifications run outside the reader's current buffer.
-        (with-temp-buffer (funcall after-focus-change-function))
-        (dsh-test-assert "question-tip-focus-loss-hides-without-a-command"
-          (= hidden 1) (not dsh-emacs--question-tip-visible))
-        (dsh-emacs--question-tip-update)
-        (dsh-test-assert "question-tip-background-update-stays-hidden"
-          (= 2 (length shown)))
-        (setq focused t)
-        (dsh-emacs--question-tip-update)
-        (dsh-test-assert "question-tip-resumes-after-focus-returns"
-          (= 3 (length shown)) dsh-emacs--question-tip-visible)
-        (setq candidate-y 45)
-        (dsh-emacs--question-tip-update)
-        (dsh-test-assert "question-tip-screen-position-follows-option-movement"
-          (equal 537 (alist-get 'bottom (cadar shown))))
-        (setq index 0)
-        (dsh-emacs--question-tip-update)
-        (dsh-test-assert "question-tip-hides-when-option-has-no-description"
-                         (= hidden 2))
-        (setq index 1)
-        (dsh-emacs--question-tip-update)
-        (dsh-emacs--question-tip-teardown)
-        (dsh-test-assert "question-tip-exit-cleanup-is-idempotent"
-                         (= hidden 3)
-                         (not dsh-emacs--question-tip-visible)
-                         (not dsh-emacs--question-tip-buffer)
-                         (eq focus-before after-focus-change-function)
-                         (progn (dsh-emacs--question-tip-teardown) (= hidden 3))))))
-  (dsh-test-assert "question-tip-preserves-global-hooks-and-placement"
-                   (equal post-before (default-value 'post-command-hook))
-                   (equal exit-before (default-value 'minibuffer-exit-hook))
-                   (equal params-before tooltip-frame-parameters)
-                   (eq focus-before after-focus-change-function)))
+;; 单选也会在 prompt 里说明空输入的含义。
+(let ((prompt nil))
+  (cl-letf (((symbol-function 'completing-read-multiple)
+             (lambda (p &rest _) (setq prompt p) '("1. Yes"))))
+    (dsh-emacs--question-choice
+     '((id . "q9") (question . "Proceed?")
+       (options . (((label . "Yes")) ((label . "No"))))))
+    (dsh-test-assert "question-reader-single-prompt-hint"
+      (equal "Proceed? (empty input = skip): " prompt))))
 
-(with-temp-buffer
-  (let* ((dsh-emacs--question-current
-          (dsh-protocol-question--from-alist
-           '((id . "unfocused") (detail . "Private explanation"))))
-         (minibuffer-completion-table nil)
-         (shown nil))
-    (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
-              ((symbol-function 'frame-focus-state) (lambda (&rest _) nil))
-              ((symbol-function 'frame-edges)
-               (lambda (&rest _) '(100 200 900 800)))
-              ((symbol-function 'dsh-emacs--question-tip-position)
-               (lambda () (list (selected-window) 20 5)))
-              ((symbol-function 'x-show-tip)
-               (lambda (&rest _) (setq shown t))))
-      (dsh-emacs--question-tip-update))
-    (dsh-test-assert "question-tip-never-shows-without-focus" (not shown))))
-
-;; 终端仍可读到说明，不调用图形接口。
-(let* ((dsh-emacs--question-current
-        (dsh-protocol-question--from-alist
-         '((id . "terminal") (detail . "First line\nSecond line"))))
-       (minibuffer-completion-table nil)
-       (seen nil))
-  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil))
-            ((symbol-function 'minibuffer-message)
-             (lambda (format-string &rest args)
-               (setq seen (apply #'format format-string args))))
-            ((symbol-function 'x-show-tip)
-             (lambda (&rest _) (error "Unexpected graphical tooltip"))))
-    (dsh-emacs--question-tip-update))
-  (dsh-test-assert "question-tip-terminal-shows-compact-help"
-                   (equal "First line · Second line" seen)))
-
-;; Echo-area help shares content and lifecycle with tips, without geometry.
-(with-temp-buffer
-  (let* ((dsh-emacs-question-help-display 'echo-area)
-         (dsh-emacs--question-current
-          (dsh-protocol-question--from-alist
-           '((id . "echo") (detail . "Context")
-             (options . [((label . "A") (description . "First"))
-                         ((label . "B") (description . "Second"))]))))
-         (dsh-emacs--question-options
-          (dsh-protocol-question-options dsh-emacs--question-current))
-         (minibuffer-completion-table '("A" "B"))
-         (index 0) (focused t) (graphical t)
-         echo logged (hidden 0))
-    (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) graphical))
-              ((symbol-function 'frame-focus-state) (lambda (_) focused))
-              ((symbol-function 'dsh-emacs--question-highlight-index) (lambda () index))
-              ((symbol-function 'current-message) (lambda () echo))
-              ((symbol-function 'message)
-               (lambda (format-string &rest args)
-                 (setq logged message-log-max
-                       echo (and format-string (apply #'format format-string args)))))
-              ((symbol-function 'tooltip-hide)
-               (lambda (&rest _) (setq hidden (1+ hidden))))
-              ((symbol-function 'dsh-emacs--question-tip-position)
-               (lambda () (error "Echo help must not inspect tooltip geometry"))))
-      (setq dsh-emacs--question-tip-visible t)
-      (dsh-emacs--question-tip-update)
-      (dsh-test-assert "question-echo-shows-raw-help-without-logging"
-        (equal "Context\n\nFirst" echo) (not logged)
-        (= hidden 1) (not dsh-emacs--question-tip-visible))
-      (setq index 1)
-      (dsh-emacs--question-tip-update)
-      (dsh-test-assert "question-echo-follows-highlight"
-        (equal "Context\n\nSecond" echo))
-      (let ((minibuffer-completion-table nil))
-        (dsh-emacs--question-tip-update)
-        (dsh-test-assert "question-echo-custom-input-shows-only-detail"
-          (equal "Context" echo)))
-      (setq focused nil)
-      (dsh-emacs--question-tip-update)
-      (dsh-test-assert "question-echo-focus-loss-clears-owned-message"
-        (null echo) (null dsh-emacs--question-echo-message))
-      (setq graphical nil)
-      (dsh-emacs--question-tip-update)
-      (dsh-test-assert "question-echo-also-works-in-terminal"
-        (equal "Context\n\nSecond" echo))
-      (setq echo "Unrelated error")
-      (dsh-emacs--question-tip-update)
-      (dsh-test-assert "question-echo-refresh-preserves-command-messages"
-        (equal "Unrelated error" echo))
-      (dsh-emacs--question-tip-teardown)
-      (dsh-test-assert "question-echo-cleanup-preserves-other-messages"
-        (equal "Unrelated error" echo) (null dsh-emacs--question-echo-message))
-      (setq echo nil)
-      (dsh-emacs--question-tip-update)
-      (let ((dsh-emacs-question-help-display nil))
-        (dsh-emacs--question-tip-update)
-        (dsh-test-assert "question-help-disabled-clears-and-suppresses-output"
-          (null echo) (null dsh-emacs--question-echo-message)))
-      (dsh-emacs--question-tip-update)
-      (setf (dsh-protocol-question-detail dsh-emacs--question-current) nil)
-      (let ((minibuffer-completion-table nil))
-        (dsh-emacs--question-tip-update)
-        (dsh-test-assert "question-echo-empty-help-clears-stale-text" (null echo)))
-      (dsh-emacs--question-tip-update)
-      (dsh-emacs--question-tip-teardown)
-      (dsh-test-assert "question-echo-exit-clears-owned-message" (null echo)))))
-
-;; Echo 区最多只画 max-mini-window-height 那么多行：超出的文本必须被
-;; 主动裁掉并留下明显截断标记，而不是让 Emacs 静默丢弃。
-(let* ((width (dsh-emacs--question-echo-width))
-       (cut "…")
-       (rows (lambda (string)
-               (with-temp-buffer
-                 (insert string)
-                 (dsh-emacs--question-display-rows (point-min) (point-max))))))
-  (dsh-test-assert "question-echo-keeps-text-within-budget"
-    (equal "Detail" (dsh-emacs--question-echo-help "Detail" 3))
-    (equal "a\nb\nc" (dsh-emacs--question-echo-help "a\nb\nc" 3))
-    (string-suffix-p cut (dsh-emacs--question-echo-help "a\nb\nc\nd\ne" 3))
-    (<= (funcall rows (dsh-emacs--question-echo-help "a\nb\nc\nd\ne" 3)) 3)
-    ;; 单行折行也必须裁掉，而不是整段丢掉。
-    (let ((clamped (dsh-emacs--question-echo-help
-                    (make-string (* width 3) ?x) 2)))
-      (<= (funcall rows clamped) 2)
-      (string-suffix-p cut clamped)
-      (> (length clamped) 1))))
+;; 帧级：一题正常作答 + 一题跳过 → answers 覆盖整帧（跳过的题空 selected）。
+(let ((picks '(("1. Yes") nil)))
+  (cl-letf (((symbol-function 'completing-read-multiple)
+             (lambda (&rest _) (pop picks))))
+    (dsh-test-assert "question-skip-covers-frame-with-empty-selected"
+      (equal '(((id . "qa") (selected "Yes"))
+               ((id . "qb") (selected . [])))
+             (dsh-emacs--collect-question-answers
+              '(((id . "qa") (question . "A?") (multiSelect . t)
+                 (options . (((label . "Yes")))))
+                ((id . "qb") (question . "B?") (multiSelect . t)
+                 (options . (((label . "Only")))))))))))
 
 ;; 3b) 帧分发：waterfall 帧（user-questions/request）→ minibuffer 应答
 ;; （不渲染任何卡片）。经 `dsh-emacs-events--host-item' 走完整 `$events'
@@ -8431,8 +7658,8 @@ symbol or an ordered list."
                    (lambda (client-id event-id outcome cb)
                      (push (list client-id event-id outcome) responds)
                      (funcall cb t nil)))
-                  ((symbol-function 'completing-read)
-                   (lambda (&rest _) "Yes")))
+                  ((symbol-function 'completing-read-multiple)
+                   (lambda (&rest _) '("Yes"))))
           (dsh-emacs-events--host-item
            'process
            '((type . "waterfall")
@@ -8461,7 +7688,7 @@ symbol or an ordered list."
 ;; 4) 多问题帧：顺序逐题 minibuffer 选择，答完只回一次 $events/result outcome
 (let* ((chat (get-buffer-create " *dsh-test-question-multi*"))
        (responds nil)
-       (queue '("1. Yes" "1. [ ] X" "Submit answer")))
+       (queue '("1. Yes" "1. X")))
   (unwind-protect
       (let ((dsh-emacs--chat-buffers (make-hash-table :test 'equal))
             (dsh-emacs-events--client-id "c1")
@@ -8473,9 +7700,10 @@ symbol or an ordered list."
                    (lambda (client-id event-id outcome cb)
                      (push (list client-id event-id outcome) responds)
                      (funcall cb t nil)))
-                  ((symbol-function 'completing-read)
+                  ((symbol-function 'completing-read-multiple)
                    (lambda (&rest _)
-                     (or (pop queue) (error "Unexpected chooser read")))))
+                     (let ((row (pop queue)))
+                       (and row (list row))))))
           (dsh-emacs-events--host-item
            'process
            '((type . "waterfall")
@@ -8521,7 +7749,7 @@ symbol or an ordered list."
                    (lambda (client-id event-id outcome cb)
                      (push (list client-id event-id outcome) responds)
                      (funcall cb t nil)))
-                  ((symbol-function 'completing-read)
+                  ((symbol-function 'completing-read-multiple)
                    (lambda (&rest _) (signal 'quit nil))))
           (dsh-emacs-events--host-item
            'process
@@ -8555,8 +7783,8 @@ symbol or an ordered list."
                    (lambda (_client-id event-id _outcome cb)
                      (push event-id responds)
                      (funcall cb t nil)))
-                  ((symbol-function 'completing-read)
-                   (lambda (&rest _) "Yes")))
+                  ((symbol-function 'completing-read-multiple)
+                   (lambda (&rest _) '("Yes"))))
           (dsh-emacs-events--host-item
            'process
            '((type . "waterfall")
@@ -8588,8 +7816,8 @@ symbol or an ordered list."
                    (lambda (client-id event-id outcome cb)
                      (push (list client-id event-id outcome) responds)
                      (funcall cb t nil)))
-                  ((symbol-function 'completing-read)
-                   (lambda (&rest _) (setq prompted t) "Yes"))
+                  ((symbol-function 'completing-read-multiple)
+                   (lambda (&rest _) (setq prompted t) '("Yes")))
                   ((symbol-function 'dsh-emacs--approval-prompt)
                    (lambda (&rest _) (setq prompted t) t)))
           ;; 未打开会话的问题 waterfall → 交给下一个接单者（next），不提示
@@ -8642,7 +7870,7 @@ symbol or an ordered list."
                    (lambda (_client-id event-id outcome cb)
                      (push (list event-id outcome) responds)
                      (funcall cb t nil)))
-                  ((symbol-function 'completing-read)
+                  ((symbol-function 'completing-read-multiple)
                    (lambda (prompt candidates &rest _)
                      (push prompt prompts)
                      ;; A 的 minibuffer 等待期间，B 会话的问题帧到达：
@@ -8655,7 +7883,7 @@ symbol or an ordered list."
                                     (cons 'question "B asks?")
                                     (cons 'options
                                           (list (list (cons 'label "Only"))))))))
-                     (car candidates))))
+                     (list (car candidates)))))
           ;; 先来 A 帧（空闲 → 直接进入回答槽）；A 回答途中 B 帧排队。
           ;; questions 形状与事件分发一致：一串 question alist
           ;; （wire 上是数组，这里直接给 list）。
@@ -8716,8 +7944,8 @@ symbol or an ordered list."
                    (lambda (_client-id event-id outcome cb)
                      (push (list event-id outcome) responds)
                      (funcall cb t nil)))
-                  ((symbol-function 'completing-read)
-                   (lambda (prompt &rest _)
+                  ((symbol-function 'completing-read-multiple)
+                   (lambda (_prompt &rest _)
                      (setq prompts (1+ prompts))
                      ;; 回答第一帧的途中，同一 event-id 的重放副本到达 → 必须丢弃。
                      ;; 只注入一次副本（修复前的代码会把它再答一遍并再次触发本
@@ -8730,7 +7958,7 @@ symbol or an ordered list."
                                     (cons 'question "Dup?")
                                     (cons 'options
                                           (list (list (cons 'label "Yes"))))))))
-                     "Yes")))
+                     '("Yes"))))
           (dsh-emacs--question-requested
            chat "rpc-dup" "sess-dup"
            (list (list (cons 'id "qd")
@@ -8767,8 +7995,8 @@ symbol or an ordered list."
                    (lambda (_client-id _event-id _outcome cb)
                      (push t responds)
                      (funcall cb t nil)))
-                  ((symbol-function 'completing-read)
-                   (lambda (&rest _) (setq prompted t) "Yes")))
+                  ((symbol-function 'completing-read-multiple)
+                   (lambda (&rest _) (setq prompted t) '("Yes"))))
           ;; 副本先到（排队），宿主随后以 cancel 帧撤销同一 eventId（重放同序）
           (dsh-emacs-events--host-item
            'process
@@ -8860,10 +8088,10 @@ symbol or an ordered list."
                    (lambda () t))
                   ((symbol-function 'abort-recursive-edit)
                    (lambda () (setq aborted t) (signal 'quit nil)))
-                  ((symbol-function 'completing-read)
+                  ((symbol-function 'completing-read-multiple)
                    (lambda (&rest _)
                      (dsh-emacs--question-cancelled "wf-active-q")
-                     "Yes")))
+                     '("Yes"))))
           (dsh-emacs--question-requested
            chat "wf-active-q" "sess-q"
            '(((id . "q1") (question . "Proceed?")
@@ -9057,8 +8285,8 @@ symbol or an ordered list."
             (dsh-emacs-enable-notifications nil))
         (cl-letf (((symbol-function 'dsh-emacs--approval-prompt)
                    (lambda (&rest _) (push :approval-prompt trace) t))
-                  ((symbol-function 'completing-read)
-                   (lambda (&rest _) (push :question-prompt trace) "Yes"))
+                  ((symbol-function 'completing-read-multiple)
+                   (lambda (&rest _) (push :question-prompt trace) '("Yes")))
                   ((symbol-function 'dsh-emacs--events-result-async)
                    (lambda (_client-id event-id _outcome cb)
                      (push (list :respond event-id) trace)
@@ -9098,8 +8326,8 @@ symbol or an ordered list."
             (dsh-emacs-enable-notifications nil))
         (cl-letf (((symbol-function 'dsh-emacs--approval-prompt)
                    (lambda (&rest _) (push :approval-prompt trace) t))
-                  ((symbol-function 'completing-read)
-                   (lambda (&rest _) (push :question-prompt trace) "Yes"))
+                  ((symbol-function 'completing-read-multiple)
+                   (lambda (&rest _) (push :question-prompt trace) '("Yes")))
                   ((symbol-function 'dsh-emacs--events-result-async)
                    (lambda (_client-id event-id _outcome cb)
                      (push (list :respond event-id) trace)
@@ -9139,8 +8367,8 @@ symbol or an ordered list."
                    (lambda (_session body _buffer) (push body posted)))
                   ((symbol-function 'dsh-emacs--events-result-async)
                    (lambda (&rest _) nil))
-                  ((symbol-function 'completing-read)
-                   (lambda (_prompt candidates &rest _) (car candidates)))
+                  ((symbol-function 'completing-read-multiple)
+                   (lambda (_prompt candidates &rest _) (list (car candidates))))
                   ((symbol-function 'read-string)
                    (lambda (&rest _) "free answer"))
                   ((symbol-function 'dsh-emacs--approval-prompt)
