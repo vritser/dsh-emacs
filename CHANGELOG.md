@@ -111,6 +111,14 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **The package loads and completes on Emacs 27–30**: session switching, the
+  model picker, `ask` answers and `@` references all pinned candidate order
+  through `completion-table-with-metadata`, which is Emacs 31-only, so on
+  older Emacsen they signalled `void-function` and even `require 'dsh-emacs`
+  failed while building the model collection.  The call sites now go through
+  a shim that uses the Emacs 31 built-in when present and an equivalent local
+  completion table otherwise, restoring the declared 27.1 baseline.
+
 - **`ask` option lists keep the question's order**: the numbered candidates
   now carry identity sort metadata, so a completion frontend no longer
   re-ranks them by history, length, and alphabet (which scrambled the

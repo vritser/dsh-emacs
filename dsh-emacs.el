@@ -56,6 +56,10 @@
 (defvar use-system-tooltips)
 (defvar x-max-tooltip-size)
 (declare-function icomplete-force-complete-and-exit "icomplete" ())
+;; Emacs 31-only; the 27.1 baseline falls back to
+;; `dsh-emacs--completion-table-with-metadata'.  The declaration only keeps
+;; byte-compile on Emacs <=30 from warning about an unknown function.
+(declare-function completion-table-with-metadata "minibuffer" (table metadata))
 
 ;; 协议层：dsh 响应字段的 typed 访问（见 dsh-emacs-protocol.el）
 (require 'crm)
@@ -1413,6 +1417,20 @@ across all workspaces."
 ;; defvar 声明只为消 byte-compile 警告并保证动态绑定；框架未加载时无副作用。
 (defvar ivy-sort-functions-alist)
 
+(defun dsh-emacs--completion-table-with-metadata (collection metadata)
+  "Return COLLECTION as a completion table carrying METADATA.
+METADATA is an alist of completion metadata (see `completion-metadata'),
+e.g. `display-sort-function' pinned to identity to stop a frontend from
+reordering the candidates.  Uses the Emacs 31 built-in when present and
+the equivalent table lambda otherwise; the built-in is Emacs 31-only,
+while the package baseline is 27.1."
+  (if (fboundp 'completion-table-with-metadata)
+      (completion-table-with-metadata collection metadata)
+    (lambda (string pred action)
+      (if (eq action 'metadata)
+          `(metadata . ,metadata)
+        (complete-with-action action collection string pred)))))
+
 (defun dsh-emacs--completing-read-ordered (prompt collection &rest args)
   "`completing-read'，但保持 COLLECTION 传入顺序不被补全框架重排。
 按用户实际启用的补全框架适配，不写死任何一家：
@@ -1424,7 +1442,7 @@ across all workspaces."
   仅本次调用生效；
 - 其余框架（selectrum 等）同样遵循 display-sort-function 约定。
 PROMPT/COLLECTION/ARGS 语义与 `completing-read' 完全一致。"
-  (let ((ordered (completion-table-with-metadata
+  (let ((ordered (dsh-emacs--completion-table-with-metadata
                   collection
                   '((display-sort-function . identity)))))
     (if (bound-and-true-p ivy-mode)
@@ -2848,7 +2866,7 @@ NOT lost while searching."
                     c))
               (let ((parts (dsh-emacs--model-key-parts cand)))
                 (and parts (substring-no-properties (nth 2 parts)))))))
-         (table (completion-table-with-metadata
+         (table (dsh-emacs--completion-table-with-metadata
                  rows
                  ;; Emacs 31 的 completion-table-with-metadata 要求元数据
                  ;; 不带前缀 (metadata ...)，直接给 plist，它自己包一层。
@@ -3883,7 +3901,7 @@ this metadata through."
       (completing-read-multiple
        (concat dsh-emacs--question-where dsh-emacs--question-text
                (or dsh-emacs--question-hint "") ": ")
-       (completion-table-with-metadata
+       (dsh-emacs--completion-table-with-metadata
         (dsh-emacs--question-pick-labels labels)
         '((display-sort-function . identity)
           (cycle-sort-function . identity)))

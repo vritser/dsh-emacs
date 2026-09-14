@@ -4395,6 +4395,39 @@ symbol or an ordered list."
              (string= "  m2" (get-text-property 0 'display (car (nth 2 rows)))))
     (dsh-test-pass "model-grouped-collection-keeps-group-metadata")))
 
+;; --- Test 47h: the completion-table-with-metadata compatibility shim ---
+;; Session/model pickers, ask multi-select and @ references all hand sort
+;; metadata to the completion frontend through this table.  The built-in is
+;; Emacs 31-only, so the 27.1 baseline must take the local fallback branch
+;; with identical behavior: answer metadata verbatim, complete normally for
+;; every other ACTION.  Removing the built-in forces that branch, which
+;; otherwise never runs on Emacs 31.
+(let ((saved (and (fboundp 'completion-table-with-metadata)
+                  (symbol-function 'completion-table-with-metadata))))
+  (unwind-protect
+      (progn
+        (when saved (fmakunbound 'completion-table-with-metadata))
+        (let ((table (dsh-emacs--completion-table-with-metadata
+                      '("alpha" "beta" "gamma")
+                      '((display-sort-function . identity)
+                        (cycle-sort-function . identity)
+                        (category . dsh-test)))))
+          (dsh-test-assert "completion-table-metadata-fallback"
+            (equal '(metadata (display-sort-function . identity)
+                              (cycle-sort-function . identity)
+                              (category . dsh-test))
+                   (funcall table "" nil 'metadata))
+            (eq #'identity
+                (completion-metadata-get
+                 (completion-metadata "" table nil) 'display-sort-function))
+            (eq 'dsh-test
+                (completion-metadata-get
+                 (completion-metadata "" table nil) 'category))
+            (equal '("alpha" "beta" "gamma") (all-completions "" table nil))
+            (equal "alpha" (try-completion "a" table nil))
+            (equal '("beta") (all-completions "b" table nil)))))
+    (when saved (fset 'completion-table-with-metadata saved))))
+
 ;; 47g2: 现代 vertico（原生支持 group-function 元数据，无
 ;; vertico-group-mode）→ 走 grouped 路径，选中行即正确 provider
 (let ((buf (generate-new-buffer " *dsh-model-grouped*"))

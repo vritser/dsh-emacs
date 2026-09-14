@@ -64,6 +64,8 @@
 (declare-function dsh-emacs--rpc-request "dsh-emacs.el" (method params))
 (declare-function dsh-emacs--completing-read-ordered
                   "dsh-emacs.el" (prompt collection &rest args))
+(declare-function dsh-emacs--completion-table-with-metadata
+                  "dsh-emacs.el" (collection metadata))
 ;; Corfu's native auto path is the same integration seam installed by
 ;; `dsh-emacs-mode'; use it for async refreshes instead of generic CAPF
 ;; dispatch, which treats a sole non-exact candidate differently.
@@ -809,7 +811,7 @@ nil outside the input area or when the token is not an @ reference."
                   ;; completion table, not from CAPF extra properties.  Keep
                   ;; both forms: the table metadata covers corfu, while the
                   ;; plist covers stock completion and other CAPF consumers.
-                  (let ((table (completion-table-with-metadata
+                  (let ((table (dsh-emacs--completion-table-with-metadata
                                 candidates
                                 '((category . dsh-emacs-reference)
                                   ;; Match @ references flexibly across the whole
