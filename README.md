@@ -104,7 +104,8 @@ description as an annotation), and the question detail shows in the echo area.
   comma-separated input path). An unambiguous prefix works too (`alph`), and
   an ambiguous one is left as your answer text rather than guessed.
 - Anything that names no option is taken as your answer text, like at any
-  Emacs completion prompt; `Type answer…` asks for it explicitly.
+  Emacs completion prompt — there is no separate "type an answer" step, and
+  a partly-matched answer is never silently trimmed.
 - `C-c C-s` skips the question (empty input does the same); `C-g` abandons
   the whole group.
 

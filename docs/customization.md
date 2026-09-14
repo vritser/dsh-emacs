@@ -139,7 +139,6 @@ never reopens, so the menu can neither flicker nor reorder.
 |---|---|---|
 | typing | Narrows the candidates as usual | The answer itself, comma-separated |
 | `RET` | Accept the chosen candidate | Submit every comma-separated value |
-| `t` / `Type answer…` | Read a free-text answer | Read a free-text answer |
 | `C-c C-s` (default) | Skip the question | Skip the question |
 | empty input | Skip the question | Skip the question |
 | `C-g` | Abandon the whole question group | Abandon the whole question group |
@@ -149,12 +148,13 @@ options separated by `crm-separator` (default `,`), for example `2,3` or
 `alpha,beta`. Both the number and the label work — the number is part of the
 candidate, and a bare number addresses the option at that position — so
 either form round-trips to the same answer. Values are submitted in the order
-typed. The prompt says `2,3 or labels; empty = skip`. An unambiguous
+the question offered the options, not the order they were typed. The prompt
+says `2,3 or names, or your own text; empty = skip`. An unambiguous
 prefix of a label resolves to it (`alph` finds `Alpha`); an ambiguous prefix
 is not guessed and instead becomes the answer text, exactly like an
-unmatched input at any Emacs completion prompt.  The `Type answer…`
-candidate is an explicit way to give text.  A single-choice question
-accepts exactly one value.
+unmatched input at any Emacs completion prompt — there is no separate
+"type an answer" candidate, the reader's text *is* the answer.  A
+single-choice question accepts exactly one value.
 
 The skip shortcut is controlled by `dsh-emacs-question-skip-key`; nil disables
 it.  It uses a prefix key because the reader's text is the answer, so a bare

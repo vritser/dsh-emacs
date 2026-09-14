@@ -7405,12 +7405,11 @@ symbol or an ordered list."
           (dsh-test-pass "question-session-label-nil-id-empty")))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
-;; 候选：编号从 1 起，Type answer… 垫底；编号属于选项本身，所以逗号分隔的
-;; 答案既能写编号也能写标签。
-(dsh-test-assert "question-candidates-number-and-tail"
-  (equal '("1. Yes" "2. No" "Type answer…")
-         (append (dsh-emacs--question-pick-labels '("Yes" "No"))
-                 (list dsh-emacs--question-type-label))))
+;; 候选：编号从 1 起，全部是选项本身（没有额外的"输入答案"哨兵——直接打
+;; 文字就是答案）。编号属于选项，所以逗号分隔的答案既能写编号也能写标签。
+(dsh-test-assert "question-candidates-are-numbered-options"
+  (equal '("1. Yes" "2. No")
+         (dsh-emacs--question-pick-labels '("Yes" "No"))))
 
 ;; 答案值可能是编号候选、裸标签、或标签自带数字前缀，都要还原成原标签。
 (let ((labels '("Yes" "2. Version" "[x] Literal" "A,B")))
@@ -7439,7 +7438,13 @@ symbol or an ordered list."
   (null (dsh-emacs--question-label-of "A" '("Alpha" "Alphabet")))
   (null (dsh-emacs--question-label-of "Al" '("Alpha" "Alphabet")))
   ;; 精确匹配优先于前缀
-  (equal "Alpha" (dsh-emacs--question-label-of "Alpha" '("Alpha" "Alphabet"))))
+  (equal "Alpha" (dsh-emacs--question-label-of "Alpha" '("Alpha" "Alphabet")))
+  ;; 裸编号按"编号候选"定位，即使标签本身以数字开头也不混淆
+  (equal "2" (dsh-emacs--question-label-of "1" '("2" "Version")))
+  (equal "2" (dsh-emacs--question-label-of "2" '("2" "Version")))
+  (equal "Version" (dsh-emacs--question-label-of "2" '("Alpha" "Version")))
+  (equal "x" (dsh-emacs--question-label-of "10" (make-list 10 "x")))
+  (null (dsh-emacs--question-label-of "0" '("Alpha" "Beta"))))
 
 ;; 每个候选的说明跟着候选走（annotation），不再是跟随高亮的 tooltip。
 (let* ((dsh-emacs--question-current
@@ -7454,7 +7459,7 @@ symbol or an ordered list."
     (equal "  [Safe route.]" (dsh-emacs--question-annotation "1. Alpha"))
     (equal "  [Safe route.]" (dsh-emacs--question-annotation "Alpha"))
     (equal "" (dsh-emacs--question-annotation "2. Beta"))
-    (equal "" (dsh-emacs--question-annotation dsh-emacs--question-type-label))))
+    (equal "" (dsh-emacs--question-annotation "something else"))))
 
 ;; 单选：同样是一次读完（CRM 只收一个值），编号候选 → 原标签。
 (let ((reads '(("1. Yes"))))
@@ -7466,16 +7471,18 @@ symbol or an ordered list."
               '((id . "q1") (question . "Proceed?")
                 (options . (((label . "Yes")) ((label . "No"))))))))))
 
-;; 多选：一次读完整个答案，逗号分隔的编号 → 对应标签（按作答顺序）；
-;; 元素既可能是补全后的候选，也可能是 CRM 未展开的裸数字。
-(let ((reads '(("2. B" "1"))))
+;; 多选：一次读完整个答案；答案按**题目选项顺序**返回，不按输入顺序
+;; （先打 2 再打 1，仍是 A 在前）。元素既可能是补全后的候选，也可能是 CRM
+;; 未展开的裸数字。
+(let ((reads '(("3. Gamma" "1"))))
   (cl-letf (((symbol-function 'completing-read-multiple)
              (lambda (&rest _) (or (pop reads) (error "Unexpected read")))))
-    (dsh-test-assert "question-choice-multi-reads-once"
-      (equal '((id . "q2") (selected "B" "A"))
+    (dsh-test-assert "question-choice-multi-follows-option-order"
+      (equal '((id . "q2") (selected "Alpha" "Gamma"))
              (dsh-emacs--question-choice
               '((id . "q2") (question . "Pick?") (multiSelect . t)
-                (options . (((label . "A")) ((label . "B")) ((label . "C"))))))))))
+                (options . (((label . "Alpha")) ((label . "Beta"))
+                            ((label . "Gamma"))))))))))
 
 ;; 空输入 = 跳过该题；跳过不依赖任何候选。
 (let ((reads '(nil)))
@@ -7487,27 +7494,37 @@ symbol or an ordered list."
               '((id . "q3") (question . "Pick?") (multiSelect . t)
                 (options . (((label . "A")) ((label . "B"))))))))))
 
-;; Type answer… 与选项混选 → 自由文本 + 已选选项并存。
-(let ((reads '(("Type answer…"))))
+;; 没有"输入答案"候选：直接打文字就是答案，多选与单选都一样，而且只读一次
+;; （不再有"选 Type answer… 再读一次"——reads 只被取一次）。
+(let ((served 0))
   (cl-letf (((symbol-function 'completing-read-multiple)
-             (lambda (&rest _) (or (pop reads) (error "Unexpected read"))))
-            ((symbol-function 'read-string) (lambda (&rest _) "extra")))
-    (dsh-test-assert "question-choice-multi-type-answer"
-      (equal '((id . "q4") (selected . []) (custom . "extra"))
+             (lambda (&rest _) (cl-incf served) '("my own note"))))
+    (dsh-test-assert "question-choice-typed-text-is-the-answer"
+      (equal '((id . "q4") (selected . []) (custom . "my own note"))
              (dsh-emacs--question-choice
               '((id . "q4") (question . "Pick?") (multiSelect . t)
-                (options . (((label . "A")) ((label . "B"))))))))))
-
-;; 单选 Type answer… 同样走自由文本。
-(let ((reads '(("Type answer…"))))
-  (cl-letf (((symbol-function 'completing-read-multiple)
-             (lambda (&rest _) (or (pop reads) (error "Unexpected read"))))
-            ((symbol-function 'read-string) (lambda (&rest _) "my note")))
-    (dsh-test-assert "question-choice-single-type-answer"
-      (equal '((id . "q5") (selected . []) (custom . "my note"))
+                (options . (((label . "A")) ((label . "B")))))))
+      (equal '((id . "q5") (selected . []) (custom . "my own note"))
              (dsh-emacs--question-choice
               '((id . "q5") (question . "Proceed?")
-                (options . (((label . "Yes")) ((label . "No"))))))))))
+                (options . (((label . "Yes")) ((label . "No")))))))
+      (= 2 served))))
+
+;; 部分能解析、部分不能 → 整段输入当文字：绝不能只保留能解析的那部分而
+;; 静默丢掉其余（例如只剩两个选项时打了 2,3）。
+(dsh-test-assert "question-choice-partially-matched-input-stays-text"
+  (equal '((id . "q6a") (selected . []) (custom . "2, 3"))
+         (cl-letf (((symbol-function 'completing-read-multiple)
+                    (lambda (&rest _) '("2" "3"))))
+           (dsh-emacs--question-choice
+            '((id . "q6a") (question . "Pick?") (multiSelect . t)
+              (options . (((label . "Alpha")) ((label . "Beta"))))))))
+  (equal '((id . "q6b") (selected . []) (custom . "1, nonsense"))
+         (cl-letf (((symbol-function 'completing-read-multiple)
+                    (lambda (&rest _) '("1" "nonsense"))))
+           (dsh-emacs--question-choice
+            '((id . "q6b") (question . "Pick?") (multiSelect . t)
+              (options . (((label . "Alpha")) ((label . "Beta")))))))))
 
 ;; 记不清选项、直接打文字 → 该文字就是答案（Emacs 补全提示的惯例），
 ;; 而不是报错或静默丢弃。
@@ -7615,7 +7632,8 @@ symbol or an ordered list."
        (options . (((label . "Yes") (description . "Go ahead"))
                    ((label . "No"))))))
     (dsh-test-assert "question-reader-multi-prompt-hint"
-      (equal "Proceed? (2,3 or labels; empty = skip): " prompt))))
+      (equal "Proceed? (2,3 or names, or your own text; empty = skip): "
+             prompt))))
 
 ;; 单选也会在 prompt 里说明空输入的含义。
 (let ((prompt nil))
@@ -7625,7 +7643,8 @@ symbol or an ordered list."
      '((id . "q9") (question . "Proceed?")
        (options . (((label . "Yes")) ((label . "No"))))))
     (dsh-test-assert "question-reader-single-prompt-hint"
-      (equal "Proceed? (empty input = skip): " prompt))))
+      (equal "Proceed? (a name or your own text; empty = skip): "
+             prompt))))
 
 ;; 帧级：一题正常作答 + 一题跳过 → answers 覆盖整帧（跳过的题空 selected）。
 (let ((picks '(("1. Yes") nil)))

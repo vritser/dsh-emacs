@@ -20,9 +20,15 @@ transport from postmortem 009 already carried the necessary payload.
 
 Decode `user-questions/request` items into protocol structs and answer each
 question in **one minibuffer read**: the question text and a hint are the
-prompt, the numbered options (plus `Type answer…`) are the completion
-candidates, and each option's description is delivered as a completion
-annotation. Multiple choice uses `completing-read-multiple` from the bundled
+prompt, the numbered options are the completion candidates, and each
+option's description is delivered as a completion annotation.  There is no
+"type an answer" candidate: the reader's text is the answer, so text that
+names no option is the free-text answer and every question is one read.  A
+partly-matched answer (some elements name options, some do not) is kept
+whole as text rather than silently trimmed to the elements that matched; a
+selection comes back in the question's option order, so the answer cannot
+depend on the order the user happened to type.
+Multiple choice uses `completing-read-multiple` from the bundled
 `crm.el` — the stock comma-separated input path — and single choice takes one
 candidate from the same reader. Empty input and the `dsh-emacs-question-skip-key`
 shortcut skip the question; `C-g` abandons the whole waterfall. The

@@ -37,8 +37,10 @@ minor) and stay undated until the release is cut.
   are the candidates, and each option's description is a completion
   annotation. Multiple choice takes a comma-separated answer (`2,3` or
   `alpha,beta`, Emacs' standard `completing-read-multiple`); single choice
-  takes one candidate; `Type answer…` reads free text; empty input and the
-  skip key skip the question; `C-g` abandons the group. The question detail
+  takes one candidate; any text that names no option is itself the answer
+  (there is no separate "type an answer" step); a selection comes back in the
+  question's option order; empty input and the skip key skip the question;
+  `C-g` abandons the group. The question detail
   shows in the echo area, and cleanup preserves unrelated messages.
   `M-x dsh-emacs-question-preview` demonstrates the reader locally
   (rationale: postmortem/042).

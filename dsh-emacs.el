@@ -3280,9 +3280,9 @@ This is the main entry command of dsh-emacs."
 ;; ApprovalOutcome 字符串：`allowed-once' 或 `rejected'（拒绝是默认——C-g/
 ;; ESC 也按拒绝应答，不回决定宿主会一直阻塞在 pending 审批上）。
 ;;
-;; 交互方式：逐题在 MINIBUFFER 中选择——选项作为 completion 候选（带
-;; 序号，按数字键即可选择），单/多选，候选末尾附「Type answer…」（空
-;; 输入回到选项）；提示语带 Question N/M 序号，全部答完一次性回 outcome。
+;; 交互方式：逐题在 MINIBUFFER 中一次读完——选项作为 completion 候选（带
+;; 序号），多选用逗号分隔；不匹配任何选项的文字就是答案，空输入跳过该题。
+;; 提示语带 Question N/M 序号，全部答完一次性回 outcome。
 ;; 跳过某题只走 `dsh-emacs-question-skip-key' 快捷键 = 该题以空 selected
 ;; 覆盖（dsh web 的逐题 Skip），其余照答；无选项问题的空输入也跳过该题。
 ;; C-g 放弃整组问题：回 outcome.kind `rejected' 且携带 error body
@@ -3444,9 +3444,6 @@ Each frame is keyed by its waterfall EVENT-ID; the answer goes to
 ;; binding a default, so the owner's own defvar is not shadowed.
 (defvar dsh-emacs-events--client-id)
 
-(defconst dsh-emacs--question-type-label "Type answer…"
-  "Candidate switching to a free-text answer; it is the last candidate.")
-
 (defconst dsh-emacs--question-skip-label "Skip this question"
   "Internal sentinel for skipping one question with an empty selection.
 The skip command returns it directly; it is not a visible candidate.")
@@ -3495,6 +3492,19 @@ text is never mapped to the wrong option."
                labels)))
     (and (= 1 (length hits)) (car hits))))
 
+(defun dsh-emacs--question-numbered-label (number labels)
+  "Return the LABELS entry NUMBER refers to, or nil.
+NUMBER is a bare option number.  The numbered candidates are matched in
+order, so `2' finds `2. Version' even when the label itself is numeric, and
+an out-of-range number matches nothing."
+  (let (found)
+    (dolist (candidate (dsh-emacs--question-pick-labels labels) found)
+      (unless found
+        (when (and (string-prefix-p (concat number ". ") candidate)
+                   (string-match "\\`[0-9]+\\. \\(.+\\)\\'" candidate))
+          ;; The numbered form was built from the label, so the tail is it.
+          (setq found (match-string 1 candidate)))))))
+
 (defun dsh-emacs--question-label-of (picked labels)
   "Return the plain LABELS entry PICKED names, or nil.
 PICKED is a candidate string, a bare option number, a label, or an
@@ -3510,8 +3520,7 @@ an element the completion engine left unexpanded."
               ((string-match "\\`[0-9]+\\. \\(.+\\)\\'" picked)
                (match-string 1 picked))
               ((string-match "\\`\\([0-9]+\\)\\'" picked)
-               (let ((n (string-to-number picked)))
-                 (and (> n 0) (nth (1- n) labels)))))))
+               (dsh-emacs--question-numbered-label picked labels)))))
         (and plain (cl-find plain labels :test #'equal)))))
 
 (defvar-local dsh-emacs--question-echo-message nil
@@ -3604,14 +3613,19 @@ read, where there is no question context to show."
      (if (or (null detail) (string-empty-p detail)) "" detail)))
   nil)
 
-(defun dsh-emacs--question-answer-labels (picked labels)
-  "Return the LABELS entries PICKED names, in PICKED order.
-Each element is a candidate, a bare number, a label, or a label prefix;
-elements that name no option are dropped, and the caller treats an empty
-result as the user's own text rather than as a malformed answer."
-  (delq nil (mapcar (lambda (value)
-                      (dsh-emacs--question-label-of value labels))
-                    picked)))
+(defun dsh-emacs--question-answer-values (picked labels)
+  "Return PICKED resolved to LABELS entries, in the question's option order.
+Each element is a candidate, a bare number, a label, or a label prefix; an
+element that names no option is left as the typed text, so the caller can
+tell `every value is an option` from `the user is answering in text`, and
+never silently drops part of the answer.  The answer follows the order the
+question offered the options, not the order they were typed."
+  (let ((values (mapcar (lambda (value)
+                          (or (dsh-emacs--question-label-of value labels) value))
+                        picked)))
+    (cl-stable-sort values #'< :key (lambda (value)
+                                      (or (cl-position value labels :test #'equal)
+                                          most-positive-fixnum)))))
 
 (defun dsh-emacs--question-read-multiple (labels)
   "Read one comma-separated answer over numbered LABELS.
@@ -3626,41 +3640,38 @@ propagates."
       (completing-read-multiple
        (concat dsh-emacs--question-where dsh-emacs--question-text
                (or dsh-emacs--question-hint "") ": ")
-       (append (dsh-emacs--question-pick-labels labels)
-               (list dsh-emacs--question-type-label))
+       (dsh-emacs--question-pick-labels labels)
        nil nil nil nil nil))))
 
 (defun dsh-emacs--question-choose (labels)
-  "Read one answer over LABELS, or return the free-text sentinel.
-The prompt carries the question; the candidates carry their own
-descriptions.  An empty input is a skip, and a value that matches no option
-(and the free-text sentinel was not chosen) is the user's own text."
+  "Read one answer over LABELS.
+The prompt carries the question and the candidates carry their own
+descriptions.  An empty input is a skip, and anything that names no option
+is the user's own text."
   (catch 'answer
     (let ((picked (dsh-emacs--question-read-multiple labels)))
       (cond
        ((equal picked dsh-emacs--question-skip-label)
         (throw 'answer :skip))
-       ((member dsh-emacs--question-type-label picked)
-        (let ((custom
-               (minibuffer-with-setup-hook #'dsh-emacs--question-reader-setup
-                 (read-string (format "%s%s (free text, empty input = back to options): "
-                                      dsh-emacs--question-where
-                                      dsh-emacs--question-text)))))
-          (if (string-empty-p custom)
-              (message "Empty answer — back to the options")
-            (throw 'answer (cons :custom custom)))))
        ((null picked) :skip)
        (t
-        (let ((selected (dsh-emacs--question-answer-labels picked labels)))
+        (let* ((values (dsh-emacs--question-answer-values picked labels))
+               (options (cl-remove-if-not (lambda (value)
+                                            (cl-member value labels :test #'equal))
+                                          values)))
           (cond
-           ((null selected)
-            ;; Not an option: the typed text is the answer, like Emacs'
-            ;; completion prompts do with an unmatched input.
+           ((null options)
+            ;; Names no option: the text is the answer, like an unmatched
+            ;; input at any completion prompt.
+            (throw 'answer (cons :custom (string-join picked ", "))))
+           ((/= (length options) (length values))
+            ;; Only part of it names options; treating it as a selection
+            ;; would silently drop the rest, so the whole input is the text.
             (throw 'answer (cons :custom (string-join picked ", "))))
            (dsh-emacs--question-multi
-            (cons :selected selected))
+            (cons :selected options))
            (t
-            (cons :one (car selected))))))))))
+            (cons :one (car options))))))))))
 
 (defun dsh-emacs--question-choice (question &optional index total session-id)
   "Read one answer to QUESTION as ((id . ID) (selected . LABELS) ...).
@@ -3668,10 +3679,9 @@ QUESTION accepts a protocol struct or legacy wire alist.  INDEX/TOTAL
 and SESSION-ID identify the question and its owning session in the prompt.
 Multiple selection is one comma-separated answer (for example `2,3'):
 the numbered options are the candidates, an empty input skips the
-question, and the `Type answer…' candidate reads free text instead.  Text
-that names no option is itself the answer (like an unmatched input at any
-completion prompt).  Single selection uses the first value when several are
-given.  Every question is answered by one minibuffer read, so the reader is
+question, and any text that names no option is itself the answer (like an
+unmatched input at any completion prompt).  Single selection uses the first
+value when several are given.  Every question is answered by one minibuffer read, so the reader is
 never reopened per key.  The skip key
 (`dsh-emacs-question-skip-key') answers with an empty selection and C-g
 abandons the whole waterfall.  Questions without options read free text,
@@ -3704,8 +3714,8 @@ area; each option's description rides along with its candidate."
           (if (null labels)
               " (empty input = skip)"
             (if dsh-emacs--question-multi
-                " (2,3 or labels; empty = skip)"
-              " (empty input = skip)"))))
+                " (2,3 or names, or your own text; empty = skip)"
+              " (a name or your own text; empty = skip)"))))
     (if (null labels)
         (let ((custom
                (minibuffer-with-setup-hook #'dsh-emacs--question-reader-setup

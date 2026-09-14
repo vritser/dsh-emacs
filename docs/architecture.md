@@ -228,14 +228,16 @@ stay raw for now (their shapes vary per event type).
 
 The question reader in `dsh-emacs.el` answers each `ask` question in one
 minibuffer read. The question text and a hint are the prompt, the numbered
-options (plus `Type answer…`) are the completion candidates, and each
+options are the completion candidates, and each
 candidate's description is delivered as a completion annotation through
 `completion-extra-properties`, so descriptions appear in whatever list UI the
 user has — no tooltip, geometry inspection, or frontend state is involved.
 Multiple choice uses `completing-read-multiple` from `crm.el`, the stock
 comma-separated input path; numbers, labels and unambiguous label prefixes
 all resolve back to the original labels, an ambiguous prefix is left as the
-user's own text, and the reader never guesses which option was meant. Single choice uses the same reader and takes one value. Empty input
+user's own text, and the reader never guesses which option was meant.  A
+selection is returned in the question's option order, not in the order it
+was typed, so the answer matches the options as presented. Single choice uses the same reader and takes one value. Empty input
 skips the question, the `dsh-emacs-question-skip-key` shortcut throws the
 skip sentinel out of the reader's scope, and C-g propagates to abandon the
 whole waterfall. Because every question is one read, no reader is reopened
