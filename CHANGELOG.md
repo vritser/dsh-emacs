@@ -48,7 +48,8 @@ minor) and stay undated until the release is cut.
   question's option order; empty input and the skip key skip the question;
   `C-g` abandons the group. The question detail
   shows in the echo area, and cleanup preserves unrelated messages.
-  `M-x dsh-emacs-question-preview` demonstrates the reader locally
+  `M-x dsh-emacs-question-preview` demonstrates the reader locally with a
+  three-question sample batch — multi-select, single-select and free text
   (rationale: postmortem/042).
 
 - **The remaining V3 core events reach the client**: `step/start` /

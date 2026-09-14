@@ -7822,6 +7822,32 @@ symbol or an ordered list."
         (equal '("1. Zulu" "2. Alpha" "3. Mike")
                (all-completions "" #'crm--collection-fn nil))))))
 
+;; 预览命令演示整批问题（多选 + 单选 + 无选项三种形态）：逐题走同一个
+;; reader，答案按帧序收集，最后整体回显（本地演示，不发 RPC）。
+(let ((option-reads 0)
+      (echoed 'unset))
+  (cl-letf (((symbol-function 'completing-read-multiple)
+             (lambda (_prompt collection &rest _)
+               (setq option-reads (1+ option-reads))
+               (list (car (all-completions "" collection)))))
+            ((symbol-function 'read-string)
+             (lambda (&rest _) "自己的补充"))
+            ;; 只截预览的总结行：reader 的 echo/cleanup 也走 `message'。
+            ((symbol-function 'message)
+             (lambda (fmt &rest args)
+               (when (equal fmt "Preview answers: %S")
+                 (setq echoed (car args))))))
+    (dsh-emacs-question-preview)
+    (dsh-test-assert "question-preview-batch-covers-every-shape"
+      (= 2 option-reads)
+      (equal '("preview-1" "preview-2" "preview-3")
+             (mapcar (lambda (answer) (cdr (assq 'id answer))) echoed))
+      (equal '("交互界面")
+             (cdr (assq 'selected (nth 0 echoed))))
+      (equal "跑一遍 scripts/verify.sh"
+             (cadr (assq 'selected (nth 1 echoed))))
+      (equal "自己的补充" (cdr (assq 'custom (nth 2 echoed)))))))
+
 ;; 帧级：一题正常作答 + 一题跳过 → answers 覆盖整帧（跳过的题空 selected）。
 (let ((picks '(("1. Yes") nil)))
   (cl-letf (((symbol-function 'completing-read-multiple)

@@ -177,9 +177,11 @@ Command errors and status messages take priority. On exit, cleanup removes
 only the question's own message and preserves an unrelated message that has
 replaced it.
 
-`M-x dsh-emacs-question-preview` opens a local sample question through the same
-reader and honors the display setting. It sends no RPC and prints the chosen
-answer when you finish.
+`M-x dsh-emacs-question-preview` runs a local three-question sample batch
+through the same reader — a multi-select with option descriptions, a
+single-select, and an option-less free-text question — so it also shows the
+`Question N/M` framing. It honors the display setting, sends no RPC, and
+prints the whole batch's answers when you finish.
 
 ## Server options
 

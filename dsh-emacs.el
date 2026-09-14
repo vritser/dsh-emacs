@@ -3844,28 +3844,26 @@ area; each option's description rides along with its candidate."
            `((id . ,id) (selected . (,label))))
           (_ (error "Unhandled question answer: %S" answer)))))))
 
-;;;###autoload
-(defun dsh-emacs-question-preview ()
-  "Try question selection and tooltips locally, without sending an RPC."
-  (interactive)
+(defun dsh-emacs--question-preview-item (id text detail multi options)
+  "Build one local preview question; no wire payload is involved.
+ID/TEXT/DETAIL are strings, MULTI says whether several options may be
+picked, and OPTIONS is a list of (LABEL . DESCRIPTION) pairs.  Values go
+in through the protocol accessors, so this local sample never spells a
+wire field name."
   (let ((question (dsh-protocol-question--from-alist nil)))
-    (setf (dsh-protocol-question-id question) "preview"
-          (dsh-protocol-question-text question) "这次更新需要包含哪些内容？"
-          (dsh-protocol-question-detail question) "可以选择多项，也可以按 t 补充要求。"
-          (dsh-protocol-question-multi-select question) t
+    (setf (dsh-protocol-question-id question) id
+          (dsh-protocol-question-text question) text
+          (dsh-protocol-question-detail question) detail
+          (dsh-protocol-question-multi-select question) multi
           (dsh-protocol-question-options question)
-          (cl-loop for (label description) in
-                   '(("交互界面" "保留原来的选择流程，在附近浮动显示当前选项的说明。")
-                     ("回归测试" "验证多选、自由输入、选项说明跟随和退出清理。")
-                     ("使用文档" "更新提示框的使用说明和决策记录。"))
-                   collect
-                   (let ((option (dsh-protocol-question-option--from-alist nil)))
-                     (setf (dsh-protocol-question-option-label option) label
-                           (dsh-protocol-question-option-description option)
-                           description)
-                     option)))
-    (message "Preview answer: %S"
-             (dsh-emacs--question-choice question 1 1))))
+          (mapcar (pcase-lambda (`(,label . ,description))
+                    (let ((option (dsh-protocol-question-option--from-alist nil)))
+                      (setf (dsh-protocol-question-option-label option) label
+                            (dsh-protocol-question-option-description option)
+                            description)
+                      option))
+                  options))
+    question))
 
 (defun dsh-emacs--collect-question-answers (questions &optional session-id)
   "Answer QUESTIONS one at a time from the minibuffer: each question's
@@ -3884,6 +3882,35 @@ C-g propagates to the caller, which declines the waterfall."
           (if (null answer) (throw 'abort nil)
             (push answer answers))))
       (reverse answers))))
+
+;;;###autoload
+(defun dsh-emacs-question-preview ()
+  "Try the ask reader locally, without sending an RPC.
+Presents a three-question batch — a multi-select with option
+descriptions, a single-select, and an option-less free-text question — so
+one run shows every prompt shape and the \"Question N/M\" framing.  The
+answers of the whole batch are echoed the way the RPC outcome would carry
+them."
+  (interactive)
+  (message "Preview answers: %S"
+           (dsh-emacs--collect-question-answers
+            (list (dsh-emacs--question-preview-item
+                   "preview-1" "这次更新需要包含哪些内容？"
+                   "多选：可以选多项（2,3），也可以直接写自己的答案。"
+                   t
+                   '(("交互界面" . "在附近显示当前选项的说明。")
+                     ("回归测试" . "验证多选、自由输入与退出清理。")
+                     ("使用文档" . "更新使用说明和决策记录。")))
+                  (dsh-emacs--question-preview-item
+                   "preview-2" "改动怎么验证？"
+                   "单选：选一个选项，或者写自己的答案。"
+                   nil
+                   '(("跑一遍 scripts/verify.sh" . "括号、单测、编译一起过。")
+                     ("只在 GUI 里点一遍" . "手动走一遍交互路径。")))
+                  (dsh-emacs--question-preview-item
+                   "preview-3" "还有什么要补充的？"
+                   "没有选项：空输入跳过，文字即答案。"
+                   nil nil)))))
 
 (defun dsh-emacs--question-requested (chat event-id session-id questions)
   "Queue a `user-questions/request' waterfall EVENT-ID of SESSION-ID and answer it.
