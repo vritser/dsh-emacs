@@ -739,15 +739,18 @@ messages can never be appended below the input area."
         (when position (goto-char position))
         (insert line "\n")))))
 
-(defun dsh-emacs-render--insert-chat-message (text face insert-point event-id &optional user-message)
+(defun dsh-emacs-render--insert-chat-message (text face insert-point event-id &optional role)
   "Insert TEXT as a read-only, background-colored chat message.
 FACE is applied to the message body.  EVENT-ID is stored for navigation.
 The prompt remains after the message and each message ends with a newline,
 so subsequent messages are appended in history order.  Blank lines left by
 the previous content are consumed so everything stacks flush — except
-around a user message (USER-MESSAGE non-nil), which keeps one blank line
+around a user message (`role' = `user'), which keeps one blank line
 above AND is marked so the NEXT insertion keeps one blank line below it
 (see `dsh-emacs-ui--blank-above-preserve').
+ROLE also tags the body with its transcript property
+\(`dsh-emacs-user-message' / `dsh-emacs-assistant-message') so commands can
+locate message bodies by role; nil tags nothing.
 Return (START . END) for the inserted message text, excluding separators."
   (when (and (stringp text) (not (string-empty-p text)))
     ;; Rendering happens from an asynchronous callback.  Never leave point at
@@ -764,7 +767,7 @@ Return (START . END) for the inserted message text, excluding separators."
         ;; Flush against previous content, but keep one blank line above when
         ;; this is a user message, or when the previous entry was one.
         (dsh-emacs-ui--consume-blanks-above
-         (if (or user-message (dsh-emacs-ui--blank-above-preserve)) 1 0))
+         (if (or (eq role 'user) (dsh-emacs-ui--blank-above-preserve)) 1 0))
         (let ((start (point))
               (text-end (progn (insert text) (point))))
           (unless (string-suffix-p "\n" text)
@@ -778,10 +781,13 @@ Return (START . END) for the inserted message text, excluding separators."
             ;; Add the background only to the message TEXT, never to the
             ;; trailing blank separator line, so blank lines stay transparent.
             (add-face-text-property start text-end face t)
-            (when user-message
+            (when (eq role 'user)
               ;; UI spacing is independent of the message's business identity.
               (put-text-property start text-end 'dsh-emacs-ui-space-after 1)
               (put-text-property start text-end 'dsh-emacs-user-message t))
+            (when (eq role 'assistant)
+              (put-text-property start text-end 'dsh-emacs-assistant-message
+                                 (or event-id t)))
             (when event-id
               (put-text-property start end 'dsh-emacs-event-block event-id)))
           (cons start text-end))))))
@@ -925,7 +931,9 @@ miss the entry is cleaned up.")
   (setf (plist-get (plist-get state :markdown) :kind) nil))
 
 (defun dsh-emacs-render--protect-stream-region (state start end)
-  "Apply STATE's transcript protection and event identity to START..END."
+  "Apply STATE's transcript protection and event identity to START..END.
+STATE is always an assistant stream, so the region is also tagged as an
+assistant message body for the copy commands."
   (when (< start end)
     (let ((inhibit-read-only t)
           (event-id (plist-get state :event-id)))
@@ -933,6 +941,9 @@ miss the entry is cleaned up.")
        start end
        (append '(read-only t front-sticky (read-only)
                  rear-nonsticky (read-only))
+               ;; The event id doubles as the message identity here, so two
+               ;; adjacent replies stay separate property runs.
+               (list 'dsh-emacs-assistant-message (or event-id t))
                (when event-id (list 'dsh-emacs-event-block event-id)))))))
 
 (defun dsh-emacs-render--schedule-markdown ()
@@ -1130,6 +1141,8 @@ FINAL also finishes deferred markup when no timer is pending."
                                       'front-sticky '(read-only)
                                       'rear-nonsticky '(read-only)
                                       'face 'dsh-emacs-assistant-body-face
+                                      'dsh-emacs-assistant-message
+                                      (plist-get state :event-id)
                                       'dsh-emacs-event-block
                                       (plist-get state :event-id)))
                   (set-marker (plist-get state :end) (point)))
@@ -1178,6 +1191,7 @@ FINAL also finishes deferred markup when no timer is pending."
                                   'front-sticky '(read-only)
                                   'rear-nonsticky '(read-only)
                                   'face 'dsh-emacs-assistant-body-face
+                                  'dsh-emacs-assistant-message event-id
                                   'dsh-emacs-event-block event-id)
                       "\n\n")
               (setq end (copy-marker (- (point) 2) t))))
@@ -1229,7 +1243,10 @@ pending incremental pass; changed text is replaced and rendered in full."
               (save-excursion
                 (goto-char start)
                 (delete-region start end)
-                (insert (propertize text 'face 'dsh-emacs-assistant-body-face))
+                (insert (propertize text
+                                    'face 'dsh-emacs-assistant-body-face
+                                    'dsh-emacs-assistant-message
+                                    (plist-get state :event-id)))
                 (set-marker (plist-get state :start) start)
                 (set-marker (plist-get state :end) (point)))
               (dsh-emacs-render--protect-stream-region
@@ -1588,7 +1605,7 @@ session chips; see `dsh-emacs-reference-fontify'."
                text)
        'dsh-emacs-user-block-face insert-point
        (format "%s-%s" (dsh-emacs-render--make-namespace) block-id)
-       t)
+       'user)
       (dolist (spec specs)
         (dsh-emacs-render--show-attachment (car spec) (cdr spec))))
     seq))
@@ -1628,7 +1645,8 @@ session chips; see `dsh-emacs-reference-fontify'."
                        (dsh-emacs-markdown-render text)))
                (range (dsh-emacs-render--insert-chat-message
                        body 'dsh-emacs-assistant-body-face
-                       (dsh-emacs-render--input-insert-point) event-id)))
+                       (dsh-emacs-render--input-insert-point) event-id
+                       'assistant)))
           (when defer
             (dsh-emacs-render--stream-render-region
              (list :start (copy-marker (car range))

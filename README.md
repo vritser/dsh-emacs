@@ -65,6 +65,7 @@ for list management and navigation.
 | `C-c C-a` | Attach an image |
 | `C-c C-s` / `C-c M-s` | Switch session in this workspace / across all |
 | `C-c C-r` | Refresh |
+| `C-c C-w` | Copy (region → code block → message at point → last reply) |
 | `C-c C-f` | Toggle mode-line stats |
 | `C-c C-!` | Stop the tracked local shell process |
 | `M-p` / `M-n` | Previous / next input |

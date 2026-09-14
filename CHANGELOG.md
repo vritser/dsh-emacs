@@ -30,6 +30,12 @@ minor) and stay undated until the release is cut.
   Rebind `dsh-emacs-question-skip-key` if you prefer another key
   (rationale: postmortem/042).
 
+- **Copy keybindings are consolidated on `C-c C-w`**: it now runs the
+  context-aware `dsh-emacs-copy-dwim` instead of copying the whole transcript,
+  and the code-block copy key `C-c C-k` is unbound.  The standalone copies
+  stay available as `M-x dsh-emacs-copy-transcript` and
+  `M-x dsh-emacs-copy-code-block` (rationale: postmortem/043).
+
 ### Added
 
 - **Question prompts explain themselves while you answer**: an `ask` prompt is
@@ -78,6 +84,16 @@ minor) and stay undated until the release is cut.
   of one path collapse to one line with the latest description.  A turn's
   `write`/`edit` changes are not folded in: their tool cards already show
   them, matching dsh web's produced-files row (rationale: postmortem/041).
+
+- **One `C-c C-w` copy key that reads the context**: the new
+  `dsh-emacs-copy-dwim` copies the active region verbatim, else the code block
+  at point, else the assistant message containing point, else the most recent
+  assistant message.  Assistant-message bodies carry no user prompts, tool
+  cards, thinking blocks or transcript chrome.  The narrower copies remain as
+  commands: `M-x dsh-emacs-copy-last-assistant-message` (the fallback alone),
+  `M-x dsh-emacs-copy-assistant-message` (every reply, blank-line separated),
+  `M-x dsh-emacs-copy-code-block` and `M-x dsh-emacs-copy-transcript`
+  (rationale: postmortem/043).
 
 ### Fixed
 

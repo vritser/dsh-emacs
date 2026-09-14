@@ -4801,6 +4801,143 @@ symbol or an ordered list."
                    (user-error (error-message-string e))))))
     (kill-buffer buf)))
 
+;; --- 测试 49b: 复制命令（助手消息 / dwim） ---
+(let ((buf (generate-new-buffer " *dsh-copy-assistant*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-render-user-message
+         '((seq . 1) (data . ((content . [((type . "text") (text . "ask me"))])))))
+        (dsh-emacs-render-assistant-message
+         '((seq . 2)
+           (data . ((turn . 1) (step . 1)
+                    (message . ((content . [((type . "text")
+                                             (text . "First **reply**."))])))))))
+        (dsh-emacs-render-tool-call
+         '((type . "tool/call") (seq . 3)
+           (data . ((callId . "c1") (name . "read")
+                    (arguments . "{\"path\":\"/tmp/x\"}")))))
+        (dsh-emacs-render-assistant-message
+         '((seq . 4)
+           (data . ((turn . 1) (step . 2)
+                    (message . ((content . [((type . "text")
+                                             (text . "Second reply."))])))))))
+        (dsh-emacs-copy-assistant-message)
+        (dsh-test-assert "copy-assistant-message-excludes-other-roles"
+          (equal (car kill-ring) "First reply.\n\nSecond reply.")))
+    (kill-buffer buf)))
+
+(defun dsh-test--copy-dwim-fixture ()
+  "Return a chat buffer with a user prompt, a reply and a fenced-code reply."
+  (let ((buf (generate-new-buffer " *dsh-copy-dwim*")))
+    (with-current-buffer buf
+      (dsh-emacs-mode)
+      (dsh-emacs-render-user-message
+       '((seq . 1) (data . ((content . [((type . "text") (text . "ask me"))])))))
+      (dsh-emacs-render-assistant-message
+       '((seq . 2) (data . ((turn . 1) (step . 1)
+                            (message . ((content . [((type . "text")
+                                                      (text . "First reply."))])))))))
+      (dsh-emacs-render-assistant-message
+       '((seq . 3) (data . ((turn . 1) (step . 2)
+                            (message . ((content . [((type . "text")
+                                                      (text . "Code:\n\n```elisp\n(+ 1 2)\n```"))]))))))))
+    buf))
+
+;; copy-dwim: region > code block > message at point > all assistant messages.
+(let ((buf (dsh-test--copy-dwim-fixture)))
+  (unwind-protect
+      (with-current-buffer buf
+        (goto-char (point-min))
+        (search-forward "(+ 1 2)")
+        (goto-char (match-beginning 0))
+        (dsh-emacs-copy-dwim)
+        (dsh-test-assert "copy-dwim-prefers-code-block-at-point"
+          (equal (car kill-ring) "(+ 1 2)"))
+        (setq kill-ring nil)
+        (goto-char (point-min))
+        (search-forward "First reply.")
+        (goto-char (match-beginning 0))
+        (dsh-emacs-copy-dwim)
+        (dsh-test-assert "copy-dwim-copies-message-at-point"
+          (equal (car kill-ring) "First reply."))
+        (setq kill-ring nil)
+        (let ((transient-mark-mode t))
+          (goto-char (point-min))
+          (search-forward "ask me")
+          (set-mark (match-beginning 0))
+          (goto-char (match-end 0))
+          (activate-mark)
+          (dsh-emacs-copy-dwim))
+        (dsh-test-assert "copy-dwim-copies-active-region"
+          (equal (car kill-ring) "ask me"))
+        (deactivate-mark)
+        (setq kill-ring nil)
+        (goto-char (point-max))
+        (dsh-emacs-copy-dwim)
+        (let ((last (car kill-ring)))
+          (dsh-test-assert "copy-dwim-falls-back-to-last-assistant-message"
+            (string-match-p "Code:" last)
+            (string-match-p (regexp-quote "(+ 1 2)") last)
+            (not (string-match-p "First reply" last))
+            (not (string-match-p "ask me" last)))
+          (setq kill-ring nil)
+          (dsh-emacs-copy-last-assistant-message)
+          (dsh-test-assert "copy-last-assistant-message-matches-dwim-fallback"
+            (equal (car kill-ring) last)))
+        (setq kill-ring nil)
+        (dsh-emacs-copy-assistant-message)
+        (dsh-test-assert "copy-assistant-message-keeps-every-reply"
+          (string-match-p "First reply" (car kill-ring))
+          (string-match-p "Code:" (car kill-ring)))
+        (dsh-test-assert "copy-dwim-keybinding"
+          (eq (lookup-key dsh-emacs-mode-map (kbd "C-c C-w"))
+              #'dsh-emacs-copy-dwim)
+          (null (lookup-key dsh-emacs-mode-map (kbd "C-c C-e")))
+          (null (lookup-key dsh-emacs-mode-map (kbd "C-c C-k")))))
+    (kill-buffer buf)))
+
+(let ((buf (generate-new-buffer " *dsh-copy-assistant-empty*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-render-user-message
+         '((seq . 1) (data . ((content . [((type . "text") (text . "hi"))])))))
+        (dsh-test-assert "copy-assistant-message-errors-without-replies"
+          (equal "No assistant messages in this transcript"
+                 (condition-case e
+                     (progn (dsh-emacs-copy-assistant-message) nil)
+                   (user-error (error-message-string e))))))
+    (kill-buffer buf)))
+
+;; A live stream is tagged from its first delta, before its final message.
+(let ((buf (generate-new-buffer " *dsh-copy-assistant-stream*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-render--start-assistant-stream
+         '((data . ((turn . 1) (step . 1)))) "partial")
+        (dsh-emacs-copy-assistant-message)
+        (dsh-test-assert "copy-assistant-message-includes-live-stream"
+          (equal (car kill-ring) "partial")))
+    (kill-buffer buf)))
+
+;; A timer flush appends to the same tagged run, even while Markdown is
+;; deferred, so a copy mid-stream never returns only the first delta.
+(let ((buf (generate-new-buffer " *dsh-copy-assistant-flush*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (let* ((dsh-emacs-stream-markdown-limit 1)
+               (event '((data . ((turn . 1) (step . 1))))))
+          (dsh-emacs-render--start-assistant-stream event "Hello ")
+          (dsh-emacs-render--start-assistant-stream event "world")
+          (dsh-emacs-render--flush-stream)
+          (dsh-emacs-copy-last-assistant-message)
+          (dsh-test-assert "copy-last-assistant-message-includes-flushed-deltas"
+            (equal (car kill-ring) "Hello world"))))
+    (kill-buffer buf)))
+
 ;; --- 测试 50: fork 会话 ---
 (let ((opened nil)
       (listed nil)

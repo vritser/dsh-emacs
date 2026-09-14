@@ -1888,9 +1888,8 @@ repaints)."
     (define-key map (kbd "C-c C-l") #'dsh-emacs-list-sessions-display)
     (define-key map (kbd "C-c C-s") #'dsh-emacs-switch-workspace-session)
     (define-key map (kbd "C-c M-s") #'dsh-emacs-switch-session)
-    (define-key map (kbd "C-c C-w") #'dsh-emacs-copy-transcript)
+    (define-key map (kbd "C-c C-w") #'dsh-emacs-copy-dwim)
     (define-key map (kbd "C-c C-f") #'dsh-emacs-modeline-toggle)
-    (define-key map (kbd "C-c C-k") #'dsh-emacs-copy-code-block)
     (define-key map (kbd "C-c C-a") #'dsh-emacs-attach-file)
     (define-key map (kbd "C-c C-m") #'dsh-emacs-select-model)
     (define-key map (kbd "C-c C-g") dsh-emacs-goal-map)
@@ -3226,8 +3225,101 @@ copy into another buffer (e.g. an image viewport)."
         (progn (kill-new text) (message "Copied code block"))
       (user-error "Point is not inside a code block"))))
 
+(defun dsh-emacs--assistant-message-region-at (pos)
+  "Return (START . END) of the assistant message body at POS, or nil.
+POS counts as inside when it carries the `dsh-emacs-assistant-message'
+property, or sits on whitespace immediately after such a body (a message's
+trailing separator carries no identity of its own)."
+  (let* ((prop 'dsh-emacs-assistant-message)
+         (at (cond
+              ((get-text-property pos prop) pos)
+              ((and (> pos (point-min))
+                    (memq (char-after pos) '(?\s ?\t ?\n))
+                    (get-text-property (1- pos) prop))
+               (1- pos)))))
+    (when at
+      (cons (or (previous-single-property-change (1+ at) prop nil (point-min))
+                (point-min))
+            (or (next-single-property-change at prop nil (point-max))
+                (point-max))))))
+
+(defun dsh-emacs--assistant-message-bodies ()
+  "Return the chat transcript's assistant message bodies, in order.
+Bodies are located by the `dsh-emacs-assistant-message' text property, so
+user prompts, tool cards, thinking blocks and the rest of the transcript
+chrome stay out.  Each body is trimmed; empty ones are dropped."
+  (let ((prop 'dsh-emacs-assistant-message)
+        (pos (point-min))
+        bodies)
+    (while (< pos (point-max))
+      (let ((start (if (get-text-property pos prop)
+                       pos
+                     (next-single-property-change pos prop nil (point-max)))))
+        (if (or (null start) (>= start (point-max)))
+            (setq pos (point-max))
+          (let* ((end (or (next-single-property-change start prop nil (point-max))
+                          (point-max)))
+                 (body (string-trim (buffer-substring-no-properties start end))))
+            (unless (string-empty-p body)
+              (push body bodies))
+            (setq pos end)))))
+    (nreverse bodies)))
+
+;;;###autoload
+(defun dsh-emacs-copy-assistant-message ()
+  "Copy only the assistant messages of the current transcript."
+  (interactive)
+  (let ((bodies (dsh-emacs--assistant-message-bodies)))
+    (if bodies
+        (progn
+          (kill-new (mapconcat #'identity bodies "\n\n"))
+          (message "Copied %d assistant message%s"
+                   (length bodies)
+                   (if (= 1 (length bodies)) "" "s")))
+      (user-error "No assistant messages in this transcript"))))
+
+;;;###autoload
+(defun dsh-emacs-copy-assistant-message-at-point ()
+  "Copy the assistant message body containing point."
+  (interactive)
+  (let* ((region (dsh-emacs--assistant-message-region-at (point)))
+         (body (and region
+                    (string-trim (buffer-substring-no-properties
+                                  (car region) (cdr region))))))
+    (if (and body (not (string-empty-p body)))
+        (progn (kill-new body) (message "Copied assistant message"))
+      (user-error "Point is not inside an assistant message"))))
+
+;;;###autoload
+(defun dsh-emacs-copy-last-assistant-message ()
+  "Copy the transcript's most recent assistant message."
+  (interactive)
+  (let ((bodies (dsh-emacs--assistant-message-bodies)))
+    (if bodies
+        (progn (kill-new (car (last bodies)))
+               (message "Copied last assistant message"))
+      (user-error "No assistant messages in this transcript"))))
+
+;;;###autoload
+(defun dsh-emacs-copy-dwim ()
+  "Copy the smallest transcript unit point means.
+An active region copies verbatim; otherwise a code block at point, else
+the assistant message containing point, else the transcript's most recent
+assistant message."
+  (interactive)
+  (cond
+   ((use-region-p)
+    (kill-new (buffer-substring-no-properties (region-beginning) (region-end)))
+    (message "Region copied"))
+   ((dsh-emacs--code-block-region-at (point))
+    (dsh-emacs-copy-code-block))
+   ((dsh-emacs--assistant-message-region-at (point))
+    (dsh-emacs-copy-assistant-message-at-point))
+   (t
+    (dsh-emacs-copy-last-assistant-message))))
+
 (defun dsh-emacs-copy-transcript ()
-  "Copy the current transcript to the clipboard."
+  "Copy the current visible transcript to the clipboard."
   (interactive)
   (let ((chat (current-buffer)))
     (when (buffer-live-p chat)
