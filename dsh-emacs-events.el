@@ -164,7 +164,7 @@ generation and a new clientId.")
 (defvar dsh-emacs--buffer-session)
 (defvar dsh-emacs-history-window)
 (declare-function dsh-emacs--chat-session-item "dsh-emacs" (session-id))
-(declare-function dsh-emacs--seed-input-history "dsh-emacs" (events session-id))
+(declare-function dsh-emacs--seed-input-history "dsh-emacs" (events session-id &optional older))
 (declare-function dsh-emacs--chat-buffer-sync "dsh-emacs" (session-id))
 (declare-function dsh-emacs--question-requested "dsh-emacs" (chat event-id session-id questions))
 (declare-function dsh-emacs--question-cancelled "dsh-emacs" (event-id))
@@ -189,7 +189,8 @@ generation and a new clientId.")
 (declare-function dsh-emacs--command-spinner-revive "dsh-emacs-render" ())
 ;; Runtime dependencies defined in dsh-emacs.el / dsh-emacs-render.el.
 (declare-function dsh-emacs--sequence-list "dsh-emacs" (value))
-(declare-function dsh-emacs-render-history-events "dsh-emacs-render" (events stream))
+(declare-function dsh-emacs-render-history-events "dsh-emacs-render" (events &optional stream bound &key insert-before follow-p))
+(declare-function dsh-emacs-render--note-history-window "dsh-emacs-render" (entries has-more))
 (declare-function dsh-emacs-render--consume-pending-user-message "dsh-emacs-render" (event))
 (declare-function dsh-emacs-render--event-seq "dsh-emacs-render" (event))
 (declare-function dsh-emacs-render-event "dsh-emacs-render" (event))
@@ -595,7 +596,14 @@ opening history tail; no separate history fetch precedes the connect."
           (dsh-emacs-render-history-events entries nil)
           (when (fboundp 'dsh-emacs--seed-input-history)
             (dsh-emacs--seed-input-history entries session-id)))
+        ;; Record what the tail covers so `dsh-emacs-load-older-history' can
+        ;; page backwards from it (and knows whether anything is left).  The
+        ;; snapshot cursor is kept too: it is the `throughSeq' a backward page
+        ;; needs (the wire's `-1' would read an empty page).
+        (dsh-emacs-render--note-history-window
+         entries (dsh-emacs-render--aget "hasMore" value))
         (when (integerp cursor)
+          (setq dsh-emacs--history-cursor cursor)
           (setq dsh-emacs--anchor-seq
                 (max (or dsh-emacs--anchor-seq 0) cursor)))
         ;; A reconnect opening can land mid-attempt: replay the accumulated

@@ -96,6 +96,19 @@ minor) and stay undated until the release is cut.
   `M-x dsh-emacs-copy-code-block` and `M-x dsh-emacs-copy-transcript`
   (rationale: postmortem/043).
 
+- **Load older messages into the transcript**: `C-c C-o`
+  (`M-x dsh-emacs-load-older-history`) reads one more page
+  (`dsh-emacs-history-window` messages) of `session/page` history *before* the
+  earliest message currently rendered and inserts it above the transcript,
+  keeping the visible text where it was — no re-open, no scroll jump, and the
+  draft under point stays put.  Pages arrive in conversation order, each tool
+  call above its result, and loading while a turn runs leaves the running
+  reply, the mode-line, busy state and `M-p` recall order untouched.  The
+  follow snapshot's `hasMore` flag arms the command and each loaded page's flag
+  re-arms it, so at the start of a session the command reports that nothing is
+  left instead of requesting a page that cannot exist (rationale:
+  postmortem/044).
+
 ### Fixed
 
 - **`ask` option lists keep the question's order**: the numbered candidates

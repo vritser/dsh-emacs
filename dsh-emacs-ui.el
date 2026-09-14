@@ -364,6 +364,11 @@ WIDTH, when supplied, is the body width already measured by the caller."
     (setf (alist-get :collapsed state) collapsed)
     (add-text-properties 0 (length text)
                          (list 'dsh-emacs-ui-state state
+                               ;; Shared "a transcript block starts here"
+                               ;; identity (chat messages carry it too):
+                               ;; the older-history insertion point is
+                               ;; located through it.
+                               'dsh-emacs-transcript-block t
                                'read-only t 'front-sticky '(read-only)) text)
     ;; Region-scoped: header row and body lines are disjoint spans, and neither
     ;; face touches the border chrome — a row/status face cannot reach the body.

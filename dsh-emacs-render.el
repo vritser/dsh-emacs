@@ -691,13 +691,24 @@ Rendered transcript blocks must be inserted before this line.  Do not move
 back one line: after the first reply that would point inside the previous
 assistant body and reverse the order of subsequent replies.
 
-When Composer chrome (Goal / Next Message) is shown above the input, its marker
-(`dsh-emacs--composer-top-marker') wins so streamed content stays above the
-chrome; otherwise the live prompt marker is preferred; when it is missing or
-points into another buffer, the anchor is located again by the prompt face so
-messages can never be appended below the input area."
+When `dsh-emacs--history-insert-marker' is set, an older-history prepend is
+in progress and it wins: the batch must stack above the oldest block already
+in the buffer, not above the prompt.  Otherwise, when Composer chrome (Goal /
+Next Message) is shown above the input, its marker (`dsh-emacs--composer-top-marker')
+wins so streamed content stays above the chrome; then the live prompt marker
+is preferred; when it is missing or points into another buffer, the anchor is
+located again by the prompt face so messages can never be appended below the
+input area."
   (or
-   ;; 0. Composer chrome top: transcript must insert above it so the
+   ;; 0. Older-history prepend: stack above the loaded transcript.
+   (when (and (boundp 'dsh-emacs--history-insert-marker)
+              (markerp dsh-emacs--history-insert-marker)
+              (eq (marker-buffer dsh-emacs--history-insert-marker)
+                  (current-buffer)))
+     (save-excursion
+       (goto-char (marker-position dsh-emacs--history-insert-marker))
+       (line-beginning-position)))
+   ;; 1. Composer chrome top: transcript must insert above it so the
    ;; chrome never separates from the editable input.
    (when (and (boundp 'dsh-emacs--composer-top-marker)
               (markerp dsh-emacs--composer-top-marker)
@@ -706,7 +717,7 @@ messages can never be appended below the input area."
      (save-excursion
        (goto-char (marker-position dsh-emacs--composer-top-marker))
        (line-beginning-position)))
-   ;; 1. Live marker pointing into the current buffer.
+   ;; 2. Live marker pointing into the current buffer.
    (let ((m (and (boundp 'dsh-emacs--input-marker)
                  (markerp dsh-emacs--input-marker)
                  dsh-emacs--input-marker)))
@@ -714,7 +725,7 @@ messages can never be appended below the input area."
        (save-excursion
          (goto-char (marker-position m))
          (line-beginning-position))))
-   ;; 2. Last prompt-face run: the anchor itself.
+   ;; 3. Last prompt-face run: the anchor itself.
    (when-let* ((anchor (dsh-emacs-render--input-anchor-pos)))
      (save-excursion
        (goto-char anchor)
@@ -778,6 +789,10 @@ Return (START . END) for the inserted message text, excluding separators."
           (let ((end (point)))
             (put-text-property start end 'read-only t)
             (put-text-property start end 'front-sticky '(read-only))
+            ;; One identity for "a transcript block starts here", shared with
+            ;; UI fragments: `dsh-emacs-render--history-prepend-marker' keys
+            ;; the older-history insertion point off it.
+            (put-text-property start text-end 'dsh-emacs-transcript-block t)
             ;; Add the background only to the message TEXT, never to the
             ;; trailing blank separator line, so blank lines stay transparent.
             (add-face-text-property start text-end face t)
@@ -799,6 +814,47 @@ Return (START . END) for the inserted message text, excluding separators."
 (defvar-local dsh-emacs--anchor-seq 0
   "Seq of the last stably rendered event in the transcript.
 Used for incremental rendering.")
+
+(defvar-local dsh-emacs--history-insert-marker nil
+  "When set, transcript insertion happens here instead of above the input.
+`dsh-emacs-load-older-history' prepends an older `session/page' batch by
+binding this to a marker at the current transcript start; nil keeps the
+normal live-stream behavior (insert above the prompt / Composer chrome).")
+
+(defvar-local dsh-emacs--history-earliest-seq nil
+  "Seq of the earliest event rendered in this transcript, or nil.
+Set from the follow snapshot's message-aligned tail and pulled earlier by
+every prepended `session/page' batch.  `dsh-emacs-load-older-history' passes
+it as the page's exclusive `beforeSeq' cursor, so each page continues where
+the loaded history begins.")
+
+(defvar-local dsh-emacs--history-has-more nil
+  "Non-nil when the server reported older messages before the loaded tail.
+A fresh follow snapshot replaces this from its own `hasMore' flag; a loaded
+page replaces it with the page's flag.  nil keeps `dsh-emacs-load-older-history'
+from issuing a doomed page request.")
+
+(defvar-local dsh-emacs--history-cursor nil
+  "The follow snapshot's inclusive session cursor, or nil.
+`dsh-emacs-load-older-history' sends it as `session/page' `throughSeq'.  It
+must be a real seq: the server slices `events[0 .. min(throughSeq + 1,
+beforeSeq))', so the wire's `-1' convention (\"the newest page\") collapses the
+slice to `events[0 .. 0)' and reads an EMPTY page, even when older messages
+exist.  The snapshot cursor is always at or below the server's current cursor,
+so it stays a valid upper bound as the session grows.")
+
+(defvar-local dsh-emacs--history-page nil
+  "Bound around one older-history page render; nil for live/snapshot renders.
+Unlike `dsh-emacs--history-insert-marker', which exists for POSITIONING and is
+only set while a block to insert above exists, this flag says what the render
+IS, so page-vs-live decisions never depend on the transcript's contents.")
+
+(defun dsh-emacs-render--history-page-p ()
+  "Return non-nil while an older-history page is being rendered here.
+Renderers consult this instead of `dsh-emacs--history-insert-marker': keeping
+one definition of \"this render belongs to a settled page, not to the live
+turn\" means the marker stays a positioning concern."
+  (and (boundp 'dsh-emacs--history-page) dsh-emacs--history-page))
 
 (defvar-local dsh-emacs--markdown-pending nil
   "Stream states awaiting interruptible Markdown formatting, in order.")
@@ -1637,7 +1693,11 @@ session chips; see `dsh-emacs-reference-fontify'."
            ns block-id reasoning ts (dsh-emacs-render--input-insert-point)))))
     (unless (dsh-emacs-render--finish-assistant-stream event text)
       (unless (string-empty-p text)
-        (let* ((defer (and dsh-emacs-stream-markdown-limit
+        ;; An older-history page renders synchronously: it is settled text,
+        ;; so it must not join the buffer's idle queue — that queue is how a
+        ;; live stream formats its tail, and page jobs would compete with it.
+        (let* ((defer (and (not (dsh-emacs-render--history-page-p))
+                           dsh-emacs-stream-markdown-limit
                            (> (length text) dsh-emacs-stream-markdown-limit)))
                (event-id (format "%s-%s" ns block-id))
                (body (if defer
@@ -2143,7 +2203,8 @@ running spinner (idempotent — the send path already lit it, and a
   (dsh-emacs-render--close-current-group)
   ;; A turn started (or a still-open turn was replayed after a reconnect /
   ;; session reopen): light the mode-line running spinner.
-  (when (fboundp 'dsh-emacs--ml-busy-set)
+  (when (and (not (dsh-emacs-render--history-page-p))
+             (fboundp 'dsh-emacs--ml-busy-set))
     (dsh-emacs--ml-busy-set t))
   (dsh-emacs-render--event-seq event))
 
@@ -2207,7 +2268,8 @@ spinner."
     (when (integerp turn)
       (dsh-emacs-render--flush-deliverables turn)))
   ;; The turn finished: stop the mode-line running spinner.
-  (when (fboundp 'dsh-emacs--ml-busy-set)
+  (when (and (not (dsh-emacs-render--history-page-p))
+             (fboundp 'dsh-emacs--ml-busy-set))
     (dsh-emacs--ml-busy-set nil))
   ;; A failed run must not be silently swallowed: dsh signals it as
   ;; `turn/end' + data.reason.kind = \"error\", mirroring dsh web's
@@ -2711,7 +2773,11 @@ Returns the event seq."
                 (progn
                   ;; Clean up the optimistic row if one is pending for
                   ;; this command name (instant feedback → real event).
-                  (when dsh-emacs--pending-command
+                  ;; A page's run is not the echo of a local submit, so it
+                  ;; never takes that over (and `dsh-emacs--pending-command'
+                  ;; is scoped to nil for the page anyway).
+                  (when (and dsh-emacs--pending-command
+                             (not (dsh-emacs-render--history-page-p)))
                     (let* ((temp-id (nth 0 dsh-emacs--pending-command))
                            (temp-entry (gethash temp-id
                                                 dsh-emacs--command-blocks)))
@@ -2737,11 +2803,16 @@ Returns the event seq."
                     :header-face 'dsh-emacs-tool-pending-face)
                    :create-new t :expanded nil
                    :insert-before (dsh-emacs-render--input-insert-point))
-                  (dsh-emacs--command-spinner-start command-id
-                                                    (current-buffer)))
+                  (unless (dsh-emacs-render--history-page-p)
+                    (dsh-emacs--command-spinner-start command-id
+                                                      (current-buffer))))
               (when-let* ((entry (gethash command-id
                                           dsh-emacs--command-blocks)))
-                (dsh-emacs--command-spinner-stop command-id)
+                ;; A page never animates: stop only a spinner this render
+                ;; actually started (a live one), and leave the optimistic
+                ;; pending-command state alone.
+                (unless (dsh-emacs-render--history-page-p)
+                  (dsh-emacs--command-spinner-stop command-id))
                 (let* ((kind (dsh-emacs-render--aget "kind" data))
                        (ok (not (equal kind "error")))
                        (state (if ok 'success 'error))
@@ -2896,14 +2967,17 @@ source filter, so without this check the same tool card is painted twice."
       ("user/message" (setq seq (dsh-emacs-render-user-message event)))
       ("assistant/chunk" (setq seq (dsh-emacs-render-assistant-chunk event)))
       ("assistant/message" (setq seq (dsh-emacs-render-assistant-message event))
-                           (when (fboundp 'dsh-emacs-modeline-note-event)
-                             (dsh-emacs-modeline-note-event event)))
+       (when (and (not (dsh-emacs-render--history-page-p))
+                  (fboundp 'dsh-emacs-modeline-note-event))
+         (dsh-emacs-modeline-note-event event)))
       ("request/context" (setq seq (dsh-emacs-render--event-seq event))
-                         (when (fboundp 'dsh-emacs-modeline-note-request)
-                           (dsh-emacs-modeline-note-request event)))
+       (when (and (not (dsh-emacs-render--history-page-p))
+                  (fboundp 'dsh-emacs-modeline-note-request))
+         (dsh-emacs-modeline-note-request event)))
       ("request/header" (setq seq (dsh-emacs-render--event-seq event))
-                        (when (fboundp 'dsh-emacs-modeline-note-header)
-                          (dsh-emacs-modeline-note-header event)))
+       (when (and (not (dsh-emacs-render--history-page-p))
+                  (fboundp 'dsh-emacs-modeline-note-header))
+         (dsh-emacs-modeline-note-header event)))
       ("tool/call" (setq seq (dsh-emacs-render-tool-call event)))
       ;; A replacement `tool/result' rewrites what the model sees; the human
       ;; card keeps the append-origin record.  Skipping the copy still counts
@@ -2915,8 +2989,10 @@ source filter, so without this check the same tool card is painted twice."
       ("command/done" (setq seq (dsh-emacs-render-command event)))
       ("turn/start" (setq seq (dsh-emacs-render-turn-start event)))
       ("turn/end" (setq seq (dsh-emacs-render-turn-end event)))
-      ("step/start" (setq seq (dsh-emacs-render-step-event event)))
-      ("step/end" (setq seq (dsh-emacs-render-step-event event)))
+      ((or "step/start" "step/end")
+       (setq seq (if (dsh-emacs-render--history-page-p)
+                     (dsh-emacs-render--event-seq event)
+                   (dsh-emacs-render-step-event event))))
       ("assistant/attempt"
        (setq seq (dsh-emacs-render-assistant-attempt event)))
       ("session/end-seed" (setq seq (dsh-emacs-render-seed-end event)))
@@ -2969,6 +3045,31 @@ Deletes the earliest content while preserving the input prompt area."
         (let ((inhibit-read-only t))
           (delete-region (point-min) trim-to))))))
 
+(defun dsh-emacs-render--json-boolean (value)
+  "Return VALUE as a Lisp boolean, mapping JSON `false' to nil.
+`json-read' decodes false as the truthy symbol `:json-false', so a flag read
+straight from a response would otherwise never be false."
+  (and value (not (eq value :json-false)) t))
+
+(defun dsh-emacs-render--note-history-window (entries has-more)
+  "Record the pagination frontier of a freshly seeded history tail.
+ENTRIES is the snapshot's message-aligned records (ascending seq) and
+HAS-MORE the server's older-messages flag.  The earliest rendered seq becomes
+`dsh-emacs--history-earliest-seq' — `dsh-emacs-load-older-history' passes it
+as the next page's exclusive cursor.  The frontier only moves EARLIER: a
+reconnect snapshot's tail can start newer than pages this buffer already
+loaded, and moving the cursor past them would make the next page re-fetch
+history that is already on screen.  An empty tail leaves it unchanged."
+  (when-let* ((event (dsh-emacs-render--aget "event" (car entries)))
+              (seq (dsh-emacs-render--event-seq event)))
+    (when (integerp seq)
+      (setq dsh-emacs--history-earliest-seq
+            (if (integerp dsh-emacs--history-earliest-seq)
+                (min dsh-emacs--history-earliest-seq seq)
+              seq))))
+  (setq dsh-emacs--history-has-more
+        (dsh-emacs-render--json-boolean has-more)))
+
 (defun dsh-emacs-render--session-refs-from-event (event)
   "References list of a `session-reference' EVENT, or nil.
 A recall context `user/message' (source.kind = \"session-reference\")
@@ -3010,14 +3111,26 @@ so a recall's references are keyed by `recall.seq - 1'.  Returns an alist
               (push (cons (- seq 1) refs) map))))))
     map))
 
-(defun dsh-emacs-render-history-events (events &optional stream)
+(cl-defun dsh-emacs-render-history-events (events &optional stream bound
+                                                  &key insert-before (follow-p t))
   "Render EVENTS in seq order, optionally processing live STREAM chunks.
-EVENTS is a vector/sequence of {\"event\": alist} entries.  Renders only
-entries with seq > `dsh-emacs--anchor-seq'.  Called from the follow
-snapshot reseed with STREAM nil: completed `assistant/message' snapshots
-are sufficient and avoid replaying thousands of old deltas (STREAM is a
-legacy option retained for the shared renderer, not used by the follow
-path).
+EVENTS is a vector/sequence of {\"event\": alist} entries.  With STREAM nil
+only entries aligned to the live frontier — seq > `dsh-emacs--anchor-seq' —
+render; this is the follow snapshot reseed, where completed
+`assistant/message' snapshots are sufficient and replaying thousands of old
+deltas is avoided (STREAM is a legacy option retained for the shared
+renderer, not used by the follow path).
+
+For an older-history prepend, BOUND is the exclusive seq cap of a
+`session/page' batch.  Entries with seq < BOUND render in ascending order.
+The caller sets `dsh-emacs--history-insert-marker' at INSERT-BEFORE; it
+advances with each insertion above the existing transcript.  Stream,
+pending-command, todo and turn presentation state are scoped to the page;
+mode-line updates and notifications belong only to live events.  `dsh-emacs--anchor-seq' is
+left alone: the page sits below the live frontier, and advancing it would
+make live events replay.  FOLLOW-P nil leaves the caller's viewport alone —
+loading older history must not yank the view to the bottom.
+
 A reseeded user message that references another session arrives with its
 session mention collapsed to the readable `@label' (the id stripped), and
 the real id+label is delivered by the immediately-following `session-reference'
@@ -3026,51 +3139,102 @@ citing message's seq to those references, so the message's `@label' renders
 as a real session chip.
 The loop yields to the input queue every 5 events so that user keystrokes
 interrupt the batch and keep the UI responsive."
-  (let ((rendered 0)
-        (entries (if (vectorp events) (append events nil) events))
-        (refs-map (and (null stream)
-                       (dsh-emacs-render--recall-refs-by-message-seq events)))
-        (counter 0))
-    (while-no-input
-      (dolist (entry entries)
-        (let* ((ev (dsh-emacs-render--aget "event" entry))
-               (seq (and ev (dsh-emacs-render--event-seq ev)))
-               (refs (and (integerp seq)
-                          (cdr (assq seq refs-map)))))
-          (when (and ev
-                     (> (or seq 0) (or dsh-emacs--anchor-seq 0))
-                     (or stream
-                         (not (equal (dsh-emacs-render--aget "type" ev)
-                                     "assistant/chunk"))))
-            (if (dsh-emacs-render--consume-pending-user-message ev)
-                ;; The optimistic copy is already visible.  Still advance the
-                ;; anchor so this canonical event is not processed repeatedly.
-                (when (integerp seq)
-                  (setq dsh-emacs--anchor-seq seq))
-              (if (and refs
-                       (equal (dsh-emacs-render--aget "type" ev)
-                              "user/message"))
-                  ;; Render the citing message with the recall's real session
-                  ;; refs so its readable @label is a jumpable session chip.
-                  (when (dsh-emacs-render-user-message ev refs)
-                    (when (integerp seq)
-                      (setq dsh-emacs--anchor-seq
-                            (max (or dsh-emacs--anchor-seq 0) seq)))
-                    (setq rendered (1+ rendered)))
-                (when (dsh-emacs-render-event ev)
-                  (setq rendered (1+ rendered))))))
-          ;; Yield every 5 events so the user can interrupt and see progress.
-          (cl-incf counter)
-          (when (and (>= counter 5) (sit-for 0))
-            (setq counter 0)))))
+  (let* ((entries (if (vectorp events) (append events nil) events))
+         (refs-map (and (null stream)
+                        (dsh-emacs-render--recall-refs-by-message-seq entries)))
+         (cap (and (integerp bound) bound))
+         (anchor (or dsh-emacs--anchor-seq 0))
+         (prepend-p (and cap (integerp insert-before)
+                         (markerp dsh-emacs--history-insert-marker)))
+         (rendered 0)
+         (counter 0))
+    (cl-flet ((consume-entry (entry)
+                "Render one history ENTRY; return non-nil when it painted."
+                (let* ((ev (dsh-emacs-render--aget "event" entry))
+                       (seq (and ev (dsh-emacs-render--event-seq ev)))
+                       (refs (and (integerp seq)
+                                  (cdr (assq seq refs-map))))
+                       (within (and ev
+                                    (if cap
+                                        (< (or seq 0) cap)
+                                      (> (or seq 0) anchor)))))
+                  (when (and within
+                             (or stream
+                                 (not (equal (dsh-emacs-render--aget "type" ev)
+                                             "assistant/chunk"))))
+                    (if (and (not prepend-p)
+                             (dsh-emacs-render--consume-pending-user-message ev))
+                        ;; The optimistic copy is already visible.  Still
+                        ;; advance the anchor so this canonical event is not
+                        ;; processed repeatedly.
+                        (when (integerp seq)
+                          (setq dsh-emacs--anchor-seq
+                                (max (or dsh-emacs--anchor-seq 0) seq)))
+                      (if (and refs
+                               (equal (dsh-emacs-render--aget "type" ev)
+                                      "user/message"))
+                          ;; Render the citing message with the recall's real
+                          ;; session refs so its readable @label is a jumpable
+                          ;; session chip.
+                          (when (dsh-emacs-render-user-message ev refs)
+                            (unless prepend-p
+                              (when (integerp seq)
+                                (setq dsh-emacs--anchor-seq
+                                      (max (or dsh-emacs--anchor-seq 0) seq))))
+                            (setq rendered (1+ rendered))
+                            t)
+                        (when (dsh-emacs-render-event ev)
+                          (setq rendered (1+ rendered))
+                          t)))))))
+      ;; A prepended page is a settled, bounded batch: run it to completion
+      ;; without the live path's `while-no-input' early exit, which would
+      ;; otherwise drop the page whenever input is pending.
+      (if prepend-p
+          ;; Old pages share the transcript and its fragment index, but must
+          ;; not flush a live reply or consume pending turn/command state.
+          (let ((dsh-emacs--streaming-assistant nil)
+                (dsh-emacs--streaming-thinking nil)
+                (dsh-emacs--turn-awaiting nil)
+                (dsh-emacs--pending-command nil)
+                (dsh-emacs--todo-list nil)
+                (dsh-emacs--current-group-id nil)
+                (dsh-emacs--current-group-count 0)
+                (dsh-emacs--current-group-completed 0)
+                (dsh-emacs-render--turn-deliverables nil))
+            (dolist (entry entries)
+              (consume-entry entry))
+            (dsh-emacs-render--flush-deliverables))
+        (while-no-input
+          (dolist (entry entries)
+            (consume-entry entry)
+            ;; Yield every 5 events so the user can interrupt and see progress.
+            (cl-incf counter)
+            (when (and (>= counter 5) (sit-for 0))
+              (setq counter 0))))))
     ;; The message-aligned tail can end mid-turn, with a collected
     ;; `deliverables/presented' whose `turn/end' is outside the window; the
     ;; batch end is then the turn's tail, so nothing stays buffered.
-    (dsh-emacs-render--flush-deliverables)
+    (unless prepend-p
+      (dsh-emacs-render--flush-deliverables))
+    ;; A prepend is a settled history page: no viewport follow.
+    (when (and (> rendered 0) follow-p (not prepend-p))
+      (dsh-emacs-render--follow-stream))
     (when (> rendered 0)
-      (dsh-emacs-render--follow-stream)
       (dsh-emacs-render--trim-buffer))
     rendered))
+
+(defun dsh-emacs-render--history-prepend-marker ()
+  "Return a marker at the top of this buffer's loaded transcript, or nil.
+The marker aims at the line the oldest transcript block (a UI fragment or a
+chat message body) starts on, and advances past content inserted there — a
+prepended batch therefore stacks above the block in order.  Returns nil when
+the buffer holds no transcript block (nothing to page above)."
+  (save-excursion
+    (when-let* ((start (text-property-any
+                        (point-min) (point-max)
+                        'dsh-emacs-transcript-block t)))
+      (goto-char start)
+      (copy-marker (line-beginning-position) t))))
 
 (provide 'dsh-emacs-render)
 

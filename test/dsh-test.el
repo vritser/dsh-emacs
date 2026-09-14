@@ -15962,6 +15962,444 @@ candidates as the UI would via `all-completions', not by destructuring."
           (= dsh-emacs--anchor-seq 4)))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
+;; --- 测试: 向前加载更早的历史（session/page prepend）---
+;; 用 markdown 记录 assistant 正文以便按位置断言渲染顺序：
+;;   序号: 1=USER-1 2=ASSIST-1 3=ASSIST-2 4=ASSIST-3 5=USER-2 6=ASSIST-4
+;;   初始会话窗口 = seq 3~6（anchor 已到 6），更早的一页 = seq 1~2。
+(defun dsh-test--history-fixture (type seq text)
+  "One wire-shaped history record \"{type:event, event:{TYPE,SEQ …}}\".
+TYPE is `user/message' or `assistant/message'; TEXT is its body."
+  (list (cons "type" "event")
+        (cons "event" (dsh-test--history-event type seq text))))
+
+(defun dsh-test--history-event (type seq text)
+  "One wire-shaped event of TYPE at SEQ carrying TEXT.
+Content blocks are vectors, exactly as `json-read' decodes a JSON array."
+  (let ((blocks (vector (list (cons "type" "text") (cons "text" text)))))
+    (if (equal type "user/message")
+        (list (cons "type" type) (cons "seq" seq)
+              (cons "data" (list (cons "content" blocks))))
+      (list (cons "type" type) (cons "seq" seq)
+            (cons "data" (list (cons "message"
+                                     (list (cons "content" blocks)))))))))
+
+(defun dsh-test--history-text-pos (needle)
+  "Position of NEEDLE in the current buffer, or nil."
+  (save-excursion
+    (goto-char (point-min))
+    (when (search-forward needle nil t)
+      (match-beginning 0))))
+
+(defun dsh-test--history-event-record (type seq data)
+  "One wire-shaped history record for TYPE at SEQ carrying DATA.
+DATA is the raw `data' alist, for event types beyond user/assistant
+messages (e.g. `command/done')."
+  (list (cons "type" "event")
+        (cons "event" (list (cons "type" type) (cons "seq" seq)
+                            (cons "data" data)))))
+
+;; 100: prepend 把更早的页插到旧内容之上，且不动 anchor。
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (let ((newer (list (dsh-test--history-fixture "assistant/message" 3 "ASSIST-2")
+                     (dsh-test--history-fixture "assistant/message" 4 "ASSIST-3")
+                     (dsh-test--history-fixture "user/message" 5 "USER-2")
+                     (dsh-test--history-fixture "assistant/message" 6 "ASSIST-4")))
+        (older (list (dsh-test--history-fixture "user/message" 1 "USER-1")
+                     (dsh-test--history-fixture "assistant/message" 2 "ASSIST-1"))))
+    (dsh-emacs-render-history-events newer)
+    (let ((marker (dsh-emacs-render--history-prepend-marker)))
+      (setq dsh-emacs--history-insert-marker marker)
+      (unwind-protect
+          (dsh-emacs-render-history-events
+           older nil 3 :insert-before (marker-position marker) :follow-p nil)
+        (set-marker marker nil)
+        (setq dsh-emacs--history-insert-marker nil))
+      (let ((text (buffer-substring-no-properties (point-min) (point-max)))
+            (p1 (dsh-test--history-text-pos "ASSIST-1"))
+            (p3 (dsh-test--history-text-pos "ASSIST-2"))
+            (p6 (dsh-test--history-text-pos "ASSIST-4")))
+        (dsh-test-assert "history-prepend-orders-old-above-new"
+          p1 p3 p6 (< p1 p3 p6)
+          (string-match "USER-1" text)
+          (< (dsh-test--history-text-pos "USER-1") p1)))
+      (dsh-test-assert "history-prepend-keeps-live-anchor"
+        (= dsh-emacs--anchor-seq 6)))))
+
+;; 101: prepend 批量不渲染 cap 之上（更新）的事件。
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (let ((marker (progn (insert "HEADER\n")
+                       (dsh-emacs-render-event
+                        (dsh-test--history-event "user/message" 1 "NEWER"))
+                       (copy-marker (point-min) nil))))
+    (setq dsh-emacs--history-insert-marker marker)
+    (unwind-protect
+        (dsh-emacs-render-history-events
+         (list (dsh-test--history-fixture "assistant/message" 0 "OLD")
+               (dsh-test--history-fixture "assistant/message" 5 "BEYOND"))
+         nil 5 :insert-before (marker-position marker) :follow-p nil)
+      (set-marker marker nil)
+      (setq dsh-emacs--history-insert-marker nil))
+    (dsh-test-assert "history-prepend-respects-seq-cap"
+      (string-match "OLD" (buffer-string))
+      (not (string-match "BEYOND" (buffer-string))))))
+
+;; 102: prepend marker 指向最旧 fragment 之上（跳过其上方空行与欢迎区）。
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (insert "WELCOME\n")
+  (dsh-emacs-render-event
+   (dsh-test--history-event "assistant/message" 1 "FIRST-REPLY"))
+  (let ((marker (dsh-emacs-render--history-prepend-marker)))
+    (dsh-test-assert "history-prepend-marker-above-oldest"
+      (markerp marker)
+      (<= (marker-position marker) (dsh-test--history-text-pos "FIRST-REPLY")))
+    (when (markerp marker) (set-marker marker nil))))
+
+;; 103: follow snapshot 记录分页前沿（最早 seq + hasMore）。
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (dsh-emacs-render--note-history-window
+   (list (dsh-test--history-fixture "user/message" 4 "A")
+         (dsh-test--history-fixture "assistant/message" 5 "B"))
+   :json-false)
+  (dsh-test-assert "history-window-records-frontier"
+    (= dsh-emacs--history-earliest-seq 4)
+    (null dsh-emacs--history-has-more))
+  (dsh-emacs-render--note-history-window
+   (list (dsh-test--history-fixture "user/message" 1 "A")) t)
+  (dsh-test-assert "history-window-records-has-more"
+    (= dsh-emacs--history-earliest-seq 1)
+    (eq dsh-emacs--history-has-more t))
+  ;; A reconnect snapshot whose tail starts later must not move the cursor
+  ;; past pages this buffer already loaded.
+  (dsh-emacs-render--note-history-window
+   (list (dsh-test--history-fixture "user/message" 9 "A")) t)
+  (dsh-test-assert "history-window-frontier-only-moves-earlier"
+    (= dsh-emacs--history-earliest-seq 1)))
+
+;; 104: `dsh-emacs-load-older-history' 拉取一页并 prepend、推进游标。
+(let ((buf (generate-new-buffer " *dsh-history-load*")))
+  (unwind-protect
+      (progn
+        (with-current-buffer buf
+          (dsh-emacs-mode)
+          (dsh-emacs-modeline-setup)
+          (setq-local dsh-emacs--buffer-session "session-history")
+          (dsh-emacs-render-history-events
+           (list (dsh-test--history-fixture "assistant/message" 3 "ASSIST-2")
+                 (dsh-test--history-fixture "user/message" 4 "USER-2")))
+          (setq-local dsh-emacs--history-earliest-seq 3)
+          (setq-local dsh-emacs--history-has-more t)
+          ;; The follow snapshot's inclusive cursor; `throughSeq' must carry a
+          ;; real seq (the wire's -1 reads an empty page on the server).
+          (setq-local dsh-emacs--history-cursor 4))
+        (let ((captured nil)
+              (callback nil))
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (_method params cb)
+                       (setq captured params callback cb))))
+            (with-current-buffer buf
+              (dsh-emacs-load-older-history)))
+          (dsh-test-assert "load-older-history-request"
+            captured
+            (integerp (cdr (assq 'throughSeq
+                                 (cdr (assq 'request captured)))))
+            ;; Regression: the wire's -1 collapses the server's slice to an
+            ;; empty page, so a real session cursor must be sent instead.
+            (not (equal -1 (cdr (assq 'throughSeq
+                                      (cdr (assq 'request captured))))))
+            (equal 4 (cdr (assq 'throughSeq
+                                (cdr (assq 'request captured))))))
+          (dsh-test-assert "load-older-history-params"
+            (equal "session-history"
+                   (cdr (assq 'sessionId
+                              (cdr (assq 'address
+                                         (cdr (assq 'request captured)))))))
+            (= 3 (cdr (assq 'beforeSeq (cdr (assq 'request captured)))))
+            (= dsh-emacs-history-window
+               (cdr (assq 'maxMessages (cdr (assq 'request captured))))))
+          (funcall callback t
+                   (list (cons "records"
+                               (vector
+                                (dsh-test--history-fixture "user/message" 1 "USER-1")
+                                (dsh-test--history-fixture
+                                 "assistant/message" 2 "ASSIST-1")))
+                         (cons "hasMore" :json-false)))
+          (with-current-buffer buf
+            (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+              (dsh-test-assert "load-older-history-prepends"
+                (string-match "ASSIST-1" text)
+                (string-match "USER-1" text)
+                (< (dsh-test--history-text-pos "USER-1")
+                   (dsh-test--history-text-pos "ASSIST-1")
+                   (dsh-test--history-text-pos "ASSIST-2"))))
+            (dsh-test-assert "load-older-history-advances-cursor"
+              (= dsh-emacs--history-earliest-seq 1)
+              (null dsh-emacs--history-has-more)
+              (null dsh-emacs--history-loading)))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; 105: hasMore=nil 时不再发请求。
+(let ((buf (generate-new-buffer " *dsh-history-nomore*")))
+  (unwind-protect
+      (progn
+        (with-current-buffer buf
+          (dsh-emacs-mode)
+          (dsh-emacs-modeline-setup)
+          (setq-local dsh-emacs--buffer-session "session-history")
+          (setq-local dsh-emacs--history-earliest-seq 1)
+          (setq-local dsh-emacs--history-has-more nil))
+        (let ((called nil))
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (&rest _) (setq called t))))
+            (with-current-buffer buf
+              (dsh-emacs-load-older-history)))
+          (dsh-test-assert "load-older-history-stops-at-start" (null called))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; 106: 聊天缓冲外调用是 user-error。
+(let ((other (generate-new-buffer " *dsh-nonchat*")))
+  (unwind-protect
+      (with-current-buffer other
+        (dsh-test-assert "load-older-history-requires-chat"
+          (condition-case nil
+              (progn (dsh-emacs-load-older-history) nil)
+            (user-error t))))
+    (when (buffer-live-p other) (kill-buffer other))))
+
+;; Older pages use real stateful renderers, but cannot change the live turn.
+(dolist (busy '(nil t))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (dsh-emacs-modeline-setup)
+    (setq-local dsh-emacs--buffer-session "history-isolation")
+    (dsh-emacs-render-history-events
+     (list (dsh-test--history-fixture "assistant/message" 20 "RECENT")))
+    (setq dsh-emacs--history-earliest-seq 20
+          dsh-emacs--modeline-model "current-model"
+          dsh-emacs--modeline-step '(7 8)
+          dsh-emacs--turn-awaiting t
+          dsh-emacs--todo-list '(("Current plan" . "pending")))
+    (dsh-emacs--ml-busy-set busy)
+    (let* ((step dsh-emacs--modeline-step)
+           (todo dsh-emacs--todo-list)
+           (notifications 0)
+           (stream (dsh-emacs-render--start-assistant-stream
+                    '((data . ((turn . 7) (step . 8)))) "LIVE-BODY"))
+           (start (marker-position (plist-get stream :start)))
+           (timer (progn
+                    (dsh-emacs-render--start-assistant-stream
+                     '((data . ((turn . 7) (step . 8)))) "-PENDING")
+                    (plist-get stream :timer)))
+           (page (json-read-from-string
+                  "{\"hasMore\":false,\"records\":[
+{\"type\":\"event\",\"event\":{\"type\":\"turn/start\",\"seq\":1,\"data\":{\"turn\":1}}},
+{\"type\":\"event\",\"event\":{\"type\":\"request/context\",\"seq\":2,\"data\":{\"model\":\"old-model\"}}},
+{\"type\":\"event\",\"event\":{\"type\":\"step/start\",\"seq\":3,\"data\":{\"turn\":1,\"step\":1}}},
+{\"type\":\"event\",\"event\":{\"type\":\"tool/call\",\"seq\":4,\"data\":{\"callId\":\"old-call\",\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"echo history\\\"}\"}}},
+{\"type\":\"event\",\"event\":{\"type\":\"tool/result\",\"seq\":5,\"data\":{\"message\":{\"callId\":\"old-call\",\"content\":[{\"type\":\"tool-result\",\"exitCode\":0,\"content\":[{\"type\":\"text\",\"text\":\"HISTORICAL-OUTPUT\"}]}]}}}},
+{\"type\":\"event\",\"event\":{\"type\":\"tool/call\",\"seq\":6,\"data\":{\"callId\":\"old-todo\",\"name\":\"todo_write\",\"arguments\":\"{\\\"todos\\\":[{\\\"content\\\":\\\"Old plan\\\",\\\"status\\\":\\\"completed\\\"}]}\"}}},
+{\"type\":\"event\",\"event\":{\"type\":\"turn/end\",\"seq\":7,\"data\":{\"turn\":1,\"reason\":{\"kind\":\"completed\"}}}}]}")))
+      (cl-letf (((symbol-function 'dsh-emacs-notify--post)
+                 (lambda (&rest _) (cl-incf notifications))))
+        (dsh-emacs--load-older-history-page (current-buffer) page))
+      (dsh-test-assert (format "history-page-settles-tools-%s" busy)
+        (eq 'success (plist-get (dsh-emacs-render--tool-state "old-call")
+                                :state))
+        (let* ((block (dsh-emacs-ui-find-block
+                       (dsh-emacs-render--make-namespace) "tool-old-call"))
+               (state (and block (get-text-property
+                                  (car block) 'dsh-emacs-ui-state))))
+          (and state (string-match-p "HISTORICAL-OUTPUT"
+                                     (map-elt state :body)))))
+      (dsh-test-assert (format "history-page-preserves-live-state-%s" busy)
+        (eq dsh-emacs--ml-busy busy)
+        (equal dsh-emacs--modeline-model "current-model")
+        (equal dsh-emacs--modeline-step step)
+        (equal dsh-emacs--todo-list todo)
+        dsh-emacs--turn-awaiting
+        (= notifications 0)
+        (= dsh-emacs--anchor-seq 20))
+      (dsh-test-assert (format "history-page-preserves-live-stream-%s" busy)
+        (eq dsh-emacs--streaming-assistant stream)
+        (eq (plist-get stream :timer) timer)
+        (memq timer timer-list)
+        (equal (plist-get stream :pending) '("-PENDING"))
+        (marker-buffer (plist-get stream :start))
+        (> (marker-position (plist-get stream :start)) start)
+        (equal "LIVE-BODY" (buffer-substring-no-properties
+                            (plist-get stream :start)
+                            (plist-get stream :end))))
+      (dsh-emacs--ml-busy-clear))))
+
+;; The in-render "this is a settled page" flag decides page-vs-live on its
+;; own, independent of whether an insertion marker could be computed.
+(dsh-test-assert "history-page-predicate-unset"
+  (not (dsh-emacs-render--history-page-p)))
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let ((dsh-emacs--history-page t))
+    (dsh-test-assert "history-page-predicate-set"
+      (dsh-emacs-render--history-page-p)))
+  (dsh-test-assert "history-page-predicate-cleared"
+    (not (dsh-emacs-render--history-page-p)))
+  ;; A marker alone no longer means "page": it is positioning state only.
+  (let ((marker (copy-marker (point-min) t)))
+    (setq dsh-emacs--history-insert-marker marker)
+    (dsh-test-assert "history-page-predicate-ignores-marker"
+      (not (dsh-emacs-render--history-page-p)))
+    (set-marker marker nil)
+    (setq dsh-emacs--history-insert-marker nil)))
+
+;; A page renders settled text synchronously and never joins the live idle
+;; Markdown queue (whose jobs format the streaming tail).
+(let ((dsh-emacs-stream-markdown-limit 40))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (setq-local dsh-emacs--buffer-session "history-markdown")
+    (setq-local dsh-emacs--history-earliest-seq 5)
+    (let ((body (concat "**bold** word " (make-string 120 ?x))))
+      (dsh-emacs--load-older-history-page
+       (current-buffer)
+       (list (cons "hasMore" :json-false)
+             (cons "records"
+                   (vector (dsh-test--history-event-record
+                            "assistant/message" 4
+                            (list (cons "message"
+                                        (list (cons "content"
+                                                    (vector
+                                                     (list (cons "type" "text")
+                                                           (cons "text" body))))))))))))
+      (dsh-test-assert "history-page-renders-markdown-synchronously"
+        (null dsh-emacs--markdown-pending)
+        (null dsh-emacs--markdown-timer)
+        (string-match-p "bold" (buffer-string))
+        (let ((face (get-text-property
+                     (1+ (dsh-test--history-text-pos "bold")) 'face)))
+          (memq 'dsh-emacs-markdown-bold
+                (if (listp face) face (list face))))))))
+
+;; Control: the same body on the live path still defers, so the page gate
+;; narrows the idle queue instead of disabling it.
+(let ((dsh-emacs-stream-markdown-limit 40))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (dsh-emacs-render-history-events
+     (list (dsh-test--history-event-record
+            "assistant/message" 4
+            (list (cons "message"
+                        (list (cons "content"
+                                    (vector (list (cons "type" "text")
+                                                  (cons "text"
+                                                        (concat "**b** "
+                                                                (make-string 100 ?x))))))))))))
+    (dsh-test-assert "live-path-still-defers-markdown"
+      dsh-emacs--markdown-pending
+      dsh-emacs--markdown-timer)
+    (dsh-emacs-render--cancel-markdown)))
+
+;; A page stops no spinner and leaves the optimistic pending-command alone.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (setq-local dsh-emacs--buffer-session "history-command")
+  (setq-local dsh-emacs--history-earliest-seq 5)
+  (let* ((block-id "cmd-old-cmd")
+         (ns (dsh-emacs-render--make-namespace))
+         (stopped nil)
+         (pending '(("cmd-temp-local" "compile"))))
+    (puthash "old-cmd" (list ns block-id "compile" nil)
+             dsh-emacs--command-blocks)
+    (setq dsh-emacs--pending-command pending)
+    (cl-letf (((symbol-function 'dsh-emacs--command-spinner-stop)
+               (lambda (&rest _) (setq stopped t))))
+      (dsh-emacs--load-older-history-page
+       (current-buffer)
+       (list (cons "hasMore" :json-false)
+             (cons "records"
+                   (vector
+                    (dsh-test--history-event-record
+                     "command/done" 4
+                     '((commandId . "old-cmd")
+                       (name . "compile")
+                       (kind . "success")
+                       (text . "COMPILE-DONE"))))))))
+    (dsh-test-assert "history-page-command-not-animated"
+      (not stopped)
+      (equal dsh-emacs--pending-command pending)
+      ;; The done row still renders (its body stays collapsed, so assert the
+      ;; header, which is what is normally visible).
+      (string-match-p "compile" (buffer-string))
+      (string-match-p "✓ done" (buffer-string)))))
+
+;; Backfill keeps newest-first recall, including when the list is full.
+(dolist (limit '(3 5))
+  (let ((dsh-emacs-input-history-length limit)
+        (dsh-emacs--input-history-by-session (make-hash-table :test 'equal)))
+    (with-temp-buffer
+      (dsh-emacs-mode)
+      (setq-local dsh-emacs--buffer-session "history-recall")
+      (dsh-emacs-render-history-events
+       (list (dsh-test--history-fixture "user/message" 20 "LATEST")))
+      (setq dsh-emacs--history-earliest-seq 20)
+      (puthash "history-recall" '("LATEST" "RECENT")
+               dsh-emacs--input-history-by-session)
+      (dsh-emacs--load-older-history-page
+       (current-buffer)
+       (list (cons "hasMore" :json-false)
+             (cons "records"
+                   (vector (dsh-test--history-fixture "user/message" 1 "ANCIENT")
+                           (dsh-test--history-fixture "user/message" 2 "RECENT")
+                           (dsh-test--history-fixture "user/message" 3 "OLDER")))))
+      (dsh-test-assert (format "history-page-keeps-recall-order-limit-%s" limit)
+        (equal (gethash "history-recall" dsh-emacs--input-history-by-session)
+               (if (= limit 3)
+                   '("LATEST" "RECENT" "OLDER")
+                 '("LATEST" "RECENT" "OLDER" "ANCIENT")))))))
+
+;; Repeated pages retain a reading window and draft, even after header trim.
+(save-window-excursion
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (setq-local dsh-emacs--buffer-session "history-window")
+    (dsh-emacs-render-history-events
+     (list (dsh-test--history-fixture "user/message" 10 "TAIL-USER")
+           (dsh-test--history-fixture "assistant/message" 11 "TAIL-REPLY")))
+    (setq dsh-emacs--history-earliest-seq 10)
+    (let ((inhibit-read-only t))
+      (delete-region (point-min)
+                     (text-property-any (point-min) (point-max)
+                                        'dsh-emacs-transcript-block t)))
+    (goto-char dsh-emacs--input-marker)
+    (insert "DRAFT")
+    (switch-to-buffer (current-buffer))
+    (let ((draft-point (copy-marker (point) t))
+          (reading-point (copy-marker (dsh-test--history-text-pos "TAIL-REPLY") t)))
+      (set-window-start (selected-window) reading-point t)
+      (dolist (seq '(5 1))
+        (dsh-emacs--load-older-history-page
+         (current-buffer)
+         (list (cons "hasMore" t)
+               (cons "records"
+                     (vector (dsh-test--history-fixture
+                              "user/message" seq (format "PAGE-%d" seq)))))))
+      (dsh-test-assert "history-pages-preserve-window-and-draft"
+        (= (point) draft-point)
+        (= (window-start) reading-point)
+        (equal (buffer-substring-no-properties dsh-emacs--input-marker
+                                               (point-max)) "DRAFT")
+        (< (dsh-test--history-text-pos "PAGE-1")
+           (dsh-test--history-text-pos "PAGE-5")
+           (dsh-test--history-text-pos "TAIL-USER")
+           (dsh-test--history-text-pos "TAIL-REPLY")))
+      (set-marker draft-point nil)
+      (set-marker reading-point nil))))
+
 (princ "\n===== 测试总结 =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))
       (fail (cl-count-if (lambda (r) (not (cdr r))) dsh-test-results)))

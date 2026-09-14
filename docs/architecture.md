@@ -265,6 +265,7 @@ is the `client-request` envelope with `payload = {args: {...}}`:
 | `session/list` | List sessions (including running status, title, cwd) |
 | `session/create` | Create a session |
 | `session/prompt` | Send a message (`mode: "queue"` = next turn, `"steer"` = wake the running agent; text and/or inline base64 image attachments; `requestId` dedups resends) |
+| `session/page` | Read one message-aligned history page before a cursor (feeds `C-c C-o`) |
 | `session/updateQueue` | Manage pending inbox items (`edit` text / `remove` / `steer` by itemId) |
 | `session/cancel` | Interrupt the running turn (partial reply is kept, inbox preserved) |
 | `session/fork` | Branch a session into a child inheriting its history |
@@ -513,6 +514,45 @@ or an alternate parser. See [036](../postmortem/036-bounded-stream-markdown.md).
   changes (`api-session/added|removed|status|activity` emits) and the
   approval/question waterfalls.  This connection is scoped to the list buffer's
   lifecycle and is also self-healing (reconnect + re-baseline).
+
+## Older history (`C-c C-o`)
+
+A chat opens on a bounded tail of the session, so
+`dsh-emacs-load-older-history` reads the page before the earliest message on
+screen and prepends it. The command sends `session/page` with `beforeSeq` = the
+snapshot's earliest rendered seq, `throughSeq` = the snapshot's recorded cursor
+and `maxMessages` = `dsh-emacs-history-window`; both pagination cursors come
+from the follow snapshot (`dsh-emacs-render--note-history-window`), and the
+frontier only moves EARLIER so a reconnect cannot push it past pages already on
+screen. `throughSeq` must be a real seq: the wire's `-1` convention reads an
+empty page, because the server slices
+`events[0 .. min(throughSeq + 1, beforeSeq))`. The command is gated by the
+snapshot's `hasMore`, so it never requests a page that cannot exist.
+
+`dsh-emacs--history-insert-marker` — a marker at the oldest transcript block,
+insertion type `t` — takes priority in
+`dsh-emacs-render--input-insert-point`, so every renderer lands there without a
+per-renderer insert argument, and the marker advances so the page stacks in
+order. `dsh-emacs-render-history-events` takes the page as `bound` (exclusive
+seq cap) plus `:insert-before` / `:follow-p`, renders events in ascending order
+so a tool call precedes its result, and skips the live path's `while-no-input`:
+a settled page must not be dropped on pending input. `dsh-emacs--anchor-seq` is
+deliberately NOT advanced — the page sits below the live frontier, so a
+reconnect snapshot cannot replay it.
+
+A page is identified by `dsh-emacs--history-page` (bound by
+`dsh-emacs--load-older-history-page`, read through
+`dsh-emacs-render--history-page-p`), never by the marker, which only positions
+and may be nil. Page state — stream, pending command, todo, activity group,
+deliverable — is scoped to the page, and a page cannot flush or divert a live
+reply, change model/usage or step/busy indicators, consume a pending
+notification, or animate a command. Its Markdown renders synchronously instead
+of joining the idle queue that formats a live streaming tail. Older prompts are
+appended behind newer `M-p` recall entries and trimmed from the oldest end.
+Message bodies and UI fragments both carry the `dsh-emacs-transcript-block`
+text property; a forward lookup finds its first occurrence, even at buffer start
+after trimming. See
+[044](../postmortem/044-load-older-history.md).
 
 ## Activity groups
 
