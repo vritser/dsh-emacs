@@ -1,10 +1,12 @@
 ;;; check-coverage.el --- Instrument dsh-emacs and report per-definition test coverage
-;;; 用法: emacs -Q --batch -l scripts/check-coverage.el
-;;; 以 testcover 对产品文件插桩 → 加载并运行测试 → 逐函数统计
-;;; edebug-coverage 向量中已执行/未执行 point 的比例，输出覆盖汇总。
-;;; 原理: testcover-start 用 Edebug 行为钩子把每个 form 的执行点记录到
-;;; 符号的 `edebug-coverage' 向量; edebug-ok-coverage = 已执行,
-;;; edebug-unknown = 从未执行。统计一个前 N 未覆盖函数清单,帮助补测试。
+;;; Usage: emacs -Q --batch -l scripts/check-coverage.el
+;;; Instrument the product files with testcover → load and run the tests →
+;;; report per-definition coverage from the ratio of executed to unexecuted
+;;; points in the edebug-coverage vector.
+;;; How: testcover-start uses the Edebug behavior hooks to record each form's
+;;; execution point in the symbol's `edebug-coverage' vector;
+;;; edebug-ok-coverage = executed, edebug-unknown = never executed.  Prints a
+;;; list of the first N uncovered functions to help fill in tests.
 
 (require 'cl-lib)
 (require 'testcover)
@@ -12,7 +14,7 @@
 (defvar dsh-cov:root
   (let ((dir (file-name-directory
              (file-truename (or load-file-name default-directory)))))
-    ;; 脚本位于 <root>/scripts/ 下：向上退一级得到仓库根
+    ;; The script lives in <root>/scripts/: go up one level to the repo root
     (if (string-suffix-p "/scripts/" dir)
         (file-name-directory (directory-file-name dir))
       dir)))
@@ -23,14 +25,15 @@
     "dsh-emacs-events.el" "dsh-emacs-ui.el"
     "dsh-emacs-faces.el" "dsh-emacs-tokens.el" "dsh-emacs-footer.el"
     "dsh-emacs-composer.el")
-  "产品源码文件（相对仓库根）。脚本会逐个 testcover-start 插桩。
-注意: dsh-emacs-protocol.el 不在列表中——testcover 的 edebug-after
-会对 cl-defstruct 返回值做 testcover--copy-object 复制，破坏 struct
-类型标签，导致测试中的 cl-struct 类型断言失败，故排除。")
+  "Product source files (relative to the repo root), each instrumented with
+testcover-start.  Note: dsh-emacs-protocol.el is not listed — testcover's
+edebug-after runs testcover--copy-object on cl-defstruct return values,
+which breaks the struct type tag and makes the cl-struct type assertions in
+the tests fail, so it is excluded.")
 
 (defun dsh-cov:instrument ()
   "Use testcover to instrument every product file and return the sym list."
-  ;; 保证 re-eval 时的内部 require 能解析到仓库根
+  ;; Make the repo root resolvable by inner requires on re-eval
   (add-to-list 'load-path dsh-cov:root)
   (let (syms)
     (dolist (f dsh-cov:product-files)
@@ -49,7 +52,8 @@
       (let ((covered 0) (total 0))
         (dotimes (i (length vec))
           (let ((entry (aref vec i)))
-            ;; 只有未执行的才标记 unknown; ok / 值 / testcover-1value 都算已覆盖
+            ;; Only unexecuted points are marked unknown; ok / a value /
+            ;; testcover-1value all count as covered
             (unless (eq entry 'edebug-unknown)
               (cl-incf covered))
             (cl-incf total)))

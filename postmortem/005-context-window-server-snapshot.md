@@ -16,7 +16,7 @@ Consume the server's `contextPressure` projection — `pressureTokens`,
 session open, and render ctx% from that snapshot alone (`3e0b9fc` →
 `250f6f8`, 2026-08-29): `pressureTokens / contextWindow` from the same
 snapshot's two values, with the server as the single source of truth
-("数据口径与 dsh web 对齐").  Delete the manual options.
+("the accounting matches dsh web").  Delete the manual options.
 
 ## Why
 

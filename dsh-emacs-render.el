@@ -9,15 +9,16 @@
 
 ;;; Commentary:
 
-;; 事件渲染器。参考 agent-shell / pi / opencode 的视觉语言：
+;; Event renderers.  The visual language follows agent-shell / pi / opencode:
 ;;
-;;   * 用户消息 → 卡片背景（淡青色），无重边框
-;;   * 助手消息 → 无框，仅 markdown body + 上下分隔
-;;   * 思考块 → `<details>`-风格，可折叠，默认折叠
-;;   * 工具调用 → 圆角框，按 pending/success/error 状态变色
-;;   * 多工具连续调用 → 活动组（Activity Group），显示聚合状态
-;; 与 dsh-emacs.el 配合使用。所有渲染函数都期望 buffer-local
-;; 变量 `dsh-emacs--session-id'、`dsh-emacs--input-marker' 已被设置。
+;;   * user message → card background (pale cyan), no heavy border
+;;   * assistant message → borderless, just the markdown body + top/bottom rules
+;;   * thinking block → `<details>`-style, collapsible, collapsed by default
+;;   * tool call → rounded box, recolored by pending/success/error state
+;;   * consecutive tool calls → activity group, showing the aggregate state
+;; Used together with dsh-emacs.el.  Every render function expects the
+;; buffer-local variables `dsh-emacs--session-id' and `dsh-emacs--input-marker'
+;; to be set.
 
 ;;; Code:
 
@@ -69,7 +70,7 @@
 (defvar dsh-emacs--composer-top-marker)
 
 ;;; ---------------------------------------------------------------------------
-;;; 定制
+;;; Customization
 ;;; ---------------------------------------------------------------------------
 
 (defgroup dsh-emacs-render nil
@@ -200,7 +201,7 @@ collapsible checklist."
   :group 'dsh-emacs-render)
 
 ;;; ---------------------------------------------------------------------------
-;;; 工具 variant / icon / summary
+;;; Tool variant / icon / summary
 ;;; ---------------------------------------------------------------------------
 
 (defconst dsh-emacs--tool-variants
@@ -337,7 +338,7 @@ symbol-keyed alists while renderer call sites use JSON field names."
   (and value (not (eq value :json-false))))
 
 ;;; ---------------------------------------------------------------------------
-;;; 工具分类与摘要
+;;; Tool classification and summary
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-render--tool-icon-svg (variant color &optional tool-name)
@@ -557,7 +558,7 @@ there is no previewable content."
     (mapconcat #'identity (nreverse parts) "\n")))
 
 ;;; ---------------------------------------------------------------------------
-;;; 时间戳
+;;; Timestamps
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-render--event-time (event)
@@ -575,7 +576,7 @@ there is no previewable content."
   (dsh-emacs-render--aget "data" event))
 
 ;;; ---------------------------------------------------------------------------
-;;; 渲染原语
+;;; Rendering primitives
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-render--make-namespace ()
@@ -808,7 +809,7 @@ Return (START . END) for the inserted message text, excluding separators."
           (cons start text-end))))))
 
 ;;; ---------------------------------------------------------------------------
-;;; 公共助手：tool state tracking
+;;; Shared helpers: tool state tracking
 ;;; ---------------------------------------------------------------------------
 
 (defvar-local dsh-emacs--anchor-seq 0
@@ -1462,7 +1463,7 @@ used as a fallback when no deltas were received."
   (dsh-emacs-render--event-seq event))
 
 ;;; ---------------------------------------------------------------------------
-;;; 渲染器：内联图片附件（session/attachment）
+;;; Renderer: inline image attachments (session/attachment)
 ;;; ---------------------------------------------------------------------------
 
 (defvar dsh-emacs-render--image-keymap
@@ -1554,7 +1555,7 @@ or nil when the RPC fails or the payload is malformed."
      `((request . ((sessionId . ,session-id)
                    (attachmentId . ,attachment-id))))
      (lambda (ok value)
-       ;; 回调可能运行在 process filter 里：吞掉 C-g 的 quit。
+       ;; The callback may run inside a process filter: swallow the C-g quit.
        (condition-case nil
            (funcall on-bytes
                     (and ok value
@@ -1615,7 +1616,7 @@ already in the event); an attachment ref is fetched via
                 'mouse-face 'highlight)))
 
 ;;; ---------------------------------------------------------------------------
-;;; 渲染器：用户消息
+;;; Renderer: user messages
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-render-user-message (event &optional references)
@@ -1642,7 +1643,8 @@ session chips; see `dsh-emacs-reference-fontify'."
          (block-id (dsh-emacs-render--make-block-id event))
          (specs nil))
     (when (or (null kind) (equal kind "user"))
-      ;; 占位行跟随正文：每张图一行，唯一 id 供异步回填定位。
+      ;; Placeholder lines follow the body: one per image, with a unique id
+      ;; that lets the async fill-in locate it.
       (let ((index 0))
         (dolist (block images)
           (setq index (1+ index)
@@ -1667,7 +1669,7 @@ session chips; see `dsh-emacs-reference-fontify'."
     seq))
 
 ;;; ---------------------------------------------------------------------------
-;;; 渲染器：助手消息
+;;; Renderer: assistant messages
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-render-assistant-message (event)
@@ -1738,12 +1740,14 @@ session chips; see `dsh-emacs-reference-fontify'."
    :insert-before insert-point))
 
 ;;; ---------------------------------------------------------------------------
-;;; 渲染器：todo 计划行（每事件一行，像 tool 卡）
+;;; Renderer: todo plan rows (one line per event, like a tool card)
 ;;; ---------------------------------------------------------------------------
-;;; dsh 的 `todo_write' 工具每次携带整份清单的全量替换快照（[{content,
-;;; status}]）。每次快照都在 chat transcript 内渲染**一行**独立的可折叠
-;;; fragment（namespace "todo"，block-id = call-id），并且像 tool 事件那样
-;;; 一行一行按时间顺序堆叠，而不是常驻单块原位更新。清单为空时不渲染任何行。
+;;; dsh's `todo_write' tool carries a full replacement snapshot of the whole
+;;; list every time ([{content, status}]).  Each snapshot renders **one**
+;;; independent collapsible fragment in the chat transcript (namespace "todo",
+;;; block-id = call-id), stacked line by line in time order like tool events
+;;; rather than living in one block updated in place.  An empty list renders no
+;;; row at all.
 
 (defconst dsh-emacs--todo-namespace "todo"
   "Namespace for the rendered todo (plan) rows.")
@@ -1879,7 +1883,7 @@ the event seq but renders no ordinary tool card."
     (dsh-emacs-render--event-seq event)))
 
 ;;; ---------------------------------------------------------------------------
-;;; 渲染器：工具调用（活动组的一部分）
+;;; Renderer: tool call (part of an activity group)
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-render--tool-call-block-id (tool-call-id)
@@ -1949,7 +1953,7 @@ the event seq but renders no ordinary tool card."
         (dsh-emacs-render--event-seq event)))))
 
 ;;; ---------------------------------------------------------------------------
-;;; 渲染器：工具结果（bash 终端卡 / 其他工具 ioCard）
+;;; Renderer: tool result (bash terminal card / ioCard for other tools)
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-render--tool-leading (icon state)
@@ -2190,7 +2194,7 @@ one background band (`dsh-emacs-tool-bash-panel-face', see
     (dsh-emacs-render--event-seq event)))
 
 ;;; ---------------------------------------------------------------------------
-;;; 渲染器：turn start / end / interrupt / error
+;;; Renderer: turn start / end / interrupt / error
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-render-turn-start (event)
@@ -2209,7 +2213,7 @@ running spinner (idempotent — the send path already lit it, and a
   (dsh-emacs-render--event-seq event))
 
 ;;; ---------------------------------------------------------------------------
-;;; 运行结束的原生桌面通知
+;;; Native desktop notification when a run ends
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-notify--visible-p (&optional buffer)
@@ -2328,14 +2332,16 @@ DATA.REASON.ERROR ({code, message, ...})."
      :insert-before insert-point)))
 
 ;;; ---------------------------------------------------------------------------
-;;; 渲染器：step / attempt / seed 边界（V3 词汇补齐）
+;;; Renderer: step / attempt / seed boundaries (V3 vocabulary completion)
 ;;; ---------------------------------------------------------------------------
-;;; `step/start' / `step/end'（一步 = 一次模型调用 + 它请求的工具执行）是 turn
-;;; 的内部边界，不是对话内容：交给 modeline 的 step 徽标（见
-;;; `dsh-emacs-modeline-note-step'），不占 transcript。
-;;; `assistant/attempt'（未提交 surface 消息的失败/重试/取消尝试，内容只存在
-;;; 于 data.stream）与 `session/end-seed'（resume/fork/replay 的种子边界）
-;;; 有正文含义，各渲染一行/一张卡。
+;;; `step/start' / `step/end' (a step = one model call plus the tool executions
+;;; it requested) are turn-internal boundaries, not conversation content: they
+;;; go to the modeline step badge (see `dsh-emacs-modeline-note-step') and take
+;;; no transcript space.
+;;; `assistant/attempt' (a failed/retried/cancelled attempt that submitted no
+;;; surface message, with content only in data.stream) and `session/end-seed'
+;;; (the resume/fork/replay seed boundary) do carry body meaning, so each
+;;; renders a row/card.
 
 (defun dsh-emacs-render-step-event (event)
   "Feed a `step/start' / `step/end' EVENT to the mode-line step badge.
@@ -2469,13 +2475,15 @@ fresh session never appends one."
   (dsh-emacs-render--event-seq event))
 
 ;;; ---------------------------------------------------------------------------
-;;; 渲染器：deliverables/presented（present 工具声明的交付文件）
+;;; Renderer: deliverables/presented (files the present tool declared)
 ;;; ---------------------------------------------------------------------------
-;;; `deliverables/presented' 是 present 工具成功收口后追加的持久事件
-;;; （{turn, callId, files:[{path, description?}]}）。dsh web 把它与本 turn 的
-;;; write/edit 变动合并成 turnTail 的交付卡；这里只接显式声明的那部分——文件
-;;; 改动本身已经由 transcript 里的 write/edit 工具卡呈现。行渲染推迟到本 turn
-;;; 的 `turn/end'，让交付行落在收尾消息之后（web 的 turnTail 位置）。
+;;; `deliverables/presented' is a durable event appended after the present tool
+;;; closes successfully ({turn, callId, files:[{path, description?}]}).  dsh web
+;;; merges it with this turn's write/edit changes into the turnTail deliverables
+;;; card; here only the explicitly declared part is taken — the file changes
+;;; themselves are already shown by the write/edit tool cards in the transcript.
+;;; Row rendering is deferred to this turn's `turn/end', so the deliverables row
+;;; lands after the closing message (web's turnTail position).
 
 (defun dsh-emacs-render--deliverables-merge (files addition)
   "Merge ADDITION into FILES, last description winning per path.
@@ -2848,12 +2856,13 @@ Returns the event seq."
     seq))
 
 ;; ---------------------------------------------------------------------------
-;; 渲染器：本地 `!command' 命令行（dsh-emacs-shell.el 调用）
+;; Renderer: local `!command' command lines (called by dsh-emacs-shell.el)
 ;; ---------------------------------------------------------------------------
-;; `!<command>' 是本机执行而不是服务器 slash 命令，但行样式与
-;; `command/run' 完全一致：bash 图标 + `-\|/' spinner + pending 着色，
-;; 完成后显示退出码并把输出收进可折叠正文。两条函数跨 buffer 唯一地
-;; 由 `dsh-emacs-render-shell-start' 返回的 id 关联。
+;; `!<command>' runs locally rather than as a server slash command, but its row
+;; style is exactly that of `command/run': bash icon + `-\|/' spinner + pending
+;; coloring; when it finishes it shows the exit code and collects the output
+;; into a collapsible body.  The two functions are uniquely associated across
+;; buffers by the id returned from `dsh-emacs-render-shell-start'.
 
 (defvar dsh-emacs--shell-seq 0
   "Monotonic counter for local `!command' row ids.
@@ -2926,7 +2935,7 @@ a finished row never animates again."
       (remhash id dsh-emacs--command-blocks))))
 
 ;;; ---------------------------------------------------------------------------
-;;; 顶层 dispatcher
+;;; Top-level dispatcher
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-render--replacement-p (event)

@@ -9,26 +9,29 @@
 
 ;;; Commentary:
 
-;; 统计段拼接进 mode-line-format（紧跟 DSH 模式名之后、行尾区），展示
-;; provider • model • effort • preset • cwd • branch • tokens • ctx% • cost。
-;; 布局参考 pi-mono 的 footer（终端底部状态条）设计；ctx 与 model/effort
-;; 数据口径与 dsh web 对齐（服务器推送 contextPressure projection）。
+;; The stats segments are spliced into mode-line-format (right after the DSH
+;; mode name, in the end-of-line area) and show provider • model • effort •
+;; preset • cwd • branch • tokens • ctx% • cost.  The layout follows pi-mono's
+;; footer (a terminal bottom status bar); the ctx and model/effort data
+;; semantics align with dsh web (the server pushes the contextPressure
+;; projection).
 ;;
-;; 公开 API：
+;; Public API:
 ;;
-;;   (dsh-emacs-modeline-format)              ;;  当前 mode-line 字符串
-;;   (dsh-emacs-modeline-update)              ;;  立即刷新 mode-line
-;;   (dsh-emacs-modeline-toggle)              ;;  切换 mode-line 显示/隐藏
-;;   (dsh-emacs-modeline-set-usage usage)     ;;  设置累计 token usage
-;;   (dsh-emacs-modeline-add-usage usage)     ;;  累加 usage 并刷新
-;;   (dsh-emacs-modeline-note-event event)    ;;  从 assistant/message 事件累计 usage
-;;   (dsh-emacs-modeline-note-step turn step start-p) ;; 记录当前 step 徽标
-;;   (dsh-emacs-modeline-set-model "claude-opus-4-5") ;; 设置模型名
-;;   (dsh-emacs-modeline-set-provider "deepseek")     ;; 设置模型所属 provider
-;;   (dsh-emacs-modeline-set-effort "max")   ;; 设置推理 effort
-;;   (dsh-emacs-modeline-set-preset "code")  ;; 设置 agent preset
+;;   (dsh-emacs-modeline-format)              ;;  current mode-line string
+;;   (dsh-emacs-modeline-update)              ;;  refresh the mode-line now
+;;   (dsh-emacs-modeline-toggle)              ;;  toggle mode-line visibility
+;;   (dsh-emacs-modeline-set-usage usage)     ;;  set cumulative token usage
+;;   (dsh-emacs-modeline-add-usage usage)     ;;  add usage and refresh
+;;   (dsh-emacs-modeline-note-event event)    ;;  accumulate usage from message events
+;;   (dsh-emacs-modeline-note-step turn step start-p) ;; record the current step badge
+;;   (dsh-emacs-modeline-set-model "claude-opus-4-5") ;; set the model name
+;;   (dsh-emacs-modeline-set-provider "deepseek")     ;; set the model's provider
+;;   (dsh-emacs-modeline-set-effort "max")   ;; set the reasoning effort
+;;   (dsh-emacs-modeline-set-preset "code")  ;; set the agent preset
 ;;
-;; 用户可通过 `dsh-emacs-modeline-format-spec' 自定义显示哪些段（默认全部）。
+;; `dsh-emacs-modeline-format-spec' lets users choose which segments are shown
+;; (all by default).
 
 ;;; Code:
 
@@ -37,13 +40,16 @@
 (require 'dsh-emacs-faces)
 (require 'dsh-emacs-tokens)
 
-;; doom-modeline 集成只引用不依赖：有则用官方 API 把统计段插进它的
-;; 布局（紧跟 major-mode 段），没有则退回原生的 mode-line-format splice。
+;; doom-modeline integration references it without depending on it: when
+;; present, the official API splices the stats segment into its layout (right
+;; after the major-mode segment); otherwise it falls back to the native
+;; mode-line-format splice.
 (declare-function doom-modeline-def-segment "doom-modeline-core" (name &rest body))
 (declare-function doom-modeline-add-segment "doom-modeline-core" (segment anchor &optional position modeline))
 (declare-function doom-modeline-remove-segment "doom-modeline-core" (segment &optional modeline))
 
-;; 队列指示器（dsh-emacs 装配 dsh-emacs-queue，运行时反向读取）。
+;; Queue indicator (dsh-emacs assembles dsh-emacs-queue and reads it back at
+;; runtime).
 (declare-function dsh-emacs-queue-counts "dsh-emacs-queue" ())
 (declare-function dsh-emacs-list-queue "dsh-emacs-queue" ())
 
@@ -53,7 +59,7 @@
 
 ;;; ---------------------------------------------------------------------------
 
-;;; 定制
+;;; Customization
 ;;; ---------------------------------------------------------------------------
 
 (defgroup dsh-emacs-modeline nil
@@ -120,7 +126,7 @@ last result — including a \"not a git repo\" nil — is reused."
   :group 'dsh-emacs-modeline)
 
 ;;; ---------------------------------------------------------------------------
-;;; 内部状态（buffer-local）
+;;; Internal state (buffer-local)
 ;;; ---------------------------------------------------------------------------
 
 (defvar-local dsh-emacs--modeline-cwd nil
@@ -157,7 +163,7 @@ after a model switch.")
 (defvar-local dsh-emacs--modeline-context-pressure nil
   "Server-reported current context occupancy (tokens), or nil.
 Fed from the `contextPressure' projection (projectedTokens ?? pressureTokens,
-dsh web's ctx-meter口径) — live via `session/projection' frames, and seeded
+dsh web's ctx-meter semantics) — live via `session/projection' frames, and seeded
 from the `session/list' snapshot when a chat buffer opens.  Pairs with
 `dsh-emacs--modeline-context-window-server'.  Nil hides the ctx segment.")
 
@@ -186,7 +192,7 @@ input-area geometry relies on (not part of the mode line proper).")
   "Non-nil once the dsh stats segment is registered with doom-modeline.")
 
 ;;; ---------------------------------------------------------------------------
-;;; 路径简化
+;;; Path shortening
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-modeline--shorten-cwd (cwd)
@@ -226,7 +232,7 @@ seconds; a nil (non-repo) result is cached the same way."
         branch))))
 
 ;;; ---------------------------------------------------------------------------
-;;; 各段格式化
+;;; Per-segment formatting
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-modeline--annotate (text tooltip)
@@ -387,7 +393,7 @@ segment renders nothing (nil hides it)."
     (_ nil)))
 
 ;;; ---------------------------------------------------------------------------
-;;; Mode-line 统计字符串
+;;; Mode-line stats string
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-modeline-format ()
@@ -411,7 +417,7 @@ segments render."
         ""))))
 
 ;;; ---------------------------------------------------------------------------
-;;; Mode-line 行渲染（在 dsh-emacs.el 中由 mode-line-format 钩入）
+;;; Mode-line line rendering (hooked into mode-line-format in dsh-emacs.el)
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-modeline-update ()
@@ -428,7 +434,7 @@ segments render."
   (message "dsh mode-line %s" (if dsh-emacs-modeline-enabled "shown" "hidden")))
 
 ;;; ---------------------------------------------------------------------------
-;;; 设置器
+;;; Setters
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-modeline-set-usage (usage-struct)
@@ -556,7 +562,7 @@ until the next genuine usage sample lands the live pair."
   (dsh-emacs-modeline-update))
 
 ;;; ---------------------------------------------------------------------------
-;;; Mode line running-state animation (dsh 执行中滚动字符)
+;;; Mode line running-state animation (characters that scroll while dsh runs)
 ;;; ---------------------------------------------------------------------------
 
 (defconst dsh-emacs--ml-busy-frames
@@ -658,7 +664,7 @@ Empty string when this buffer is not executing, so the spinner is hidden."
     ""))
 
 ;;; ---------------------------------------------------------------------------
-;;; 结构 overlay 初始化
+;;; Structural overlay initialization
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-modeline--step-elapsed (state)
@@ -825,7 +831,8 @@ width-filling renderer.  BASE is the pre-existing mode-line-format list."
   (let* ((stats '(:eval (dsh-emacs-modeline--modeinline)))
          (anim '(:eval (dsh-emacs-modeline--ml-indicator)))
          (queue '(:eval (dsh-emacs-modeline--queue-indicator)))
-         ;; 动画与队列指示器紧跟模式名（DSH 之后），统计段跟在最后。
+         ;; Animation and queue indicator sit right after the mode name (after
+         ;; DSH); the stats segment comes last.
          (segments (list anim queue stats)))
     (cond
      ((memq 'mode-line-modes base)

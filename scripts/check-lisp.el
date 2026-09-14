@@ -1,29 +1,39 @@
-;;; check-lisp.el --- 结构校验：read 级校验 + 详细诊断（不自动修复） -*- lexical-binding: t; -*-
-;;; 用法: emacs -Q --batch -l scripts/check-lisp.el
-;;;       或指定文件: emacs -Q --batch -l scripts/check-lisp.el -- t.el
-;;; 退出码: 0 = 全部 read 通过; 1 = 存在失败; 2 = 用法错误
-;;; 库加载(供测试): 先 (setq dsh-check--no-run t) 再 load 本文件即不自动运行
-;;; 定位: 判官 + 侦探，不是医生。工具从不修改文件；对每个失败文件输出
-;;;       结构化诊断：问题类型、行号、列号、绝对字符偏移、上下文片段；
-;;;       缺闭合时给出完整 opener 栈（内→外，含各 opener 的坐标）。
-;;;       修复是人力/agent 的工作——按报告坐标一次修完再重跑验证，
-;;;       避免小步试错陷入修括号循环。
-;;; 原理: 两段式逼近 load 语义。第一段 forward-sexp 逐顶层 form 前进，
-;;;       配平类失衡抛 scan-error（报错自带肇事位置）；第二段用真正的
-;;;       read 带哨兵复验，覆盖 reader 拒绝而 syntax 层无感的构造
-;;;       （#| 块注释、`]'/`[' 交叉闭合、悬空的 #' 等）。诊断用
-;;;       parse-partial-sexp 逐字符扫描，把全部问题一次列出。
-;;; 诊断覆盖:
-;;;   1. 多余 `)' / `]'  → 逐个列出（类型/行/列/偏移/字符/上下文）；直接删除该字符
-;;;   2. 缺闭合到 EOF     → 列出缺失数与 opener 栈（内→外，含坐标）；
-;;;      在哪儿补由意图决定——一律补在 EOF 会吞并后续顶层 form，报告
-;;;      用 EXTEND 行号给吞并警示；修复时勿盲目堆在 EOF
-;;;   3. 字符串未闭合     → 阻断项：其后内容都被视为字符串内，先修复它
-;;;   4. 配平但 read 拒绝 → 单列（#| 块注释、交叉闭合、悬空 #' 等），与行号一并给出
-;;;   5. 顶层 form 签名   → 每个文件打印 top-level 清单（行号+首符号）；
-;;;      修复缺闭后对比签名，form 数量变少即发生了吞并（byte-compile 对此类伤害静默）
-;;; 注意：配平但结构错误的代码（如 let* 绑定表提前闭合）read 本来就通过，
-;;;       不在本工具射程内——那类问题靠 batch-byte-compile 的警告暴露。
+;;; check-lisp.el --- read-level structural check; diagnostics only -*- lexical-binding: t; -*-
+;;; Usage: emacs -Q --batch -l scripts/check-lisp.el
+;;;        or with files: emacs -Q --batch -l scripts/check-lisp.el -- t.el
+;;; Exit codes: 0 = all files read clean; 1 = some failed; 2 = usage error
+;;; Library load (for tests): (setq dsh-check--no-run t) before loading this
+;;;       file suppresses the automatic run.
+;;; Role: judge + detective, not doctor.  The tool never modifies files; for
+;;;       each failing file it prints a structured diagnosis: problem type,
+;;;       line, column, absolute character offset, context snippet; when
+;;;       closers are missing it prints the full opener stack (inner to
+;;;       outer, with each opener's coordinates).  Fixing is human/agent
+;;;       work -- fix everything from the reported coordinates in one pass
+;;;       and re-run, instead of nudging parens by trial and error.
+;;; How: two stages that approach `load' semantics.  Stage 1 walks
+;;;       top-level forms with forward-sexp; a balance error signals
+;;;       scan-error (with the offending position).  Stage 2 re-checks with
+;;;       a real `read' plus a sentinel, covering constructs the reader
+;;;       rejects but the syntax layer does not see (#| block comments, `]'
+;;;       / `[' cross-closing, a dangling #', ...).  Diagnosis scans
+;;;       character by character with parse-partial-sexp and lists every
+;;;       problem at once.
+;;; Diagnoses covered:
+;;;   1. Stray `)' / `]'  -> listed one by one (type/line/col/offset/char/context); delete that char
+;;;   2. Missing closers at EOF -> lists how many and the opener stack (inner to outer, with coordinates);
+;;;      where to close is an intent judgment -- piling them all at EOF swallows
+;;;      later top-level forms, which the report flags via the EXTEND line
+;;;      number; do not blindly stack closers at EOF
+;;;   3. Unterminated string    -> blocker: everything after it counts as
+;;;      string content, so fix it first
+;;;   4. Balanced but read-rejected -> listed separately (#| block comments, cross-closing, dangling #', ...) with line numbers
+;;;   5. Top-level form signature -> each file prints a top-level list (line + first symbol);
+;;;      compare the signature after fixing missing closers: fewer forms
+;;;      means swallowing happened (byte-compile stays silent on that damage)
+;;; Note: balanced but structurally wrong code (e.g. a let* binding list
+;;;       closed early) reads fine and is out of scope here -- that class of
+;;;       problem surfaces through batch-byte-compile warnings.
 
 (defvar dsh-check:files
   '("dsh-emacs.el" "dsh-emacs-protocol.el" "dsh-emacs-session.el"
@@ -33,17 +43,20 @@
     "dsh-emacs-command.el" "dsh-emacs-reference.el" "dsh-emacs-composer.el"
     "dsh-emacs-shell.el"
     "test/dsh-test.el" "test/dsh-e2e.el" "test/check-lisp-test.el")
-  "默认检查的 elisp 文件（相对仓库根目录）。")
+  "Default elisp files to check (relative to the repository root).")
 
 (defvar dsh-check--no-run nil
-  "非 nil 时 `load' 本文件不自动执行 `dsh-check:main'（供测试库加载）。")
+  "When non-nil, `load'ing this file skips `dsh-check:main' (for test loading).")
 
 (defun dsh-check:read-ok (file)
-  "若 FILE 通过 read 级校验则返回 t；否则抛错。
-第一段 `forward-sexp' 逐 form 前进：缺闭合括号（EOF 处）与多余括号
-都会抛 scan-error，报错自带肇事位置（比裸 `read' 可靠）。
-第二段用真正的 `read' 带哨兵复验：syntax 层对 reader 拒绝的构造无感
-（#| 块注释、`]'/`[' 交叉闭合、悬空的 #' 等），这一段补齐 load 语义。"
+  "Return t if FILE passes the read-level check; otherwise signal an error.
+Stage 1 walks form by form with `forward-sexp': missing closers (at EOF)
+and stray parens both signal scan-error, which carries the offending
+position (more reliable than a bare `read').
+Stage 2 re-checks with a real `read' plus a sentinel: the syntax layer
+does not see constructs the reader rejects (#| block comments, `]'/`['
+cross-closing, a dangling #', ...), and this stage restores load
+semantics."
   (with-temp-buffer
     (insert-file-contents file)
     (emacs-lisp-mode)
@@ -51,8 +64,10 @@
     (while (not (eobp))
       (forward-sexp 1)
       (skip-chars-forward " \t\r\n"))
-    ;; 哨兵复验：读到 (:dsh-check-end) 才算 reader 级完整。追加前先补一个
-    ;; 换行，避免无结尾换行的行尾注释把哨兵吞进注释（那种文件 load 通过）。
+    ;; Sentinel re-check: only reading (:dsh-check-end) means the file is
+    ;; complete at reader level.  Add a newline first so a trailing line
+    ;; comment without a final newline cannot swallow the sentinel (such
+    ;; files do load fine).
     (goto-char (point-max))
     (insert "\n (:dsh-check-end)")
     (goto-char (point-min))
@@ -64,35 +79,39 @@
         (end-of-file
          (unless seen
            (signal 'end-of-file
-                   '("read 复验失败：哨兵被吞，存在 reader 级不完整"))))))
+                   '("read re-check failed: sentinel swallowed, file is incomplete at reader level"))))))
     t))
 
 (defun dsh-check:ctx (pos)
-  "返回 POS 附近的紧凑文本片段（换行折为空格，便于单行输出）。"
+  "Return a compact text snippet around POS (newlines folded to spaces, for one-line output)."
   (let ((s (max (point-min) (- pos 12)))
         (e (min (point-max) (+ pos 13))))
     (replace-regexp-in-string "\n" " "
                               (buffer-substring s e))))
 
 (defun dsh-check:loc (pos)
-  "返回 POS 的 (行 列) 二元组：行、列均从 1 起算。"
+  "Return the (LINE COLUMN) pair for POS; both are 1-based."
   (list (line-number-at-pos pos)
         (save-excursion (goto-char pos) (1+ (current-column)))))
 
 (defun dsh-check:diagnose-buffer ()
-  "一趟 syntax 扫描当前 buffer，返回全部 read 级问题（不只第一个）：
-  (stray LINE COL OFFSET CHAR SNIPPET)         多余的闭合括号，每个一条
-  (unterminated LINE COL OFFSET SNIPPET)       字符串未闭合（阻断：其后皆字符串内容）
-  (missing LINE COL OFFSET N STACK EXTEND)    EOF 缺闭合；LINE/COL/OFFSET = 最内层
-                                               未闭合 opener；N = 缺失总数；
+  "Scan the current buffer in one syntax pass and return every read-level
+problem (not just the first):
+  (stray LINE COL OFFSET CHAR SNIPPET)         stray closer, one entry each
+  (unterminated LINE COL OFFSET SNIPPET)       unterminated string (blocker: the rest is string content)
+  (missing LINE COL OFFSET N STACK EXTEND)    missing closers at EOF; LINE/COL/OFFSET = innermost
+                                               unclosed opener; N = total missing;
                                                STACK = ((CHAR LINE COL OFFSET) ...)
-                                               按内→外排序；EXTEND = 最内层 opener
-                                               之后最后一个开括号所在行（无则 nil），
-                                               用于吞并警示（在 EOF 补闭会吞并后续 form）
-  nil                                          配平
-逐字符 `parse-partial-sexp' 串联状态：注释/字符串里的括号不参与深度，
-负深度即多余闭合（连续多个逐个记录）；行注释延伸到 EOF 属正常结束
-（load 语义合法），不算未闭合。返回全部问题，便于一次修完、不绕圈。"
+                                               ordered inner to outer; EXTEND = line of the
+                                               last open paren after the innermost opener
+                                               (nil if none), used for the swallowing
+                                               warning (closing at EOF swallows later forms)
+  nil                                          balanced
+Chains state character by character through `parse-partial-sexp': parens
+inside comments/strings do not count toward depth, a negative depth means a
+stray closer (consecutive ones are recorded one by one); a line comment
+running to EOF is a normal end (valid load semantics), not an unclosed
+form.  Returning every problem lets you fix them all in one pass."
   (goto-char (point-min))
   (let ((state nil) (prev 0) (stack '()) (items '()) (last-open 0))
     (while (not (eobp))
@@ -100,18 +119,21 @@
       (let ((depth (car state)))
         (cond
          ((> depth prev)
-          ;; 深度上涨：只有 >= 1 才算真正打开的 form（从负深度回 0 的
-          ;; `(' 抵消的是 stray，不该进栈）
+          ;; Depth rose: only >= 1 counts as a real opened form (a `(' that
+          ;; goes from negative depth back to 0 cancels a stray and does not
+          ;; belong on the stack)
           (when (>= depth 1)
             (push (cons (char-before) (1- (point))) stack)
-            ;; 记录最后出现的开括号（含随后已闭合的）：吞并警示用
+            ;; Record the last open paren seen (including already closed
+            ;; ones): used for the swallowing warning
             (when (> (1- (point)) last-open)
               (setq last-open (1- (point))))))
          ((< depth prev)
           (when (>= prev 1)
             (setq stack (cdr stack)))
-          ;; 闭合字符把深度从 <= 0 继续下探 → 多余闭合；深度为负但
-          ;; 未变化的字符（空格/符号/字符串内容）不是 stray
+          ;; A closer pushing depth further below <= 0 is a stray closer; a
+          ;; character at negative depth that does not change it (space,
+          ;; symbol, string content) is not a stray
           (when (< depth 0)
             (let* ((pos (1- (point)))
                    (lc (dsh-check:loc pos))
@@ -120,16 +142,17 @@
                     items)))))
         (setq prev depth)))
     (cond
-     ((null state) nil)                     ; 空 buffer，无从谈起
-     ((nth 3 state)                         ; 字符串未闭合 = 阻断根因：其后内容
-      ;; 全被当作字符串看不穿。报一条，并附串前已收集的 stray（若有）
+     ((null state) nil)                     ; empty buffer, nothing to tell
+     ((nth 3 state)                         ; unterminated string = root cause:
+     ;; a blocker, since everything after it is invisible string content.
+     ;; Report one entry, plus any strays collected before the string
       (nconc (let* ((pos (nth 8 state))
                     (lc (dsh-check:loc pos)))
                (list (list 'unterminated (nth 0 lc) (nth 1 lc)
                            pos (dsh-check:ctx pos))))
              (nreverse items)))
-     ((> (car state) 0)                     ; 缺闭合 = 根因：会吞并后续 form，
-      ;; 其后的问题报告可能因此失真；排在前头先修，再重跑看剩余
+     ((> (car state) 0)                     ; missing closer = root cause: it swallows
+      ;; later forms, so later reports may be skewed; list it first, fix it, then re-run
       (let* ((inner (car stack))
              (lc (dsh-check:loc (cdr inner))))
         (nconc (list (list 'missing (nth 0 lc) (nth 1 lc) (cdr inner) (length stack)
@@ -143,35 +166,37 @@
      (t (nreverse items)))))
 
 (defun dsh-check:stack-str (stack)
-  "把 opener 栈 STACK（((CHAR LINE COL OFFSET) ...) 内→外）渲染为多行文本。"
+  "Render the opener stack STACK (((CHAR LINE COL OFFSET) ...), inner to outer) as multi-line text."
   (mapconcat (lambda (e)
-               (format "行 %d 列 %d 偏移 %d  ``%c''"
+               (format "line %d column %d offset %d  ``%c''"
                        (nth 1 e) (nth 2 e) (nth 3 e) (nth 0 e)))
              stack "\n"))
 
 (defun dsh-check:describe (item)
-  "把 `dsh-check:diagnose-buffer' 的单条 ITEM 渲染为人读文本。"
+  "Render one ITEM from `dsh-check:diagnose-buffer' as human-readable text."
   (pcase item
     (`(stray ,line ,col ,off ,ch ,ctx)
-     (format "[third] 多余闭合 `%c': 行 %d 列 %d 偏移 %d | 上下文: %s"
+     (format "[third] stray closer `%c': line %d column %d offset %d | context: %s"
              ch line col off ctx))
     (`(unterminated ,line ,col ,off ,ctx)
-     (format "[first] 未闭合字符串: 行 %d 列 %d 偏移 %d | 上下文: %s（此后内容都在字符串内，先修复它，其余问题会被它遮蔽）"
+     (format "[first] unterminated string: line %d column %d offset %d | context: %s (everything after it is string content; fix it first, later problems are masked by it)"
              line col off ctx))
     (`(missing ,line ,col ,off ,n ,stack ,extend)
-     (format "[second] EOF 缺 %d 个闭合: 最内层 opener 行 %d 列 %d 偏移 %d；未闭合栈（内→外）:\n%s\n注意: %s"
+     (format "[second] EOF missing %d closer(s): innermost opener line %d column %d offset %d; unclosed stack (innermost first):\n%s\nnote: %s"
              n line col off (dsh-check:stack-str stack)
              (if extend
-                 (format "未闭合内容自第 %d 行延续至第 %d 行，在文件末尾补闭会把后续内容（含可能的独立顶层 form）全部并入。缺失闭合放哪儿是意图判断——请按缩进/注释/调用点核对真实边界，勿盲目堆在 EOF。"
+                 (format "unclosed content continues from line %d to line %d; closing at end of file swallows everything after it (including possibly independent top-level forms). Where to place the missing closers is an intent judgment -- check the real boundary against indentation/comments/call sites, and do not blindly stack closers at EOF."
                          line extend)
-               "缺失闭合放哪儿是意图判断——多种补法都能让文件可读但语义不同；请按缩进/注释/调用点核对真实边界，勿盲目把闭合堆在文件末尾。")))
+               "Where to place the missing closers is an intent judgment -- several placements make the file readable but with different semantics; check the real boundary against indentation/comments/call sites, and do not blindly pile closers at end of file.")))
     (_ (format "%S" item))))
 
 (defun dsh-check:topforms ()
-  "返回当前 buffer 的顶层 form 签名：((LINE . NAME) ...)。
-基于 `parse-partial-sexp' 深度 0→1 的跨越判定，残缺文件（会 read 失败）
-同样可用——这是修复前后对比吞并的机器依据：form 数量变少 = 有 form
-被吞进前一 form 里。引号/#' 开头的顶层形式不计（无深度跨越）。"
+  "Return the top-level form signature of the current buffer: ((LINE . NAME) ...).
+Based on `parse-partial-sexp' depth 0->1 crossings, it also works on
+incomplete files (ones that would fail `read') -- this is the machine
+basis for comparing swallowing before and after a fix: fewer forms means
+some form was swallowed into the previous one.  Top-level forms starting
+with a quote/#' do not count (no depth crossing)."
   (goto-char (point-min))
   (let ((state nil) (prev 0) (out '()))
     (while (not (eobp))
@@ -192,26 +217,33 @@
     (nreverse out)))
 
 (defun dsh-check:err-line (file err)
-  "提取校验错误 ERR 在 FILE 上的肇事行号，返回 \"第 N 行 \"；无位置则 nil。
-scan-error 的数据是 (消息 起点 终点)，第二个元素 = 配平类的 opener
-起点（多余闭合时 = 肇事字符），是绝对字符偏移，读文件换算行号；
-invalid-read-syntax 的数据是 (对象 行 列)，第二个元素就是行号。
-其余错误（file-missing、end-of-file 等）无数字位置，返回 nil。"
+  "Extract the line where the check error ERR occurred in FILE, as \"line N \";
+nil when there is no position.
+scan-error data is (MESSAGE START END): the second element is the opener
+start for balance errors (the offending character for a stray closer), an
+absolute character offset, converted to a line by reading the file;
+invalid-read-syntax data is (OBJECT LINE COLUMN), whose second element is
+already the line number.  Other errors (file-missing, end-of-file, ...)
+carry no numeric position, so nil is returned."
   (let ((num (nth 1 (cdr err))))
     (when (numberp num)
       (condition-case nil
           (if (eq (car err) 'invalid-read-syntax)
-              (format "第 %d 行 " num)
+              (format "line %d " num)
             (with-temp-buffer
               (insert-file-contents file)
-              (format "第 %d 行 " (line-number-at-pos num))))
+              (format "line %d " (line-number-at-pos num))))
         (error nil)))))
 
 (defun dsh-check:main ()
-  "命令行入口：解析 `command-line-args-left'，逐个文件校验并输出诊断。
-退出码：0 = 全部通过；1 = 存在失败；2 = 用法错误（缺 \"--\" 或传了已移除的 --fix）。
-只诊断不修复——每个问题带类型/行/列/偏移/上下文，修复后重跑验证。
-加载本文件默认自动调用；测试场景用 `dsh-check--no-run' 抑制自动运行。"
+  "Command-line entry point: parse `command-line-args-left', check each file
+and print diagnostics.
+Exit codes: 0 = all passed; 1 = some failed; 2 = usage error (missing
+\"--\" or the removed --fix was passed).
+Diagnoses only, never fixes -- each problem carries type/line/column/
+offset/context, and you re-run after fixing.
+Loading this file runs it automatically; tests suppress that with
+`dsh-check--no-run'."
   (let* ((args command-line-args-left)
          (sep (member "--" args))
          (raw (cdr sep))
@@ -219,15 +251,16 @@ invalid-read-syntax 的数据是 (对象 行 列)，第二个元素就是行号�
          (files (remove "--fix" (copy-sequence raw)))
          (failed 0))
     (setq command-line-args-left nil)
-    ;; 位置参数必须经 `--' 传入：漏写时找不到 "--" 会静默落到默认文件列表
-    ;; 并以绿色退出——正是最危险的假绿，直接拒绝而不是猜。
+    ;; Positional args must come after `--': if it is missing we would
+    ;; silently fall back to the default file list and exit green -- the most
+    ;; dangerous false green, so refuse outright instead of guessing.
     (when (and args (null sep))
-      (princ (format "check-lisp: 位置参数 %S 缺少 \"--\" 分隔，拒绝检查
-用法: emacs -Q --batch -l scripts/check-lisp.el -- FILE...\n"
+      (princ (format "check-lisp: positional argument %S is missing the \"--\" separator; refusing to check
+usage: emacs -Q --batch -l scripts/check-lisp.el -- FILE...\n"
                      args))
       (kill-emacs 2))
     (when fix-mode
-      (princ "check-lisp: --fix 已移除：本工具只诊断不自动修复；请按输出的行/列/偏移手工修复后重跑\n")
+      (princ "check-lisp: --fix was removed: this tool only diagnoses, it never fixes; fix by hand from the reported line/column/offset and re-run\n")
       (kill-emacs 2))
     (when files
       (setq dsh-check:files files))
@@ -251,10 +284,12 @@ invalid-read-syntax 的数据是 (对象 行 列)，第二个元素就是行号�
               (princ "     Fix order: unterminated string (blocker) -> missing closers (root cause) -> stray closers; fix in this order and re-run after every edit (positions drift, errors appear/disappear), never batch-apply a stale report.\n"))
             (dolist (it items)
               (princ (format "     %s\n" (dsh-check:describe it))))
-            (princ (format "     原始错误: %s%S\n"
+            (princ (format "     raw error: %s%S\n"
                            (or (dsh-check:err-line f fail-err) "")
                            fail-err))))
-        ;; 顶层 form 签名：修复缺闭前后对比吞并的机器依据（残缺文件同样可用）
+        ;; Top-level form signature: the machine basis for comparing
+        ;; swallowing before and after fixing missing closers (also works
+        ;; on incomplete files)
         (let* ((forms (condition-case nil
                            (with-temp-buffer
                              (insert-file-contents f)

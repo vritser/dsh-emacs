@@ -16,7 +16,8 @@ was a placeholder with nothing to send to.
 The design discussion (root `queue-design.md`) had already rejected a
 persistent side panel or overlay in favor of Emacs-transient presentation —
 mode line for passive state, echo area for action feedback, a
-`completing-read` manager for active control ("平时无感，一键唤起").
+`completing-read` manager for active control ("unobtrusive day to day, one
+key to summon").
 
 ## Decision
 

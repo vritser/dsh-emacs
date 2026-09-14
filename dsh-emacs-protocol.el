@@ -9,12 +9,13 @@
 
 ;;; Commentary:
 
-;; dsh server 的响应是 JSON 解码后的 alist（数组为 vector）。本文件把
-;; 常用响应归纳为 cl-defstruct 类型：每个字段名只在对应的 `--from-alist'
-;; 构造器里出现一次，业务代码一律通过访问器取值；服务端协议修改时，
-;; 只需在这里同步字段，调用方无需逐个确认。
+;; dsh server responses are JSON-decoded alists (arrays are vectors).  This
+;; file distills the common responses into cl-defstruct types: every field name
+;; appears exactly once, in its `--from-alist' constructor, and business code
+;; always reads through accessors; when the server protocol changes only the
+;; fields here need syncing, and callers need no per-use confirmation.
 ;;
-;; 结构概览（对应端到协议）：
+;; Structure overview (endpoint to protocol):
 ;;
 ;;   session/list   → dsh-protocol-session             (sessionId title cwd
 ;;                                                       agentPreset updatedAt)
@@ -42,9 +43,10 @@
 ;;                        result kind text)
 ;;   session/queue    → dsh-protocol-queue-item (id placement text kind)
 ;;
-;; 转换入口都接受 wire alist；注意 wire 中的数组（vector）在 struct 里
-;; 一律归一为 list。业务代码写入缓存 struct 后，读取统一用 `dsh-protocol-*'
-;; 访问器。
+;; Conversion entry points all accept a wire alist; note that arrays (vectors)
+;; on the wire are always normalized to lists inside the structs.  Once
+;; business code caches a struct, it reads it uniformly through the
+;; `dsh-protocol-*' accessors.
 
 ;;; Code:
 
@@ -82,51 +84,58 @@
                               (updated-at (cdr (assq 'updatedAt alist)))
                               (blank (cdr (assq 'blank alist)))
                               (running (cdr (assq 'running alist)))
-                              ;; 子会话标记：subagent 同时带 origin="subagent"
-                              ;; 和 parentSessionId；fork 子会话只有
-                              ;; parentSessionId（无 origin）
+                              ;; Sub-session markers: a subagent carries both
+                              ;; origin="subagent"
+                              ;; and parentSessionId; a fork child has only
+                              ;; parentSessionId (no origin)
                               (parent-session-id
                                (cdr (assq 'parentSessionId alist)))
-                              ;; subagent 会话标记（server schema:
-                              ;; origin: literal("subagent")）；不为 nil 时应在
-                              ;; 会话列表中隐藏
+                              ;; subagent session marker (server schema:
+                              ;; origin: literal("subagent")); when non-nil it
+                              ;; should be hidden from the session list
                               (origin (cdr (assq 'origin alist)))
-                              ;; projections.values.title —— dsh web 的
-                              ;; 自动摘要标题（与列表行的显示标题一致）
+                              ;; projections.values.title — dsh web's
+                              ;; auto-summary title (same as the list row's
+                              ;; display title)
                               (title-value
                                (let ((p (cdr (assq 'projections alist))))
                                  (and p (cdr (assq 'title
                                                    (cdr (assq 'values p)))))))
-                              ;; projections.values.contextPressure —— 服务器对
-                              ;; 当前上下文占用的权威估计（ctx% 段用它而不是
-                              ;; 累计 token 用量，后者是会话总量、会远超窗口）
+                              ;; projections.values.contextPressure — the
+                              ;; server's authoritative estimate of the current
+                              ;; context occupancy (the ctx% segment uses it,
+                              ;; not cumulative token usage, which is the
+                              ;; session total and far exceeds the window)
                               (context-pressure
                                (let* ((p (cdr (assq 'projections alist)))
                                       (v (and p (cdr (assq 'values p))))
                                       (cp (and v
                                                (cdr (assq 'contextPressure v)))))
                                  (and cp (cdr (assq 'pressureTokens cp)))))
-                              ;; 同一 contextPressure 对象里的窗口大小
+                              ;; the window size inside the same
+                              ;; contextPressure object
                               (context-window
                                (let* ((p (cdr (assq 'projections alist)))
                                       (v (and p (cdr (assq 'values p))))
                                       (cp (and v
                                                (cdr (assq 'contextPressure v)))))
                                  (and cp (cdr (assq 'contextWindow cp)))))
-                              ;; contextPressure.projectedTokens —— 压力 + surface
-                              ;; 增量（回答"下一次请求会占多少"）。dsh web 的
-                              ;; ctx 指示器以此优先（StatsLine：projected ??
-                              ;; pressure），align 它的口径。
+                              ;; contextPressure.projectedTokens — pressure plus
+                              ;; the surface delta (answers "how much will the
+                              ;; next request occupy").  dsh web's ctx indicator
+                              ;; prefers it (StatsLine: projected ??
+                              ;; pressure); align with that definition.
                               (context-projected
                                (let* ((p (cdr (assq 'projections alist)))
                                       (v (and p (cdr (assq 'values p))))
                                       (cp (and v
                                                (cdr (assq 'contextPressure v)))))
                                  (and cp (cdr (assq 'projectedTokens cp)))))
-                              ;; projections.values.modelSelection.lastUsed ——
-                              ;; 会话最后用过的 (provider, model,
-                              ;; reasoningEffort?) 三元组（mode-line 的权威
-                              ;; current 来源；§9 modelSelection 投影）。
+                              ;; projections.values.modelSelection.lastUsed —
+                              ;; the (provider, model,
+                              ;; reasoningEffort?) triple the session last used
+                              ;; (the mode-line's authoritative current source;
+                              ;; §9 modelSelection projection).
                               (model-selection
                                (let* ((p (cdr (assq 'projections alist)))
                                       (v (and p (cdr (assq 'values p))))
@@ -355,9 +364,10 @@ AUTHORABLE / HAS-DOCUMENT flags the management UI needs."
   authorable
   has-document)
 
-;; 将 wire alist 归一为 struct 的便捷入口：已是 struct 则原样返回。
-;; 这样业务函数可以同时接受“协议响应”和“转换后的 struct”两种形态，
-;; 调用方（以及既有测试里的裸 alist fixture）无需改动。
+;; Convenience entry that normalizes a wire alist into a struct: an
+;; already-converted struct is returned as-is.  This lets business functions
+;; accept both a "protocol response" and a "converted struct", so callers (and
+;; the bare alist fixtures in existing tests) need no changes.
 ;; ---------------------------------------------------------------------------
 ;; commands.list / commands.execute
 ;; ---------------------------------------------------------------------------

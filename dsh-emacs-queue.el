@@ -35,8 +35,9 @@
 (require 'cl-lib)
 (require 'dsh-emacs-protocol)
 
-;; 同包模块的惰性边界（见 AGENTS.md）：dsh-emacs.el 装配本模块，运行时
-;; 反向调用其符号走 declare-function，避免顶层 require 环。
+;; Lazy boundary with same-package modules (see AGENTS.md): dsh-emacs.el
+;; assembles this module, which calls back into its symbols through
+;; declare-function at runtime, avoiding a top-level require cycle.
 (declare-function dsh-emacs--active-session-id "dsh-emacs" ())
 (declare-function dsh-emacs--busy-p "dsh-emacs" ())
 (declare-function dsh-emacs--replace-input "dsh-emacs" (text))
@@ -51,7 +52,7 @@
 (defvar vertico--candidates)
 
 ;;; ---------------------------------------------------------------------------
-;;; 状态镜像（buffer-local，随 mux 帧全量更新）
+;;; State mirror (buffer-local, replaced wholesale by mux frames)
 ;;; ---------------------------------------------------------------------------
 
 (defvar-local dsh-emacs--queue-items nil
@@ -172,7 +173,7 @@ mirror, keeps such transient states invisible.")
       line)))
 
 ;;; ---------------------------------------------------------------------------
-;;; 帧应用 + 反馈（echo area）
+;;; Frame application + feedback (echo area)
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-queue--find-id (items id)
@@ -185,7 +186,8 @@ DELETED lists locally-deleted ids whose disappearance is a confirmed
 delete, not a consumption.  Each event is (KIND . TEXT) with KIND one
 of `running', `steering' or `queued'; TEXT is a display preview."
   (let ((events '()))
-    ;; 消费：id 从镜像中消失且不是本端删除（下一轮/下一步领取）。
+    ;; Consumption: the id vanished from the mirror and is not a local
+    ;; delete (claimed by the next turn/step).
     (dolist (item old)
       (let ((id (dsh-protocol-queue-item-id item)))
         (when (and id
@@ -195,8 +197,9 @@ of `running', `steering' or `queued'; TEXT is a display preview."
                       (dsh-emacs-queue-preview
                        (dsh-protocol-queue-item-text item)))
                 events))))
-    ;; steering：新出现的 next-step 项，或从 queued 提升的项（本端或
-    ;; dsh web 另一端发起的 插队 都由此反馈）。
+    ;; Steering: a newly appearing next-step item, or one promoted from
+    ;; queued (a queue-jump started here or by the other dsh web client is
+    ;; announced this way).
     (dolist (item new)
       (let* ((id (dsh-protocol-queue-item-id item))
              (prev (and id (dsh-emacs-queue--find-id old id))))
@@ -208,7 +211,8 @@ of `running', `steering' or `queued'; TEXT is a display preview."
                       (dsh-emacs-queue-preview
                        (dsh-protocol-queue-item-text item)))
                 events))))
-    ;; queued：新出现的 next-turn 项（本端或另一端排队）。
+    ;; Queued: a newly appearing next-turn item (parked here or by
+    ;; another client).
     (dolist (item new)
       (let ((id (dsh-protocol-queue-item-id item)))
         (when (and (eq (dsh-protocol-queue-item-placement item) 'queued)
@@ -270,8 +274,9 @@ settles back to empty or by its timeout."
         ;; must stay silent follows it.
         (when (and dsh-emacs--queue-submit-suppress (null items))
           (dsh-emacs-queue--submit-suppress-clear))
-        ;; 删除已被服务器确认（项已消失）：清掉抑制标记，避免吞掉后续
-        ;; 真实消费的反馈。
+        ;; The delete is confirmed by the server (the item is gone): clear the
+        ;; suppression mark so it does not swallow the feedback of a later
+        ;; real consumption.
         (setq dsh-emacs--queue-deleted
               (cl-remove-if-not
                (lambda (id)
@@ -280,7 +285,7 @@ settles back to empty or by its timeout."
         (dsh-emacs-queue--schedule-paint)))))
 
 ;;; ---------------------------------------------------------------------------
-;;; 下一条消息的选择 / 可见性，以及 UI 合并刷新
+;;; Next-message selection / visibility and coalesced UI refresh
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-queue-next-item ()
@@ -324,7 +329,7 @@ drop any pending burst repaint, so our own actions stay instantaneous."
   (dsh-emacs-queue--paint-after-burst))
 
 ;;; ---------------------------------------------------------------------------
-;;; RPC：session/updateQueue（edit / remove / steer）
+;;; RPC: session/updateQueue (edit / remove / steer)
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-queue--session-id ()
@@ -363,11 +368,13 @@ the RPC succeeds, without waiting for the frame round-trip."
     (dsh-emacs-queue--update
      id '((kind . "remove"))
      (lambda (_value)
-       ;; 删除失败：项仍在队列里，恢复消费反馈的口径。
+       ;; Delete failed: the item is still queued, so restore the
+       ;; consumption-feedback semantics.
        (setq dsh-emacs--queue-deleted
              (delete id dsh-emacs--queue-deleted)))
      (lambda (_value)
-       ;; 删除成功：乐观移除（确认帧随后全量覆盖镜像）+ 输入行闪现。
+       ;; Delete succeeded: remove optimistically (the confirming frame
+       ;; repaints the whole mirror) + input-line flash.
        (setq dsh-emacs--queue-items
              (cl-remove-if (lambda (it)
                              (equal id (dsh-protocol-queue-item-id it)))
@@ -417,7 +424,7 @@ edited preview at once; the confirming frame overwrites the mirror."
        (dsh-emacs-queue--refresh-ui)))))
 
 ;;; ---------------------------------------------------------------------------
-;;; 管理界面：C-c C-q（completing-read，Vertico/Ivy/Helm 兼容）
+;;; Management UI: C-c C-q (completing-read, Vertico/Ivy/Helm compatible)
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-queue--send-now (item)
@@ -435,7 +442,7 @@ with its text preserved."
              (id (dsh-protocol-queue-item-id item))
              (session-id (dsh-emacs-queue--session-id))
              (buf (current-buffer)))
-        (push id dsh-emacs--queue-deleted) ; 发送即删除：确认帧不当作消费
+        (push id dsh-emacs--queue-deleted) ; delete on send, not a consumption
         (dsh-emacs--rpc-async
          "session/updateQueue"
          `((request . ((sessionId . ,session-id)
@@ -446,7 +453,8 @@ with its text preserved."
              (with-current-buffer buf
                (if ok
                    (progn
-                     ;; 乐观移除 + 输入行闪现，再重提交（失败绝不重发）。
+                     ;; Optimistic removal + input-line flash, then resubmit
+                     ;; (a failure is never resent).
                      (setq dsh-emacs--queue-items
                            (cl-remove-if
                             (lambda (it)
@@ -536,8 +544,8 @@ exit and fired once the minibuffer is gone (same pattern as the `e'
 and `x' keys)."
   (let* ((chat (dsh-emacs-queue--menu-chat))
          (item (dsh-emacs-queue--menu-item)))
-    ;; 定时器必须排在 exit 之前：`exit-minibuffer' 会 throw 离开
-    ;; 命令，之后的代码永不执行。
+    ;; The timer must be scheduled before the exit: `exit-minibuffer' throws
+    ;; out of the command, so code after it never runs.
     (run-at-time 0 nil
                  (lambda ()
                    (when (and (buffer-live-p chat) item)
@@ -550,8 +558,9 @@ and `x' keys)."
   (interactive)
   (let* ((chat (dsh-emacs-queue--menu-chat))
          (item (dsh-emacs-queue--menu-item)))
-    ;; 定时器先于 exit 注册，exit 后 minibuffer 已关，read-string
-    ;; 不再嵌套在 recursive minibuffer 里（提示不会被吞）。
+    ;; The timer is registered before the exit, so after the exit the
+    ;; minibuffer is closed and read-string no longer nests inside the
+    ;; recursive minibuffer (its prompt is not swallowed).
     (run-at-time 0 nil
                  (lambda ()
                    (when (and (buffer-live-p chat) item)
@@ -590,7 +599,8 @@ and `x' keys)."
   (interactive)
   (let* ((chat (dsh-emacs-queue--menu-chat))
          (items (delq nil (mapcar #'cdr dsh-emacs--queue-pick-table))))
-    ;; 定时器先于 exit 注册（exit 的 throw 会丢弃命令剩余代码）。
+    ;; The timer is registered before the exit (the throw discards the
+    ;; rest of the command).
     (run-at-time 0 nil
                  (lambda ()
                    (when (buffer-live-p chat)
@@ -652,7 +662,8 @@ in the chat buffer the menu was opened from.  Host-injected `context'
 items are never shown or acted on."
   (interactive)
   (dsh-emacs-queue--session-id)
-  ;; C-g 一次彻底退出（菜单、编辑、全删确认），不留半开 minibuffer。
+  ;; A single C-g exits everything (menu, edit, delete-all confirmation),
+  ;; leaving no half-open minibuffer.
   (condition-case nil
       (let* ((items (cl-remove-if
                      (lambda (item)

@@ -9,9 +9,10 @@
 
 ;;; Commentary:
 
-;; Token 用量跟踪与格式化（参考 pi-mono 的 formatTokens / pi-tui）。
+;; Token usage tracking and formatting (after pi-mono's formatTokens /
+;; pi-tui).
 ;;
-;; 公开 API：
+;; Public API:
 ;;
 ;;   (dsh-emacs-format-tokens 12345)
 ;;     => "12.3k"
@@ -22,20 +23,20 @@
 ;;   (dsh-emacs-usage-from-event assistant/message-event-alist)
 ;;     => (:input 626 :output 155 :cache-read 7168 :cache-write 0 :cost 0.0)
 ;;
-;; 真实 dsh 事件把用量对象放在 `data.usage'，键名为 camelCase：
-;; inputTokens / outputTokens / cacheReadTokens（cacheWriteTokens、cost
-;; 当服务端上报时才有）。同时兼容早期短键名 input/output/cacheRead。
+;; Real dsh events carry the usage object at `data.usage' with camelCase keys:
+;; inputTokens / outputTokens / cacheReadTokens (cacheWriteTokens, cost only
+;; when the server reports them); legacy input/output/cacheRead also work.
 ;;
-;; 用法：render 层每收到一个 assistant/message 事件调用
-;; `dsh-emacs-modeline-note-event' 累计，mode-line 用 `dsh-emacs-format-tokens' /
-;; `dsh-emacs-format-cost' 显示。
+;; Usage: the render layer calls `dsh-emacs-modeline-note-event' on every
+;; assistant/message event to accumulate; the mode-line shows the result with
+;; `dsh-emacs-format-tokens' / `dsh-emacs-format-cost'.
 
 ;;; Code:
 
 (require 'cl-lib)
 
 ;;; ---------------------------------------------------------------------------
-;;; 数值格式化
+;;; Number formatting
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-format-tokens (count)
@@ -189,7 +190,7 @@ one yields a zero struct."
    (t 'dsh-emacs-modeline-ctx-crit-face)))
 
 ;;; ---------------------------------------------------------------------------
-;;; alist helpers（不依赖 dsh-emacs.el 内部的 dsh-emacs--alist-get）
+;;; alist helpers (not dsh-emacs.el's internal dsh-emacs--alist-get)
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs--alist-state (alist key)

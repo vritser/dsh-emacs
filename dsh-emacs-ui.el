@@ -25,7 +25,7 @@
 (require 'text-property-search)
 
 ;;; ---------------------------------------------------------------------------
-;;; 定制面孔
+;;; Customization faces
 ;;; ---------------------------------------------------------------------------
 
 (defface dsh-emacs-ui-border-face
@@ -57,7 +57,7 @@ header face, never by this title face."
   :group 'dsh-emacs)
 
 ;;; ---------------------------------------------------------------------------
-;;; 标签样式
+;;; Label styling
 ;;; ---------------------------------------------------------------------------
 
 (defcustom dsh-emacs-ui-label-separator "·"
@@ -105,7 +105,7 @@ two-space gap."
     (_ dsh-emacs-ui--rounded-chars)))
 
 ;;; ---------------------------------------------------------------------------
-;;; 片段模型
+;;; Fragment model
 ;;; ---------------------------------------------------------------------------
 
 (cl-defun dsh-emacs-ui-make-fragment (&key (namespace-id "global") (block-id "1")
@@ -133,7 +133,7 @@ user's fold state."
         (cons :non-foldable non-foldable)))
 
 ;;; ---------------------------------------------------------------------------
-;;; 内部辅助函数
+;;; Internal helpers
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-ui--string-or-nil (str)
@@ -151,7 +151,7 @@ Hidden buffers use an 80-column fallback."
     (max 1 (- (if window (window-text-width window) 80) 4))))
 
 ;;; ---------------------------------------------------------------------------
-;;; 折叠指示符
+;;; Fold indicator
 ;;; ---------------------------------------------------------------------------
 
 (defvar dsh-emacs-ui-fragment-map
@@ -164,7 +164,7 @@ Hidden buffers use an 80-column fallback."
 Applied as a `keymap' text property.  RET toggles the fragment.")
 
 ;;; ---------------------------------------------------------------------------
-;;; 边框渲染
+;;; Border rendering
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-ui--label-merge (text &optional non-foldable title-p)
@@ -255,7 +255,7 @@ Long body lines retain their content rather than being truncated."
    width style))
 
 ;;; ---------------------------------------------------------------------------
-;;; 片段插入与更新
+;;; Fragment insertion and update
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-ui--consume-blanks-above (&optional preserve)
@@ -577,7 +577,7 @@ Silent no-op when no fragment exists at or after point."
             (prop-match-beginning match))))))
 
 ;;; ---------------------------------------------------------------------------
-;;; 删除片段
+;;; Delete fragment
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-ui-delete-fragment (namespace-id block-id)
@@ -594,7 +594,7 @@ Silent no-op when no fragment exists at or after point."
           (remhash (cons namespace-id block-id) dsh-emacs-ui--blocks))))))
 
 ;;; ---------------------------------------------------------------------------
-;;; 导航辅助
+;;; Navigation helpers
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-ui-forward-block ()
@@ -624,7 +624,7 @@ Silent no-op when no fragment exists at or after point."
     (goto-char found)))
 
 ;;; ---------------------------------------------------------------------------
-;;; 清除所有片段
+;;; Clear all fragments
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-ui-clear ()
@@ -634,7 +634,7 @@ Silent no-op when no fragment exists at or after point."
     (erase-buffer)))
 
 ;;; ---------------------------------------------------------------------------
-;;; 折叠所有片段
+;;; Collapse all fragments
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-ui-collapse-all ()
@@ -666,7 +666,7 @@ Silent no-op when no fragment exists at or after point."
                     (point) 'dsh-emacs-ui-state nil (point-max)))))))
 
 ;;; ---------------------------------------------------------------------------
-;;; 模式
+;;; Mode
 ;;; ---------------------------------------------------------------------------
 
 (defvar dsh-emacs-ui-mode-map

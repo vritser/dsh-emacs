@@ -37,12 +37,12 @@ server version; dsh-emacs reads it live from `commands.list`):
 
 ## Three ways to run a command
 
-- **Type it**: `/goal set 改进模型选择器` + `C-c C-c` — dsh-emacs parses the
-  line, calls `commands.execute`, records it in the input history and **clears
-  the input immediately** (web-style; no waiting on the RPC round trip). If the
-  transport fails the line is restored into the input (only while it is still
-  empty) so you can retry. The outcome renders when the `command/done` event
-  arrives.
+- **Type it**: `/goal set improve the model picker` + `C-c C-c` — dsh-emacs
+  parses the line, calls `commands.execute`, records it in the input history
+  and **clears the input immediately** (web-style; no waiting on the RPC round
+  trip). If the transport fails the line is restored into the input (only while
+  it is still empty) so you can retry. The outcome renders when the
+  `command/done` event arrives.
 - **Menu**: `M-x dsh-emacs-command` — reads the live catalog
   (`commands.list`, cached per session), shows command + description in
   `completing-read`, and prompts for the argument when the command declares an

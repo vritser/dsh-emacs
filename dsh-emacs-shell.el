@@ -9,45 +9,51 @@
 
 ;;; Commentary:
 
-;; 输入区以 `!' 开头、后跟命令的行会在本机执行（Pi / agent-shell 风格的
-;; 客户端 shell 命令），不会发给模型：`!git status' 运行 git status，
-;; `!ls' 运行 ls。本文件提供：
+;; Input lines that start with `!' followed by a command run on this machine
+;; (Pi / agent-shell style client shell commands) and are never sent to the
+;; model: `!git status' runs git status, `!ls' runs ls.  This file provides:
 ;;
-;;   - `dsh-emacs-shell-parse'      判定一行输入是否为 `!command' 命令（纯函数）
-;;   - `dsh-emacs-shell-submit'     提交路径：记历史、清输入、开始执行
-;;   - `dsh-emacs-shell-run'        shell-file-name 加 -c 异步执行并渲染结果
+;;   - `dsh-emacs-shell-parse'      whether a line is a `!command' line (pure)
+;;   - `dsh-emacs-shell-submit'     submit path: record history, clear input, run
+;;   - `dsh-emacs-shell-run'        run async via shell-file-name -c, render result
 ;;   - `dsh-emacs-shell-process-kill'
-;;                                  M-x / C-c C-!：中断当前 buffer 的运行中命令
-;;   - `dsh-emacs-shell-mode-setup' 每个聊天 buffer 的清理钩子（buffer 被杀时
-;;                                  杀掉仍被跟踪的 shell 主进程）
+;;                                  M-x / C-c C-!: interrupt this buffer's running
+;;                                  command
+;;   - `dsh-emacs-shell-mode-setup' per-chat-buffer cleanup hook (kill tracked
+;;                                  shell processes when the buffer dies)
 ;;
-;; 发送路径（`dsh-emacs--submit-prompt'）在 slash 命令之前拦截 `!'
-;; 行：它是本地动作，不依赖会话/服务器运行状态，也从不进入
-;; session/prompt 或 commands/execute。执行目录是聊天 buffer 的
-;; `default-directory'（会话工作区，见 `dsh-emacs--chat-buffer-sync'），
-;; 与 magit 等命令的期望一致。结果以与 slash 命令行一致的工具行渲染
-;; （bash 图标 + spinner + 状态着色，见 dsh-emacs-render.el 的
-;; `dsh-emacs-render-shell-start' / `dsh-emacs-render-shell-done'）。
+;; The send path (`dsh-emacs--submit-prompt') intercepts `!' lines before
+;; slash commands: it is a local action, independent of session/server run
+;; state, and never enters session/prompt or commands/execute.  The execution
+;; directory is the chat buffer's `default-directory' (the session workspace,
+;; see `dsh-emacs--chat-buffer-sync'), matching what commands such as magit
+;; expect.  Results render as the same tool row as slash command lines (bash
+;; icon + spinner + status coloring, see `dsh-emacs-render-shell-start' /
+;; `dsh-emacs-render-shell-done' in dsh-emacs-render.el).
 ;;
-;; 语义：`!' 必须紧跟一个非空命令（`! ls' 亦可）——裸 `!'、普通文本、
-;; `/name' slash 行都不是 shell 行。
+;; Semantics: `!' must be followed by a non-empty command (`! ls' works too) —
+;; a bare `!', plain text, and `/name' slash lines are not shell lines.
 ;;
-;; 执行边界（聊天里没有可以交互的终端）：
-;;   - 默认关闭命令的输入管道（`dsh-emacs-shell-null-stdin'）：
-;;     cat 等等待 stdin 的命令得到 EOF；这不保证 TUI 退出，vim 仍可能
-;;     持续运行。需要交互的程序应使用真实终端。
-;;   - 新 `!' 命令会终止上一条仍被跟踪的 shell 主进程。主进程退出后
-;;     存活的后台子进程不受此跟踪表管理，关闭 buffer 不保证清理它们。
-;;   - 可选超时 `dsh-emacs-shell-timeout' 终止超时的被跟踪主进程；默认
-;;     nil，不自动终止长时间运行的命令。
-;;   - 结果行只在当前本地转录中，历史重载后消失，不会发给模型。
+;; Execution boundaries (the chat has no interactive terminal):
+;;   - By default the command's input pipe is closed
+;;     (`dsh-emacs-shell-null-stdin'): stdin-waiting commands such as cat get
+;;     EOF; this does not guarantee a TUI exits, and vim may keep running.
+;;     Interactive programs need a real terminal.
+;;   - A new `!' command kills the previous still-tracked shell process.
+;;     Background children that outlive it are not managed by this tracking
+;;     table, and closing the buffer does not guarantee they are cleaned up.
+;;   - The optional timeout `dsh-emacs-shell-timeout' kills tracked processes
+;;     that exceed it; nil by default, so long-running commands are not killed
+;;     automatically.
+;;   - Result rows live only in the current local transcript: they disappear
+;;     after a history reload and are never sent to the model.
 
 ;;; Code:
 
 (require 'dsh-emacs-render)
 
-;; dsh-emacs.el 持有输入区状态与历史；本模块与 command/queue 一样通过
-;; 声明式调用（加载顺序由 dsh-emacs.el 保证）。
+;; dsh-emacs.el holds the input-area state and history; like command/queue,
+;; this module is called declaratively (dsh-emacs.el guarantees load order).
 (declare-function dsh-emacs--push-input-history "dsh-emacs" (text))
 (declare-function dsh-emacs--clear-input "dsh-emacs" ())
 (defvar dsh-emacs--input-history-pos)
@@ -106,7 +112,7 @@ killed wholesale when the buffer dies (`dsh-emacs-shell-mode-setup').
 This tracks shell processes, not all of their descendant processes.")
 
 ;; ---------------------------------------------------------------------------
-;; 解析
+;; Parsing
 ;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-shell-parse (line)
@@ -124,7 +130,7 @@ embedded newlines in scripts and here-documents."
           (and (not (string-empty-p command)) command))))))
 
 ;; ---------------------------------------------------------------------------
-;; 提交与执行
+;; Submit and run
 ;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-shell--check-timeout ()
@@ -290,7 +296,7 @@ nil output stays nil (no body)."
         trimmed))))
 
 ;; ---------------------------------------------------------------------------
-;; 中断与清理
+;; Interrupt and cleanup
 ;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-shell-process-kill ()

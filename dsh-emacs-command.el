@@ -9,42 +9,47 @@
 
 ;;; Commentary:
 
-;; dsh 的 slash command 是 host 侧注册表（`commands/list' /
-;; `commands/execute'，typert Remote，HTTP 路径为 /api/commands/list、
-;; /api/commands/execute，payload 是 {args: {...}}）。本文件提供：
+;; dsh slash commands are a host-side registry (`commands/list' /
+;; `commands/execute', typert Remote, HTTP paths /api/commands/list and
+;; /api/commands/execute, payload {args: {...}}).  This file provides:
 ;;
-;;   - `dsh-emacs-command-parse'      按与 dsh 注册表相同的语法判定一行
-;;                                     输入是否为 slash 命令（纯函数）
-;;   - `dsh-emacs-command-execute'     向 `commands/execute' 提交一行命令
-;;   - `dsh-emacs-command-catalog'     按会话缓存的命令目录（读取）
+;;   - `dsh-emacs-command-parse'      whether a line is a slash command by the
+;;                                    same syntax as the dsh registry (pure)
+;;   - `dsh-emacs-command-execute'     submit one command line to `commands/execute'
+;;   - `dsh-emacs-command-catalog'     per-session cached command catalog (read)
 ;;   - `dsh-emacs-command-catalog-fetch' / `dsh-emacs-command-catalog-sync'
-;;                                     异步 / 同步拉取并缓存目录
-;;   - `dsh-emacs-command'             M-x 命令菜单：completing-read 选
-;;                                     命令（带 description），有 input
-;;                                     hint 时再读参数
+;;                                     async / sync fetch and cache of the catalog
+;;   - `dsh-emacs-command'             M-x command menu: completing-read picks a
+;;                                     command (with description), then reads
+;;                                     arguments when it has an input hint
 ;;   - `dsh-emacs-command-completion-at-point'
-;;                                     `completion-at-point-functions' 入口：
-;;                                     输入区以 "/" 开头时补全 "/name "
+;;                                     `completion-at-point-functions' entry:
+;;                                     completes "/name " when the input area
+;;                                     starts with "/"
 ;;   - `dsh-emacs-slash-auto-complete' / `dsh-emacs-command-auto-trigger-setup'
 ;;                                     cooperative "/" auto-trigger: contributes a
 ;;                                     trigger, never enables a front-end
 ;;
-;; 发送路径（`dsh-emacs--submit-prompt'）把形如 "/name" 的行交给
-;; `commands/execute'，未命中注册表（admission miss）时按普通消息发回 —
-;; 与 dsh web 的行为一致。执行结果由 `command/run' + `command/done'
-;; 会话事件渲染（见 dsh-emacs-render.el 的 `dsh-emacs-render-command'）。
+;; The send path (`dsh-emacs--submit-prompt') hands a "/name" line to
+;; `commands/execute' and falls back to an ordinary message on an admission
+;; miss — same behavior as dsh web.  Results render from the `command/run' +
+;; `command/done' session events (see `dsh-emacs-render-command' in
+;; dsh-emacs-render.el).
 ;;
-;; 附件的线上形状（dsh 0.1.5 起）：`commands/execute' 的第三个 wire 字段是
-;; `submittedAttachments'（0.1.2 叫 `images'，0.1.5 改名并升级为 tagged
-;; union），每项必须带 `type' 判别字段：
+;; Wire shape of attachments (since dsh 0.1.5): the third wire field of
+;; `commands/execute' is `submittedAttachments' (called `images' in 0.1.2,
+;; renamed and upgraded to a tagged union in 0.1.5); every item must carry a
+;; `type' discriminant field:
 ;;   `((type . "image") (mediaType . M) (data . B64) [name?])'
-;;   `((type . "file") (receiptId . R))'   ← 文件回执（prompt 上载产物）
-;; 本模块只处理单个图片附件：`dsh-emacs-command-execute' 收一个「附件 alist」
-;; （nil = 无附件），由 `dsh-emacs-command--submitted-attachments' 包成单元素
-;; tagged 数组。注意 `((mediaType . M) (data . B64))' 既是「一个附件 alist」
-;; 也是「两个 dotted pair 的列表」——逐项 mapcar 会把它误拆成两个附件（线上
-;; 表现为 `((type . "image") mediaType . M)' 这种 dotted 结构），所以这里
-;; 不做「附件列表」的推断。
+;;   `((type . "file") (receiptId . R))'   ← file receipt (prompt upload product)
+;; This module handles a single image attachment only: `dsh-emacs-command-execute'
+;; takes one "attachment alist" (nil = no attachment), wrapped by
+;; `dsh-emacs-command--submitted-attachments' into a one-element tagged array.
+;; Note that `((mediaType . M) (data . B64))' is both "one attachment alist"
+;; and "a list of two dotted pairs" — mapping over it item by item would split
+;; it into two attachments (on the wire: a dotted structure like
+;; `((type . "image") mediaType . M)'), so no "attachment list" inference is
+;; done here.
 
 ;;; Code:
 
@@ -115,7 +120,7 @@ Guards the completion warm-up so repeated TAB presses do not stack
 requests; drained by the fetch callback.")
 
 ;; ---------------------------------------------------------------------------
-;; 解析与执行
+;; Parse and execute
 ;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-command-parse (line)
@@ -174,13 +179,13 @@ asynchronously; returns nil."
                            (dsh-protocol-command-execution--from-alist
                             value))))
        (when (functionp on-done)
-         ;; 回调可能运行在 process filter 里：吞掉 C-g 的 quit。
+         ;; The callback may run inside a process filter: swallow the C-g quit.
          (condition-case nil
              (funcall on-done ok execution (and (null ok) value))
            (quit nil)))))))
 
 ;; ---------------------------------------------------------------------------
-;; 命令目录（commands/list）
+;; Command catalog (commands/list)
 ;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-command-catalog (&optional session-id)
@@ -281,7 +286,7 @@ open.  Runs asynchronously; the result is shown via message."
                 (if items (length items) 0))))))
 
 ;; ---------------------------------------------------------------------------
-;; 交互入口
+;; Interactive entry points
 ;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-command--input-hint (command)
@@ -334,7 +339,7 @@ the line to `commands/execute'.  Requires a running server."
                    nil
                    (lambda (ok execution _err)
                      (cond
-                      ((null ok) nil) ; rpc-async 已打印传输错误
+                      ((null ok) nil) ; rpc-async already printed the transport error
                       ((null execution)
                        (message "Unknown or malformed command: %s" name))
                       ((equal (dsh-protocol-command-execution-kind execution)

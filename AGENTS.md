@@ -87,7 +87,7 @@ whole report blindly.
   Fix the string first (the `[first]` item), then re-run to see the rest.
 - Balanced-but-read-rejected (`#|` comments, `]`/`[` cross-closing, dangling
   `#'`) — reported with the original error and its line. Only the
-  `原始错误:` (raw error) line keeps the raw format: `scan-error` is
+  `raw error:` line keeps the raw format: `scan-error` is
   (message start end) with start an absolute character offset;
   `invalid-read-syntax` is (object line col). Everything else prints line /
   column / offset directly — no raw-error decoding needed.

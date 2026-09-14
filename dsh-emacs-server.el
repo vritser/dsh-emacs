@@ -9,25 +9,28 @@
 
 ;;; Commentary:
 
-;; 开箱即用：调用任何需要服务的 dsh-emacs-* 命令前，保证 dsh server 就绪。
-;; 流程（见 `dsh-emacs-server-ensure'）：
-;;   1. 探测 `dsh-emacs-base-url' 是否已响应（一次廉价 HTTP GET /）；
-;;   2. 未响应且服务器由本包托管（`dsh-emacs-server-auto-start'）时，先定位
-;;      `dsh' CLI —— 缺失则询问是否用 `npm install -g @deepseek-ai/dsh'
-;;      安装；
-;;   3. 以 `dsh web --host H --port P --no-open' 后台拉起并等待就绪。
+;; Out of the box: before any dsh-emacs-* command that needs the service, make
+;; sure the dsh server is ready.  Flow (see `dsh-emacs-server-ensure'):
+;;   1. probe whether `dsh-emacs-base-url' already responds (one cheap HTTP
+;;      GET /);
+;;   2. when it does not and the server is managed by this package
+;;      (`dsh-emacs-server-auto-start'), locate the `dsh' CLI first — if it
+;;      is missing, ask whether to install it with
+;;      `npm install -g @deepseek-ai/dsh';
+;;   3. launch `dsh web --host H --port P --no-open' in the background and
+;;      wait until it is ready.
 ;;
-;; 公开 API：
+;; Public API:
 ;;
-;;   (dsh-emacs-server-ensure)   ;; 命令入口守卫：探测 / 安装 / 启动 / 等待
-;;   (dsh-emacs-server-start)    ;; 启动托管 server（已就绪则跳过）
-;;   (dsh-emacs-server-stop)     ;; 停止本包拉起的 server 进程
-;;   (dsh-emacs-server-restart)  ;; 重启托管 server
-;;   (dsh-emacs-open-web)        ;; 在浏览器打开 dsh web（provider 配置在官方 UI）
-;;   (dsh-emacs--server-alive-p) ;; 服务器是否就绪（带短缓存）
+;;   (dsh-emacs-server-ensure)   ;; guard: probe / install / start / wait
+;;   (dsh-emacs-server-start)    ;; start managed server (skip when ready)
+;;   (dsh-emacs-server-stop)     ;; stop the managed server process
+;;   (dsh-emacs-server-restart)  ;; restart the managed server
+;;   (dsh-emacs-open-web)        ;; open dsh web in a browser
+;;   (dsh-emacs--server-alive-p) ;; whether the server is ready (short cache)
 ;;
-;; batch（--batch，单测）下 `dsh-emacs-server-ensure' 恒为 no-op：mock RPC
-;; 的单元测试不需要真实服务，也不会在网络/进程上被拦截。
+;; Under batch (--batch, unit tests) `dsh-emacs-server-ensure' is always a
+;; no-op: mocked-RPC unit tests need no real server and hit no network/process.
 
 ;;; Code:
 
@@ -108,7 +111,7 @@ server is restarted."
   :group 'dsh-emacs-server)
 
 ;;; ---------------------------------------------------------------------------
-;;; 内部状态
+;;; Internal state
 ;;; ---------------------------------------------------------------------------
 
 (defvar dsh-emacs--server-process nil
@@ -143,7 +146,7 @@ Used when `dsh-emacs-server-auth-token' is nil and this package started the
 server.  Reset whenever a fresh server is spawned.")
 
 ;;; ---------------------------------------------------------------------------
-;;; URL / 探测
+;;; URL / probing
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs--server-base-url-raw ()
@@ -303,7 +306,7 @@ in one command chain do not re-probe."
   (setq dsh-emacs--server-alive-check nil))
 
 ;;; ---------------------------------------------------------------------------
-;;; 浏览器会话认证（launch token → dsh-auth-* cookie）
+;;; Browser session auth (launch token → dsh-auth-* cookie)
 ;;; ---------------------------------------------------------------------------
 ;;
 ;; Recent dsh web (0.1.2-rc.1+) authenticates the whole Host API: RPC, exact
@@ -648,7 +651,7 @@ to prompt again."
       t))))
 
 ;;; ---------------------------------------------------------------------------
-;;; CLI 检测与安装
+;;; CLI detection and install
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs--server-bin ()
@@ -691,7 +694,7 @@ Interruptible by C-g (`sleep-for' polling)."
       (dsh-emacs--server-bin))))
 
 ;;; ---------------------------------------------------------------------------
-;;; 启动 / 停止 / 等待
+;;; Start / stop / wait
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs--server-launch (bin host port)
@@ -759,7 +762,7 @@ fast when the spawned process already exited; otherwise signals
                   dsh-emacs-server-wait-seconds)))))
 
 ;;; ---------------------------------------------------------------------------
-;;; 公开命令
+;;; Public commands
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-server-start (&optional wait)
@@ -883,7 +886,7 @@ the unauthenticated request pop `url''s Basic username/password box."
                     (dsh-emacs--server-base-url))))))
 
 ;;; ---------------------------------------------------------------------------
-;;; Emacs 退出清理
+;;; Emacs exit cleanup
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-server--teardown ()

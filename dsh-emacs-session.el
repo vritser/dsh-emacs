@@ -9,7 +9,7 @@
 
 ;;; Commentary:
 
-;; 会话列表视图，参考 dsh web 设计：
+;; Session list view, modeled after the dsh web design:
 ;;   Sessions
 ;;   ──────────────────────────────────────────────────
 ;;   my-workspace  (3)
@@ -19,24 +19,25 @@
 ;;   Ungrouped  (1)
 ;;     ● stray-session                             1d
 ;;
-;; 每行显示：状态点 + 标题 + 相对时间。会话按工作区分组显示。
-;; 标题即会话的自动摘要（`projections.values.title'，与 dsh web 一致：
-;; 由首条用户消息概括生成）；空会话（blank）显示 "New Session"。
-;; 详细信息通过 `i' 键显示在 minibuffer。
+;; Each row shows a status dot, a title and a relative time; sessions are
+;; grouped by workspace.  The title is the session's auto summary
+;; (`projections.values.title', same as dsh web: condensed from the first
+;; user message); a blank session shows "New Session".  Details appear in
+;; the minibuffer via the `i' key.
 ;;
-;; 键位：
-;;   RET     打开会话
-;;   TAB     折叠/展开工作区
-;;   c       新建会话
-;;   r       重命名会话
-;;   D       删除会话（如果 API 支持）
-;;   /       搜索过滤
-;;   i       显示会话详情
-;;   W       创建工作区（从目录）
-;;   R       重命名当前工作区
-;;   u       移除当前工作区注册
-;;   g       刷新列表
-;;   q       退出
+;; Keys:
+;;   RET     open session
+;;   TAB     collapse/expand workspace
+;;   c       new session
+;;   r       rename session
+;;   D       delete session (if the API supports it)
+;;   /       search filter
+;;   i       show session details
+;;   W       create workspace (from a directory)
+;;   R       rename current workspace
+;;   u       unregister current workspace
+;;   g       refresh list
+;;   q       quit
 
 ;;; Code:
 
@@ -82,7 +83,7 @@ Interactively resolve command targets through `dsh-emacs--active-session-id'
 (defvar dsh-emacs-session--filter-ws-title)
 
 ;;; ---------------------------------------------------------------------------
-;;; 缓冲和模式
+;;; Buffer and mode
 ;;; ---------------------------------------------------------------------------
 
 (defvar dsh-emacs-sessions-buffer "*dsh-sessions*"
@@ -147,7 +148,7 @@ buffer; `dsh-emacs-collapse-workspaces' and
   (dsh-emacs-session--render))
 
 ;;; ---------------------------------------------------------------------------
-;;; 会话列表渲染
+;;; Session list rendering
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-session--render ()
@@ -155,9 +156,10 @@ buffer; `dsh-emacs-collapse-workspaces' and
   (let ((sessions dsh-emacs--sessions)
         (workspaces dsh-emacs--workspaces)
         (inhibit-read-only t)
-        ;; 重绘后仍停在同一个会话行上：列表在事件/刷新/自动刷新之间重建时，
-        ;; 光标不弹回顶部，hl-line 高亮也随之保持（否则导航中列表自己“跳走”，
-        ;; 体感就是卡顿）。
+        ;; Stay on the same session row after a redraw: while the list is
+        ;; rebuilt by events/refreshes/auto-refresh the cursor does not jump
+        ;; back to the top and hl-line keeps its highlight (otherwise the list
+        ;; "jumps away" under navigation, which feels like a stall).
         (restore-id (dsh-emacs-session-id-at-point))
         (restore-group-id
          (and (null (dsh-emacs-session-id-at-point))
@@ -337,7 +339,7 @@ sessions are always excluded."
     (insert "\n")))
 
 ;;; ---------------------------------------------------------------------------
-;;; 工作区过滤 / 自动刷新 / 分支
+;;; Workspace filter / auto-refresh / branch
 ;;; ---------------------------------------------------------------------------
 
 (defvar-local dsh-emacs-session--filter-ws-id nil
@@ -521,7 +523,7 @@ the workspace context applies to the whole group."
       (insert "\n"))))
 
 ;;; ---------------------------------------------------------------------------
-;;; 辅助函数
+;;; Helpers
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-session--generate-name (session)
@@ -594,7 +596,7 @@ STATUS is `running' or `idle' (see `dsh-emacs-session--compute-status')."
     (_        (propertize "●" 'face 'dsh-emacs-status-idle-face))))
 
 ;;; ---------------------------------------------------------------------------
-;;; 交互命令
+;;; Interactive commands
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-session-at-point ()

@@ -11,37 +11,38 @@
 
 ;;; Commentary:
 
-;; dsh-emacs 是在 Emacs 中使用 DeepSeek Harness 的界面。
-;; 它通过 HTTP 与正在运行的 dsh web 服务通信，提供符合 Emacs 操作习惯的交互方式。
+;; dsh-emacs is a UI for using DeepSeek Harness inside Emacs.
+;; It talks to a running dsh web service over HTTP in an Emacs-native way.
 ;;
-;; 主要功能：
-;; - 会话列表（卡片视图）
-;; - 对话缓冲（带工具调用折叠、思考折叠）
-;; - mode-line 统计段（显示 cwd、git branch、model、tokens、ctx%、cost）
-;; - Markdown 渲染
+;; Main features:
+;; - Session list (card view)
+;; - Chat buffer (with tool-call and reasoning folding)
+;; - Mode-line stats (cwd, git branch, model, tokens, ctx%, cost)
+;; - Markdown rendering
 ;;
-;; 快速开始：
+;; Quick start:
 ;;   (require 'dsh-emacs)
-;;   M-x dsh-emacs                    ; 打开会话列表
-;;   M-x dsh-emacs-new-session        ; 新建会话
+;;   M-x dsh-emacs                    ; Open the session list
+;;   M-x dsh-emacs-new-session        ; Create a new session
 ;;
-;; 对话缓冲键位：
-;;   C-c C-c   发送（运行中按 `dsh-emacs-busy-enter-behavior' 入队/引导，
-;;             空输入或 `C-u' 反转时为中断/引导）
-;;   C-c C-b   中断当前轮
-;;   C-c C-q   管理待发队列（编辑/引导/删除/立即发送）
-;;   C-c C-r   刷新
-;;   C-c C-o   向前加载更早的历史消息
-;;   C-c C-l   打开会话列表
-;;   C-c C-w   复制转录
+;; Chat buffer keybindings:
+;;   C-c C-c   Send (while running, queues/steers per
+;;             `dsh-emacs-busy-enter-behavior'; empty input or a reversed
+;;             `C-u' interrupts/steers)
+;;   C-c C-b   Interrupt the current turn
+;;   C-c C-q   Manage the pending queue (edit/steer/delete/send now)
+;;   C-c C-r   Refresh
+;;   C-c C-o   Load earlier history messages
+;;   C-c C-l   Open the session list
+;;   C-c C-w   Copy the transcript
 ;;
-;; 会话列表键位：
-;;   RET       打开会话
-;;   c         新建会话
-;;   r         重命名
-;;   D         删除
-;;   g         刷新
-;;   q         退出
+;; Session list keybindings:
+;;   RET       Open a session
+;;   c         Create a new session
+;;   r         Rename
+;;   D         Delete
+;;   g         Refresh
+;;   q         Quit
 
 ;;; Code:
 
@@ -61,14 +62,14 @@
 ;; byte-compile on Emacs <=30 from warning about an unknown function.
 (declare-function completion-table-with-metadata "minibuffer" (table metadata))
 
-;; 协议层：dsh 响应字段的 typed 访问（见 dsh-emacs-protocol.el）
+;; Protocol layer: typed access to dsh response fields (dsh-emacs-protocol.el)
 (require 'crm)
 (require 'dsh-emacs-protocol)
 
-;; 加载核心 UI 框架(必须先加载)
+;; Load the core UI framework (must be loaded first)
 (require 'dsh-emacs-ui)
 
-;; 加载所有新模块
+;; Load all new modules
 (require 'dsh-emacs-faces)
 (require 'dsh-emacs-tokens)
 (require 'dsh-emacs-markdown)
@@ -85,7 +86,7 @@
 (require 'dsh-emacs-session)
 
 ;;; ---------------------------------------------------------------------------
-;;;  定制选项
+;;;  Customization options
 ;;; ---------------------------------------------------------------------------
 
 (defgroup dsh-emacs nil
@@ -258,7 +259,7 @@ the echo area carries only the question's own detail."
   :group 'dsh-emacs)
 
 ;;; ---------------------------------------------------------------------------
-;;;  内部变量
+;;;  Internal variables
 ;;; ---------------------------------------------------------------------------
 
 (defvar dsh-emacs--sessions nil
@@ -354,7 +355,7 @@ one session never bleeds its index or pending text into another.")
 Buffer-local alongside `dsh-emacs--input-history-pos'.")
 
 ;;; ---------------------------------------------------------------------------
-;;;  RPC 客户端
+;;;  RPC client
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs--rpc-id ()
@@ -506,9 +507,11 @@ content — see `dsh-emacs--wrap-request'."
     (url-retrieve url
                   (lambda (status)
                     ;; JSON decode of big history windows allocates heavily;
-                    ;; profiler 实测默认窗口（~3 万原始事件）解析时 Automatic GC
-                    ;; 占到 open 全程的 ~46%。动态放大 GC 阈值，把 GC 风暴推迟到
-                    ;; 解析完成后一次性回收 —— 解析与回调在同一个动态作用域里。
+                    ;; Profiler-measured on the default window (~30k raw
+                    ;; events): Automatic GC took ~46% of the whole open.
+                    ;; Enlarge the GC threshold dynamically to defer the GC
+                    ;; storm into one collection after parsing — parsing and
+                    ;; the callback run in the same dynamic scope.
                     (let ((gc-cons-threshold (* 64 1024 1024))
                           (gc-cons-percentage 0.6))
                       (if (plist-get status :error)
@@ -526,8 +529,9 @@ content — see `dsh-emacs--wrap-request'."
                                      (dsh-emacs--http-error-hint err))
                             (when (buffer-live-p callback-buffer)
                               (with-current-buffer callback-buffer
-                                ;; 回调若在 filter 里交互（completing-read 等）
-                                ;; 并按 C-g，吞掉 quit 而非报 process filter 错误
+                                ;; Callback that interacts inside the filter
+                                ;; (completing-read etc.) and hits C-g: swallow the
+                                ;; quit instead of a process-filter error.
                                 (condition-case nil
                                     (funcall callback nil nil)
                                   (quit nil)))))
@@ -541,9 +545,11 @@ content — see `dsh-emacs--wrap-request'."
                                       (goto-char (point-min))
                                       (json-read))
                                   (error
-                                   ;; 体无法解析（非 JSON、断流等）：打印缘由
-                                   ;; 但仍把回调派发出去（ok=nil），调用方因此
-                                   ;; 总能走到自己的失败分支，而不是被静默丢弃。
+                                   ;; Body cannot be parsed (non-JSON, cut
+                                   ;; stream, ...): print the reason but still
+                                   ;; dispatch the callback (ok=nil), so callers
+                                   ;; always reach their failure branch instead
+                                   ;; of being silently dropped.
                                    (message "RPC response error: %s"
                                             (error-message-string err))
                                    nil)))
@@ -561,7 +567,7 @@ content — see `dsh-emacs--wrap-request'."
                   nil t t)))
 
 ;;; ---------------------------------------------------------------------------
-;;;  会话管理
+;;;  Session management
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs--sequence-list (value)
@@ -583,7 +589,7 @@ is unavailable does `dsh-emacs-default-cwd' apply."
   (expand-file-name (or cwd default-directory dsh-emacs-default-cwd)))
 
 ;; ---------------------------------------------------------------------------
-;;  会话缓冲同步：命名与列表一致 + 工作区路径（default-directory）
+;;  Chat buffer sync: name matches list + workspace path (default-directory)
 ;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs--chat-session-item (session-id)
@@ -765,9 +771,10 @@ known value."
                                            #'dsh-protocol-session--from-alist
                                            (dsh-emacs--sequence-list
                                             (cdr (assq 'items value)))))
-                                    ;; 标题/工作区可能已漂移（自动摘要/重命名/
-                                    ;; 会话移动），同步所有存活聊天缓冲的名称与
-                                    ;; default-directory。
+                                    ;; Title/workspace may have drifted
+                                    ;; (auto summary/rename/session move):
+                                    ;; re-sync all live chat buffers' name and
+                                    ;; default-directory.
                                     (dsh-emacs--chat-buffers-sync-all)
                                     ;; Refresh workspaces in parallel so the
                                     ;; session list can group by workspace.
@@ -939,20 +946,26 @@ the first roster arrives); without one the session uses
                           (lambda (ok value)
                             (if ok
                                 (let ((session-id (cdr (assq 'sessionId value))))
-                                  ;; 把新会话补进缓存：sessions 列表 + workspace
-                                  ;; session-ids（分组归属）——否则它落到 ungrouped
-                                  ;; 且 `session/title' 事件找不到缓存 item，自动
-                                  ;; 重命名无法实时生效。创建响应携带 agentPreset
-                                  ;; 时一并入缓存，列表详情/页脚预设立即可见。
+                                  ;; Cache the new session: sessions list +
+                                  ;; workspace session-ids (group membership)
+                                  ;; — otherwise it lands in ungrouped and
+                                  ;; `session/title' events find no cached item,
+                                  ;; so live auto-rename never takes effect.
+                                  ;; Cache the create response's agentPreset
+                                  ;; too, so list details and the footer show
+                                  ;; the preset at once.
                                   (dsh-emacs--cache-new-session
                                    session-id ws
                                    (cdr (assq 'agentPreset value)))
                                   (dsh-emacs-open-session session-id)
-                                  ;; 新建的 workspace 会话尚未进入 session/list
-                                  ;; 缓存（事件流不携带该信息），`--chat-buffer-sync'
-                                  ;; 因此取不到 cwd；立即用 workspace 的 path 对齐
-                                  ;; default-directory，magit-status 等按此定位项目。
-                                  ;; 重新打开时缓存已刷新，走 `--chat-cwd' 分支。
+                                  ;; A newly created workspace session is not
+                                  ;; yet in the session/list cache (the event
+                                  ;; stream does not carry it), so
+                                  ;; `--chat-buffer-sync' finds no cwd; align
+                                  ;; default-directory with the workspace path
+                                  ;; right away so magit-status etc. locate the
+                                  ;; project.  Reopening uses the refreshed
+                                  ;; cache and takes the `--chat-cwd' branch.
                                   (when ws
                                     (let ((ws-struct (cl-find-if
                                                       (lambda (w)
@@ -1030,7 +1043,7 @@ arrives."
   session-id)
 
 ;; ---------------------------------------------------------------------------
-;;  新建会话的 agent preset（agentPreset）选择
+;;  Agent preset (agentPreset) selection for new sessions
 ;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs--agent-presets-refresh ()
@@ -1181,7 +1194,8 @@ last-opened one."
              (eq (marker-buffer dsh-emacs--input-marker) (current-buffer)))
     (let* ((marker-pos (marker-position dsh-emacs--input-marker))
            (input-end (max marker-pos (dsh-emacs--input-end)))
-           ;; 输入行行首（`❯ ' 所在行）：该行内、图标左侧属于禁停区。
+           ;; Start of the input line (the line holding `❯ '): on that
+           ;; line, left of the icon is a no-park zone.
            (line-start (save-excursion
                          (goto-char marker-pos)
                          (line-beginning-position))))
@@ -1301,8 +1315,9 @@ realtime)."
   (let* ((existing (gethash session-id dsh-emacs--chat-buffers))
          (buf (if (and existing (buffer-live-p existing))
                   existing
-                ;; 首次打开，或缓冲已被杀掉：用 `dsh-<列表标题>' 作为名称，
-                ;; 被占用时自动追加 <N> 后缀保证唯一（同标题会话并存）。
+                ;; First open, or the buffer was killed: name it
+                ;; `dsh-<list title>', appending an <N> suffix when taken
+                ;; so it stays unique (same-titled sessions can coexist).
                 (get-buffer-create
                  (generate-new-buffer-name
                   (dsh-emacs--chat-buffer-name session-id))))))
@@ -1310,24 +1325,33 @@ realtime)."
     (setq dsh-emacs--current-buffer buf)
     (with-current-buffer buf
       (setq-local dsh-emacs--buffer-session session-id)
-      ;; 缓存可能已漂移（自动摘要/重命名/换工作区）：对齐列表标题，并把
-      ;; 缓冲的 default-directory 指向会话工作区（magit 等按此定位项目）。
-      ;; 必须在 setq-local 之后调用：sync 的守卫要求 buffer-session 匹配，
-      ;; 首次打开的缓冲此前还没有这个局部变量（否则会静默跳过）。
+      ;; The cache may have drifted (auto summary/rename/workspace
+      ;; move): align the list title and point the buffer's
+      ;; default-directory at the session workspace (magit etc.
+      ;; locate the project from it).  Must run after setq-local:
+      ;; sync's guard requires buffer-session to match, and a
+      ;; first-open buffer has no such local variable yet (it would
+      ;; be silently skipped).
       (dsh-emacs--chat-buffer-sync session-id)
       (dsh-emacs-mode)
       (dsh-emacs-modeline-setup)
-      ;; 默认模型只作段级兜底立即显示；权威的 (provider, model, effort)
-      ;; 来自会话行的 modelSelection 投影（`dsh-emacs--chat-buffer-model-sync'，
-      ;; 随列表/投影帧到达）——盲信默认值曾是 mode-line 显示错模型的根因。
+      ;; Show the default model immediately as a segment-level
+      ;; fallback only; the authoritative (provider, model, effort)
+      ;; comes from the session row's modelSelection projection
+      ;; (`dsh-emacs--chat-buffer-model-sync', arriving with list/
+      ;; projection frames) — trusting the default was the root
+      ;; cause of the mode-line showing the wrong model.
       (dsh-emacs-modeline-set-model dsh-emacs-default-model)
       (dsh-emacs--chat-buffer-model-sync session-id buf)
-      ;; 打开即把服务器 contextPressure 快照喂给 mode-line 段。必须在
-      ;; `dsh-emacs-mode'（define-derived-mode 内部 kill-all-local-variables）
-      ;; 与 `dsh-emacs-modeline-setup' 之后：此前喂入的 buffer-local 快照会
-      ;; 被 mode 切换整个清掉，ctx% 就永远不显示（首次打开的经典症状）。
+      ;; Feed the server contextPressure snapshot to the mode-line
+      ;; segment on open.  Must come after `dsh-emacs-mode' (whose
+      ;; define-derived-mode runs kill-all-local-variables) and
+      ;; `dsh-emacs-modeline-setup': a snapshot fed in earlier is
+      ;; wiped by the mode switch, so ctx% never appears (the
+      ;; classic first-open symptom).
       (dsh-emacs--chat-buffer-context-sync session-id buf)
-      ;; 思考预设（agentPreset）来自会话列表缓存；缺失时补拉一次 session/list。
+      ;; The agent preset (agentPreset) comes from the session
+      ;; list cache; fetch session/list once when it is missing.
       (dsh-emacs--link-session-preset session-id)
       ;; Reopening an already-live chat buffer resumes its realtime stream
       ;; without re-rendering what is on screen: the follow snapshot is the
@@ -1350,7 +1374,7 @@ realtime)."
     (pop-to-buffer dsh-emacs--current-buffer)))
 
 ;; ---------------------------------------------------------------------------
-;;  在同一 workspace 内切换 session（chat buffer 中直接切）
+;;  Switch session within the same workspace (directly from a chat buffer)
 ;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs--workspace-sessions (workspace-id)
@@ -1412,9 +1436,12 @@ across all workspaces."
       (when (member session-id (dsh-protocol-workspace-session-ids ws))
         (throw 'found (dsh-protocol-workspace-workspace-id ws))))))
 
-;; `ivy-mode' 开启时 `ivy-sort-functions-alist' 接管排序；开关我们按用户
-;; 实际启用的补全框架适配（见 `dsh-emacs--completing-read-ordered'）。
-;; defvar 声明只为消 byte-compile 警告并保证动态绑定；框架未加载时无副作用。
+;; With `ivy-mode' on, `ivy-sort-functions-alist' takes over
+;; sorting; we adapt to whichever completion framework the user
+;; actually enabled (see `dsh-emacs--completing-read-ordered').
+;; The defvar only silences a byte-compile warning and guarantees
+;; dynamic binding; it has no effect when the framework is not
+;; loaded.
 (defvar ivy-sort-functions-alist)
 
 (defun dsh-emacs--completion-table-with-metadata (collection metadata)
@@ -1432,16 +1459,22 @@ while the package baseline is 27.1."
         (complete-with-action action collection string pred)))))
 
 (defun dsh-emacs--completing-read-ordered (prompt collection &rest args)
-  "`completing-read'，但保持 COLLECTION 传入顺序不被补全框架重排。
-按用户实际启用的补全框架适配，不写死任何一家：
-- vertico / corfu / stock minibuffer：读取 completion metadata 的
-  `display-sort-function'（vertico--sort-function / corfu 均优先于各自
-  的排序开关），这里把它设为 identity，框架自动放弃重排；
-- ivy：不读该 metadata，按 collection/caller 从 `ivy-sort-functions-alist'
-  取排序函数——动态绑定为 ((t . nil))（docstring: nil = no sorting），
-  仅本次调用生效；
-- 其余框架（selectrum 等）同样遵循 display-sort-function 约定。
-PROMPT/COLLECTION/ARGS 语义与 `completing-read' 完全一致。"
+  "`completing-read', but keep COLLECTION's incoming order from
+  being reordered by the completion framework.
+  Adapts to whichever framework the user actually enabled, without
+  hardcoding any of them:
+  - vertico / corfu / stock minibuffer: reads the completion
+    metadata's `display-sort-function' (vertico--sort-function /
+    corfu both take priority over their own sort toggles); set it to
+    identity here and the framework drops the reorder by itself;
+  - ivy: does not read that metadata and takes the sort function per
+    collection/caller from `ivy-sort-functions-alist' — bound
+    dynamically to ((t . nil)) (docstring: nil = no sorting),
+    effective for this call only;
+  - other frameworks (selectrum etc.) also honor the
+    display-sort-function convention.
+  PROMPT/COLLECTION/ARGS have exactly the same semantics as
+  `completing-read'."
   (let ((ordered (dsh-emacs--completion-table-with-metadata
                   collection
                   '((display-sort-function . identity)))))
@@ -1560,11 +1593,12 @@ order."
   (let ((counts (make-hash-table :test 'equal))
         (seen (make-hash-table :test 'equal))
         (entries nil))
-    ;; 第一遍：统计显示标题出现次数（重复标题需要 workspace 消歧）
+    ;; First pass: count display-title occurrences (duplicate
+    ;; titles need workspace disambiguation)
     (dolist (s candidates)
       (let ((title (dsh-emacs--switch-title s session-index)))
         (puthash title (1+ (gethash title counts 0)) counts)))
-    ;; 第二遍：构建 (label . id)，唯一标题裸显示
+    ;; Second pass: build (label . id); unique titles show bare
     (dolist (s candidates)
       (let* ((id (dsh-protocol-session-session-id s))
              (title (dsh-emacs--switch-title s session-index))
@@ -1603,12 +1637,15 @@ results in bounded increments."
   (dsh-emacs-server-ensure)
   (let* ((session-id (dsh-emacs--active-session-id))
          (workspace-id (unless all (dsh-emacs--workspace-for-session session-id)))
-         ;; 每次调用只建一次索引：逐候选的标题/工作区查询从线性扫描
-         ;; （O(n)/O(n·m)）降为哈希 O(1)，会话多时不再卡。
+         ;; Build the index once per call: per-candidate
+         ;; title/workspace lookups drop from a linear scan
+         ;; (O(n)/O(n·m)) to a hash O(1), so many sessions no longer
+         ;; stall.
          (session-index (dsh-emacs--sessions-index))
          (ws-index (dsh-emacs--workspaces-by-session))
-         ;; 工作区显示名记忆化：每个 workspace 只算一次
-         ;; （`dsh-emacs--workspace-label' 每次调用都线性扫 workspace 列表）。
+         ;; Memoize workspace display names: each workspace is
+         ;; resolved once (`dsh-emacs--workspace-label' scans the
+         ;; workspace list per call).
          (ws-label-cache (make-hash-table :test 'equal))
          (ws-label (lambda (ws-id)
                      (or (gethash ws-id ws-label-cache)
@@ -1620,8 +1657,9 @@ results in bounded increments."
            (lambda (s)
              (equal (dsh-protocol-session-session-id s) session-id))
            (if workspace-id
-               ;; 同 workspace 的成员已按可见规则（非归档/subagent/blank）
-               ;; 过滤并按活跃时间排序。
+               ;; Members of the same workspace are already filtered by
+               ;; the visibility rules (non-archived/subagent/blank) and
+               ;; sorted by activity time.
                (dsh-emacs--workspace-sessions workspace-id)
              (dsh-emacs-session--sort-by-recency
               (cl-remove-if-not #'dsh-emacs-session--visible-p
@@ -1770,7 +1808,7 @@ the session list on success."
                             (message "Failed to rename: %S" value)))))
 
 ;;; ---------------------------------------------------------------------------
-;;;  工作区管理
+;;;  Workspace management
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs--normalize-archived (archived)
@@ -1897,7 +1935,7 @@ repaints)."
                             (message "Failed to reorder: %S" value)))))
 
 ;;; ---------------------------------------------------------------------------
-;;;  对话模式
+;;;  Chat mode
 ;;; ---------------------------------------------------------------------------
 
 (defvar dsh-emacs-mode-map
@@ -1918,7 +1956,8 @@ repaints)."
     (define-key map (kbd "C-c C-!") #'dsh-emacs-shell-process-kill)
     (define-key map (kbd "M-p") #'dsh-emacs-input-history-back)
     (define-key map (kbd "M-n") #'dsh-emacs-input-history-forward)
-    ;; 输入区以 "/" 开头时 TAB 补全 slash 命令名（无论弹出菜单是否开着）
+    ;; TAB completes slash command names when the input area
+    ;; starts with "/" (whether or not the popup menu is open)
     (define-key map (kbd "TAB") #'completion-at-point)
     (define-key map [drag-n-drop] #'dsh-emacs--dnd-attach)
     map)
@@ -1989,8 +2028,9 @@ vertico, etc.)."
   (buffer-disable-undo)
   (setq-local comment-start "// ")
   (setq-local comment-end "")
-  ;; 输入区以 "/" 开头时补全 slash 命令；"@" 令牌进行中时补全文件/会话引用
-  ;; （见 dsh-emacs-command.el / dsh-emacs-reference.el）。
+  ;; Complete slash commands when the input starts with "/"; complete
+  ;; file/session references while an "@" token is in progress (see
+  ;; dsh-emacs-command.el / dsh-emacs-reference.el).
   (setq-local completion-at-point-functions
               '(dsh-emacs-command-completion-at-point
                 dsh-emacs-reference-completion-at-point))
@@ -2018,27 +2058,31 @@ vertico, etc.)."
   (setq-local completion-category-overrides
               (cons '(dsh-emacs-reference (styles flex))
                     completion-category-overrides))
-  ;; imenu: 按 user message 索引，M-x imenu 可跳转到任意历史输入
+  ;; imenu: index by user message, so M-x imenu jumps to any past input
   (setq-local imenu-create-index-function #'dsh-emacs-imenu-create-user-index)
 
-  ;; Mode-line 拼接由 `dsh-emacs-modeline-setup' 完成（会话创建时调用），
-  ;; 这里不再覆盖 mode-line-format，保留用户的默认 modeline。
+  ;; Mode-line assembly is done by `dsh-emacs-modeline-setup'
+  ;; (called on session creation); do not override
+  ;; mode-line-format here, keeping the user's default mode line.
 
-  ;; 重置渲染状态
-  ;; add-hook 前插：先断开并刷新文本，再释放 Markdown 的正文标记。
+  ;; Reset rendering state
+  ;; add-hook prepends: disconnect and refresh the text first,
+  ;; then release the Markdown body markers.
   (add-hook 'kill-buffer-hook #'dsh-emacs-render--cancel-markdown nil t)
   (add-hook 'change-major-mode-hook #'dsh-emacs-render--cancel-markdown nil t)
   (add-hook 'kill-buffer-hook #'dsh-emacs-events-disconnect nil t)
   (add-hook 'change-major-mode-hook #'dsh-emacs-events-disconnect nil t)
   (add-hook 'kill-buffer-hook #'dsh-emacs--chat-buffer-untrack nil t)
-  ;; 聊天缓冲永不"modified"：会话转录不落盘，关闭时不应提示保存
+  ;; Chat buffers are never "modified": the session transcript
+  ;; is not written to disk, so closing must not prompt to save
   (add-hook 'kill-buffer-query-functions #'dsh-emacs--chat-buffer-clear-modified nil t)
   (add-hook 'after-change-functions #'dsh-emacs--chat-buffer-keep-clean nil t)
-  ;; 打开会话前把光标锁定输入区（`❯ ' 之后）
+  ;; Lock the cursor to the input area (after `❯ ') when a session opens
   (add-hook 'post-command-hook #'dsh-emacs--lock-cursor-to-input nil t)
-  ;; 输入/编辑命令前若点在只读区，先挪回输入区
+  ;; Before insert/edit commands, move point back to the input
+  ;; area if it sits in the read-only region
   (add-hook 'pre-command-hook #'dsh-emacs--route-typing-to-input nil t)
-  ;; 输入时立即滚动到输入区
+  ;; Scroll to the input area immediately when typing
   (add-hook 'post-command-hook #'dsh-emacs--reveal-input-when-typing nil t)
   ;; Forward deletes (`C-k'/kill-line, `M-d'/kill-word, kill-region, `C-d')
   ;; must never cross the input area's trailing structural newline; `C-k'
@@ -2055,10 +2099,11 @@ vertico, etc.)."
         dsh-emacs--ws-last-probe-time nil
         dsh-emacs--ws-probe-inflight nil)
   (dsh-emacs-render--reset-tool-tracking)
-  ;; `!' 本地 shell 命令：buffer 被杀时一并杀掉运行中的进程
+  ;; `!' local shell commands: kill a running process too when
+  ;; the buffer is killed
   (dsh-emacs-shell-mode-setup)
 
-  ;; 初始化输入区域
+  ;; Initialize the input area
   (dsh-emacs--setup-input-area)
   ;; Reset Composer chrome with the buffer; the next projection or snapshot
   ;; rebuilds the Goal Row and its top marker.
@@ -2068,17 +2113,18 @@ vertico, etc.)."
   "Set up the input area (a read-only transcript plus a writable input box).
 All welcome text is marked read-only; only the region after ❯ is writable."
   (let ((inhibit-read-only t))
-    ;; 清空缓冲
+    ;; Clear the buffer
     (erase-buffer)
-    ;; 添加简洁的聊天头部和操作提示
+    ;; Add a minimal chat header and operation hints
     (let ((welcome-start (point)))
       (insert (propertize "dsh  " 'face 'dsh-emacs-accent-face))
       (insert (propertize "DeepSeek Harness\n" 'face 'dsh-emacs-header-face))
       (insert (propertize "C-c C-c send   ·   C-c C-q queue   ·   C-c C-r refresh   ·   C-c C-l session list\n\n"
                           'face 'dsh-emacs-hint-face))
-      ;; 输入提示符
+      ;; Input prompt
       (insert (propertize "❯ " 'face 'dsh-emacs-input-prompt-face))
-      ;; 把整个欢迎区域标记为 read-only（使用 text property 而非 buffer-read-only）
+      ;; Mark the whole welcome area read-only (via a text property,
+      ;; not buffer-read-only)
       (put-text-property welcome-start (point) 'read-only t)
       (put-text-property welcome-start (point) 'front-sticky '(read-only))
       ;; Do not let properties leak into the input inserted at the end of the
@@ -2094,7 +2140,8 @@ All welcome text is marked read-only; only the region after ❯ is writable."
       ;;    default coloured — the "half blue, half white" input line.
       (put-text-property welcome-start (point) 'rear-nonsticky
                          '(read-only face font-lock-face)))
-    ;; 标记输入开始位置（marker 会自动跟随文本插入/删除）
+    ;; Mark the input start position (the marker follows text
+    ;; insertion/deletion automatically)
     (setq dsh-emacs--input-marker (point-marker))))
 
 (defun dsh-emacs--ensure-input-area ()
@@ -2353,7 +2400,8 @@ of wire-ready attachment alists
 the model sees them immediately."
   (let ((command (and (null attachments) (dsh-emacs-shell-parse message))))
     (cond
-     ;; 无附件的 `!' 行是本地动作；附件 caption 不进入 shell。
+     ;; A `!' line with no attachments is a local action;
+     ;; attachment captions do not go to the shell.
      (command
       (dsh-emacs-shell-submit message command))
      ((or mode
@@ -2363,27 +2411,31 @@ the model sees them immediately."
      ((dsh-emacs-command-parse message)
       (let ((session-id (dsh-emacs--active-session-id))
             (input-buffer (current-buffer)))
-        ;; 提交即清空输入区、记入输入历史——不等 RPC 往返（网页同款手感）：
-        ;; 命令是否被 host 受理由 `commands.execute' 的响应决定，结果由
-        ;; command/run + command/done 会话事件渲染。
+        ;; Clear the input and record it in history on submit —
+        ;; without waiting for the RPC round trip (the same feel as
+        ;; the web UI): whether the host admits the command is decided
+        ;; by the `commands.execute' response, and the result is
+        ;; rendered from the command/run + command/done session events.
         (dsh-emacs--push-input-history message)
         (setq dsh-emacs--input-history-pos nil
               dsh-emacs--input-history-pending nil)
         (when (buffer-live-p input-buffer)
           (with-current-buffer input-buffer
             (dsh-emacs--clear-input)))
-        ;; 立即渲染命令行（乐观路径）——不等 RPC 往返。
+        ;; Render the command line immediately (optimistic path) —
+        ;; without waiting for the RPC round trip.
         (when (buffer-live-p input-buffer)
           (with-current-buffer input-buffer
             (dsh-emacs-render-command-optimistic message)))
         (dsh-emacs-command-execute
          session-id (string-trim message) attachments
          (lambda (ok execution err)
-           ;; 回调可能运行在 process filter 里：吞掉 C-g 的 quit。
+           ;; The callback may run inside a process filter: swallow C-g's quit.
            (condition-case nil
                (cond
                 ((null ok)
-                 ;; 传输失败（HTTP/解析错误）：清除乐观行，恢复原文。
+                 ;; Transport failure (HTTP/parse error): clear the optimistic
+                 ;; row and restore the original text.
                  (when (buffer-live-p input-buffer)
                    (with-current-buffer input-buffer
                      (dsh-emacs-render-command-cleanup-optimistic)
@@ -2393,13 +2445,14 @@ the model sees them immediately."
                  (message "Command failed to run: %S"
                           (or err "transport error")))
                 ((null execution)
-                 ;; 未命中注册表 → 清除乐观行，按普通消息发送（浏览器同款语义）；
-                 ;; 历史已在提交时记录，不再重复记入。
+                 ;; Not in the registry → clear the optimistic row and send
+                 ;; it as an ordinary message (browser semantics); history was
+                 ;; already recorded at submit time, so do not record it again.
                  (when (buffer-live-p input-buffer)
                    (with-current-buffer input-buffer
                      (dsh-emacs-render-command-cleanup-optimistic)))
                  (dsh-emacs--submit-plain message attachments t))
-                (t nil))        ; 受理：乐观行由 command/run 事件替换
+                (t nil))        ; accepted: the command/run event replaces it
              (quit nil))))))
      (t (dsh-emacs--submit-plain message attachments)))))
 
@@ -2538,9 +2591,11 @@ still empty (a newer draft typed meanwhile is left alone)."
         ;; already parked) keeps its feedback.
         (when (null (dsh-emacs-queue-items))
           (dsh-emacs-queue--mark-submit-suppress))))
-    ;; 提交即清空输入区（与 command/deferred 路径同手感）：RPC 往返期间
-    ;; 再按一次 C-c C-c 读到的只会是空输入，不会把同一句消息发两遍；文本
-    ;; 在传输失败的失败分支里恢复（见下）。
+    ;; Clear the input on submit (same feel as the
+    ;; command/deferred paths): a second C-c C-c during the RPC
+    ;; round trip then reads an empty input and never sends the
+    ;; same message twice; the text is restored in the
+    ;; transport-failure branch below.
     (when (buffer-live-p input-buffer)
       (with-current-buffer input-buffer
         (dsh-emacs--clear-input)))
@@ -2577,13 +2632,17 @@ still empty (a newer draft typed meanwhile is left alone)."
                                          message attachments))
                                       (dsh-emacs-render--follow-stream)
                                       (unless dsh-emacs--event-ready
-                                        ;; 流不在线时自愈：连进程都不存在说明
-                                        ;; 该会话的 mux 已断开且无人重连（旧版
-                                        ;; 打开新会话会误拆上一个会话的流——
-                                        ;; 见 `dsh-emacs-open-session'）——先
-                                        ;; 重连，让「switches back to realtime」
-                                        ;; 的承诺成立；握手途中的进程由 connect
-                                        ;; 的 health check 兜底，这里不重复建连。
+                                        ;; Self-heal when the stream is offline:
+                                        ;; with no process at all, this session's
+                                        ;; mux dropped and nobody reconnected
+                                        ;; (opening a new session used to tear
+                                        ;; down the previous one's stream — see
+                                        ;; `dsh-emacs-open-session') — so
+                                        ;; reconnect first, letting the "switches
+                                        ;; back to realtime" promise hold; a
+                                        ;; process mid-handshake is covered by
+                                        ;; connect's health check, so do not
+                                        ;; connect again here.
                                         (when (not (process-live-p
                                                     dsh-emacs--event-process))
                                           (dsh-emacs-events-connect
@@ -2603,10 +2662,13 @@ still empty (a newer draft typed meanwhile is left alone)."
                                   ;; the suppression: clear it here
                                   ;; (idempotent).
                                   (dsh-emacs-queue--submit-suppress-clear)))
-                              ;; 输入已在提交时清空：传输失败把草稿放回输入
-                              ;; 区。只有输入区仍是空的才恢复——用户趁 RPC
-                              ;; 往返敲下的新草稿不被覆盖（与
-                              ;; `dsh-emacs--submit-deferred' 的失败恢复一致）。
+                              ;; The input was cleared on submit: on a
+                              ;; transport failure put the draft back into
+                              ;; the input area.  Restore only when the input
+                              ;; is still empty — a newer draft typed during
+                              ;; the RPC round trip is not overwritten
+                              ;; (matching the failure restore in
+                              ;; `dsh-emacs--submit-deferred').
                               (when (buffer-live-p input-buffer)
                                 (with-current-buffer input-buffer
                                   (when (string-empty-p
@@ -2614,7 +2676,7 @@ still empty (a newer draft typed meanwhile is left alone)."
                                     (dsh-emacs--replace-input message)))))))))
 
 ;;; ---------------------------------------------------------------------------
-;;;  附件 / 模型选择 / 输入历史
+;;;  Attachments / model selection / input history
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs--file-attachment (file)
@@ -2846,20 +2908,29 @@ NOT lost while searching."
   (let* ((rows (mapcar (lambda (c) (dsh-emacs--model-row-entry c nil))
                        candidates))
          (group-fn
-          ;; 自包含：直接从键里解析 provider 显示名，不捕获任何变量。
-          ;; 标题必须是无属性串（match-string 会保留候选键上的 display 属性）。
-          ;; transform 分支把 id 区间的匹配高亮 face 迁到显示串对应位置：
-          ;; 键 = "m2 [g2|Qwen]"（display 隐藏段），输入 "m2" 时 orderless/
-          ;; basic 给键首 [0,2) 打 completion-match-face —— 整键摊给
-          ;; vertico--display-string 会变成整行背景，全部剥掉又丢失高亮；
-          ;; 正确做法是带 face 子串嵌入 "  " + id 的可见文本
+          ;; Self-contained: parse the provider display name
+          ;; straight from the key, capturing no variables.
+          ;; The title must be a property-free string
+          ;; (match-string keeps the candidate key's display
+          ;; property).  The transform branch moves the match
+          ;; highlight face over the id span to the matching
+          ;; position in the display string: key = "m2
+          ;; [g2|Qwen]" (display hides the rest); typing "m2"
+          ;; makes orderless/basic put completion-match-face on
+          ;; the key's first [0,2) — spreading the whole key
+          ;; through vertico--display-string would paint the
+          ;; entire line background, and stripping every
+          ;; property loses the highlight; the right move is to
+          ;; embed a face-carrying substring into the visible
+          ;; "  " + id text
           (lambda (cand transform)
             (if transform
                 (let* ((c (copy-sequence cand))
                        (id (car (dsh-emacs--model-key-parts cand))))
                   (if (and id (> (length id) 0))
                       (let ((sub (substring c 0 (length id))))
-                        ;; 子串剥掉 display/invisible（隐藏段的属性），保留 face。
+                        ;; The substring drops display/invisible (properties
+                        ;; of the hidden part) while keeping face.
                         (remove-text-properties
                          0 (length sub) '(display nil invisible nil) sub)
                         sub)
@@ -2868,16 +2939,22 @@ NOT lost while searching."
                 (and parts (substring-no-properties (nth 2 parts)))))))
          (table (dsh-emacs--completion-table-with-metadata
                  rows
-                 ;; Emacs 31 的 completion-table-with-metadata 要求元数据
-                 ;; 不带前缀 (metadata ...)，直接给 plist，它自己包一层。
-                 ;; (category . dsh-model)：nerd-icons-completion 会给
-                 ;; 每个候选行首插图标 —— 它的图标表里 nil 类别映射为
-                 ;; nf-cod-arrow_small_right（行首的 "->" 箭头），而
-                 ;; 不在表里的类别返回空串；显式声明一个自用类别即可
-                 ;; 让行首无图标（同时 marginalia 因类别不在其 annotator
-                 ;; 表中也不会注入后缀注解）。
-                 ;; 恒等 affixation-function 再兜底：第三方包想往行尾加
-                 ;; annotation/affixation 后缀也会被顶掉
+                 ;; Emacs 31's completion-table-with-metadata wants
+                 ;; the metadata without the (metadata ...) prefix —
+                 ;; give it the plist directly and it wraps it itself.
+                 ;; (category . dsh-model): nerd-icons-completion
+                 ;; inserts an icon at the start of every candidate
+                 ;; row — in its icon table the nil category maps to
+                 ;; nf-cod-arrow_small_right (the "->" arrow at line
+                 ;; start) while categories absent from the table
+                 ;; return an empty string; declaring a private
+                 ;; category keeps the row start icon-free (and
+                 ;; marginalia injects no suffix annotation either,
+                 ;; because the category is not in its annotator
+                 ;; table).
+                 ;; An identity affixation-function is the last
+                 ;; backstop: a third-party package trying to append
+                 ;; an annotation/affixation suffix is overridden too
                  (list (cons 'category 'dsh-model)
                        (cons 'group-function group-fn)
                        (cons 'affixation-function
@@ -2885,11 +2962,15 @@ NOT lost while searching."
                                (mapcar (lambda (c) (list c "" "")) cands)))))))
     (cons table rows)))
 
-;; 模型选择器行首图标（可选集成，不新增依赖）：
-;; 选择器 metadata 声明 category=dsh-model；当 nerd-icons-completion 加载后，
-;; 给这个类别注册一枚默认芯片图标（nf-cod-chip）——行首就显示，无需
-;; 用户配置。想换图标时在自己的配置里先 add-to-list 同类别条目即可覆盖
-;; （assq 已存在则默认注册跳过）。未安装 nerd-icons-completion 时无任何影响。
+;; Model picker row-start icon (optional integration, no new
+;; dependency): the picker metadata declares category=dsh-model;
+;; once nerd-icons-completion is loaded, register a default chip
+;; icon (nf-cod-chip) for that category — it shows at the row
+;; start with no user configuration.  To change the icon,
+;; add-to-list a same-category entry in your own config first and
+;; it overrides the default (the default registration is skipped
+;; when assq already finds one).  No effect when
+;; nerd-icons-completion is not installed.
 (with-eval-after-load 'nerd-icons-completion
   (when (and (boundp 'nerd-icons-completion-category-icons)
              (not (assq 'dsh-model nerd-icons-completion-category-icons)))
@@ -2912,9 +2993,10 @@ the stock long separator lines inside the picker only)."
     (setq-local vertico-preselect 'first))
   (when (and grouped (boundp 'vertico-group-format))
     (setq-local vertico-group-format dsh-emacs-model-group-format))
-  ;; 显式返回 nil：Emacs 31 的 minibuffer-with-setup-hook 会把 SETUP
-  ;; 表达式的求值结果 funcall 掉，绝不能让它流回别的值（比如上面的
-  ;; setq-local 值 —— 那会变成 "Invalid function: ..."）
+  ;; Return nil explicitly: Emacs 31's minibuffer-with-setup-hook
+  ;; funcalls the evaluation result of the SETUP expression, so
+  ;; never let another value flow back (such as the setq-local
+  ;; value above — that would become "Invalid function: ...")
   nil)
 
 ;;;###autoload
@@ -3015,30 +3097,40 @@ the filter as \"error in process filter: Quit\"."
                                        (nth 2 c)))
                                 candidates))
                   current-provider))
-             ;; 现代 vertico（≥2.0）原生支持 group-function 元数据：每次
-             ;; 输入都重算分组并重绘粘性组头（无需 vertico-group.el/group-mode）
-             ;; → 走元数据分组路径；否则用候选头行 + 重复行后缀兜底
-             ;; （头行会被过滤滤掉）。旧 vertico + vertico-group 也用同协议。
+             ;; Modern vertico (>=2.0) natively supports group-function
+             ;; metadata: it recomputes groups and redraws sticky group
+             ;; headers on every input (no vertico-group.el/group-mode)
+             ;; → take the metadata grouping path; otherwise fall back
+             ;; to candidate header rows + suffixes on duplicate rows
+             ;; (header rows get filtered out).  Old vertico +
+             ;; vertico-group use the same protocol.
              (grouped (and (bound-and-true-p vertico-mode)
                            (or (boundp 'vertico--groups)
                                (boundp 'vertico-group--groups))))
              (grouped-pair (and grouped
                                 (dsh-emacs--model-grouped-collection
                                  candidates)))
-             ;; provider 头行 + 缩进的模型行（头行 payload 是 (:header . NAME)）
+             ;; Provider header row + indented model rows (header
+             ;; payload is (:header . NAME))
              (entries (if grouped (cdr grouped-pair)
                         (dsh-emacs--model-entries candidates)))
              (collection (if grouped (car grouped-pair) entries))
              (picked (minibuffer-with-setup-hook
-                         ;; 模型选择器内局部关闭 vertico 的排序（防止候选被重排），
-                         ;; 兜底预选设为首行（vertico preselect 只支持 prompt/first）。
-                         ;; 必须是求值成函数对象的表达式：Emacs 31 的宏会
-                         ;; (funcall (eval SETUP))，直接传函数调用会把它
-                         ;; 的返回值当函数调用（见 dsh-emacs--model-select-setup-hook）
+                         ;; Locally disable vertico's sorting inside the model
+                         ;; picker (so candidates are not reordered) and set the
+                         ;; fallback preselect to the first row (vertico preselect
+                         ;; supports only prompt/first).  Must be an expression
+                         ;; evaluating to a function object: Emacs 31's macro does
+                         ;; (funcall (eval SETUP)), and passing a function call
+                         ;; directly makes it call the return value (see
+                         ;; dsh-emacs--model-select-setup-hook).
                          (lambda () (dsh-emacs--model-select-setup-hook grouped))
-                         ;; 不传 DEF：vertico 会把默认项搬到列表最前，当前模型就会
-                         ;; 脱离自己的分组、永远占首行。空 RET 由下方 "" 分支处理
-                         ;; （保持当前模型），乱输入由 assoc 校验兜底。
+                         ;; No DEF: vertico moves the default to the front of the
+                         ;; list, which would pull the current model out of its
+                         ;; group and pin it to the first row forever.  An empty
+                         ;; RET is handled by the "" branch below (keep the
+                         ;; current model); garbage input is caught by the assoc
+                         ;; check.
                           (completing-read
                            (format "Select model%s: "
                                    (if current-model
@@ -3060,7 +3152,8 @@ the filter as \"error in process filter: Quit\"."
                      "Kept the current model")))
          ((not (assoc picked entries))
           (message "Unknown model: %s" picked))
-         ;; 选中 provider 头行（不是模型）→ 提示后不切换
+         ;; A provider header row (not a model) was picked →
+         ;; message and do not switch
          ((eq :header (car (cdr (assoc picked entries))))
           (message "That is a provider header — pick a model below it"))
          (t
@@ -3068,10 +3161,12 @@ the filter as \"error in process filter: Quit\"."
                  (model (nth 0 chosen))
                  (provider (nth 1 chosen))
                  (reasoning (nth 4 chosen))
-                 ;; 第二层：目标模型声明了 reasoning 选项才问 effort。
-                 ;; 重选当前模型 → 保持其现行 reasoningEffort；其他模型
-                 ;; → 目录 defaultEffort（无则第一个）。RET/vertico 预选
-                 ;; 即默认，C-g 冒泡到外层统一“取消”。
+                 ;; Second layer: ask for effort only when the target
+                 ;; model declares reasoning options.  Re-picking the
+                 ;; current model → keep its live reasoningEffort; other
+                 ;; models → the catalog defaultEffort (or the first one).
+                 ;; RET/the vertico preselect takes the default; C-g
+                 ;; bubbles to the outer handler for a uniform "cancel".
                  (effort-id (and reasoning
                                  (dsh-emacs--model-pick-effort
                                   model
@@ -3090,14 +3185,17 @@ the filter as \"error in process filter: Quit\"."
                 (if ok2
                     (progn
                       (dsh-emacs-modeline-set-model model)
-                      ;; 选中行自带所属 provider：同 id 跨 provider 时
-                      ;; mode-line 的 model 段靠它消歧（tooltip 显示）。
+                      ;; The chosen row carries its provider: for the same
+                      ;; id across providers, the mode-line model segment
+                      ;; uses it to disambiguate (shown in the tooltip).
                       (dsh-emacs-modeline-set-provider provider)
                       (dsh-emacs-modeline-set-effort effort-id)
-                      ;; 模型切换后立即刷新会话列表：旧模型的
-                      ;; contextPressure 快照不再可信，需拉新模型的同一投影
-                      ;; 快照（mode-line ctx% 的 pressure+window 一并更新成对）。
-                      ;; 直接走内部 fetch（纯 RPC），不进 server-start/事件恢复。
+                      ;; Refresh the session list right after the model switch:
+                      ;; the old model's contextPressure snapshot is no longer
+                      ;; trustworthy, so fetch the same projection snapshot for
+                      ;; the new model (the mode-line ctx% pressure+window pair
+                      ;; updates together).  Go straight through the internal
+                      ;; fetch (pure RPC), not server-start/event recovery.
                       (dsh-emacs-list-sessions--fetch)
                       (message "Model switched to %s (%s)%s"
                                (nth 3 chosen) (nth 2 chosen)
@@ -3498,7 +3596,7 @@ assistant message."
         (dsh-emacs-modeline-update)))))
 
 ;;; ---------------------------------------------------------------------------
-;;;  主入口
+;;;  Main entry point
 ;;; ---------------------------------------------------------------------------
 
 ;;;###autoload
@@ -3519,42 +3617,61 @@ This is the main entry command of dsh-emacs."
                             (message "dsh service unreachable: %S" value)))))
 
 ;; ---------------------------------------------------------------------------
-;;  用户提问/审批 waterfall（$events）应答
+;;  User question/approval waterfall ($events) responses
 ;; ---------------------------------------------------------------------------
-;; dsh 的 `ask' 工具与沙箱审批通过核心连接的 `$events' 流推送 waterfall
-;; 帧：`user-questions/request'（提问）与 `approval/request'（审批）。每个
-;; waterfall 带宿主分发的 `eventId'，客户端读取用户的选择/决定后以一元
-;; 端点 POST /api/$events/result 回 outcome（args {clientId, eventId,
-;; outcome}，clientId 来自 `$events' 的 ready 帧）。outcome.kind ∈
-;; result（携带 value）/ next（交给下一个接单者）/ rejected（携 error）。
+;; dsh's `ask' tool and sandbox approvals push waterfall frames
+;; over the core connection's `$events' stream:
+;; `user-questions/request' (questions) and `approval/request'
+;; (approvals).  Each waterfall carries a host-assigned `eventId';
+;; after reading the user's choice/decision the client answers
+;; with an outcome via the unary endpoint POST /api/$events/result
+;; (args {clientId, eventId, outcome}, where clientId comes from
+;; the `$events' ready frame).  outcome.kind ∈ result (with a
+;; value) / next (handed to the next taker) / rejected (with an
+;; error).
 ;;
-;; 提问 answer value = {answers: [{id, selected: string[], custom?}]}
-;; （selected 用 vector，custom-only 时为空数组）。逐字对齐宿主的校验规则：
-;; 单选用一个 label 或 custom（二选一），多用 label 集合 + 可选 custom，
-;; 无选项问题只能给 custom，且 answers 必须覆盖整帧。审批 answer value =
-;; ApprovalOutcome 字符串：`allowed-once' 或 `rejected'（拒绝是默认——C-g/
-;; ESC 也按拒绝应答，不回决定宿主会一直阻塞在 pending 审批上）。
+;; Question answer value = {answers: [{id, selected: string[],
+;; custom?}]} (selected is a vector; empty when custom-only).
+;; Match the host's validation rules exactly: single-select takes
+;; one label or a custom (either/or), multi-select takes a set of
+;; labels + optional custom, an option-less question can only give
+;; a custom, and answers must cover the whole frame.  Approval
+;; answer value = an ApprovalOutcome string: `allowed-once' or
+;; `rejected' (rejection is the default — C-g/ESC answers with
+;; rejection too; sending no decision leaves the host blocked
+;; forever on the pending approval).
 ;;
-;; 交互方式：逐题在 MINIBUFFER 中一次读完——选项作为 completion 候选（带
-;; 序号），多选用逗号分隔；不匹配任何选项的文字就是答案，空输入跳过该题。
-;; 提示语带 Question N/M 序号，全部答完一次性回 outcome。
-;; 跳过某题只走 `dsh-emacs-question-skip-key' 快捷键 = 该题以空 selected
-;; 覆盖（dsh web 的逐题 Skip），其余照答；无选项问题的空输入也跳过该题。
-;; C-g 放弃整组问题：回 outcome.kind `rejected' 且携带 error body
-;; （name/message，镜像旧协议保留的 cancelled 意图）——宿主把该 ask 撤销、
-;; ask 工具调用随之中止；旧行为（完全不应答）会让宿主永久 pending、
-;; 回合卡死。
+;; Interaction: read every question in the MINIBUFFER in one pass —
+;; options are completion candidates (numbered), multi-select is
+;; comma-separated; text that matches no option is itself the
+;; answer, and empty input skips the question.  Prompts carry the
+;; Question N/M number; once all are answered, one outcome is
+;; returned for the batch.
+;; Skipping one question uses only the `dsh-emacs-question-skip-key'
+;; shortcut = that question is overridden with an empty selected
+;; (dsh web's per-question Skip); the rest are answered normally.
+;; Empty input on an option-less question also skips it.
+;; C-g abandons the whole batch: it returns outcome.kind `rejected'
+;; with an error body (name/message, mirroring the cancelled intent
+;; kept by the old protocol) — the host withdraws the ask and the
+;; ask tool call aborts; the old behavior (no answer at all) left
+;; the host pending forever and the turn stuck.
 ;;
-;; 每个 waterfall 代（每次 $events 重连生成新的 ready/clientId）：本端在
-;; 新 ready 到达时把上一代 pending 的帧整体退役（不再应答——旧 clientId
-;; 的 result 是 no-op）；宿主取消一个 waterfall（cancel 帧或会话结束）时
-;; 按 eventId 退役未决帧。
+;; Per waterfall generation (each $events reconnect mints a new
+;; ready/clientId): when a new ready arrives this side retires all
+;; pending frames of the previous generation (no answer — the old
+;; clientId's result is a no-op); when the host cancels a waterfall
+;; (cancel frame or session end) the pending frame is retired by
+;; eventId.
 ;;
-;; minibuffer 是全局唯一资源：多个会话同时活跃时，回答一帧的途中其它
-;; 流仍会继续到达 waterfall。帧进入全局 FIFO 队列，同一时刻只回答一帧
-;; （否则嵌套 completing-read 会把不同会话的提示叠进同一个 minibuffer、
-;; 相互覆盖）；提示语带所属会话的标识（聊天缓冲名，如 [dsh-<标题>]），
-;; 让用户知道问题来自哪个会话。
+;; The minibuffer is a single global resource: with several
+;; sessions live, other streams keep delivering waterfalls while
+;; one frame is being answered.  Frames enter a global FIFO queue
+;; and only one is answered at a time (nested completing-read calls
+;; would stack different sessions' prompts in the same minibuffer
+;; and overwrite each other); prompts carry the owning session's
+;; identifier (the chat buffer name, e.g. [dsh-<title>]) so the user
+;; knows which session asked.
 
 (defvar dsh-emacs--question-queue nil
   "Pending `user-questions/request' waterfalls awaiting the single
@@ -4054,21 +4171,21 @@ them."
   (message "Preview answers: %S"
            (dsh-emacs--collect-question-answers
             (list (dsh-emacs--question-preview-item
-                   "preview-1" "这次更新需要包含哪些内容？"
-                   "多选：可以选多项（2,3），也可以直接写自己的答案。"
+                   "preview-1" "What should this update include?"
+                   "Multi-select: pick several (2,3), or type your own answer."
                    t
-                   '(("交互界面" . "在附近显示当前选项的说明。")
-                     ("回归测试" . "验证多选、自由输入与退出清理。")
-                     ("使用文档" . "更新使用说明和决策记录。")))
+                   '(("UI" . "Show the current option's description here.")
+                     ("Regression tests" . "Cover multi-select and free text.")
+                     ("Docs" . "Update usage notes and the decision record.")))
                   (dsh-emacs--question-preview-item
-                   "preview-2" "改动怎么验证？"
-                   "单选：选一个选项，或者写自己的答案。"
+                   "preview-2" "How should the change be verified?"
+                   "Single select: pick one option, or type your own answer."
                    nil
-                   '(("跑一遍 scripts/verify.sh" . "括号、单测、编译一起过。")
-                     ("只在 GUI 里点一遍" . "手动走一遍交互路径。")))
+                   '(("Run scripts/verify.sh" . "Parens, tests, compile pass.")
+                     ("Click through the GUI only" . "Walk the path by hand.")))
                   (dsh-emacs--question-preview-item
-                   "preview-3" "还有什么要补充的？"
-                   "没有选项：空输入跳过，文字即答案。"
+                   "preview-3" "Anything else to add?"
+                   "No options: empty input skips, text is the answer."
                    nil nil)))))
 
 (defun dsh-emacs--question-requested (chat event-id session-id questions)
@@ -4167,22 +4284,29 @@ aborted from here — its stale answer is likewise a no-op)."
         dsh-emacs--approval-queue nil))
 
 ;; ---------------------------------------------------------------------------
-;;  用户审批（approval/request）应答
+;;  User approval (approval/request) responses
 ;; ---------------------------------------------------------------------------
-;; 沙箱工具的越界请求通过核心连接的 `$events' 流推送 `approval/request'
-;; waterfall：bash/fs 等工具要访问 workspace 之外的文件时，宿主先征询
-;; 用户的许可（dsh web 的 ApprovalPanel 同一协议）。客户端必须展示请求
-;; （toolName + justification reason）、读取用户的 approve/reject 决定，
-;; 并以一元端点 POST /api/$events/result 回 outcome（value = ApprovalOutcome
-;; 字符串：客户端只给 "allowed-once" | "rejected"；wire 上没有 approvalId）。
+;; Out-of-bounds requests from sandboxed tools push
+;; `approval/request' waterfalls over the core connection's `$events'
+;; stream: when bash/fs and friends need files outside the workspace,
+;; the host first asks the user's permission (the same protocol as
+;; dsh web's ApprovalPanel).  The client must show the request
+;; (toolName + justification reason), read the user's approve/reject
+;; decision, and answer with an outcome via the unary endpoint POST
+;; /api/$events/result (value = ApprovalOutcome string: the client
+;; gives only "allowed-once" | "rejected"; the wire has no
+;; approvalId).
 ;;
-;; 交互方式：minibuffer y-or-n-p —— y/y 键 = 允许一次，n = 拒绝；C-g/ESC
-;; 同样按拒绝应答（客户端不回决定，宿主就会一直阻塞在 pending 审批上；
-;; 宿主已先 cancel 的 waterfall 其 result 为 no-op，静默丢弃）。minibuffer
-;; 是全局唯一资源：审批与提问共用同一把锁
-;; （`dsh-emacs--approval-active' / `dsh-emacs--question-active'，见上面的
-;; defvar），任一活跃时新帧入队串行，两个 drain 在各自队列清空时互相
-;; 接棒，绝不嵌套两个 minibuffer 提示。
+;; Interaction: minibuffer y-or-n-p — y/the y key = allow once, n =
+;; reject; C-g/ESC answers with rejection too (with no decision the
+;; client sends nothing and the host blocks forever on the pending
+;; approval; a waterfall the host already cancelled has a no-op
+;; result and is dropped silently).  The minibuffer is a single
+;; global resource: approvals and questions share one lock
+;; (`dsh-emacs--approval-active' / `dsh-emacs--question-active', see
+;; the defvars above); while either is active new frames queue up
+;; serially, and the two drains hand off to each other as their
+;; queues empty, never nesting two minibuffer prompts.
 
 (defun dsh-emacs--approval-command-line (call-id)
   "One-line summary of the tool call CALL-ID from the live transcript.

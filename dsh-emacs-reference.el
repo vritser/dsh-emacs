@@ -8,52 +8,64 @@
 
 ;;; Commentary:
 
-;; dsh web 的 `@' 指令：在输入区键入 `@' 弹出文件与会话引用菜单。本文件
-;; 是 dsh-emacs 的组合器一侧 —— 与 web 客户端共用一个 wire：
+;; dsh web's `@' directive: typing `@' in the input area pops a file and session
+;; reference menu.  This file is the composer side of dsh-emacs — it shares one
+;; wire with the web client:
 ;;
-;;   - `fileReferences/list'              工作区文件/目录路径提示（typert
-;;                                        Remote，HTTP POST /api/fileReferences/list）
+;;   - `fileReferences/list'              workspace file/directory path hints
+;;                                        (typert Remote, HTTP POST
+;;                                        /api/fileReferences/list)
 ;;   - `sessionReferenceResolver/candidates'
-;;                                       会话引用候选（带规范 mention 文本，
-;;                                       HTTP POST /api/sessionReferenceResolver/candidates）
+;;                                       session reference candidates (with
+;;                                       canonical mention text, HTTP POST
+;;                                       /api/sessionReferenceResolver/candidates)
 ;;
-;; 两者 payload 都是 {args: {agentId, query}}，走与 `commands.list' 相同的
-;; 信封。补全弹层的会话行显示短标签（`@label'，对齐 web 行），选择后在输入区
-;; 保留这条短 `@label' 文本并作原子 chip —— canonical 的
-;; `@[label](dsh-session:…)' 挂在 `dsh-emacs-reference-canonical' 文本属性上，
-;; 读输入（发送/历史）时把该 span 展开回完整 mention，`session.prompt' 收到的
-;; 仍是 host 产出的规范文本；送达后，服务端的 agent/pre-step 监听器负责解析
-;; mention、冻结源会话快照并注入
-;; 上下文（见 harness 的 dsh-session-reference 包）—— 快照逻辑全在 host，
-;; 本文件只做组合器，与 web 的 dsh-client-ui-reference 职责一致。
+;; Both payloads are {args: {agentId, query}} and ride the same envelope as
+;; `commands.list'.  The completion popup's session rows show a short label
+;; (`@label', matching web rows); a pick keeps that short `@label' text in the
+;; input area as an atomic chip — the canonical
+;; `@[label](dsh-session:…)' hangs off the `dsh-emacs-reference-canonical' text
+;; property, and reading the input (send/history) expands that span back into
+;; the full mention, so `session.prompt' still receives the host-produced
+;; canonical text; once delivered, the server's agent/pre-step listener parses
+;; the mention, freezes the source session snapshot and injects the context (see
+;; the harness's dsh-session-reference package) — all snapshot logic lives in
+;; the host, and this file is only the composer, mirroring the responsibility of
+;; web's dsh-client-ui-reference.
 ;;
-;; 语法与插入规则逐字对齐 web 的 grammar.ts（`dsh-emacs-reference--at-token'
-;; = activeAtToken，`dsh-emacs-reference--format-file-mention' =
-;; formatFileMention）：`@path' / `@"path with spaces' 令牌；含空格的路径
-;; 用引号形态；目录候选带尾斜杠并继续补全；含控制字符或引号的路径不可
-;; 表示、直接跳过；`@' 在其它令牌内部（如邮件地址）不是触发器。
+;; Syntax and insertion rules align token for token with web's grammar.ts
+;; (`dsh-emacs-reference--at-token' = activeAtToken,
+;; `dsh-emacs-reference--format-file-mention' = formatFileMention): `@path' /
+;; `@"path with spaces' tokens; paths containing spaces use the quoted form;
+;; directory candidates carry a trailing slash and keep completion open; paths
+;; containing control characters or quotes are unrepresentable and are skipped;
+;; `@' inside another token (an email address, say) is not a trigger.
 ;;
-;; 缓存语义（stale-while-revalidate，对应 web 的"失效后索引继续应答"决策）：
-;; 每个查询首次请求同步拉取两个 remote（与 slash 首次 TAB 的 catalog-sync
-;; 同款一次往返）。补全是协作式的（与 slash 同款）：dsh-emacs 只注册 capf、
-;; 把 "@" 贡献给用户已开启的 corfu-auto 触发器，从不自行驱动补全 UI。Corfu
-;; 用原生 completion table 负责每次编辑/退格的过滤；`dsh-emacs-reference--
-;; auto-complete'（`dsh-emacs-mode' 挂的 post-command）在 @ 令牌变化时后台
-;; 取 host 数据，供目录下钻等场景经 corfu 自己的 deferred 路径刷新/重开弹层。
-;; 非 Corfu（stock / vertico / icomplete）无自动通道，按 TAB 补全。输入永远
-;; 不会阻塞在网络往返上。
+;; Cache semantics (stale-while-revalidate, matching web's "keep answering from
+;; the stale index" decision): the first request for a query synchronously
+;; fetches both remotes (the same single round trip as slash's first-TAB
+;; catalog-sync).  Completion is cooperative (also like slash): dsh-emacs only
+;; registers the capf and contributes "@" to the corfu-auto trigger the user
+;; already enabled; it never drives the completion UI itself.  Corfu uses the
+;; native completion table to filter on each edit/backspace;
+;; `dsh-emacs-reference--auto-complete' (the post-command hooked by
+;; `dsh-emacs-mode') fetches host data in the background when the @ token
+;; changes, letting directory drill-down and friends refresh/reopen the popup
+;; through corfu's own deferred path.  Non-Corfu front-ends (stock / vertico /
+;; icomplete) have no auto channel and complete on TAB.  Input never blocks on a
+;; network round trip.
 ;;
-;; 提供：
-;;   - `dsh-emacs-reference--at-token'      输入区 `@path' / `@"path' 令牌解析
+;; Provides:
+;;   - `dsh-emacs-reference--at-token'      input-area `@path' / `@"path' token parsing
 ;;   - `dsh-emacs-reference--format-file-mention'
-;;                                         候选 → 提示文本（对齐 web 规则）
+;;                                          candidate → hint text (matches web rules)
 ;;   - `dsh-emacs-reference-completion-at-point'
-;;                                         `completion-at-point-functions' 入口
+;;                                         `completion-at-point-functions' entry
 ;;   - `dsh-emacs-reference-auto-trigger-setup'
-;;                                         协作式 "@" 自动触发（corfu）
-;;   - `dsh-emacs-reference--auto-complete' corfu 数据拉取 watcher（post-command）
-;;   - `dsh-emacs-reference-prefetch'       打开会话时预热裸查询缓存
-;;   - `dsh-emacs-reference'                M-x 菜单：completing-read 选引用
+;;                                         cooperative "@" auto-trigger (corfu)
+;;   - `dsh-emacs-reference--auto-complete' corfu data-fetch watcher (post-command)
+;;   - `dsh-emacs-reference-prefetch'       warm the bare-query cache when a session opens
+;;   - `dsh-emacs-reference'                M-x menu: completing-read picks a reference
 
 ;;; Code:
 
@@ -74,10 +86,11 @@
 (declare-function dsh-emacs--get-input "dsh-emacs.el" ())
 (declare-function dsh-emacs-server-ensure "dsh-emacs-server.el" ())
 
-;; dsh-emacs.el 的输入区域锚点（buffer-local），本模块只读借用
+;; dsh-emacs.el's input-area anchor (buffer-local), borrowed read-only here
 (defvar dsh-emacs--input-marker)
-;; corfu 的可选变量（corfu-auto-trigger 由 corfu-auto.el 定义）。前向声明只
-;; 为 byte-compile 干净；运行期用 `bound-and-true-p' / `boundp' 把关。
+;; Optional corfu variables (corfu-auto-trigger is defined by corfu-auto.el).
+;; The forward declarations only keep byte-compile quiet; at runtime they are
+;; gated with `bound-and-true-p' / `boundp'.
 (defvar corfu-auto)
 (defvar corfu-auto-trigger)
 
@@ -164,8 +177,9 @@ Set to nil to always keep the rows text-only."
   :group 'dsh-emacs-reference)
 
 ;; ---------------------------------------------------------------------------
-;; 缓存状态（buffer-local：每个聊天缓冲一份，mode 重入时随
-;; `kill-all-local-variables' 清空，重开会话由 prefetch 重新预热）
+;; Cache state (buffer-local: one per chat buffer; cleared with
+;; `kill-all-local-variables' on mode re-entry, and re-warmed by prefetch when
+;; a session reopens)
 ;; ---------------------------------------------------------------------------
 
 (defvar-local dsh-emacs--reference-candidates nil
@@ -209,7 +223,7 @@ De-dup for the data-fetch watcher: a changed query re-fetches, so
 keystrokes while an @ reference is in progress keep the cache warm.")
 
 ;; ---------------------------------------------------------------------------
-;; 语法（对齐 web 的 packages/context/file-reference/src/grammar.ts）
+;; Syntax (aligned with web's packages/context/file-reference/src/grammar.ts)
 ;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-reference--at-token (start end)
@@ -262,7 +276,7 @@ user's own quote stays open)."
          (t (concat "@\"" path "\"")))))))
 
 ;; ---------------------------------------------------------------------------
-;; 候选归一化（wire 数组 → 缓存条目）
+;; Candidate normalization (wire array → cache entries)
 ;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-reference--collect-files (value)
@@ -333,7 +347,7 @@ Each group keeps its host order; a non-nil configured cap truncates it."
             sessions)))
 
 ;; ---------------------------------------------------------------------------
-;; 拉取状态机
+;; Fetch state machine
 ;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-reference--fetch-query (session-id query)
@@ -466,9 +480,11 @@ so the next trigger retries."
    (t nil)))
 
 ;; ---------------------------------------------------------------------------
-;; corfu 数据拉取 watcher：@ 候选按 query 动态来自 host（与 slash 的静态目录
-;; 不同）。watcher 只在 @ 令牌变化时后台取数，popup 由 corfu 触发器 / 异步刷新
-;; 打开；dsh-emacs 从不自行驱动补全 UI（见 `dsh-emacs-mode' 的挂接）。
+;; corfu data-fetch watcher: @ candidates come from the host dynamically per
+;; query (unlike slash's static catalog).  The watcher only fetches in the
+;; background when the @ token changes, and the popup is opened by the corfu
+;; trigger / async refresh; dsh-emacs never drives the completion UI itself (see
+;; the hookup in `dsh-emacs-mode').
 ;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-reference--active-token ()
@@ -487,18 +503,23 @@ QUOTED), see `dsh-emacs-reference--at-token'."
     (let ((token (dsh-emacs-reference--at-token
                   (marker-position dsh-emacs--input-marker) (point))))
       (and token
-           ;; 完成的规范 mention 文本（host 会把标签里的 `\` 与 `]` 转义成
-           ;; `\\` / `\]`，口径见 harness 的 formatSessionReferenceMention）：
-           ;; 标签区 = 任意个 (转义对 `\X` | 非 `]` 非 `\` 字符)，然后收尾
-           ;; `](dsh-session:<base64url>)`。
+           ;; Completed canonical mention text (the host escapes `\` and `]`
+           ;; in the label as `\\` / `\]`; see the harness's
+           ;; formatSessionReferenceMention for the exact convention):
+           ;; label area = any number of (escape pair `\X` | a char that is
+           ;; neither `]` nor `\`), then the closing
+           ;; `](dsh-session:<base64url>)`.
            (not (string-match-p
                  "\\`@\\[\\(?:\\\\.\\|[^]\\\\]\\)*\\](dsh-session:[A-Za-z0-9_-]+)\\'"
                  (nth 0 token)))
-           ;; 完成的 file 引用是 buffer 里的原子 chip：它没有 session 那种
-           ;; canonical 形态可排除，但其文本 `@path' 仍会被 @-token grammar 认成
-           ;; active token。若 token 起点落在 chip 上说明是"已完成引用"，不是新
-           ;; 在敲的 token —— 否则光标回到上个引用旁就会触发 watcher 按该引用
-           ;; 的路径重新拉取、把候选缓存再次窄化（下一次 @ 只剩上个的候选）。
+           ;; A completed file reference is an atomic chip in the buffer: it
+           ;; has no session-style canonical form to exclude, but its `@path'
+           ;; text is still recognized as an active token by the @-token
+           ;; grammar.  A token whose start falls on a chip is a "completed
+           ;; reference", not a token being typed — otherwise moving the cursor
+           ;; back beside a previous reference would make the watcher re-fetch
+           ;; by that reference's path and narrow the candidate cache again (the
+           ;; next @ would only offer the previous one's candidates).
            (not (and (>= (point) (length (nth 0 token)))
                      (get-text-property
                       (- (point) (length (nth 0 token)))
@@ -574,7 +595,7 @@ buffer still owns SESSION-ID.  Returns nil."
                (dsh-emacs-reference--fetch-query session-id "")))))))))
 
 ;; ---------------------------------------------------------------------------
-;; 补全 UI 侧
+;; Completion UI side
 ;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-reference--session-rows ()
@@ -844,14 +865,19 @@ nil outside the input area or when the token is not an @ reference."
                                      ;; UIs such as vertico/corfu.
                                      :display-sort-function
                                      #'identity)))
-                    ;; 不提供 `:company-kind'：nerd-icons-corfu / kind-icon 的
-                    ;; margin formatter 对 `:fn' 型条目（file/folder）会做
-                    ;; (propertize icon 'face 映射face)，把 nerd-font 字体族从
-                    ;; `face' 属性剥掉（只剩 font-lock-face，显示按 `face' 解析）
-                    ;; —— PUA 字形落到默认字体 → 乱码；静态 codicon 条目（如
-                    ;; slash 菜单的 command）不受影响。图标一律由本模块的
-                    ;; `:affixation-function' 列自绘（字体族保留），无 kind 时
-                    ;; margin formatter 整体停用、prefix 列不被覆盖。
+                    ;; `:company-kind' is deliberately not provided: for
+                    ;; `:fn'-style entries (file/folder) the margin formatter of
+                    ;; nerd-icons-corfu / kind-icon does
+                    ;; (propertize icon 'face mapped-face), stripping the
+                    ;; nerd-font family out of the `face' property (only
+                    ;; font-lock-face survives, and display resolves via `face')
+                    ;; — PUA glyphs then fall back to the default font →
+                    ;; mojibake; static codicon entries (the slash menu's
+                    ;; command, say) are unaffected.  Icons are always drawn by
+                    ;; this module's own `:affixation-function' column (the font
+                    ;; family is preserved); without a kind the margin formatter
+                    ;; is disabled wholesale and the prefix column is not
+                    ;; overridden.
                     (apply #'list start pos table
                            (append props
                                    (list :exit-function
@@ -860,8 +886,9 @@ nil outside the input area or when the token is not an @ reference."
                                             cand status rows)))))))))))))))
 
 ;; ---------------------------------------------------------------------------
-;; @ 引用渲染：transcript / 输入行把完成的 mention 显示成彩色可点击链接
-;; (canonical mention 仍是 buffer/上发的原文，这里只加显示与跳转属性)。
+;; @ reference rendering: transcript / input lines show completed mentions as
+;; colored clickable links (the canonical mention is still the buffer/sent
+;; source text; only display and jump properties are added here).
 ;; ---------------------------------------------------------------------------
 
 (defvar dsh-emacs-reference--mention-keymap
@@ -1085,12 +1112,15 @@ The reference data rides the `dsh-emacs-reference-ref' text property set by
       (dsh-emacs-reference--open-ref (car ref) (cdr ref)))))
 
 ;; ---------------------------------------------------------------------------
-;; Composer 原子 chip：完成的 session mention 在 buffer 存短 `@label' 文本，
-;; canonical 原文（上发需要的 `@[label](dsh-session:…)'）挂
-;; `dsh-emacs-reference-canonical' 文本属性；读输入（发送/历史）前由
-;; `dsh-emacs-reference--expanded-text' 展开回完整 mention。不再用 `display'
-;; 折叠 —— buffer 文本即所见文本，编辑守卫作用于短文本、无折叠几何问题。
-;; file chip 的 `@path' 本就是 wire 文本，无 canonical 属性、展开为恒等。
+;; Composer atomic chip: a completed session mention stores the short `@label'
+;; text in the buffer, while the canonical source (the `@[label](dsh-session:…)'
+;; needed for sending) hangs off the `dsh-emacs-reference-canonical' text
+;; property; `dsh-emacs-reference--expanded-text' expands it back into the full
+;; mention before the input is read (send/history).  `display' folding is no
+;; longer used — the buffer text is the visible text, and the editing guards act
+;; on the short text with no fold geometry to worry about.  A file chip's
+;; `@path' is wire text already, so it has no canonical property and expands to
+;; itself.
 ;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-reference--session-chip (start end canonical)
@@ -1258,7 +1288,7 @@ style from bleeding onto following typed text."
 
 
 ;; ---------------------------------------------------------------------------
-;; M-x 入口
+;; M-x entry point
 ;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-reference--display-pairs ()
@@ -1338,7 +1368,8 @@ with the formatted mention.  Requires a chat buffer with a session."
         (message "Reference candidates are still loading…")))))
 
 ;; ---------------------------------------------------------------------------
-;; 协作式自动触发（与 slash 同款：只贡献触发器字符，不启用前端自动模式）
+;; Cooperative auto-trigger (same as slash: contributes a trigger character
+;; only, never enables a front-end's auto mode)
 ;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-reference-auto-trigger-setup ()

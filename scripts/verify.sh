@@ -1,23 +1,30 @@
 #!/bin/sh
-# verify.sh --- 一键机检 "Definition of done"（AGENTS.md "Verification" 的聚合出口）
-# 用法: 从仓库根运行 scripts/verify.sh；全部通过 exit 0，任一失败 exit 1。
-# 覆盖全部可机器检查的步骤：
-#   1. check-lisp 全量（dsh-check:files 默认列表）
-#   2. checker 自测（test/check-lisp-test.el）
-#   3. 生产文件 byte-compile（Error 计 FAIL；"reference to free variable" 也计
-#      FAIL——它是"代码引用了不存在的变量"，正是 docstring 里裸引号提前结束
-#      字符串时的症状，读级 check-lisp 查不出来；其余 Warning（docstring 宽度、
-#      未声明的外部包函数等）按 AGENTS.md 纪律忽略。有意的跨模块引用用
-#      defvar/declare-function 声明即可消除。.elc 产物重定向到临时目录，
-#      绝不落进仓库树）
-#   4. 主测试套件（test/dsh-test.el）
-#   5. 干净加载：emacs -Q --batch -L . -l dsh-emacs.el 必须无输出且 exit 0
-#   6. git diff HEAD --check（空白错误；仅覆盖已跟踪文件）
-#   7. 树内 junk 扫描（*.elc / 备份 / 自动保存 / 锁文件 / .DS_Store）
-# 不可机检、依赖人工/环境的部分不在此脚本内：
-#   - "review git diff" 的实质审阅（不只看空白）
-#   - "不自动提交"（由 harness 的 auto-commit 禁用保证，不是本文档承诺）
-# 任一 FAIL 即非零退出——跑完才能说 definition of done 达成。
+# verify.sh --- one-shot machine check for "Definition of done" (the aggregate
+# exit of AGENTS.md "Verification")
+# Usage: run scripts/verify.sh from the repository root; exit 0 when all pass,
+# exit 1 if anything fails.
+# Covers every machine-checkable step:
+#   1. check-lisp over the whole default dsh-check:files list
+#   2. checker self-tests (test/check-lisp-test.el)
+#   3. byte-compile of the production files (Errors count as FAIL;
+#      "reference to free variable" does too -- it means "code references a
+#      variable that does not exist", exactly the symptom of an unescaped
+#      quote in a docstring closing the string early, which the read-level
+#      check-lisp cannot see; other Warnings (docstring width, undeclared
+#      functions from external packages, ...) are ignored per AGENTS.md
+#      discipline.  Intentional cross-module references are silenced with
+#      defvar/declare-function declarations.  .elc artifacts are redirected
+#      to a temp directory and never land in the repo tree)
+#   4. main test suite (test/dsh-test.el)
+#   5. clean load: emacs -Q --batch -L . -l dsh-emacs.el must print nothing and exit 0
+#   6. git diff HEAD --check (whitespace errors; tracked files only)
+#   7. junk scan in the tree (*.elc / backups / autosaves / lock files / .DS_Store)
+# Steps that are not machine-checkable and need a human/environment are not in
+# this script:
+#   - the substantive part of "review git diff" (not just whitespace)
+#   - "do not auto-commit" (guaranteed by the harness auto-commit disable, not
+#     a promise of this document)
+# Any FAIL exits nonzero -- only a full pass means definition of done is met.
 
 set -u
 cd "$(dirname "$0")/.." || { echo "verify: cannot cd to repo root" >&2; exit 1; }

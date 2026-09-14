@@ -224,10 +224,12 @@ socket; the caller opens its specific stream (a chat's
            (request (concat
                      (format "GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\nOrigin: %s\r\n"
                              path host-header key origin)
-                     ;; nginx basic auth 下握手必须带认证头，否则 401 拒绝、
-                     ;; 实时事件流（mux/host）全部断连。
+                     ;; Under nginx basic auth the handshake must carry the
+                     ;; auth header, or 401 rejections drop every live mux/host
+                     ;; stream.
                      (if auth (format "%s: %s\r\n" (car auth) (cdr auth)) "")
-                     ;; 0.1.2-rc.1+ 的浏览器会话认证：握手必须带 dsh-auth-* cookie。
+                     ;; Browser session auth since 0.1.2-rc.1+: the handshake
+                     ;; must carry the dsh-auth-* cookie.
                      (if cookie (format "Cookie: %s\r\n" cookie) "")
                      "\r\n")))
       (process-send-string process request))))
