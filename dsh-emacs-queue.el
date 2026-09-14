@@ -623,8 +623,10 @@ is what makes the keys win."
 
 (defun dsh-emacs-queue--chooser-setup-hook ()
   "Queue-menu minibuffer setup: stable candidate order (no completion
-re-sort), first entry preselected, single-key map mounted.  Same as the
-question chooser's setup — because `minibuffer-with-setup-hook'
+re-sort), first entry preselected, single-key map mounted.  Unlike the
+question reader, which pins its order with collection sort metadata, this
+menu pins the frontend's own sort variable — its candidates are queue
+labels with no position to carry.  Because `minibuffer-with-setup-hook'
 prepends, this hook runs AFTER vertico's and its `use-local-map' wins.
 Returns nil explicitly — `minibuffer-with-setup-hook' funcalls the
 setup value."

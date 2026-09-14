@@ -97,6 +97,11 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **`ask` option lists keep the question's order**: the numbered candidates
+  now carry identity sort metadata, so a completion frontend no longer
+  re-ranks them by history, length, and alphabet (which scrambled the
+  numbers, differently from one question to the next).
+
 - **The code-block scan no longer hangs at the end of the transcript**: it
   read `next-single-property-change`'s limit return as a real block and
   looped forever at `point-max` when the buffer held no code block;

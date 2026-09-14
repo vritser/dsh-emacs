@@ -7797,6 +7797,31 @@ symbol or an ordered list."
       (equal "Proceed? (a name or your own text; empty = skip): "
              prompt))))
 
+;; 候选顺序 = 题目选项原序：编号项（"1. …"）的编号就是顺序，补全前端不得
+;; 重排。collection 带 `display-sort-function'/`cycle-sort-function' 恒等
+;; metadata 才做得到 —— 否则 vertico 默认按 history/长度/字母重排（多题时
+;; 同一批问题的列表顺序还会各不相同）。CRM 把这个 metadata 经
+;; `crm-completion-table' 透传给前端的 collection（`crm--collection-fn'），
+;; 所以断言要经过它取，才覆盖前端真正看到的那张表。
+(let ((seen 'unset))
+  (cl-letf (((symbol-function 'completing-read-multiple)
+             (lambda (_prompt collection &rest _)
+               (setq seen collection)
+               '("2. Alpha"))))
+    (dsh-emacs--question-choice
+     '((id . "q-order") (question . "Pick?") (multiSelect . t)
+       (options . (((label . "Zulu")) ((label . "Alpha"))
+                   ((label . "Mike"))))))
+    (let* ((crm-completion-table seen)
+           (metadata (completion-metadata "" #'crm--collection-fn nil)))
+      (dsh-test-assert "question-reader-pins-option-order"
+        (eq #'identity
+            (completion-metadata-get metadata 'display-sort-function))
+        (eq #'identity
+            (completion-metadata-get metadata 'cycle-sort-function))
+        (equal '("1. Zulu" "2. Alpha" "3. Mike")
+               (all-completions "" #'crm--collection-fn nil))))))
+
 ;; 帧级：一题正常作答 + 一题跳过 → answers 覆盖整帧（跳过的题空 selected）。
 (let ((picks '(("1. Yes") nil)))
   (cl-letf (((symbol-function 'completing-read-multiple)
@@ -8053,7 +8078,9 @@ symbol or an ordered list."
                                     (cons 'question "B asks?")
                                     (cons 'options
                                           (list (list (cons 'label "Only"))))))))
-                     (list (car candidates)))))
+                     ;; COLLECTION 是补全表（读序 metadata），按 UI 的方式取
+                     ;; 第一项，不直接解构。
+                     (list (car (all-completions "" candidates))))))
           ;; 先来 A 帧（空闲 → 直接进入回答槽）；A 回答途中 B 帧排队。
           ;; questions 形状与事件分发一致：一串 question alist
           ;; （wire 上是数组，这里直接给 list）。
@@ -8538,7 +8565,8 @@ symbol or an ordered list."
                   ((symbol-function 'dsh-emacs--events-result-async)
                    (lambda (&rest _) nil))
                   ((symbol-function 'completing-read-multiple)
-                   (lambda (_prompt candidates &rest _) (list (car candidates))))
+                   (lambda (_prompt candidates &rest _)
+                     (list (car (all-completions "" candidates)))))
                   ((symbol-function 'read-string)
                    (lambda (&rest _) "free answer"))
                   ((symbol-function 'dsh-emacs--approval-prompt)

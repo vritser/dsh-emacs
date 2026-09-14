@@ -3730,13 +3730,22 @@ an empty answer.  `require-match' is nil on purpose: the answer is typed
 text, so an empty minibuffer must stay empty (a mandatory match lets a
 frontend turn a bare RET into its preselected candidate) and an unknown
 value is better treated as a free-text answer than rejected.  C-g
-propagates."
+propagates.
+The candidates carry identity sort metadata: the number in a candidate is
+its position in the question, so a frontend must not reorder the list (the
+default ranking is by history, length and alphabet, which scrambles the
+numbered items and differs from question to question).  CRM hands the
+collection on to the frontend through `crm--collection-fn', which passes
+this metadata through."
   (catch 'dsh-emacs--question-command
     (minibuffer-with-setup-hook #'dsh-emacs--question-reader-setup
       (completing-read-multiple
        (concat dsh-emacs--question-where dsh-emacs--question-text
                (or dsh-emacs--question-hint "") ": ")
-       (dsh-emacs--question-pick-labels labels)
+       (completion-table-with-metadata
+        (dsh-emacs--question-pick-labels labels)
+        '((display-sort-function . identity)
+          (cycle-sort-function . identity)))
        nil nil nil nil nil))))
 
 (defun dsh-emacs--question-choose (labels)
