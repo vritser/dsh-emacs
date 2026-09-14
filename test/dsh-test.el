@@ -4787,6 +4787,20 @@ symbol or an ordered list."
             (dsh-test-pass "copy-code-block-errors-outside"))))
     (kill-buffer buf)))
 
+;; The scan must stop at point-max: no code block there is not a code block.
+(let ((buf (generate-new-buffer " *dsh-copy-block-max*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (insert "plain transcript text\n")
+        (goto-char (point-max))
+        (dsh-test-assert "copy-code-block-errors-at-point-max"
+          (equal "Point is not inside a code block"
+                 (condition-case e
+                     (progn (dsh-emacs-copy-code-block) nil)
+                   (user-error (error-message-string e))))))
+    (kill-buffer buf)))
+
 ;; --- 测试 50: fork 会话 ---
 (let ((opened nil)
       (listed nil)

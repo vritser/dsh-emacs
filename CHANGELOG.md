@@ -81,6 +81,12 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **The code-block scan no longer hangs at the end of the transcript**: it
+  read `next-single-property-change`'s limit return as a real block and
+  looped forever at `point-max` when the buffer held no code block;
+  `dsh-emacs-copy-code-block` now stops at the limit and reports
+  `Point is not inside a code block`.
+
 - **HTTPS RPC calls can authenticate on demand**: obtaining or renewing the
   session cookie during an RPC now uses an independent GET request. The token
   exchange no longer inherits the RPC's POST method, body, or headers, which

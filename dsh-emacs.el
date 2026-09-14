@@ -3192,9 +3192,13 @@ part of the body (RET on the label already copies there)."
                            (point)
                          (next-single-property-change (point) prop nil
                                                       (point-max)))))
-            (if (null start)
+            ;; `next-single-property-change' returns its LIMIT, not nil, when
+            ;; the property never occurs; treat that as "no block left" or the
+            ;; loop below spins forever at `point-max'.
+            (if (or (null start) (>= start (point-max)))
                 (throw 'found nil)
-              (let ((end (or (next-single-property-change start prop)
+              (let ((end (or (next-single-property-change start prop nil
+                                                          (point-max))
                              (point-max))))
                 (cond
                  ((<= start pos)
