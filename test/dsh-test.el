@@ -3269,6 +3269,107 @@ Lets a test drive a malformed content value through the result path."
       (not (string-match-p
             (regexp-quote "[killed by signal: SIGTERM]") body)))))
 
+;; Background-job cards: the Host's trailing `[status: ...]' line becomes a
+;; state-colored footer, `job_list' and `job_kill' render their result as
+;; rows, and the argument JSON is never repeated (the row header already
+;; carries the job id).
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event
+    1 "j1" "job_output" "{\"job_id\":\"bash-7\",\"wait\":true}"))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event
+    2 "j1" nil nil "step one\nstep two\n[status: running]"))
+  (let ((body (dsh-emacs-test--tool-block-text
+               (dsh-emacs-render--make-namespace) "tool-j1")))
+    (dsh-test-assert "tool-job-output-card"
+      (eq 'success (plist-get (dsh-emacs-render--tool-state "j1") :state))
+      (string-match-p "step one" body)
+      (string-match-p (regexp-quote "[status: running]") body)
+      (not (string-match-p "job_id" body))
+      (not (string-match-p "^OUT$" body)))))
+
+;; The Host calls an exited background command completed even when its exit
+;; code is nonzero.  The footer must distinguish that failure from exit 0.
+(dolist (case '(("completed, exit code: 0" dsh-emacs-tool-success-face)
+                ("completed, exit code: 2" dsh-emacs-tool-error-face)
+                ("completed, exit code: -1" dsh-emacs-tool-error-face)
+                ("completed" dsh-emacs-tool-success-face)))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (setq-local dsh-emacs-tool-expand-by-default t)
+    (dsh-emacs-render-tool-call
+     (dsh-emacs-test--tool-call-event
+      1 "job-exit" "job_output" "{\"job_id\":\"bash-7\"}"))
+    (let ((footer (format "[status: %s]" (car case))))
+      (dsh-emacs-render-tool-result
+       (dsh-emacs-test--tool-result-event
+        2 "job-exit" nil nil (concat "command output\n" footer)))
+      (let* ((text (buffer-string))
+             (pos (string-match (regexp-quote footer) text)))
+        (dsh-test-assert (format "tool-job-output-footer-%s" (car case))
+          (and pos
+               (memq (cadr case)
+                     (ensure-list (get-text-property pos 'face text)))))))))
+
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "j2" "job_list" "{}"))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event
+    2 "j2" nil nil
+    (concat "bash-7 [bash] running — make build\n"
+            "bash-2 [bash] completed — cat > x.sh <<'PY'\necho hi")))
+  (let ((body (dsh-emacs-test--tool-block-text
+               (dsh-emacs-render--make-namespace) "tool-j2")))
+    (dsh-test-assert "tool-job-list-card"
+      (string-match-p "bash-7 \\[bash\\] running — make build" body)
+      (string-match-p "bash-2 \\[bash\\] completed — cat > x.sh" body)
+      ;; A multi-line label stays indented under its job row.
+      (string-match-p "^    echo hi$" body)
+      (not (string-match-p "^OUT$" body)))))
+
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event
+    1 "j3" "job_kill" "{\"reason\":\"stale\",\"job_id\":\"bash-7\"}"))
+  (dsh-test-assert "tool-job-kill-pending-summary-prefers-id"
+    (equal "bash-7" (plist-get (dsh-emacs-render--tool-state "j3") :summary)))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event
+    2 "j3" nil nil "requested cancellation of job bash-7"))
+  (let ((body (dsh-emacs-test--tool-block-text
+               (dsh-emacs-render--make-namespace) "tool-j3")))
+    (dsh-test-assert "tool-job-kill-card"
+      (string-match-p "requested cancellation of job bash-7" body)
+      (string-match-p "bash-7" (dsh-emacs-render--first-line body))
+      (not (string-match-p "reason" body))
+      (not (string-match-p "^OUT$" body)))))
+
+;; A `job_output' failure carries no status line; the generic card keeps the
+;; diagnostic text and the argument JSON that names the job.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event
+    1 "j4" "job_output" "{\"job_id\":\"nope\"}"))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event 2 "j4" t 1 "unknown job id nope"))
+  (let ((body (dsh-emacs-test--tool-block-text
+               (dsh-emacs-render--make-namespace) "tool-j4")))
+    (dsh-test-assert "tool-job-output-without-status-keeps-iocard"
+      (eq 'error (plist-get (dsh-emacs-render--tool-state "j4") :state))
+      (string-match-p "unknown job id nope" body)
+      (string-match-p "job_id" body)
+      (string-match-p "^OUT$" body))))
+
 ;; Metadata line numbers before the declared offset invalidate the window.
 ;; The raw output must survive rather than being replaced by unrelated lines.
 (with-temp-buffer

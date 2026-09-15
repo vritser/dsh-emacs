@@ -282,7 +282,10 @@ template with a \"__C__\" fill placeholder.  Graphical Emacs renders it via
 `create-image'; terminal Emacs falls back to the \"✶\" glyph.")
 
 (defcustom dsh-emacs-tool-titles
-  '(("pwsh" . "PowerShell"))
+  '(("pwsh" . "PowerShell")
+    ("job_output" . "Job Output")
+    ("job_list" . "Jobs")
+    ("job_kill" . "Kill Job"))
   "Alist of tool name -> display title overrides.
 Tools not listed here show a humanized name (\"grep\" -> \"Grep\",
 \"web_search\" -> \"Web Search\") while keeping their variant icon, so
@@ -298,8 +301,11 @@ icon.  Add your own entries to curate custom tool names."
     ("write"  . ("path" "file_path"))
     ("edit"   . ("path" "file_path"))
     ("code"   . ("description"))
+    ("job_output" . ("job_id"))
+    ("job_kill" . ("job_id"))
     ("others" . ()))
-  "Variant -> summary key priority list.")
+  "Tool name or variant -> summary key priority list.
+An exact tool name takes precedence over its variant.")
 
 ;;; ---------------------------------------------------------------------------
 ;;; alist helpers (internal)
@@ -508,11 +514,13 @@ there is no previewable content."
     (when (and first (> dsh-emacs-thinking-preview-max 0))
       (truncate-string-to-width first dsh-emacs-thinking-preview-max nil nil "..."))))
 
-(defun dsh-emacs-render--tool-summary (variant args-raw)
-  "Extract single-line summary from ARGS-RAW (JSON string) for VARIANT."
+(defun dsh-emacs-render--tool-summary (name variant args-raw)
+  "Extract a single-line summary from NAME's ARGS-RAW JSON string.
+Prefer NAME's summary keys, falling back to those for VARIANT."
   (when (and args-raw (not (string-empty-p args-raw)) (not (string= args-raw "{}")))
     (let* ((parsed (condition-case nil (json-read-from-string args-raw) (error nil)))
-           (keys (cdr (assoc variant dsh-emacs--summary-keys))))
+           (keys (cdr (or (assoc name dsh-emacs--summary-keys)
+                          (assoc variant dsh-emacs--summary-keys)))))
       (when (and parsed (listp parsed))
         (or
          (catch 'found
@@ -1918,7 +1926,7 @@ the event seq but renders no ordinary tool card."
                (variant (car variant-info))
                (icon (cdr variant-info))
                (title (dsh-emacs-render--tool-title name))
-               (summary (dsh-emacs-render--tool-summary variant args))
+               (summary (dsh-emacs-render--tool-summary name variant args))
                (body-text (dsh-emacs-render--tool-body-text variant args))
                ;; bash and file-mutation rows draw their (running) expanded body
                ;; as the card the settled result will complete — the `$' prompt
@@ -2332,6 +2340,100 @@ unusable arguments return nil so the caller preserves diagnostic output."
                                    'face 'dsh-emacs-tool-meta-face))))
                    "\n")))))
 
+;;; ---------------------------------------------------------------------------
+;;; Renderer: background-job cards (`job_output' / `job_list' / `job_kill')
+;;; ---------------------------------------------------------------------------
+
+(defconst dsh-emacs--job-tools '("job_output" "job_list" "job_kill")
+  "Tool names whose results render as a background-job card.")
+
+(defun dsh-emacs-render--job-status (text)
+  "Split job result TEXT into (OUTPUT STATUS), or nil without a status line.
+The Host appends `[status: <status>[, <detail>]]' as the final line of a
+`job_output' result; OUTPUT is TEXT without it."
+  (when (and (stringp text)
+             (string-match "\n\\[status: \\([^]\n]+\\)\\]\\'" text))
+    (list (substring text 0 (match-beginning 0)) (match-string 1 text))))
+
+(defun dsh-emacs-render--job-status-face (status)
+  "Face for a job STATUS token and its optional detail.
+The Host calls any normally exited command `completed'; a nonzero exit
+code in its detail still indicates failure.  Preserve the caller's match
+data because `job_list' is in the middle of parsing its row."
+  (save-match-data
+    (cond ((and (string-match
+                 "\\`completed, exit code: \\(-?[0-9]+\\)\\'" status)
+                (/= (string-to-number (match-string 1 status)) 0))
+           'dsh-emacs-tool-error-face)
+          ((string-prefix-p "completed" status) 'dsh-emacs-tool-success-face)
+          ((string-prefix-p "failed" status) 'dsh-emacs-tool-error-face)
+          ((string-prefix-p "killed" status) 'dsh-emacs-tool-stopped-face)
+          ((string-prefix-p "stopping" status) 'dsh-emacs-tool-stopped-face)
+          (t 'dsh-emacs-tool-pending-face))))
+
+(defun dsh-emacs-render--job-rows (text)
+  "Return TEXT as indented card rows, or nil when it has no content."
+  (when (and (stringp text) (not (string-empty-p text)))
+    (mapcar (lambda (line) (concat "  " line))
+            (split-string (string-trim-right text "\n") "\n"))))
+
+(defconst dsh-emacs--job-list-row-regexp
+  "\\`\\([^ \n]+\\) \\[\\([^]\n]+\\)\\] \\([a-z]+\\) — \\(.*\\)\\'"
+  "A `job_list' row: `ID [KIND] STATUS — LABEL'.
+The Host prints one per job, but a label can itself contain newlines (it is a
+background command verbatim), so only the opening line matches.")
+
+(defun dsh-emacs-render--job-list-rows (text)
+  "Return a `job_list' result TEXT as rows.
+The opening line of each job carries its id/kind in the muted meta face and
+its status in the face matching that status; a label that continues on later
+lines stays indented under its job."
+  (when (and (stringp text) (not (string-empty-p text)))
+    (let (rows)
+      (dolist (line (split-string (string-trim-right text "\n") "\n"))
+        (push (if (string-match dsh-emacs--job-list-row-regexp line)
+                  (concat
+                   "  "
+                   (propertize (concat (match-string 1 line)
+                                       " [" (match-string 2 line) "]")
+                               'face 'dsh-emacs-tool-meta-face)
+                   " "
+                   (propertize (match-string 3 line)
+                               'face (dsh-emacs-render--job-status-face
+                                      (match-string 3 line)))
+                   " — " (match-string 4 line))
+                (concat "    " line))
+              rows))
+      (nreverse rows))))
+
+(defun dsh-emacs-render--job-card-body (name text)
+  "Compose the expanded body of a background-job card for tool NAME, or nil.
+TEXT is the settled result text.  `job_output' splits the Host's trailing
+`[status: ...]' line into a state-colored footer and `job_list' colors each
+job's status; `job_kill' renders its one-line result as a row.  The argument
+JSON is never repeated: the row header already carries the job id.  A
+`job_output' without its status line returns nil, so the caller keeps the
+generic card."
+  (when (member name dsh-emacs--job-tools)
+    (cond
+     ((equal name "job_output")
+      (when-let* ((split (dsh-emacs-render--job-status text)))
+        (let ((output (nth 0 split))
+              (status (nth 1 split)))
+          (mapconcat #'identity
+                     (append
+                      (dsh-emacs-render--job-rows output)
+                      (list (concat
+                             "  "
+                             (propertize (concat "[status: " status "]")
+                                         'face
+                                         (dsh-emacs-render--job-status-face
+                                          status)))))
+                     "\n"))))
+     ((equal name "job_list")
+      (mapconcat #'identity (dsh-emacs-render--job-list-rows text) "\n"))
+     (t (mapconcat #'identity (dsh-emacs-render--job-rows text) "\n")))))
+
 (defun dsh-emacs-render--shell-status (text)
   "Split TEXT into (BODY EXIT-CODE SIGNAL).
 dsh's shell renderer appends `[exit code: N]' or `[killed by signal: X]' to
@@ -2432,6 +2534,7 @@ everything else `success'."
                            (and (member variant '("write" "edit"))
                                 (dsh-emacs-render--diff-card-body
                                  name args-raw meta state))
+                           (dsh-emacs-render--job-card-body name full-text)
                            (dsh-emacs-render--tool-body-io
                             args full-text status-text))))
             (dsh-emacs-ui-update-fragment

@@ -56,6 +56,14 @@ minor) and stay undated until the release is cut.
   `dsh-emacs-tool-diff-path-face`, `dsh-emacs-tool-diff-add-face` and
   `dsh-emacs-tool-diff-del-face` (rationale: postmortem/045).
 
+- **Background-job rows expand into job cards**: a `job_output` row shows the
+  job's output and turns the Host's trailing `[status: ...]` line into a
+  state-colored footer (`running`, `completed`, `killed`, `failed`), while
+  `job_list` and `job_kill` show their result as plain rows.  The argument
+  JSON is no longer repeated — `job_output` and `job_kill` headers carry the
+  job id, and the three tools get `Job Output`, `Jobs` and `Kill Job` titles
+  (rationale: postmortem/046).
+
 - **Question prompts explain themselves while you answer**: an `ask` prompt is
   one minibuffer read — the question text is the prompt, the numbered options
   are the candidates, and each option's description is a completion
@@ -128,6 +136,14 @@ minor) and stay undated until the release is cut.
   postmortem/044).
 
 ### Fixed
+
+- **Background command failures use the error color**: a `job_output` footer
+  with `completed, exit code: N` is red when N is nonzero, even though the
+  Host marks the job as completed.
+
+- **Job summaries consistently identify the job**: `job_output` and
+  `job_kill` prioritize `job_id`, even when another string argument such as
+  the cancellation reason appears first.
 
 - **Shell exit status is read from the result text**: a nonzero exit or a
   killing signal settles the row as failed and prints its `✗ exit N` /

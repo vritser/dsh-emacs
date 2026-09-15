@@ -133,6 +133,20 @@ for no added meaning (see
   keep the generic ioCard, preserving the diagnostic output.
   Like dsh web, the card shows the whole old block then the whole new block
   rather than a line-by-line alignment.
+- **Background-job rows expand into a job card** (this client's own model; web
+  keeps these generic): a `job_output` row shows the job's output as body rows
+  and renders the Host's trailing `[status: …]` line as a footer in the face
+  matching the job status — success for `completed`, error for `failed`,
+  stopped for `killed`/`stopping`, pending for `running`.  A `completed`
+  footer with a nonzero `exit code` detail uses the error face: the job ended,
+  but its command failed.  `job_list` renders one row per job
+  (`id [kind] status — label`) with the status token colored by its lifecycle
+  state and a label that spans lines indented under its row; `job_kill`
+  renders its one-line acknowledgement.  The argument JSON is never repeated:
+  `job_output` and `job_kill` headers explicitly use `job_id` as their summary,
+  independent of argument order.  The titles are `Job Output`, `Jobs` and
+  `Kill Job`.  A `job_output` without a status line (a
+  malformed or failed read) keeps the generic ioCard.
 - Every other variant keeps a dsh web-style **ioCard** (an `IN` arguments /
   `OUT` result pair with the status line on top).
 
