@@ -64,6 +64,12 @@ minor) and stay undated until the release is cut.
   job id, and the three tools get `Job Output`, `Jobs` and `Kill Job` titles
   (rationale: postmortem/046).
 
+- **`present` rows name the files they declared**: the row header carries the
+  call's paths, comma-joined under a `Present files` title (dsh web's
+  `PresentRow` shape), and the expanded body shows the result text instead of
+  the argument JSON.  A failed `present` keeps the Host's message and the
+  declared-path summary (rationale: postmortem/047).
+
 - **Question prompts explain themselves while you answer**: an `ask` prompt is
   one minibuffer read — the question text is the prompt, the numbered options
   are the candidates, and each option's description is a completion

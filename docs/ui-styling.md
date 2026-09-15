@@ -133,6 +133,12 @@ for no added meaning (see
   keep the generic ioCard, preserving the diagnostic output.
   Like dsh web, the card shows the whole old block then the whole new block
   rather than a line-by-line alignment.
+- **`present` rows expand into a declared-files card** (dsh web `PresentRow`):
+  the header summary is the call's `files[].path` list, comma-joined under the
+  `Present files` title, and the body is the result text (`Presented <path>`
+  lines, or the Host's failure message) as indented rows.  The argument JSON
+  is never repeated.  The turn-tail Deliverables row still lists the same
+  paths with their descriptions and clickable links.
 - **Background-job rows expand into a job card** (this client's own model; web
   keeps these generic): a `job_output` row shows the job's output as body rows
   and renders the Host's trailing `[status: …]` line as a footer in the face
@@ -155,9 +161,12 @@ extra blank lines), and adjacent tool rows stack tightly; pressing `RET` on a
 tool row expands/collapses the body (the body is stored inside the block, so
 expanding always restores it).
 
-Summary key precedence matches dsh web's `SUMMARY_KEYS`:
-bash→`description|command`, read→`path|file_path|url`,
-search→`query|pattern|url`, write/edit→`path|file_path`, code→`description`.
+Summary key precedence matches dsh web's `SUMMARY_KEYS`, keyed by tool name
+first and by variant second: bash→`description|command`,
+read→`path|file_path|url`, search→`query|pattern|url`,
+write/edit→`path|file_path`, code→`description`,
+job_output/job_kill→`job_id`.  A `present` row is different again: it names
+the call's declared `files[].path` list rather than one argument value.
 
 ## Thinking blocks
 

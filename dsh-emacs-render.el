@@ -283,6 +283,7 @@ template with a \"__C__\" fill placeholder.  Graphical Emacs renders it via
 
 (defcustom dsh-emacs-tool-titles
   '(("pwsh" . "PowerShell")
+    ("present" . "Present files")
     ("job_output" . "Job Output")
     ("job_list" . "Jobs")
     ("job_kill" . "Kill Job"))
@@ -514,15 +515,35 @@ there is no previewable content."
     (when (and first (> dsh-emacs-thinking-preview-max 0))
       (truncate-string-to-width first dsh-emacs-thinking-preview-max nil nil "..."))))
 
+(defun dsh-emacs-render--present-paths (parsed)
+  "Return a `present' call's declared paths as one comma-joined line.
+PARSED is the call's decoded argument alist; nil when it declares no usable
+path.  dsh web's `PresentRow' names its files this way, so the row header
+carries them instead of the generic ioCard's argument dump."
+  (let ((paths (and (listp parsed)
+                    (delq nil
+                          (mapcar
+                           (lambda (file)
+                             (let ((path (dsh-emacs-render--aget "path" file)))
+                               (and (stringp path)
+                                    (not (string-empty-p path))
+                                    path)))
+                           (dsh-emacs-render--wire-list
+                            (dsh-emacs-render--aget "files" parsed)))))))
+    (and paths (mapconcat #'identity paths ", "))))
+
 (defun dsh-emacs-render--tool-summary (name variant args-raw)
   "Extract a single-line summary from NAME's ARGS-RAW JSON string.
-Prefer NAME's summary keys, falling back to those for VARIANT."
+Prefer NAME's summary keys, falling back to those for VARIANT; a `present'
+call instead names the files it declared."
   (when (and args-raw (not (string-empty-p args-raw)) (not (string= args-raw "{}")))
     (let* ((parsed (condition-case nil (json-read-from-string args-raw) (error nil)))
            (keys (cdr (or (assoc name dsh-emacs--summary-keys)
                           (assoc variant dsh-emacs--summary-keys)))))
       (when (and parsed (listp parsed))
         (or
+         (and (equal name "present")
+              (dsh-emacs-render--present-paths parsed))
          (catch 'found
            (dolist (key keys)
              (let ((val (dsh-emacs-render--aget key parsed)))
@@ -2371,11 +2392,24 @@ data because `job_list' is in the middle of parsing its row."
           ((string-prefix-p "stopping" status) 'dsh-emacs-tool-stopped-face)
           (t 'dsh-emacs-tool-pending-face))))
 
-(defun dsh-emacs-render--job-rows (text)
+(defun dsh-emacs-render--body-rows (text)
   "Return TEXT as indented card rows, or nil when it has no content."
   (when (and (stringp text) (not (string-empty-p text)))
     (mapcar (lambda (line) (concat "  " line))
             (split-string (string-trim-right text "\n") "\n"))))
+
+;;; ---------------------------------------------------------------------------
+;;; Renderer: present card (dsh web `PresentRow')
+;;; ---------------------------------------------------------------------------
+
+(defun dsh-emacs-render--present-card-body (name text)
+  "Compose the expanded body of a `present' card for tool NAME, or nil.
+TEXT is the settled result text (`Presented <path>' lines, or the Host's
+failure message).  The argument JSON is never repeated: the row summary
+already names the declared paths, as dsh web's `PresentRow' does."
+  (when (equal name "present")
+    (when-let* ((rows (dsh-emacs-render--body-rows text)))
+      (mapconcat #'identity rows "\n"))))
 
 (defconst dsh-emacs--job-list-row-regexp
   "\\`\\([^ \n]+\\) \\[\\([^]\n]+\\)\\] \\([a-z]+\\) — \\(.*\\)\\'"
@@ -2422,7 +2456,7 @@ generic card."
               (status (nth 1 split)))
           (mapconcat #'identity
                      (append
-                      (dsh-emacs-render--job-rows output)
+                      (dsh-emacs-render--body-rows output)
                       (list (concat
                              "  "
                              (propertize (concat "[status: " status "]")
@@ -2432,7 +2466,7 @@ generic card."
                      "\n"))))
      ((equal name "job_list")
       (mapconcat #'identity (dsh-emacs-render--job-list-rows text) "\n"))
-     (t (mapconcat #'identity (dsh-emacs-render--job-rows text) "\n")))))
+     (t (mapconcat #'identity (dsh-emacs-render--body-rows text) "\n")))))
 
 (defun dsh-emacs-render--shell-status (text)
   "Split TEXT into (BODY EXIT-CODE SIGNAL).
@@ -2534,6 +2568,7 @@ everything else `success'."
                            (and (member variant '("write" "edit"))
                                 (dsh-emacs-render--diff-card-body
                                  name args-raw meta state))
+                           (dsh-emacs-render--present-card-body name full-text)
                            (dsh-emacs-render--job-card-body name full-text)
                            (dsh-emacs-render--tool-body-io
                             args full-text status-text))))

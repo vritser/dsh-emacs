@@ -3370,6 +3370,51 @@ Lets a test drive a malformed content value through the result path."
       (string-match-p "job_id" body)
       (string-match-p "^OUT$" body))))
 
+;; A `present' row names the files it declared in the header (web PresentRow)
+;; and shows the result text as its body; the argument JSON is never repeated.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event
+    1 "p1" "present"
+    (concat "{\"files\":[{\"path\":\"report.md\","
+            "\"description\":\"Final report\"},{\"path\":\"notes.txt\"}]}")))
+  (dsh-test-assert "tool-present-summary-names-paths"
+    (equal "report.md, notes.txt"
+           (plist-get (dsh-emacs-render--tool-state "p1") :summary)))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event
+    2 "p1" nil nil "Presented report.md\nPresented notes.txt"))
+  (let ((body (dsh-emacs-test--tool-block-text
+               (dsh-emacs-render--make-namespace) "tool-p1")))
+    (dsh-test-assert "tool-present-card"
+      (string-match-p "Present files" body)
+      (string-match-p "report.md, notes.txt" body)
+      (string-match-p "Presented report.md" body)
+      (string-match-p "Presented notes.txt" body)
+      (not (string-match-p "\"files\"" body))
+      (not (string-match-p "^OUT$" body)))))
+
+;; A failed `present' keeps the Host's message and the declared-path summary.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event
+    1 "p2" "present" "{\"files\":[{\"path\":\"missing.txt\"}]}"))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event
+    2 "p2" t 1 "Cannot present missing.txt: not a regular file"))
+  (let ((body (dsh-emacs-test--tool-block-text
+               (dsh-emacs-render--make-namespace) "tool-p2")))
+    (dsh-test-assert "tool-present-failure-keeps-diagnostic"
+      (eq 'error (plist-get (dsh-emacs-render--tool-state "p2") :state))
+      (string-match-p "Cannot present missing.txt" body)
+      (string-match-p "missing.txt" (dsh-emacs-render--first-line body))
+      (not (string-match-p "\"files\"" body))
+      (not (string-match-p "^OUT$" body)))))
+
 ;; Metadata line numbers before the declared offset invalidate the window.
 ;; The raw output must survive rather than being replaced by unrelated lines.
 (with-temp-buffer
