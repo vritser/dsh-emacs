@@ -2602,10 +2602,7 @@ symbol or an ordered list."
         (equal '(file . "report.md")
                (get-text-property path 'dsh-emacs-reference-ref full))
         (memq 'dsh-emacs-reference-face
-              (ensure-list (get-text-property path 'face full))))
-      (dsh-test-assert "deliverables-expanded-body-has-no-panel-face"
-        (not (memq 'dsh-emacs-tool-bash-panel-face
-                   (ensure-list (get-text-property path 'face full))))))))
+              (ensure-list (get-text-property path 'face full)))))))
 
 ;; Repeated declaration of one path keeps one line, latest description.
 (with-temp-buffer
@@ -2926,6 +2923,32 @@ symbol or an ordered list."
                                                           (vector (list (cons "type" "text")
                                                                         (cons "text" text)))))))))))))
 
+(defun dsh-emacs-test--tool-result-event-meta (seq call-id text meta &optional is-error)
+  "Build a `tool/result' event carrying TEXT and the settled result META."
+  (list (cons "type" "tool/result")
+        (cons "seq" seq)
+        (cons "data"
+              (list (cons "message"
+                          (list (cons "callId" call-id)
+                                (cons "content"
+                                      (vector (list (cons "type" "tool-result")
+                                                    (cons "isError" (if is-error t :json-false))
+                                                    (cons "exitCode" (if is-error 1 0))
+                                                    (cons "content"
+                                                          (vector (list (cons "type" "text")
+                                                                        (cons "text" text)))))))))
+                    (cons "meta" meta)))))
+
+(defun dsh-emacs-test--tool-result-event-bare (seq call-id content)
+  "Build a `tool/result' event whose MESSAGE.CONTENT is CONTENT verbatim.
+Lets a test drive a malformed content value through the result path."
+  (list (cons "type" "tool/result")
+        (cons "seq" seq)
+        (cons "data"
+              (list (cons "message"
+                          (list (cons "callId" call-id)
+                                (cons "content" content)))))))
+
 (defun dsh-emacs-test--tool-result-event-source (seq call-id text)
   "Build a real dsh Web `tool/result' with MESSAGE.SOURCE.CALL-ID."
   (list (cons "type" "tool/result")
@@ -2970,6 +2993,14 @@ symbol or an ordered list."
                (not (string-match-p "IN" block))
                (not (string-match-p "OUT" block)))
       (dsh-test-pass "tool-bash-success-terminal-card")))
+  ;; 3) expanded rows are unpadded: cards draw on the transcript background
+  ;; with no surface band, so each row ends at its own content.
+  (let* ((ns (dsh-emacs-render--make-namespace))
+         (block (dsh-emacs-test--tool-block-text ns "tool-c1")))
+    (dsh-test-assert "tool-bash-card-rows-are-unpadded"
+      (and block
+           (string-match-p "^  \\$ ls -la$" block)
+           (string-match-p "^  drwxr-xr-x$" block))))
   ;; 3) error result: the leading marker becomes a red status dot ●
   (dsh-emacs-render-tool-call
    (dsh-emacs-test--tool-call-event 3 "c2" "edit" "{\"path\":\"/tmp/x\"}"))
@@ -2981,6 +3012,406 @@ symbol or an ordered list."
                (string-match-p (regexp-quote "● ") block)
                (string-match-p "segmentation fault" block))
       (dsh-test-pass "tool-error-state-dot-leading"))))
+
+;; --- Test 29c: a file read expands into a line-numbered read card ---
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event
+    1 "r1" "read" "{\"file_path\":\"/a/b.el\",\"offset\":2,\"limit\":2}"))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event-meta
+    2 "r1"
+    "<path>/a/b.el</path>\n<type>file</type>\n<content>\n2: (b)\n3: (c)\n</content>"
+    '((path . "/a/b.el") (offset . 2) (totalLines . 9) (lang . "emacs-lisp")
+      (lines . [((number . 2) (text . "(b)"))
+                ((number . 3) (text . "(c)"))]))))
+  (let* ((ns (dsh-emacs-render--make-namespace))
+         (full (buffer-string))
+         (block (dsh-emacs-test--tool-block-text ns "tool-r1"))
+         (num (string-match "2  (b)" full)))
+    (dsh-test-assert "tool-read-card-numbers-the-window"
+      (string-match-p "^  2  (b)$" block)
+      (string-match-p "3  (c)" block)
+      (string-match-p "Showing 2 of 9 lines · emacs-lisp" block)
+      ;; the raw envelope and the argument JSON are both gone
+      (not (string-match-p "<content>" block))
+      (not (string-match-p "file_path" block)))
+    (dsh-test-assert "tool-read-card-gutter-keeps-its-face"
+      (and num
+           (memq 'dsh-emacs-tool-meta-face
+                 (ensure-list (get-text-property num 'face full)))))))
+
+;; A read that covered the whole file prints no window footer.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "r2" "read" "{\"file_path\":\"/a/c.el\"}"))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event-meta
+    2 "r2"
+    "<path>/a/c.el</path>\n<type>file</type>\n<content>\n1: one\n2: \n</content>"
+    '((path . "/a/c.el") (offset . 1) (totalLines . 2)
+      (lines . [((number . 1) (text . "one"))
+                ((number . 2) (text . ""))]))))
+  (let* ((ns (dsh-emacs-render--make-namespace))
+         (block (dsh-emacs-test--tool-block-text ns "tool-r2")))
+    (dsh-test-assert "tool-read-card-whole-file-has-no-window-footer"
+      (string-match-p "1  one" block)
+      (not (string-match-p "Showing" block))
+      (not (string-match-p "IN" block)))))
+
+;; --- Test 29d: write/edit rows expand into a dsh web diff card ---
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  ;; While the call runs the diff is the one the arguments intend.
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event
+    1 "d1" "edit"
+    "{\"file_path\":\"src/x.el\",\"old_string\":\"(old a)\\n(old b)\",\"new_string\":\"(new a)\"}"))
+  (let* ((ns (dsh-emacs-render--make-namespace))
+         (running (dsh-emacs-test--tool-block-text ns "tool-d1")))
+    (dsh-test-assert "tool-edit-running-shows-intended-diff"
+      (string-match-p "- (old a)" running)
+      (string-match-p "- (old b)" running)
+      (string-match-p "+ (new a)" running)
+      (string-match-p (regexp-quote "└ +1 -2 · 1 file") running)
+      (not (string-match-p "old_string" running))))
+  ;; Settled, the applied diffs from the result metadata win.
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event-meta
+    2 "d1" "The file src/x.el has been updated successfully."
+    '((diffs . [((path . "src/x.el")
+                 (oldText . "one\ntwo")
+                 (newText . "ONE\ntwo\nthree"))]))))
+  (let* ((ns (dsh-emacs-render--make-namespace))
+         (full (buffer-string))
+         (settled (dsh-emacs-test--tool-block-text ns "tool-d1"))
+         (del (string-match "- one" full))
+         (add (string-match "+ ONE" full)))
+    (dsh-test-assert "tool-edit-settled-shows-applied-diff"
+      (string-match-p "- two" settled)
+      (string-match-p "+ three" settled)
+      (string-match-p (regexp-quote "└ +3 -2 · 1 file") settled)
+      (not (string-match-p "(old a)" settled)))
+    (dsh-test-assert "tool-diff-lines-carry-state-faces"
+      (and del add
+           (memq 'dsh-emacs-tool-diff-del-face
+                 (ensure-list (get-text-property del 'face full)))
+           (memq 'dsh-emacs-tool-diff-add-face
+                 (ensure-list (get-text-property add 'face full)))))
+    ;; Expanded card rows are drawn on the transcript background and are not
+    ;; padded to the box width, so each row ends at its own content.
+    (dsh-test-assert "tool-diff-card-rows-are-unpadded"
+      (string-match-p "^  - one$" settled)
+      (string-match-p "^  \\+ three$" settled)
+      (string-match-p "^  src/x\\.el$" settled))))
+
+;; A write keeps its argument-derived whole-file diff when the result records
+;; none, and repeated paths get a gap row instead of a second path row.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event
+    1 "w1" "write" "{\"file_path\":\"new.txt\",\"content\":\"alpha\\nbeta\"}"))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event-meta 2 "w1" "created" nil))
+  (let* ((ns (dsh-emacs-render--make-namespace))
+         (block (dsh-emacs-test--tool-block-text ns "tool-w1")))
+    (dsh-test-assert "tool-write-keeps-whole-file-diff"
+      (string-match-p "+ alpha" block)
+      (string-match-p "+ beta" block)
+      (string-match-p (regexp-quote "└ +2 -0 · 1 file") block)
+      (not (string-match-p "\"content\"" block))))
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event
+    3 "w2" "write" "{\"file_path\":\"a.txt\",\"content\":\"x\"}"))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event-meta
+    4 "w2" "ok"
+    '((diffs . [((path . "a.txt") (oldText . "x") (newText . "y"))
+                ((path . "a.txt") (oldText . nil) (newText . "z"))
+                ((path . "b.txt") (oldText . nil) (newText . "q"))]))))
+  (let* ((ns (dsh-emacs-render--make-namespace))
+         (block (dsh-emacs-test--tool-block-text ns "tool-w2")))
+    (dsh-test-assert "tool-diff-multi-hunk-gap-and-file-count"
+      (string-match-p "  ⋯" block)
+      (string-match-p "b.txt" block)
+      (string-match-p (regexp-quote "└ +3 -1 · 2 files") block))))
+
+;; The diff card declines what dsh web's models decline: an edit that records
+;; no diff, a failed call, and inconsistent read metadata all keep the ioCard.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event
+    1 "e1" "edit" "{\"file_path\":\"src/y.el\",\"old_string\":\"a\",\"new_string\":\"b\"}"))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event-meta 2 "e1" "no match found" nil))
+  (let* ((ns (dsh-emacs-render--make-namespace))
+         (block (dsh-emacs-test--tool-block-text ns "tool-e1")))
+    (dsh-test-assert "tool-edit-without-diffs-keeps-iocard"
+      (string-match-p "no match found" block)
+      (string-match-p "old_string" block)))
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event
+    3 "e2" "edit" "{\"file_path\":\"src/z.el\",\"old_string\":\"a\",\"new_string\":\"b\"}"))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event-meta
+    4 "e2" "the file changed on disk" nil t))
+  (let* ((ns (dsh-emacs-render--make-namespace))
+         (block (dsh-emacs-test--tool-block-text ns "tool-e2")))
+    (dsh-test-assert "tool-failed-edit-keeps-iocard"
+      (string-match-p "the file changed on disk" block)
+      (not (string-match-p "└ +" block))))
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 5 "r3" "read" "{\"file_path\":\"/a/d.el\"}"))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event-meta
+    6 "r3"
+    "<path>/a/d.el</path>\n<type>file</type>\n<content>\n1: a\n2: b\n</content>"
+    '((path . "/a/d.el") (offset . 1) (totalLines . 2)
+      (lines . [((number . 2) (text . "a"))
+                ((number . 2) (text . "b"))]))))
+  (let* ((ns (dsh-emacs-render--make-namespace))
+         (block (dsh-emacs-test--tool-block-text ns "tool-r3")))
+    (dsh-test-assert "tool-read-inconsistent-meta-keeps-iocard"
+      (string-match-p "<content>" block)
+      (not (string-match-p "Showing" block)))))
+
+;; A failed or interrupted file call keeps its diagnostic output: a
+;; specialized card may replace the result text only for a successful call.
+;; The Host marks a failure with `isError' and, for an abort, an `interrupted'
+;; failure code.
+(dolist (case '((error nil) (stopped "interrupted")))
+  (dolist (name '("read" "edit" "write"))
+    (with-temp-buffer
+      (dsh-emacs-mode)
+      (setq-local dsh-emacs-tool-expand-by-default t)
+      (let* ((state (car case))
+             (code (cadr case))
+             (meta (if (equal name "read")
+                       '((path . "/a") (offset . 1) (totalLines . 1)
+                         (lines . [((number . 1) (text . "preview"))]))
+                     '((diffs . [((path . "/a") (oldText . "old")
+                                  (newText . "preview"))]))))
+             (text (if (equal name "read")
+                       (concat "<path>/a</path>\n<type>file</type>\n"
+                               "<content>\n1: diagnostic output\n</content>")
+                     "diagnostic output"))
+             (event (dsh-emacs-test--tool-result-event-meta
+                     2 "failed-file" text meta t)))
+        (when code
+          (setf (alist-get "error" (alist-get "data" event nil nil #'equal)
+                           nil nil #'equal)
+                (list (cons "name" "ToolError") (cons "code" code))))
+        (dsh-emacs-render-tool-call
+         (dsh-emacs-test--tool-call-event
+          1 "failed-file" name
+          (concat "{\"file_path\":\"/a\",\"old_string\":\"old\","
+                  "\"new_string\":\"preview\",\"content\":\"preview\"}")))
+        (dsh-emacs-render-tool-result event)
+        (let* ((body (dsh-emacs-test--tool-block-text
+                      (dsh-emacs-render--make-namespace) "tool-failed-file"))
+               (tracked (plist-get
+                         (dsh-emacs-render--tool-state "failed-file") :state)))
+          (dsh-test-assert (format "tool-%s-%s-keeps-diagnostics" name state)
+            (eq state tracked)
+            (string-match-p "diagnostic output" body)
+            (string-match-p "file_path" body)
+            (not (string-match-p (regexp-quote "└ +") body))
+            (not (string-match-p "1  preview" body))))))))
+
+;; dsh's shell renderer writes the exit status into the result text
+;; (`[exit code: N]' / `[killed by signal: X]'), not the wire block: a failed
+;; command must settle the row as failed, print its footer, and lose the
+;; marker from the output instead of duplicating it.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event
+    1 "b1" "bash" "{\"command\":\"make\",\"description\":\"build\"}"))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event
+    2 "b1" nil nil "make: *** No rule\n[exit code: 2]"))
+  (let ((body (dsh-emacs-test--tool-block-text
+               (dsh-emacs-render--make-namespace) "tool-b1")))
+    (dsh-test-assert "tool-bash-exit-marker-settles-error"
+      (eq 'error (plist-get (dsh-emacs-render--tool-state "b1") :state))
+      (string-match-p (regexp-quote "✗ exit 2") body)
+      (not (string-match-p (regexp-quote "[exit code: 2]") body)))))
+
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event
+    1 "b2" "bash" "{\"command\":\"sleep 60\",\"description\":\"wait\"}"))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event
+    2 "b2" nil nil "waiting\n[killed by signal: SIGTERM]"))
+  (let ((body (dsh-emacs-test--tool-block-text
+               (dsh-emacs-render--make-namespace) "tool-b2")))
+    (dsh-test-assert "tool-bash-signal-marker-settles-error"
+      (eq 'error (plist-get (dsh-emacs-render--tool-state "b2") :state))
+      (string-match-p (regexp-quote "✗ signal SIGTERM") body)
+      (not (string-match-p
+            (regexp-quote "[killed by signal: SIGTERM]") body)))))
+
+;; Metadata line numbers before the declared offset invalidate the window.
+;; The raw output must survive rather than being replaced by unrelated lines.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event
+    1 "bad-window" "read" "{\"file_path\":\"/a\",\"offset\":10}"))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event-meta
+    2 "bad-window"
+    "<path>/a</path>\n<type>file</type>\n<content>\n10: actual window\n</content>"
+    '((path . "/a") (offset . 10) (totalLines . 20)
+      (lines . [((number . 1) (text . "wrong window"))]))))
+  (let ((body (dsh-emacs-test--tool-block-text
+               (dsh-emacs-render--make-namespace) "tool-bad-window")))
+    (dsh-test-assert "tool-read-before-offset-keeps-raw-output"
+      (string-match-p "10: actual window" body)
+      (string-match-p "file_path" body)
+      (not (string-match-p "wrong window" body)))))
+
+;; A host with a raised read byte cap can return a large, valid envelope.
+;; Rendering must complete without consuming regexp stack per character.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (let* ((line (make-string 1000 ?x))
+         (lines (vconcat
+                 (cl-loop for n from 1 to 150
+                          collect (list (cons 'number n) (cons 'text line)))))
+         (text (concat
+                "<path>/large.txt</path>\n<type>file</type>\n<content>\n"
+                (mapconcat (lambda (cell)
+                             (format "%d: %s" (alist-get 'number cell)
+                                     (alist-get 'text cell)))
+                           lines "\n")
+                "\n\n(End of file - total 150 lines)\n</content>"))
+         (meta `((path . "/large.txt") (offset . 1) (totalLines . 150)
+                 (lines . ,lines))))
+    (dsh-emacs-render-tool-call
+     (dsh-emacs-test--tool-call-event
+      1 "large-read" "read" "{\"file_path\":\"/large.txt\"}"))
+    (condition-case err
+        (progn
+          (dsh-emacs-render-tool-result
+           (dsh-emacs-test--tool-result-event-meta 2 "large-read" text meta))
+          (let ((body (dsh-emacs-test--tool-block-text
+                       (dsh-emacs-render--make-namespace) "tool-large-read")))
+            (dsh-test-assert "tool-large-read-completes-numbered-card"
+              (eq 'success (plist-get
+                            (dsh-emacs-render--tool-state "large-read") :state))
+              (string-match-p (concat "  150  " line) body)
+              (not (string-match-p "<content>" body)))))
+      (error (dsh-test-fail "tool-large-read-completes-numbered-card"
+                            (error-message-string err))))))
+
+;; Checking the envelope ends separately still rejects non-file results,
+;; truncated envelopes, trailing output, and overlapping opening/closing tags.
+;; Cases carry a short label: interpolating the multi-line result itself would
+;; break the one-line-per-assertion output.
+(dolist (case '(("directory-type" . "<path>/a</path>\n<type>directory</type>\n<content>\nx\n</content>")
+                ("no-path-tag" . "<type>file</type>\n<content>\nx\n</content>")
+                ("truncated" . "<path>/a</path>\n<type>file</type>\n<content>\nx")
+                ("trailing-output" . "<path>/a</path>\n<type>file</type>\n<content>\nx\n</content>extra")
+                ("overlapping-tags" . "<path>/a</path>\n<type>file</type>\n<content>\n</content>")))
+  (dsh-test-assert (format "tool-read-rejects-envelope-%s" (car case))
+    (null (dsh-emacs-render--read-card-body
+           "read" "{\"file_path\":\"/a\"}"
+           '((path . "/a") (offset . 1) (totalLines . 1)
+             (lines . [((number . 1) (text . "x"))]))
+           (cdr case)))))
+
+;; A malformed result body must not signal out of the renderer either: a
+;; non-array `content', or an array whose members are not objects, settles the
+;; call with no usable result text instead of raising `sequencep'.
+(dolist (content '(42 "invalid" [42] [[]] t))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (setq-local dsh-emacs-tool-expand-by-default t)
+    (dsh-emacs-render-tool-call
+     (dsh-emacs-test--tool-call-event
+      1 "bad-content" "bash" "{\"command\":\"ls\"}"))
+    (let ((label (format "tool-malformed-content-%S" content)))
+      (condition-case err
+          (progn
+            (dsh-emacs-render-tool-result
+             (dsh-emacs-test--tool-result-event-bare 2 "bad-content" content))
+            ;; The event carries no usable tool-result block, so the call still
+            ;; settles, with no result text to show.
+            (dsh-test-assert label
+              (let ((state (dsh-emacs-render--tool-state "bad-content")))
+                (and (eq 'success (plist-get state :state))
+                     (equal "" (or (plist-get state :result) ""))))))
+        (error (dsh-test-fail label (error-message-string err)))))))
+
+;; Malformed metadata must not leave a completed tool pending.  Exercise
+;; non-object metadata and non-object array members through the result path.
+(dolist (name '("read" "edit" "write"))
+  (dolist (bad '(42 t :json-false "invalid" [42]))
+    (dolist (nested '(nil t))
+      (with-temp-buffer
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs-tool-expand-by-default t)
+        (let* ((read-p (equal name "read"))
+               (meta (if (not nested) bad
+                       (if read-p
+                           `((path . "/a.txt") (offset . 1) (totalLines . 1)
+                             (lines . ,(vector bad)))
+                         `((diffs . ,(vector bad))))))
+               (text (if read-p
+                         (concat "<path>/a.txt</path>\n<type>file</type>\n"
+                                 "<content>\n1: actual\n</content>")
+                       "completed mutation"))
+               (label (format "tool-%s-malformed-meta-%S-nested-%S"
+                              name bad nested)))
+          (dsh-emacs-render-tool-call
+           (dsh-emacs-test--tool-call-event
+            1 "bad-meta" name
+            (concat "{\"file_path\":\"/a.txt\",\"old_string\":\"old\","
+                    "\"new_string\":\"new\",\"content\":\"written\"}")))
+          (condition-case err
+              (progn
+                (dsh-emacs-render-tool-result
+                 (dsh-emacs-test--tool-result-event-meta 2 "bad-meta" text meta))
+                (let ((body (dsh-emacs-test--tool-block-text
+                             (dsh-emacs-render--make-namespace) "tool-bad-meta")))
+                  (dsh-test-assert label
+                    (eq 'success (plist-get
+                                  (dsh-emacs-render--tool-state "bad-meta") :state))
+                    (if (equal name "write")
+                        (string-match-p (regexp-quote "+ written") body)
+                      (and (string-match-p
+                            (if read-p "1: actual" "completed mutation") body)
+                           (string-match-p "file_path" body))))))
+            (error (dsh-test-fail label (error-message-string err)))))))))
+
+;; A hunk's line split matches dsh web's `wo': one trailing newline is markup,
+;; a further empty line is a real line.
+(dsh-test-assert "diff-lines-drop-one-trailing-newline"
+  (null (dsh-emacs-render--diff-lines ""))
+  (equal '("a") (dsh-emacs-render--diff-lines "a\n"))
+  (equal '("a" "") (dsh-emacs-render--diff-lines "a\n\n"))
+  (equal '("a" "" "b") (dsh-emacs-render--diff-lines "a\n\nb")))
 
 ;; --- Test 30: blank tool results hide the OUT section ---
 (with-temp-buffer

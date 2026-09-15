@@ -348,14 +348,29 @@ icons).  A blue accent was tried first and read as a second link color."
 leading variant icon, so an expanded bash row reads as one tool surface."
   :group 'dsh-emacs-faces)
 
-(defface dsh-emacs-tool-bash-panel-face
-  `((((background light)) :background "#f2f4f7")
-    (((background dark))  :background "#22252d")
-    (t :background "gray20"))
-  "Bash terminal card surface — the flat background band of the expanded
-card, the text-mode analog of dsh web's TerminalBlock code surface.  Rows
-are padded to the fragment box width, so the band spans the whole card
-without relying on `:extend'."
+(defface dsh-emacs-tool-meta-face
+  '((t :inherit shadow))
+  "Muted tool-card body text — read line numbers, the read window footer,
+and the diff card's gap and totals lines."
+  :group 'dsh-emacs-faces)
+
+(defface dsh-emacs-tool-diff-path-face
+  '((t :inherit bold))
+  "Diff card hunk path (one bold row per file)."
+  :group 'dsh-emacs-faces)
+
+(defface dsh-emacs-tool-diff-add-face
+  `((((background light)) :foreground ,dsh-emacs-color-tool-success-border)
+    (((background dark))  :foreground ,dsh-emacs-color-tool-success-border-dark)
+    (t :inherit success))
+  "Diff card added line (the `+ ' prefix and its text)."
+  :group 'dsh-emacs-faces)
+
+(defface dsh-emacs-tool-diff-del-face
+  `((((background light)) :foreground ,dsh-emacs-color-tool-error-border)
+    (((background dark))  :foreground ,dsh-emacs-color-tool-error-border-dark)
+    (t :inherit error))
+  "Diff card removed line (the `- ' prefix and its text)."
   :group 'dsh-emacs-faces)
 
 ;;; ---------------------------------------------------------------------------

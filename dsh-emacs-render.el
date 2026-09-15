@@ -308,22 +308,34 @@ icon.  Add your own entries to curate custom tool names."
 (defun dsh-emacs-render--aget (key alist)
   "Return KEY's value from ALIST (a list or vector of (KEY . VALUE) cells).
 Accept both string and symbol keys because `json-read' normally produces
-symbol-keyed alists while renderer call sites use JSON field names."
-  (let* ((alternate-key (cond
-                         ((stringp key) (intern key))
-                         ((symbolp key) (symbol-name key))
-                         (t key)))
-         (entry (if (listp alist)
-                    (or (assoc key alist)
-                        (assoc alternate-key alist))
-                  (catch 'found
-                    (dotimes (i (length alist))
-                      (let ((pair (aref alist i)))
-                        (when (and (consp pair)
-                                   (or (equal (car pair) key)
-                                       (equal (car pair) alternate-key)))
-                          (throw 'found pair))))))))
-    (and (consp entry) (cdr entry))))
+symbol-keyed alists while renderer call sites use JSON field names.  A
+non-sequence ALIST (a number, symbol, or string where the wire promised an
+object) yields nil rather than signalling: this accessor is the renderer's
+wire boundary, and a malformed field must select a fallback, not break the
+event stream."
+  (when (or (listp alist) (vectorp alist))
+    (let* ((alternate-key (cond
+                           ((stringp key) (intern key))
+                           ((symbolp key) (symbol-name key))
+                           (t key)))
+           (entry (if (listp alist)
+                      (or (assoc key alist)
+                          (assoc alternate-key alist))
+                    (catch 'found
+                      (dotimes (i (length alist))
+                        (let ((pair (aref alist i)))
+                          (when (and (consp pair)
+                                     (or (equal (car pair) key)
+                                         (equal (car pair) alternate-key)))
+                            (throw 'found pair))))))))
+      (and (consp entry) (cdr entry)))))
+
+(defun dsh-emacs-render--wire-list (value)
+  "Return VALUE as a list when it is a wire array or object list, else nil.
+JSON arrays arrive as vectors and JSON objects as alists; a field that must
+hold a list of objects yields nil for anything else, so the caller can fall
+back instead of signalling on malformed wire data."
+  (and (or (listp value) (vectorp value)) (append value nil)))
 
 (defun dsh-emacs-render--aget-nested (path alist)
   "Walk PATH (list of keys) inside ALIST and return the value, or nil."
@@ -1908,13 +1920,20 @@ the event seq but renders no ordinary tool card."
                (title (dsh-emacs-render--tool-title name))
                (summary (dsh-emacs-render--tool-summary variant args))
                (body-text (dsh-emacs-render--tool-body-text variant args))
-               ;; bash rows draw their (running) expanded body as a terminal card —
-               ;; the `$' prompt rows, styled — so the first frame already matches
-               ;; the settled card the result will complete.
-               (display-body (if (equal variant "bash")
-                                 (or (dsh-emacs-render--bash-card-body body-text)
-                                     body-text)
-                               body-text))
+               ;; bash and file-mutation rows draw their (running) expanded body
+               ;; as the card the settled result will complete — the `$' prompt
+               ;; rows, or the intended diff — so the first frame already
+               ;; matches.  read waits for its metadata, like dsh web.  The
+               ;; variant gate keeps the other variants from re-parsing their
+               ;; arguments for a card they cannot have.
+               (display-body (cond ((equal variant "bash")
+                                    (or (dsh-emacs-render--bash-card-body body-text)
+                                        body-text))
+                                   ((member variant '("write" "edit"))
+                                    (or (dsh-emacs-render--diff-card-body
+                                         name args nil 'pending)
+                                        body-text))
+                                   (t body-text)))
                (ns (dsh-emacs-render--make-namespace))
                (insert-point (dsh-emacs-render--input-insert-point))
                (ts (dsh-emacs-render--event-time event))
@@ -1925,7 +1944,8 @@ the event seq but renders no ordinary tool card."
           ;; Track state for later (tool/result will update this block).
           (dsh-emacs-render--set-tool-state
            call-id :state 'pending :variant variant :icon icon :title title
-           :summary summary :args body-text :call-time ts :ns ns)
+           :name name :args body-text :args-raw args
+           :summary summary :call-time ts :ns ns)
           ;; Maybe open / reuse an activity group.
           (dsh-emacs-render--ensure-group)
           (setq dsh-emacs--current-group-count (1+ dsh-emacs--current-group-count))
@@ -1939,7 +1959,7 @@ the event seq but renders no ordinary tool card."
             :style 'minimal
             :status 'tool-pending
             ;; The state tint covers the header row only, never the body: the
-            ;; expanded IN/OUT content must not inherit the row's accent.
+            ;; expanded card content must not inherit the row's accent.
             :header-face 'dsh-emacs-tool-pending-face)
            :create-new t
            :expanded dsh-emacs-tool-expand-by-default
@@ -1947,7 +1967,8 @@ the event seq but renders no ordinary tool card."
           ;; Update tracked state with group id.
           (dsh-emacs-render--set-tool-state
            call-id :state 'pending :variant variant :icon icon :title title
-           :summary summary :args body-text :call-time ts :ns ns
+           :name name :args body-text :args-raw args
+           :summary summary :call-time ts :ns ns
            :group-id dsh-emacs--current-group-id))
         ;; Return seq via the helper to keep helper structure.
         (dsh-emacs-render--event-seq event)))))
@@ -2026,19 +2047,6 @@ past a single row.  Returns nil for an empty COMMAND."
           (truncate-string-to-width flat limit nil nil "…")
         flat))))
 
-(defun dsh-emacs-render--bash-panel-row (row)
-  "Return ROW padded to the fragment box width as one terminal-card band.
-The card surface (`dsh-emacs-tool-bash-panel-face') is PREPENDED to the
-row's face list, so the row keeps its own piece faces (the `$' prompt
-glyph, divider, status colors) — the panel face supplies only the
-background, exactly like the transcript's code-block surfaces."
-  (let* ((width (dsh-emacs-ui--box-width))
-         (pad (max 0 (- width (string-width row))))
-         (s (concat row (make-string pad ?\s))))
-    (add-face-text-property 0 (length s)
-                            'dsh-emacs-tool-bash-panel-face nil s)
-    s))
-
 (defun dsh-emacs-render--bash-card-body (args-text &optional out-text state exit-code signal)
   "Compose the expanded body of a bash/pwsh tool row as a terminal card.
 Mirrors dsh web's TerminalBlock inside BashRow: a single `$' prompt row for
@@ -2057,9 +2065,9 @@ divider either).
 When the one-line prompt is elided, the row carries the full raw command as
 a `help-echo' tooltip.  Faces are baked onto the returned string so
 fold/unfold preserves the styling.  Returns nil when ARGS-TEXT carries no
-\"$ \" command — callers then keep the generic ioCard.  Rows are padded into
-one background band (`dsh-emacs-tool-bash-panel-face', see
-`dsh-emacs-render--bash-panel-row'), the transcript code-block surface."
+\"$ \" command — callers then keep the generic ioCard.  Rows are drawn on the
+transcript background with no card surface band, and are not padded to the
+box width."
   (let* ((raw-cmd (dsh-emacs-render--bash-command args-text))
          (cmd-line (dsh-emacs-render--bash-command-line raw-cmd))
          (raw-out (and (stringp out-text)
@@ -2107,7 +2115,252 @@ one background band (`dsh-emacs-tool-bash-panel-face', see
                            (and divider (list divider))
                            out-rows
                            (and footer (list footer)))))
-        (mapconcat #'dsh-emacs-render--bash-panel-row rows "\n")))))
+        (mapconcat #'identity rows "\n")))))
+
+;;; ---------------------------------------------------------------------------
+;;; Renderer: read card (dsh web ReadBlock)
+;;; ---------------------------------------------------------------------------
+
+(defconst dsh-emacs--read-result-prefix
+  "\\`<path>[^\n]*</path>\n<type>file</type>\n<content>\n"
+  "Regexp matching the opening envelope of a file read.
+A directory or image read carries a different `<type>', and a malformed
+result carries none; both keep the generic ioCard (web `readCardModel').
+The closing tag is checked separately to avoid regexp stack growth over
+large file contents.")
+
+(defun dsh-emacs-render--read-lines (meta offset)
+  "Narrow META's `lines' to a list of (NUMBER . TEXT) cells, or nil.
+META is the settled `tool/result' metadata alist.  The payload is validated
+as a whole (web `readMeta'), so a malformed one falls back to the generic
+card instead of printing a half-read file: `lines' must be an array whose
+NUMBERs are strictly increasing from the 1-based OFFSET through
+`totalLines', each with a string TEXT."
+  (when (listp meta)
+    (let ((raw (dsh-emacs-render--aget "lines" meta))
+          (total (dsh-emacs-render--aget "totalLines" meta)))
+      (when (and (vectorp raw) (integerp total) (>= total 0)
+                 (integerp offset) (>= offset 1))
+        (catch 'bad
+          (let ((previous (1- offset)) (out '()))
+            (dotimes (i (length raw))
+              (let ((cell (aref raw i)))
+                (unless (listp cell) (throw 'bad nil))
+                (let ((number (dsh-emacs-render--aget "number" cell))
+                      (text (dsh-emacs-render--aget "text" cell)))
+                  (unless (and (integerp number) (>= number 1)
+                               (> number previous) (<= number total)
+                               (stringp text))
+                    (throw 'bad nil))
+                  (setq previous number)
+                  (push (cons number text) out))))
+            (nreverse out)))))))
+
+(defun dsh-emacs-render--read-card-body (name args-raw meta result-text)
+  "Compose the expanded body of a `read' card, or nil for the generic ioCard.
+Mirrors dsh web's ReadBlock: the file's lines with their numbers in a muted
+gutter, and — when the call read a window of a larger file — a footer
+saying how many lines were shown, followed by the language when the Host
+reported one.  NAME and ARGS-RAW are the tool call's name and argument JSON;
+META and RESULT-TEXT are the settled result's metadata and text.
+
+Rows are drawn on the transcript background with no card surface band, and
+are not padded to the box width.  The card is drawn only for a plain readable
+file whose arguments, metadata and result envelope agree; a directory or image
+read, a failed call, or a truncated payload returns nil so the caller keeps
+the generic card."
+  (when (and (equal name "read") (listp meta))
+    (let* ((args (condition-case nil (json-read-from-string args-raw) (error nil)))
+           (path (and (listp args) (dsh-emacs-render--aget "file_path" args)))
+           (offset (dsh-emacs-render--aget "offset" meta))
+           (total (dsh-emacs-render--aget "totalLines" meta))
+           (lang (dsh-emacs-render--aget "lang" meta))
+           (lines (dsh-emacs-render--read-lines meta offset)))
+      (when (and (stringp path) (not (string-empty-p (string-trim path)))
+                 (integerp offset) (>= offset 1)
+                 (integerp total) (>= total 0)
+                 (listp lines) (stringp result-text)
+                 (string-match dsh-emacs--read-result-prefix result-text)
+                 (<= (match-end 0)
+                     (- (length result-text) (length "\n</content>")))
+                 (string-suffix-p "\n</content>" result-text))
+        ;; Numbers are right-aligned to the widest one, so the gutter keeps
+        ;; one column count down the whole card.
+        (let* ((gutter-format (format "%%%dd"
+                                      (length (number-to-string (max total 1)))))
+               (shown (length lines))
+               (rows (mapcar
+                      (lambda (cell)
+                        (concat
+                         "  "
+                         (propertize (format gutter-format (car cell))
+                                     'face 'dsh-emacs-tool-meta-face)
+                         "  " (cdr cell)))
+                      lines)))
+          (when (> shown 0)
+            (when (< shown total)
+              (setq rows
+                    (append rows
+                            (list (concat
+                                   "  "
+                                   (propertize
+                                    (concat (format "Showing %d of %d lines"
+                                                    shown total)
+                                            (if (and (stringp lang)
+                                                     (not (string-empty-p lang)))
+                                                (concat " · " lang)
+                                              ""))
+                                    'face 'dsh-emacs-tool-meta-face))))))
+            (mapconcat #'identity rows "\n")))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Renderer: diff card (dsh web DiffBlock)
+;;; ---------------------------------------------------------------------------
+
+(defun dsh-emacs-render--diff-lines (text)
+  "Split diff TEXT into lines the way dsh web's `wo' does.
+The empty string has no lines; one trailing newline is dropped while any
+further empty line is a real line, so a blank line inside a hunk survives."
+  (if (or (null text) (string= text ""))
+      nil
+    (split-string (if (string-suffix-p "\n" text) (substring text 0 -1) text)
+                  "\n")))
+
+(defun dsh-emacs-render--diff-args (name args-raw)
+  "Return the hunk NAME/ARGS-RAW intend as (PATH OLD-TEXT NEW-TEXT), or nil.
+Mirrors dsh web's `intendedDiff': `write' contributes a whole-file creation
+(OLD-TEXT nil) from its `content', `edit' the `old_string' → `new_string'
+replacement (an empty old string means insertion, so OLD-TEXT is nil).
+Returns nil when the arguments are not a usable file mutation."
+  (let ((args (condition-case nil (json-read-from-string args-raw) (error nil))))
+    (when (listp args)
+      (let ((path (dsh-emacs-render--aget "file_path" args)))
+        (when (and (stringp path) (not (string-empty-p (string-trim path))))
+          (pcase name
+            ("write"
+             (let ((content (dsh-emacs-render--aget "content" args)))
+               (when (stringp content) (list path nil content))))
+            ("edit"
+             (let ((old (dsh-emacs-render--aget "old_string" args))
+                   (new (dsh-emacs-render--aget "new_string" args)))
+               (when (and (stringp old) (stringp new))
+                 (list path (unless (string-empty-p old) old) new))))))))))
+
+(defun dsh-emacs-render--diff-hunks (meta)
+  "Return META's applied `diffs' as (PATH OLD-TEXT NEW-TEXT) hunks, or nil.
+Mirrors dsh web's `narrowDiffs': any malformed hunk invalidates the whole
+payload, and an empty array is no hunk list (the caller then keeps the
+argument-derived diff for a `write' and the generic ioCard for an `edit')."
+  (let ((raw (and (listp meta) (dsh-emacs-render--aget "diffs" meta))))
+    (when (and (vectorp raw) (> (length raw) 0))
+      (catch 'bad
+        (let (out)
+          (dotimes (i (length raw))
+            (let ((hunk (aref raw i)))
+              (unless (listp hunk) (throw 'bad nil))
+              (let ((path (dsh-emacs-render--aget "path" hunk))
+                    (old (dsh-emacs-render--aget "oldText" hunk))
+                    (new (dsh-emacs-render--aget "newText" hunk)))
+                (unless (and (stringp path)
+                             (or (null old) (stringp old))
+                             (stringp new))
+                  (throw 'bad nil))
+                (push (list path old new) out))))
+          (nreverse out))))))
+
+(defun dsh-emacs-render--diff-rows (hunks)
+  "Return the rendered rows and totals for HUNKS as (ROWS ADDED REMOVED FILES).
+HUNKS is a list of (PATH OLD-TEXT NEW-TEXT).  The rows mirror dsh web's
+DiffBlock: a bold path row per file (an `⋯' gap row when a later hunk stays
+in the same file), every removed line as `- TEXT' in the error color, then
+every added line as `+ TEXT' in the success color.  FILES is the number of
+distinct paths."
+  (let ((rows '()) (added 0) (removed 0) (files '()) (previous nil))
+    (dolist (hunk hunks)
+      (pcase-let ((`(,path ,old ,new) hunk))
+        (push (concat "  " (propertize (if (equal path previous) "⋯" path)
+                                       'face (if (equal path previous)
+                                                 'dsh-emacs-tool-meta-face
+                                               'dsh-emacs-tool-diff-path-face)))
+              rows)
+        (setq previous path)
+        (unless (member path files) (push path files))
+        (dolist (line (dsh-emacs-render--diff-lines old))
+          (push (concat "  " (propertize (concat "- " line)
+                                         'face 'dsh-emacs-tool-diff-del-face))
+                rows)
+          (setq removed (1+ removed)))
+        (dolist (line (dsh-emacs-render--diff-lines new))
+          (push (concat "  " (propertize (concat "+ " line)
+                                         'face 'dsh-emacs-tool-diff-add-face))
+                rows)
+          (setq added (1+ added)))))
+    (list (nreverse rows) added removed (length files))))
+
+(defun dsh-emacs-render--diff-card-body (name args-raw meta state)
+  "Compose the expanded body of a `write'/`edit' diff card, or nil.
+Mirrors dsh web's DiffBlock; see `dsh-emacs-render--diff-rows' for the rows,
+which are drawn on the transcript background with no card surface band — the
+-/+ line colors carry the structure, and padding every row of a whole-file
+write to the box width would bloat the transcript for no gain.
+NAME and ARGS-RAW are the tool call's name and argument JSON, META the
+settled result's metadata.
+
+While STATE is `pending' the body is the diff the arguments intend.  On
+`success', the recorded applied `meta.diffs' win; an `edit' whose result
+records none falls back to the generic ioCard (an edit can match nothing)
+while a `write' keeps its intended whole-file diff.  Other states or
+unusable arguments return nil so the caller preserves diagnostic output."
+  (let* ((intended (dsh-emacs-render--diff-args name args-raw))
+         (hunks (cond ((null intended) nil)
+                      ((eq state 'pending) (list intended))
+                      ((not (eq state 'success)) nil)
+                      ((equal name "write")
+                       (or (dsh-emacs-render--diff-hunks meta) (list intended)))
+                      (t (dsh-emacs-render--diff-hunks meta)))))
+    (when hunks
+      (pcase-let ((`(,rows ,added ,removed ,files)
+                   (dsh-emacs-render--diff-rows hunks)))
+        (mapconcat #'identity
+                   (append rows
+                           (list (concat
+                                  "  "
+                                  (propertize
+                                   (format "└ +%d -%d · %s" added removed
+                                           (if (= files 1) "1 file"
+                                             (format "%d files" files)))
+                                   'face 'dsh-emacs-tool-meta-face))))
+                   "\n")))))
+
+(defun dsh-emacs-render--shell-status (text)
+  "Split TEXT into (BODY EXIT-CODE SIGNAL).
+dsh's shell renderer appends `[exit code: N]' or `[killed by signal: X]' to
+the model-facing result text; the wire block carries no exit-status field
+(web `parseExitStatus').  BODY is TEXT without that trailing marker, and both
+EXIT-CODE and SIGNAL are nil when TEXT ends with neither."
+  (if (not (stringp text))
+      (list text nil nil)
+    (cond
+     ((string-match "\n\\[killed by signal: \\([^]\n]+\\)\\]\\'" text)
+      (list (substring text 0 (match-beginning 0)) nil (match-string 1 text)))
+     ((string-match "\n\\[exit code: \\([0-9]+\\)\\]\\'" text)
+      (list (substring text 0 (match-beginning 0))
+            (string-to-number (match-string 1 text)) nil))
+     (t (list text nil nil)))))
+
+(defun dsh-emacs-render--result-state (is-error error-code exit-code signal)
+  "Resolve a settled call's display state from its result facts.
+IS-ERROR is the result block's `isError' flag; ERROR-CODE is the Host's
+failure identity (an `interrupted' abort settles as an error too, but reads as
+stopped); EXIT-CODE and SIGNAL come from the shell status marker.  Mirrors web
+`toolRowModel' and `terminalFailed': only `interrupted' is `stopped', any
+other failure — a nonzero exit or a killing signal included — is `error',
+everything else `success'."
+  (cond ((equal error-code "interrupted") 'stopped)
+        (is-error 'error)
+        ((and (integerp exit-code) (/= exit-code 0)) 'error)
+        (signal 'error)
+        (t 'success)))
 
 (defun dsh-emacs-render-tool-result (event)
   "Render a `tool/result' event by appending to the corresponding tool-call block."
@@ -2123,33 +2376,41 @@ one background band (`dsh-emacs-tool-bash-panel-face', see
                          "callId" (dsh-emacs-render--aget "source" message))
                         (dsh-emacs-render--aget "callId" data)))
            (content (dsh-emacs-render--aget "content" message))
+           (error-code (dsh-emacs-render--aget
+                        "code" (dsh-emacs-render--aget "error" data)))
            (is-error nil)
-           (exit-code nil)
-           (signal nil)
+           (block-exit-code nil)
+           (block-signal nil)
            (text-parts '()))
-      (dolist (block (append content nil))
+      (dolist (block (dsh-emacs-render--wire-list content))
         (when (equal (dsh-emacs-render--aget "type" block) "tool-result")
           (setq is-error (dsh-emacs-render--json-bool (dsh-emacs-render--aget "isError" block)))
-          (setq exit-code (dsh-emacs-render--aget "exitCode" block))
-          (setq signal (dsh-emacs-render--aget "signal" block))
-          (dolist (inner (append (dsh-emacs-render--aget "content" block) nil))
+          (setq block-exit-code (dsh-emacs-render--aget "exitCode" block))
+          (setq block-signal (dsh-emacs-render--aget "signal" block))
+          (dolist (inner (dsh-emacs-render--wire-list
+                          (dsh-emacs-render--aget "content" block)))
             (when (equal (dsh-emacs-render--aget "type" inner) "text")
               (push (dsh-emacs-render--aget "text" inner) text-parts)))))
       (let* ((full-text (mapconcat #'identity (nreverse text-parts) "\n"))
-             (state (if is-error 'error
-                      (cond
-                       ((and (integerp exit-code) (= exit-code 0)) 'success)
-                       ((and (integerp exit-code) (/= exit-code 0)) 'error)
-                       (signal 'stopped)
-                       (t 'success))))
+             (meta (dsh-emacs-render--aget "meta" data))
              (ns (dsh-emacs-render--make-namespace))
              (block-id (dsh-emacs-render--tool-call-block-id call-id)))
         (when-let* ((prev (dsh-emacs-render--tool-state call-id)))
           (let* ((title (or (plist-get prev :title) "Tool"))
+                 (name (or (plist-get prev :name) ""))
                  (args (or (plist-get prev :args) ""))
+                 (args-raw (or (plist-get prev :args-raw) ""))
                  (summary (or (plist-get prev :summary) ""))
                  (icon (or (plist-get prev :icon) ""))
                  (variant (plist-get prev :variant))
+                 ;; The shell status rides in the result text, not the wire
+                 ;; block: parse it before resolving the display state.
+                 (shell (and (equal variant "bash")
+                             (dsh-emacs-render--shell-status full-text)))
+                 (exit-code (or block-exit-code (nth 1 shell)))
+                 (signal (or block-signal (nth 2 shell)))
+                 (state (dsh-emacs-render--result-state
+                         is-error error-code exit-code signal))
                  (face (pcase state
                          ('success 'dsh-emacs-tool-success-face)
                          ('error 'dsh-emacs-tool-error-face)
@@ -2157,11 +2418,20 @@ one background band (`dsh-emacs-tool-bash-panel-face', see
                          (_ 'dsh-emacs-tool-pending-face)))
                  (status-text (dsh-emacs-render--tool-status-text state exit-code signal))
                  ;; A settled bash/pwsh call expands into a terminal card
-                 ;; (`$' prompt rows + output + status footer); every other
-                 ;; tool keeps the generic ioCard (IN/OUT).
+                 ;; (`$' prompt rows + output + status footer), a file read into
+                 ;; the line-numbered read card, a write/edit into its diff
+                 ;; card; a call the card models cannot describe (or a failed
+                 ;; one) keeps the generic ioCard (IN/OUT).  The variant gate
+                 ;; keeps the other variants from re-parsing their arguments.
                  (body (or (and (equal variant "bash")
                                 (dsh-emacs-render--bash-card-body
-                                 args full-text state exit-code signal))
+                                 args (nth 0 shell) state exit-code signal))
+                           (and (eq state 'success)
+                                (dsh-emacs-render--read-card-body
+                                 name args-raw meta full-text))
+                           (and (member variant '("write" "edit"))
+                                (dsh-emacs-render--diff-card-body
+                                 name args-raw meta state))
                            (dsh-emacs-render--tool-body-io
                             args full-text status-text))))
             (dsh-emacs-ui-update-fragment
@@ -2181,10 +2451,10 @@ one background band (`dsh-emacs-tool-bash-panel-face', see
                            ('success 'tool-success)
                            ('error 'tool-error)
                            (_ 'tool-stopped)))
-             :create-new nil))
-          ;; Track the new state.
-          (dsh-emacs-render--set-tool-state
-           call-id :state state :result full-text :exit-code exit-code)
+             :create-new nil)
+             ;; Track the new state.
+             (dsh-emacs-render--set-tool-state
+              call-id :state state :result full-text :exit-code exit-code))
           ;; Increment completed counter in the current group.
           (when (and dsh-emacs--current-group-id
                      (equal (plist-get (dsh-emacs-render--tool-state call-id) :group-id)

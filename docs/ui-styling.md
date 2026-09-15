@@ -22,7 +22,8 @@ builds on agent-shell, the mode-line stats on pi-mono):
 - **Tool calls**: collapsible tool rows modeled on dsh web, with a variant icon
   + status color (pending=orange, success=green, error=red); bash/pwsh rows
   expand into a terminal card (`$` prompt + output, error/interrupt footer),
-  other variants into separate IN/OUT sections
+  read rows into a line-numbered file card, write/edit rows into a diff card,
+  and every other variant into an IN/OUT section
 - **Mode-line stats**: a compact status section spliced into the mode line (cwd, git branch, model,
   tokens, context%, and cost)
 - **Session list**: card view showing session title, working directory, branch,
@@ -46,15 +47,19 @@ builds on agent-shell, the mode-line stats on pi-mono):
 | `dsh-emacs-tool-stopped-face` | Tool interrupted (inherits `font-lock-keyword-face`) |
 | `dsh-emacs-tool-icon-face` | Tool variant icon (purple, mimicking dsh web's tool purple #a78bfa) |
 | `dsh-emacs-tool-bash-prompt-face` | Bash terminal card `$` prompt glyph (same tool-purple accent) |
-| `dsh-emacs-tool-bash-panel-face` | Bash terminal card surface (the expanded card's background band, mirroring the code-block panel look) |
 | `dsh-emacs-tool-title-face` | Tool card title |
 | `dsh-emacs-tool-io-face` | ioCard `IN` / `OUT` section labels |
+| `dsh-emacs-tool-meta-face` | Muted card body text: read line numbers, the read window footer, diff gap and totals lines |
+| `dsh-emacs-tool-diff-path-face` | Diff card hunk path |
+| `dsh-emacs-tool-diff-add-face` | Diff card added line (`+ ` prefix) |
+| `dsh-emacs-tool-diff-del-face` | Diff card removed line (`- ` prefix) |
 
 State faces tint the **header row only** — variant icon/title plus the
 summary/suffix — for every tool variant, bash included; an expanded body never
-inherits them.  The ioCard body carries its own faces instead: `IN`/`OUT`
-labels use `dsh-emacs-tool-io-face`, the divider `dsh-emacs-divider-face`, and
-the args/output lines stay unstyled (`dsh-emacs-tool-output-face` is unused).
+inherits them.  A card body carries its own faces instead (`$` prompt,
+gutter numbers, diff lines, muted footers), and the ioCard body keeps `IN`/`OUT`
+labels in `dsh-emacs-tool-io-face`, its divider in `dsh-emacs-divider-face`,
+and its args/output lines unstyled (`dsh-emacs-tool-output-face` is unused).
 
 Tool rows mimic dsh web's `ToolRow`: each tool call renders as one row of
 **collapsible** cards, with a header of `variant icon + title + summary`;
@@ -82,21 +87,52 @@ Status semantics align with dsh web's `leadingFor`/`stateStatus`:
 - **Interrupted**: leading switches to `◐` in the stopped face; the body
   shows `⏸ interrupted`
 
-Expanded bodies mirror dsh web's keyed toolviews:
+Expanded bodies mirror dsh web's keyed toolviews.  Every one of them is drawn
+on the transcript background — no card surface band: a card's own faces (the
+`$` prompt, gutter numbers, the `-`/`+` diff colors) already carry its
+structure, and padding every row to the box width would inflate the transcript
+for no added meaning (see
+[045](../postmortem/045-read-and-diff-tool-cards.md)).
 
 - **bash/pwsh rows expand into a terminal card** (dsh web `BashRow` +
-  `TerminalBlock`): the card body is one background band (the
-  `dsh-emacs-tool-bash-panel-face` surface, the same look as transcript code
-  blocks) carrying a single `$` prompt row for the command (prompt glyph in
-  the tool-purple `dsh-emacs-tool-bash-prompt-face`; a multi-line or
-  over-long command is flattened to one line and ellipsized — the full raw
-  command stays available as the row's tooltip), a thin `─` divider where
-  the output starts, and the raw output verbatim below.  A failure or
-  interrupt appends a state-colored footer (`✗ exit N`, `✗ signal …`,
-  `⏸ interrupted`); a clean exit ends bare at the output.  While the call is
-  still running the card shows only the prompt row.  The faces are baked
-  onto the card text, so fold/unfold keeps the styling; the row's state tint
-  covers only the header line, never the card.
+  `TerminalBlock`): the card body carries a single `$` prompt row for the
+  command (prompt glyph in the tool-purple `dsh-emacs-tool-bash-prompt-face`;
+  a multi-line or over-long command is flattened to one line and ellipsized —
+  the full raw command stays available as the row's tooltip), a thin `─`
+  divider where the output starts, and the output below — dsh's shell renderer
+  appends the exit status to the result text (`[exit code: N]` /
+  `[killed by signal: X]`), and that trailing marker is parsed into the row
+  state (web `parseExitStatus`) and removed, so it is never shown twice.  A
+  failure or interrupt appends a state-colored footer (`✗ exit N`,
+  `✗ signal …`, `⏸ interrupted`); a clean exit ends bare at the output.
+  While the call is still running the card shows only the prompt row.  The
+  faces are baked onto the card text, so fold/unfold keeps the styling; the
+  row's state tint covers only the header line, never the card.
+- **`read` rows expand into a line-numbered file card** (dsh web `ReadBlock`):
+  the file's lines with their numbers right-aligned in a muted gutter
+  (`dsh-emacs-tool-meta-face`).  When the call read only a window of a larger
+  file, a muted footer reports `Showing N of M lines` (plus the Host-reported
+  language).  Neither the raw `<path>/<type>/<content>` envelope nor the
+  argument JSON is repeated: the row header already shows the path.  The card
+  needs the settled result's `meta` (path, offset, lines, totalLines) **and** a
+  `<type>file</type>` envelope, and is drawn only for a successful call.  Line
+  numbers must increase within the range from `offset` through `totalLines`.
+  A directory or image read, a call that failed or was interrupted, a nonzero
+  exit or signal, a truncated payload, or a tool sharing the icon without
+  being `read` (`web_fetch`, `cordis_*_inspect`) keeps the generic ioCard.
+- **`write`/`edit` rows expand into a diff card** (dsh web `DiffBlock`): a bold
+  path row per file (an `⋯` gap row when a later hunk stays in the same file),
+  removed lines as `- text` in `dsh-emacs-tool-diff-del-face`, added lines as
+  `+ text` in `dsh-emacs-tool-diff-add-face`, and a muted
+  `└ +N -M · K file(s)` footer.  While the call runs the diff is the one the
+  arguments intend (so an `edit` previews immediately, like the bash prompt
+  row); once settled the applied `meta.diffs` win.  A `write` whose result
+  records no diff keeps its whole-file diff; an `edit` whose result records
+  none (it can match nothing), a call that did not succeed (a failure, an
+  `interrupted` abort, a nonzero exit, or a signal), or unusable arguments
+  keep the generic ioCard, preserving the diagnostic output.
+  Like dsh web, the card shows the whole old block then the whole new block
+  rather than a line-by-line alignment.
 - Every other variant keeps a dsh web-style **ioCard** (an `IN` arguments /
   `OUT` result pair with the status line on top).
 

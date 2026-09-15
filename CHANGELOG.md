@@ -10,6 +10,11 @@ minor) and stay undated until the release is cut.
 
 ### Breaking Changes
 
+- **The tool-card surface face is removed**: `dsh-emacs-tool-bash-panel-face`
+  has no replacement — expanded tool cards now draw on the transcript
+  background (see `Changed`).  Drop any `custom-set-faces` entry that named it
+  (rationale: postmortem/045).
+
 - **Fragment faces are region-scoped**: `dsh-emacs-ui-make-fragment` drops the
   whole-block `:face` for `:header-face` (header row) and `:body-face`
   (expanded body).  The regions are disjoint, so a row/status face can no
@@ -37,6 +42,19 @@ minor) and stay undated until the release is cut.
   `M-x dsh-emacs-copy-code-block` (rationale: postmortem/043).
 
 ### Added
+
+- **Read and file-mutation rows expand into their own cards**: a `read` row
+  shows the file's lines with their numbers in a muted gutter, plus a
+  `Showing N of M lines` footer when it read only a window; a `write`/`edit`
+  row shows a `- `/`+ ` diff with a per-file path row and a
+  `└ +N -M · K file(s)` total.  Both replace the raw argument JSON and result
+  envelope.  An `edit` previews its intended diff while it runs and switches
+  to the one its result records; a `write` keeps its whole-file diff.
+  Anything the models cannot describe (a directory or image read,
+  `web_fetch`, a failed call, malformed arguments) keeps the generic IN/OUT
+  card.  Four faces style the new bodies: `dsh-emacs-tool-meta-face`,
+  `dsh-emacs-tool-diff-path-face`, `dsh-emacs-tool-diff-add-face` and
+  `dsh-emacs-tool-diff-del-face` (rationale: postmortem/045).
 
 - **Question prompts explain themselves while you answer**: an `ask` prompt is
   one minibuffer read — the question text is the prompt, the numbered options
@@ -110,6 +128,31 @@ minor) and stay undated until the release is cut.
   postmortem/044).
 
 ### Fixed
+
+- **Shell exit status is read from the result text**: a nonzero exit or a
+  killing signal settles the row as failed and prints its `✗ exit N` /
+  `✗ signal X` footer — dsh's shell renderer writes the status into the
+  model-facing text (`[exit code: N]` / `[killed by signal: X]`), not into the
+  result block, so the marker is parsed there (web `parseExitStatus`) and
+  removed from the displayed output.
+
+- **File cards require a successful call**: read and diff cards fall back to
+  the raw result for any other status — a failure, an `interrupted` abort, a
+  nonzero exit, or a signal — instead of drawing a card over the diagnostic
+  text.
+
+- **Read cards reject lines before the requested window**: metadata with line
+  numbers below its declared offset falls back to the raw result instead of
+  displaying an unrelated window.
+
+- **Large file reads finish rendering**: validating the read envelope no
+  longer overflows Emacs' regexp matcher when the host returns a large window.
+
+- **Malformed tool results no longer leave completed calls pending**: invalid
+  read/diff metadata, and a malformed result body (a non-array `content`, or
+  members that are not objects), now select the existing fallback body instead
+  of signalling out of the renderer — preserving the result text for reads and
+  edits and the whole-file preview for writes.
 
 - **The package loads and completes on Emacs 27–30**: session switching, the
   model picker, `ask` answers and `@` references all pinned candidate order
@@ -214,6 +257,11 @@ minor) and stay undated until the release is cut.
   are recognized again (rationale: docs/rpc.md §0.2, §4.11).
 
 ### Changed
+
+- **Expanded tool cards no longer paint a background band**: every card — the
+  bash terminal card included — draws on the transcript background, so rows
+  are no longer padded to the box width (a 20-line bash card is 542 characters
+  instead of 1814) (rationale: postmortem/045).
 
 - **`scripts/verify.sh` now rejects free-variable warnings**: the
   byte-compile step used to pass on any warning.  `reference to free
