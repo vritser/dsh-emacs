@@ -7,7 +7,7 @@ built-ins (Emacs 27.1+) with no third-party dependencies.
 
 ![Chat buffer with streaming replies and tool calls](assets/chat.png)
 
-> **0.3.0** targets the **dsh 0.1.2** wire protocol (server **0.1.2-rc.1 or
+> **0.4.0** targets the **dsh 0.1.5** wire protocol (server **0.1.5-rc.1 or
 > newer**).
 
 ## Quick start
