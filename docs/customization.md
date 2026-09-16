@@ -82,6 +82,11 @@ These default keys apply in the session list opened by `M-x dsh-emacs`:
 | `M` | Move the session under point to another workspace |
 | `w` | Filter by workspace; empty input clears the filter |
 
+The same `session/rename` RPC is available without leaving a chat buffer:
+`M-x dsh-emacs-rename-session` there names the session you are in (no session
+picker), prefilled with its current title; outside a chat buffer it asks for
+the session with completion.
+
 Workspace and `Ungrouped` groups start expanded by default. Set
 `dsh-emacs-workspaces-collapsed-by-default` to non-nil to start with all
 groups collapsed. `M-x dsh-emacs-collapse-workspaces` and

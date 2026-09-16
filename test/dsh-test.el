@@ -6348,6 +6348,49 @@ Lets a test drive a malformed content value through the result path."
               (dsh-test-pass "rename-at-point-uses-point-session")))))
     (kill-buffer buf)))
 
+;; --- Test 59b: rename the session owned by the current chat buffer ---
+;; The rename command inside a chat buffer must target that buffer's
+;; session and prefill the current title; the session picker must not run.
+(let ((buf (generate-new-buffer " *dsh-rename-chat*"))
+      (old dsh-emacs--sessions)
+      (calls nil)
+      (prefill 'unset))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs--sessions
+              (dsh-emacs-test--session-items
+               (list (list (cons 'sessionId "sid-chat")
+                           (cons 'blank :json-false)
+                           (cons 'projections
+                                 (list (cons 'values
+                                             (list (cons 'title "Old title")))))))))
+        (with-current-buffer buf
+          (dsh-emacs-mode)
+          (setq dsh-emacs--buffer-session "sid-chat")
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (method params cb)
+                       (push (list method params) calls)
+                       (funcall cb t '((title . "New title")))))
+                    ((symbol-function 'read-string)
+                     (lambda (_prompt &optional initial &rest _)
+                       (setq prefill initial)
+                       "New title"))
+                    ((symbol-function 'dsh-emacs-list-sessions)
+                     (lambda () nil))
+                    ((symbol-function 'dsh-emacs--completing-session-id)
+                     (lambda (&rest _) (error "session picker must not run"))))
+            (call-interactively #'dsh-emacs-rename-session)))
+        (let* ((call (car calls))
+               (req (cdr (assq 'request (cadr call)))))
+          (dsh-test-assert "rename-chat-uses-buffer-session"
+            (equal "session/rename" (car call))
+            (equal "sid-chat" (cdr (assq 'sessionId req)))
+            (equal "New title" (cdr (assq 'title req))))
+          (dsh-test-assert "rename-chat-prefills-current-title"
+            (equal "Old title" prefill))))
+    (setq dsh-emacs--sessions old)
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
 ;; --- Test 60: subagent sessions do not enter a group ---
 ;; The server marks subagent sessions with origin: "subagent"; they
 ;; must not appear in the session list (including the Ungrouped bucket).

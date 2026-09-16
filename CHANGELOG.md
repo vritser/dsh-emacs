@@ -141,6 +141,13 @@ minor) and stay undated until the release is cut.
   left instead of requesting a page that cannot exist (rationale:
   postmortem/044).
 
+- **Rename the current session from its chat buffer**:
+  `M-x dsh-emacs-rename-session` inside a chat buffer prompts for a new
+  title, prefilled with the session's current one, and renames that session
+  in place — no trip through the session list or a session picker (there is
+  no default chat key for it).  The session list and any other open buffer
+  for the same session follow the live title (rationale: postmortem/048).
+
 ### Fixed
 
 - **Background command failures use the error color**: a `job_output` footer

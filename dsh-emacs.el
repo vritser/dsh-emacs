@@ -1789,9 +1789,14 @@ the session list on success."
                             (message "Failed to archive: %S" value)))))
 
 (defun dsh-emacs-rename-session (session-id new-title)
-  "Rename session."
+  "Rename session SESSION-ID to NEW-TITLE.
+Interactively the target is read with completion, except inside a chat
+buffer, where that buffer's own session is renamed without a picker; the
+title prompt is prefilled with the session's current title."
   (interactive
-   (let* ((sid (dsh-emacs--completing-session-id "Rename session: "))
+   (let* ((sid (or (and (derived-mode-p 'dsh-emacs-mode)
+                        (dsh-emacs--active-session-id))
+                   (dsh-emacs--completing-session-id "Rename session: ")))
           (item (dsh-emacs--chat-session-item sid)))
      (list sid
            (read-string "New title: "
