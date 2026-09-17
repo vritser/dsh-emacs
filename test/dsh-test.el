@@ -6317,6 +6317,64 @@ Lets a test drive a malformed content value through the result path."
     (when listed
       (dsh-test-pass "archive-refreshes-list"))))
 
+;; --- Test 58b: unarchive session (workspace/unarchiveSession, dsh 0.1.6) ---
+;; The inverse of Test 58: the response is the complete remaining archive
+;; set, so the cache is replaced wholesale (the host is idempotent for an
+;; id it no longer holds archived).
+(let ((listed nil)
+      (calls nil)
+      (dsh-emacs--archived-sessions (dsh-emacs--normalize-archived '("s1" "s2"))))
+  (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+             (lambda (method params cb)
+               (push (list method params) calls)
+               (when (string= method "workspace/unarchiveSession")
+                 (funcall cb t '((archivedSessionIds . ["s1"]))))))
+            ((symbol-function 'dsh-emacs-list-sessions)
+             (lambda () (setq listed t))))
+    (dsh-emacs-unarchive-session "s2")
+    (dsh-test-assert "unarchive-passes-session-id"
+      (let* ((call (car calls))
+             (params (cadr call)))
+        (and (string= "workspace/unarchiveSession" (car call))
+             (string= "s2"
+                      (cdr (assq 'sessionId
+                                 (cdr (assq 'request params))))))))
+    (dsh-test-assert "unarchive-updates-archived-set"
+      (and (gethash "s1" dsh-emacs--archived-sessions)
+           (not (gethash "s2" dsh-emacs--archived-sessions))))
+    (dsh-test-assert "unarchive-refreshes-list" listed)))
+
+;; --- Test 58c: the unarchive picker offers only archived rows ---
+;; `dsh-emacs--completing-session-id' grew an optional FILTER; an empty
+;; candidate set must surface EMPTY-MESSAGE as a user-error rather than
+;; letting `completing-read' fail on an empty collection.
+(let ((dsh-emacs--sessions
+       (list (dsh-protocol-session--from-alist '((sessionId . "live")
+                                                 (title . "Live")))
+             (dsh-protocol-session--from-alist '((sessionId . "gone")
+                                                 (title . "Gone")))))
+      (dsh-emacs--archived-sessions (dsh-emacs--normalize-archived '("gone")))
+      (offered nil))
+  (cl-letf (((symbol-function 'completing-read)
+             (lambda (_prompt collection &rest _args)
+               (setq offered (mapcar #'car collection))
+               (caar collection))))
+    (dsh-test-assert "unarchive-picker-offers-archived-only"
+      (let ((picked (dsh-emacs--completing-session-id
+                     "Unarchive session: " #'dsh-emacs--archived-session-p
+                     "No archived session can be restored")))
+        (and (= 1 (length offered))
+             (string-match-p "gone" (car offered))
+             (equal "gone" picked))))
+    (let ((dsh-emacs--archived-sessions nil))
+      (dsh-test-assert "unarchive-picker-empty-user-error"
+        (equal "No archived session can be restored"
+               (condition-case err
+                   (dsh-emacs--completing-session-id
+                    "Unarchive session: " #'dsh-emacs--archived-session-p
+                    "No archived session can be restored")
+                 (user-error (error-message-string err))))))))
+
 ;; --- Test 59: rename session at point ---
 ;; The r key in the list should act on the session at point like
 ;; archive (the D key), taking id + new title from the text property,

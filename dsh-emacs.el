@@ -1691,11 +1691,17 @@ same-titled sessions), and the current session itself is never offered."
   (interactive)
   (dsh-emacs-switch-workspace-session 'all))
 
-(defun dsh-emacs--completing-session-id (prompt)
+(defun dsh-emacs--completing-session-id (prompt &optional filter empty-message)
   "Read a session id with completion against the cached session list.
 Choices show the display title (like the list); the returned value is
-always the session id."
+always the session id.  FILTER, when given, restricts the candidates to
+the sessions it accepts (unarchive offers only the archived rows); when
+that leaves nothing to choose, signal EMPTY-MESSAGE instead of letting
+`completing-read' fail on an empty collection."
   (let* ((index (dsh-emacs--sessions-index))
+         (sessions (if filter
+                       (cl-remove-if-not filter dsh-emacs--sessions)
+                     dsh-emacs--sessions))
          (entries (mapcar (lambda (s)
                             (let* ((id (dsh-protocol-session-session-id s))
                                    (item (gethash id index)))
@@ -1705,9 +1711,10 @@ always the session id."
                                                 id)
                                             id)
                                     id)))
-                          dsh-emacs--sessions))
-         (picked (completing-read prompt entries nil t)))
-    (cdr (assoc picked entries))))
+                          sessions)))
+    (unless entries
+      (user-error "%s" (or empty-message "No session to choose from")))
+    (cdr (assoc (completing-read prompt entries nil t) entries))))
 
 ;;;###autoload
 (defun dsh-emacs-fork-session (session-id)
@@ -1770,9 +1777,9 @@ preset, context snapshot, title and workspace in one round trip."
 
 (defun dsh-emacs-archive-session (session-id)
   "Archive SESSION-ID: remove it from its workspace view.
-`workspace/archiveSession' (the only session-removal RPC this dsh version
-exposes; there is no `session.delete').  Refreshes the archived set and
-the session list on success."
+`workspace/archiveSession' (still the only session-removal RPC; there is
+no `session.delete'); `dsh-emacs-unarchive-session' is its dsh 0.1.6
+inverse.  Refreshes the archived set and the session list on success."
   (interactive (list (dsh-emacs--completing-session-id "Archive session: ")))
   (dsh-emacs-server-ensure)
   (dsh-emacs--rpc-async "workspace/archiveSession"
@@ -1787,6 +1794,36 @@ the session list on success."
                                 (dsh-emacs-list-sessions)
                                 (message "Session archived"))
                             (message "Failed to archive: %S" value)))))
+
+(defun dsh-emacs--archived-session-p (session)
+  "Whether SESSION is in the cached archived set."
+  (and dsh-emacs--archived-sessions
+       (gethash (dsh-protocol-session-session-id session)
+                dsh-emacs--archived-sessions)))
+
+(defun dsh-emacs-unarchive-session (session-id)
+  "Restore archived SESSION-ID to its workspace view.
+`workspace/unarchiveSession' (dsh 0.1.6), the inverse of archiving: the
+host drops the id from its registry-global archive set and treats an id
+it no longer holds archived as a no-op, so a lost race with another
+surface reports success.  The returned set refreshes the archived cache
+and the session list."
+  (interactive (list (dsh-emacs--completing-session-id
+                      "Unarchive session: " #'dsh-emacs--archived-session-p
+                      "No archived session can be restored")))
+  (dsh-emacs-server-ensure)
+  (dsh-emacs--rpc-async "workspace/unarchiveSession"
+                        `((request . ((sessionId . ,session-id))))
+                        (lambda (ok value)
+                          (if ok
+                              (progn
+                                (setq dsh-emacs--archived-sessions
+                                      (dsh-emacs--normalize-archived
+                                       (dsh-protocol-archived-set-archived-session-ids
+                                        (dsh-protocol-archived-set--from-alist value))))
+                                (dsh-emacs-list-sessions)
+                                (message "Session restored"))
+                            (message "Failed to restore session: %S" value)))))
 
 (defun dsh-emacs-rename-session (session-id new-title)
   "Rename session SESSION-ID to NEW-TITLE.

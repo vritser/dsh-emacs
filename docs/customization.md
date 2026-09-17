@@ -73,6 +73,7 @@ These default keys apply in the session list opened by `M-x dsh-emacs`:
 | `c` / `C` | Create a session / create with a chosen agent preset |
 | `r` | Rename the session under point |
 | `d` | Archive the session without deleting it |
+| `u` | Restore an archived session (pick from the archive set) |
 | `/` | Search |
 | `g` | Refresh |
 | `TAB` | Toggle folding for the workspace group |

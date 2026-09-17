@@ -273,7 +273,7 @@ is the `client-request` envelope with `payload = {args: {...}}`:
 | `session/selectModel` | Switch the session's model |
 | `session/rename` | Rename a session (its display title) |
 | `session/attachment` | Fetch a stored image attachment (ref + base64 data) |
-| `workspace/create` / `rename` / `delete` / `insertBefore` / `archiveSession` | Mutate a workspace or a session's workspace membership |
+| `workspace/create` / `rename` / `delete` / `insertBefore` / `archiveSession` / `unarchiveSession` | Mutate a workspace or a session's workspace membership (archive has no delete; unarchive is its dsh 0.1.6 inverse) |
 | `agentPresets/list` | List agent presets |
 | `commands/list` / `commands/execute` | List / run slash commands |
 | `$events/result` | Answer a `$events` waterfall (approval/question), args `{clientId, eventId, outcome}` |

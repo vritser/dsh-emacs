@@ -8,6 +8,16 @@ minor) and stay undated until the release is cut.
 
 ## 0.5.0 - Unreleased
 
+### Added
+
+- **Restore an archived session without leaving Emacs**: `M-x
+  dsh-emacs-unarchive-session`, and `u` in `*dsh-sessions*`, bring a session
+  back from the archive set through the dsh 0.1.6 `workspace/unarchiveSession`
+  RPC — the inverse the `d` archive action never had.  The picker offers only
+  archived sessions (an archived row stays in `session/list`, the list just
+  hides it), and the returned set refreshes the archive cache and the list.
+  (rationale: postmortem/049)
+
 ### Fixed
 
 - **Sending a message no longer flashes the Next Message row**: an idle
