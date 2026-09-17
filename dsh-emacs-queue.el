@@ -87,10 +87,14 @@ settles back to empty (the claim frame), in the submit failure branch,
 or via `dsh-emacs-queue--submit-suppress-timer' (transport-safety only:
 un-sticks the echo gate when neither a settle frame nor an RPC failure
 ever arrives; it paces NO preview).  The Next Message preview is gated
-by this flag too — with one event-driven exception: while a turn is
-RUNNING (`dsh-emacs--busy-p') the preview shows regardless, because an
-item mirrored then can only be claimed at the turn end and is genuinely
-parked — that is how a queued message surfaces without any timing hack.
+by this flag too — with one exception: a submit that was already PARKED
+when it was made (`dsh-emacs-queue--submit-parked-p': a turn was running
+then) shows its preview at once, because such an item can only be
+claimed at the turn end.  An IDLE submit is not parked — the host claims
+it at the turn START — so its splice→claim transient stays hidden even
+after the send path lights the optimistic spinner; keying this on the
+live spinner instead painted the row and cleared it within milliseconds
+(the `C-c C-c' flash).
 Connection seeds do NOT clear it: on a fresh open the submit's own
 splice-in frame is the seed, and the claim leg that must stay silent
 follows it.  Set by `dsh-emacs-queue--mark-submit-suppress' (called
@@ -103,7 +107,18 @@ transport or an RPC that never fails visibly — so the echo gate does
 not stay stuck until the next submit.  The claim frame normally clears
 the flag within milliseconds, so this is pure transport hygiene: its
 value carries no user-visible timing (the parked preview is revealed by
-`dsh-emacs--busy-p', not by this timer).")
+`dsh-emacs-queue--submit-parked-p', not by this timer).")
+
+(defvar-local dsh-emacs-queue--submit-parked-p nil
+  "Whether the submit behind `dsh-emacs--queue-submit-suppress' is parked.
+Non-nil when that submit was made while a turn was ALREADY running, so
+the host can only claim it at the turn end: it is genuinely parked and
+its Next Message preview must show at once, even while the suppression
+flag is up.  An IDLE submit is not parked — the host claims it at the
+turn START — and its splice→claim transient must stay invisible even
+after the send path lights the optimistic spinner.  Set alongside
+`dsh-emacs--queue-submit-suppress' (see
+`dsh-emacs-queue--mark-submit-suppress'), cleared with it.")
 
 (defun dsh-emacs-queue--submit-suppress-clear ()
   "Clear the submit-suppression flag and its timer (idempotent).
@@ -113,6 +128,7 @@ immediately instead of waiting for the next queue frame."
     (cancel-timer dsh-emacs-queue--submit-suppress-timer))
   (setq dsh-emacs-queue--submit-suppress-timer nil)
   (setq dsh-emacs--queue-submit-suppress nil)
+  (setq dsh-emacs-queue--submit-parked-p nil)
   (dsh-emacs-queue--schedule-paint))
 
 (defun dsh-emacs-queue--mark-submit-suppress ()
@@ -126,14 +142,21 @@ is rendered directly by the submit path.  With items already parked the
 flashes are genuine (ordering information) and stay."
   (dsh-emacs-queue--submit-suppress-clear)
   (setq dsh-emacs--queue-submit-suppress t)
+  ;; Capture whether this submit is genuinely parked NOW: a turn already
+  ;; running means the host can only claim the item at the turn end, so its
+  ;; preview must show at once.  An idle submit must NOT be revealed just
+  ;; because the send path lights the optimistic spinner while the claim
+  ;; frame is still in flight — that is the `C-c C-c' flash (see
+  ;; `dsh-emacs-queue--submit-parked-p').
+  (setq dsh-emacs-queue--submit-parked-p (dsh-emacs--busy-p))
   (let ((buf (current-buffer)))
     ;; Transport hygiene only: a dead transport would otherwise leave the
     ;; echo gate stuck until the next submit.  The parked preview is NOT
-    ;; revealed by this timer — `dsh-emacs--busy-p' gates the preview
-    ;; independently (see `dsh-emacs--queue-submit-suppress'), so the
-    ;; value only bounds the one remaining corner: an interrupted turn
-    ;; keeps its parked items while busy drops, and the preview there
-    ;; returns when this fires (2s, as before the busy-gate).
+    ;; revealed by this timer — `dsh-emacs-queue--submit-parked-p' gates
+    ;; the preview independently (see `dsh-emacs--queue-submit-suppress'),
+    ;; so the value only bounds the one remaining corner: an interrupted
+    ;; turn keeps its parked items while busy drops, and the preview there
+    ;; returns when this fires (2s, as before the parked gate).
     (setq dsh-emacs-queue--submit-suppress-timer
           (run-at-time 2 nil
                        (lambda ()
@@ -291,9 +314,11 @@ settles back to empty or by its timeout."
 (defun dsh-emacs-queue-next-item ()
   "Return the next pending message to display in this buffer, or nil.
 Steering (next-step) precedes queued (next-turn); context entries are never
-previewed.  Suppress the client's transient self-submit while idle, but show
-parked input immediately while a turn runs.  The raw mirror is unchanged."
-  (when (or (null dsh-emacs--queue-submit-suppress) (dsh-emacs--busy-p))
+previewed.  Suppress the client's transient self-submit — unless that submit
+was already parked behind a running turn, which must show at once (see
+`dsh-emacs-queue--submit-parked-p').  The raw mirror is unchanged."
+  (when (or (null dsh-emacs--queue-submit-suppress)
+            dsh-emacs-queue--submit-parked-p)
     (or (cl-find 'steering dsh-emacs--queue-items
                  :key #'dsh-protocol-queue-item-placement)
         (cl-find 'queued dsh-emacs--queue-items

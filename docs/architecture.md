@@ -322,12 +322,16 @@ submit time, on both the plain and the deferred path; it clears when
 the mirror settles back to empty, in the submit failure branch, or by
 a transport-hygiene timer (a dead transport would otherwise leave the
 echo gate stuck until the next submit — the timer paces no preview).
-The Next Message preview is gated by the same flag, with one
-event-driven escape: while a turn is running (`dsh-emacs--busy-p`,
-buffer-local) the preview shows regardless, because an item mirrored
-then can only be claimed at the turn end and is genuinely parked —
-this is what reveals a queued message immediately, with no timing
-window.  Genuine queueing — items already parked — keeps its feedback,
+The Next Message preview is gated by the same flag, with one exception:
+a submit that was already PARKED when it was made — a turn was running
+then, recorded by `dsh-emacs-queue--mark-submit-suppress' in
+`dsh-emacs-queue--submit-parked-p' — shows its preview at once, because
+such an item can only be claimed at the turn end and is genuinely
+parked.  An IDLE submit is not parked (the host claims it at the turn
+START), so its transient stays hidden even after the send path lights
+the optimistic spinner; keying this on the live spinner instead painted
+and cleared the row within milliseconds (the `C-c C-c' flash).
+Genuine queueing — items already parked — keeps its feedback,
 its preview, and its mode-line count.
 This is the queue-frame complement of the anchor-gated replay dedup
 (rationale: postmortem/004): transcript frames are idempotent by seq,

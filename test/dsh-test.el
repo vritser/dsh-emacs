@@ -13830,25 +13830,56 @@ candidates as the UI would via `all-completions', not by destructuring."
             (dsh-test-composer-next-row))))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
-;; The parked case is revealed by STATE, not by a timer: while a turn is
-;; running (`dsh-emacs--ml-busy') an item in the mirror can only be
-;; claimed at the turn end, so the `Next: …' preview must show it even
-;; though the submit-suppression is still armed — the old timer-only
-;; reveal is what made a queued message appear ~2s late.
+;; The parked case is revealed by STATE, not by a timer: a submit made while
+;; a turn is already running can only be claimed at the turn end, so its
+;; `Next: …' preview must show even though the submit-suppression is still
+;; armed — the old timer-only reveal is what made a queued message appear
+;; ~2s late.  The discriminator is the submit-time busy state captured by
+;; `dsh-emacs-queue--mark-submit-suppress', not the live spinner.
 (let ((buf (get-buffer-create " *t-queue-next-row-busy-reveal*")))
   (unwind-protect
       (with-current-buffer buf
         (dsh-emacs-mode)
         (setq-local dsh-emacs--buffer-session "sess-busy")
         (setq-local dsh-emacs--ml-busy t)
-        (setq-local dsh-emacs--queue-submit-suppress t)
+        (dsh-emacs-queue--mark-submit-suppress)
         (setq dsh-emacs--queue-items
               (list (dsh-protocol-queue-item--from-alist
                      (dsh-emacs-test--queue-item "pb" "queued" "parked"))))
         (dsh-emacs-composer-render)
         (dsh-test-assert "queue-submit-suppress-busy-reveals-parked"
           (dsh-test-composer-next-row)
-          dsh-emacs--queue-submit-suppress))
+          dsh-emacs--queue-submit-suppress
+          dsh-emacs-queue--submit-parked-p)
+        (dsh-emacs-queue--submit-suppress-clear))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; An IDLE submit is NOT parked: the host claims it at the turn START, and
+;; the send path lights the optimistic spinner on acceptance — both before
+;; the claim frame arrives.  The busy reveal must therefore key on whether a
+;; turn was ALREADY running when the submit was made, not on the current
+;; spinner: keying on the spinner paints our own message on the splice frame
+;; and clears it on the claim frame (the flash on `C-c C-c').
+(let ((buf (get-buffer-create " *t-queue-next-row-idle-submit*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-idle-submit")
+        (setq-local dsh-emacs--ml-busy nil)
+        (setq dsh-emacs--queue-items nil)
+        ;; Idle submit (mirror empty) arms the suppression while NOT busy…
+        (dsh-emacs-queue--mark-submit-suppress)
+        ;; …then the RPC is accepted and the optimistic spinner lights.
+        (setq-local dsh-emacs--ml-busy t)
+        ;; The splice frame carries our own just-submitted message.
+        (setq dsh-emacs--queue-items
+              (list (dsh-protocol-queue-item--from-alist
+                     (dsh-emacs-test--queue-item "own" "queued" "hello"))))
+        (dsh-emacs-composer-render)
+        (dsh-test-assert "queue-idle-submit-splice-does-not-flash-next-row"
+          (null (dsh-test-composer-next-row))
+          dsh-emacs--queue-submit-suppress)
+        (dsh-emacs-queue--submit-suppress-clear))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
 ;; Submit-path arming/disarming: armed whenever the mirror is EMPTY at
@@ -13871,6 +13902,8 @@ candidates as the UI would via `all-completions', not by destructuring."
           (dsh-test-assert "submit-plain-arms-suppress"
             dsh-emacs--queue-submit-suppress
             (timerp dsh-emacs-queue--submit-suppress-timer))
+          (dsh-test-assert "submit-plain-idle-submit-is-not-parked"
+            (null dsh-emacs-queue--submit-parked-p))
           (dsh-emacs-queue--submit-suppress-clear)
           ;; Plain path, items parked → not armed: "queued:" is genuine
           (setq dsh-emacs--queue-items
@@ -13887,6 +13920,8 @@ candidates as the UI would via `all-completions', not by destructuring."
           (dsh-test-assert "submit-deferred-arms-when-empty"
             dsh-emacs--queue-submit-suppress
             (timerp dsh-emacs-queue--submit-suppress-timer))
+          (dsh-test-assert "submit-deferred-busy-submit-is-parked"
+            dsh-emacs-queue--submit-parked-p)
           (dsh-emacs-queue--submit-suppress-clear)
           ;; Deferred path, items parked → not armed
           (setq dsh-emacs--queue-items

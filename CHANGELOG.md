@@ -8,6 +8,19 @@ minor) and stay undated until the release is cut.
 
 ## 0.5.0 - Unreleased
 
+### Fixed
+
+- **Sending a message no longer flashes the Next Message row**: an idle
+  `C-c C-c` passes through the host inbox (a splice frame and a claim frame
+  within milliseconds), and the row is suppressed for that transient — but
+  the suppression was lifted whenever a turn was running, and the send path
+  lights the spinner on acceptance, *before* the claim frame arrives.  The
+  row therefore painted the just-sent message and cleared it a frame later.
+  The reveal is now keyed on whether a turn was ALREADY running when the
+  submit was made (captured in `dsh-emacs-queue--submit-parked-p'): a
+  genuinely parked message behind a running turn still shows immediately,
+  while an idle submit stays invisible through its transient.
+
 ## 0.4.1 - 2026-09-17
 
 ### Fixed
