@@ -18,6 +18,14 @@ minor) and stay undated until the release is cut.
   hides it), and the returned set refreshes the archive cache and the list.
   (rationale: postmortem/049)
 
+- **Failed tool rows explain themselves**: a settled `tool/result` carrying
+  dsh 0.1.6's `error.reason` now shows that user-facing explanation in the
+  row's status line (`✗ failed — …`, `✗ exit 1 — …`).  The reason is the one
+  the host deliberately keeps *outside* the model-facing result text, so a
+  refused call (for example an Auto review denial) no longer reads as a bare
+  `✗ failed`.  An absent or whitespace-only reason keeps the old status text
+  unchanged.
+
 ### Fixed
 
 - **Sending a message no longer flashes the Next Message row**: an idle

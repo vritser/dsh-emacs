@@ -2038,17 +2038,28 @@ the tool's state face belongs to the header row, not the body."
         (push (concat "   " line) parts)))
     (mapconcat #'identity (nreverse parts) "\n")))
 
-(defun dsh-emacs-render--tool-status-text (state exit-code signal)
-  "Short human status for STATE/EXIT-CODE/SIGNAL, or nil."
-  (pcase state
-    ('success (format "✓ exit %s" (or exit-code "0")))
-    ('error (cond
-             ((and (integerp exit-code) (/= exit-code 0))
-              (format "✗ exit %d" exit-code))
-             (signal (format "✗ signal %s" signal))
-             (t "✗ failed")))
-    ('stopped "⏸ interrupted")
-    (_ nil)))
+(defun dsh-emacs-render--tool-status-text (state exit-code signal &optional reason)
+  "Short human status for STATE/EXIT-CODE/SIGNAL, or nil.
+REASON is a failed `tool/result' error's raw user-facing explanation —
+the dsh 0.1.6 `error.reason', which the host keeps OUTSIDE the
+model-facing message — and is appended to the error status so a refused
+call explains itself instead of showing a bare `✗ failed'."
+  (let* ((base (pcase state
+                 ('success (format "✓ exit %s" (or exit-code "0")))
+                 ('error (cond
+                          ((and (integerp exit-code) (/= exit-code 0))
+                           (format "✗ exit %d" exit-code))
+                          (signal (format "✗ signal %s" signal))
+                          (t "✗ failed")))
+                 ('stopped "⏸ interrupted")
+                 (_ nil)))
+         (reason (and (stringp reason)
+                      (replace-regexp-in-string
+                       "[[:space:][:cntrl:]]+" " " (string-trim reason)))))
+    (cond ((null base) nil)
+          ((and reason (not (string-empty-p reason)) (eq state 'error))
+           (concat base " — " reason))
+          (t base))))
 
 (defun dsh-emacs-render--bash-command (args-text)
   "Return the shell command inside ARGS-TEXT, or nil.
@@ -2076,7 +2087,7 @@ past a single row.  Returns nil for an empty COMMAND."
           (truncate-string-to-width flat limit nil nil "…")
         flat))))
 
-(defun dsh-emacs-render--bash-card-body (args-text &optional out-text state exit-code signal)
+(defun dsh-emacs-render--bash-card-body (args-text &optional out-text state exit-code signal reason)
   "Compose the expanded body of a bash/pwsh tool row as a terminal card.
 Mirrors dsh web's TerminalBlock inside BashRow: a single `$' prompt row for
 the command (see `dsh-emacs-render--bash-command-line' — one line, overflow
@@ -2087,7 +2098,8 @@ the web card whose exit-0 pill never renders.
 
 ARGS-TEXT is the rendered call body (\"$ <command>\" for a bash call) from
 `dsh-emacs-render--tool-body-text'; OUT-TEXT is the full result text.
-STATE/EXIT-CODE/SIGNAL follow `dsh-emacs-render--tool-status-text'; a nil
+STATE/EXIT-CODE/SIGNAL follow `dsh-emacs-render--tool-status-text'; REASON
+is that status helper's optional failed-result explanation.  A nil
 STATE (call still running) draws the prompt row only (no output yet, so no
 divider either).
 
@@ -2107,7 +2119,7 @@ box width."
          ;; already says "done", and exit 0 carries no news to print.
          (status-text (and (memq state '(error stopped))
                            (dsh-emacs-render--tool-status-text
-                            state exit-code signal))))
+                            state exit-code signal reason))))
     (when cmd-line
       (let* ((prompt-row (concat "  "
                                  (propertize "$ " 'face
@@ -2514,6 +2526,10 @@ everything else `success'."
            (content (dsh-emacs-render--aget "content" message))
            (error-code (dsh-emacs-render--aget
                         "code" (dsh-emacs-render--aget "error" data)))
+           ;; dsh 0.1.6: the user-facing refusal reason, which the host keeps
+           ;; outside the model-facing `message'.
+           (error-reason (dsh-emacs-render--aget
+                          "reason" (dsh-emacs-render--aget "error" data)))
            (is-error nil)
            (block-exit-code nil)
            (block-signal nil)
@@ -2552,7 +2568,8 @@ everything else `success'."
                          ('error 'dsh-emacs-tool-error-face)
                          ('stopped 'dsh-emacs-tool-stopped-face)
                          (_ 'dsh-emacs-tool-pending-face)))
-                 (status-text (dsh-emacs-render--tool-status-text state exit-code signal))
+                 (status-text (dsh-emacs-render--tool-status-text
+                               state exit-code signal error-reason))
                  ;; A settled bash/pwsh call expands into a terminal card
                  ;; (`$' prompt rows + output + status footer), a file read into
                  ;; the line-numbered read card, a write/edit into its diff
@@ -2561,7 +2578,8 @@ everything else `success'."
                  ;; keeps the other variants from re-parsing their arguments.
                  (body (or (and (equal variant "bash")
                                 (dsh-emacs-render--bash-card-body
-                                 args (nth 0 shell) state exit-code signal))
+                                 args (nth 0 shell) state exit-code signal
+                                 error-reason))
                            (and (eq state 'success)
                                 (dsh-emacs-render--read-card-body
                                  name args-raw meta full-text))

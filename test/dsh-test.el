@@ -2908,20 +2908,25 @@ symbol or an ordered list."
                     (cons "name" name)
                     (cons "arguments" args)))))
 
-(defun dsh-emacs-test--tool-result-event (seq call-id is-error exit-code text)
-  "Build a `tool/result' event alist."
+(defun dsh-emacs-test--tool-result-event (seq call-id is-error exit-code text
+                                              &optional error)
+  "Build a `tool/result' event alist.
+ERROR, when given, is the settled `data.error' alist (dsh 0.1.6's
+optional `{name, code, reason?}')."
   (list (cons "type" "tool/result")
         (cons "seq" seq)
         (cons "data"
-              (list (cons "message"
-                          (list (cons "callId" call-id)
-                                (cons "content"
-                                      (vector (list (cons "type" "tool-result")
-                                                    (cons "isError" (if is-error t :json-false))
-                                                    (cons "exitCode" exit-code)
-                                                    (cons "content"
-                                                          (vector (list (cons "type" "text")
-                                                                        (cons "text" text)))))))))))))
+              (append
+               (list (cons "message"
+                           (list (cons "callId" call-id)
+                                 (cons "content"
+                                       (vector (list (cons "type" "tool-result")
+                                                     (cons "isError" (if is-error t :json-false))
+                                                     (cons "exitCode" exit-code)
+                                                     (cons "content"
+                                                           (vector (list (cons "type" "text")
+                                                                         (cons "text" text))))))))))
+               (and error (list (cons "error" error)))))))
 
 (defun dsh-emacs-test--tool-result-event-meta (seq call-id text meta &optional is-error)
   "Build a `tool/result' event carrying TEXT and the settled result META."
@@ -6215,6 +6220,52 @@ Lets a test drive a malformed content value through the result path."
                         (not (memq state-face (dsh-test--faces-at pos))))
                       (number-sequence body-start (1- (cdr block)))))))))
       (kill-buffer buf))))
+
+;; --- Test 56c: a settled tool error shows `error.reason' (dsh 0.1.6) ---
+;; The host keeps the raw user-facing reason OUTSIDE the model-facing
+;; `message', so the card is the only place a refusal explains itself:
+;; without it the ioCard/bash footer says just "✗ failed"/"✗ exit N".
+(dolist (case '(("grep" "{\"pattern\":\"x\"}" nil "✗ failed — Auto review denied this call")
+                ("bash" "{\"command\":\"rm -rf /\"}" 1 "✗ exit 1 — Auto review denied this call")))
+  (let ((buf (generate-new-buffer " *dsh-tool-error-reason*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (dsh-emacs-mode)
+          (dsh-emacs-modeline-setup)
+          ;; The status line lives in the body, so expand it: a collapsed
+          ;; card would make the assertion vacuous.
+          (setq-local dsh-emacs-tool-expand-by-default t)
+          (dsh-emacs-render-tool-call
+           (dsh-emacs-test--tool-call-event 1 "r1" (nth 0 case) (nth 1 case)))
+          (dsh-emacs-render-tool-result
+           (dsh-emacs-test--tool-result-event
+            2 "r1" t (nth 2 case) "refused"
+            '((name . "AutoReview") (code . "denied")
+              (reason . "Auto review denied this call"))))
+          (let* ((ns (dsh-emacs-render--make-namespace))
+                 (block (dsh-emacs-test--tool-block-text ns "tool-r1")))
+            (dsh-test-assert (format "tool-%s-error-reason" (nth 0 case))
+              (and block
+                   (string-match-p (regexp-quote (nth 3 case)) block)))))
+      (kill-buffer buf))))
+
+;; --- Test 56d: a reason-less (or whitespace-only) reason keeps the old
+;; status text: the 0.1.6 field is optional, and an absent `reason' must
+;; not turn "✗ failed" into "✗ failed — " ---
+(let ((i 0))
+  (dolist (error '(nil ((name . "X") (code . "y"))
+                       ((name . "X") (code . "y") (reason . "   "))))
+    (dsh-test-assert (format "tool-status-no-reason-%d" i)
+      (equal "✗ failed"
+             (dsh-emacs-render--tool-status-text
+              'error nil nil (cdr (assq 'reason error)))))
+    (setq i (1+ i))))
+(dsh-test-assert "tool-status-reason-newlines-collapse"
+  (equal "✗ failed — line one line two"
+         (dsh-emacs-render--tool-status-text 'error nil nil "line one\nline two")))
+(dsh-test-assert "tool-status-reason-ignored-when-not-error"
+  (equal "✓ exit 0"
+         (dsh-emacs-render--tool-status-text 'success 0 nil "not a failure")))
 
 ;; --- Test 57: protocol layer workspace baseline / workspace-result
 ;; / model-selection-result ---
