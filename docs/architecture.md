@@ -318,10 +318,13 @@ frames carry no ordering information, so the transient splice/claim
 gets no `queued:` / `running:` echo and no Next Message preview paint
 (the row would otherwise flash as the item is inserted and claimed) — `dsh-emacs-queue--mark-submit-suppress`
 arms `dsh-emacs--queue-submit-suppress` when the mirror is empty at
-submit time, on both the plain and the deferred path; it clears when
-the mirror settles back to empty, in the submit failure branch, or by
-a transport-hygiene timer (a dead transport would otherwise leave the
-echo gate stuck until the next submit — the timer paces no preview).
+submit time, on both the plain and the deferred path; it clears at the
+CLAIM — the empty frame that follows the submit's own splice (which is
+why an empty frame seen before the splice, such as a fresh session's
+connection seed, is ignored rather than taken for the claim) — in the
+submit failure branch, or by a transport-hygiene timer (a dead transport
+would otherwise leave the echo gate stuck until the next submit — the
+timer paces no preview).
 The Next Message preview is gated by the same flag, with one exception:
 a submit that was already PARKED when it was made — a turn was running
 then, recorded by `dsh-emacs-queue--mark-submit-suppress' in
@@ -330,7 +333,9 @@ such an item can only be claimed at the turn end and is genuinely
 parked.  An IDLE submit is not parked (the host claims it at the turn
 START), so its transient stays hidden even after the send path lights
 the optimistic spinner; keying this on the live spinner instead painted
-and cleared the row within milliseconds (the `C-c C-c' flash).
+and cleared the row within milliseconds (the `C-c C-c' flash), and
+taking a fresh session's empty seed for the claim did the same on the
+first send of a newly opened session.
 Genuine queueing — items already parked — keeps its feedback,
 its preview, and its mode-line count.
 This is the queue-frame complement of the anchor-gated replay dedup

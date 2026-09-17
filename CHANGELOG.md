@@ -21,6 +21,15 @@ minor) and stay undated until the release is cut.
   genuinely parked message behind a running turn still shows immediately,
   while an idle submit stays invisible through its transient.
 
+- **A newly opened session's first send no longer flashes it either**: a
+  fresh chat buffer's queue mirror is seeded by the connection's first
+  frame, which can be empty and arrive between the suppression arm and the
+  splice.  That baseline was taken for the claim, disarming the gate so the
+  next frame painted our own message (and leaked a `queued:` echo).  The
+  suppression now ends only at the empty frame that FOLLOWS the submit's
+  own splice — the real claim — while the hygiene timer still bounds a
+  submit whose item never reaches the mirror.
+
 ## 0.4.1 - 2026-09-17
 
 ### Fixed

@@ -13882,6 +13882,59 @@ candidates as the UI would via `all-completions', not by destructuring."
         (dsh-emacs-queue--submit-suppress-clear))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
+;; A fresh session's queue mirror is seeded by the connection's FIRST frame,
+;; which can be EMPTY and arrive between the arm and the splice.  That seed
+;; is a baseline, not the claim: treating any empty frame as the claim
+;; disarmed the suppression early, so the next frame — our own splice —
+;; painted the row and the claim cleared it again (the flash on the first
+;; `C-c C-c' in a newly opened session).  The suppression must end only at
+;; the empty frame that FOLLOWS our own item.
+(let ((buf (get-buffer-create " *t-queue-next-row-empty-seed*"))
+      (proc (make-pipe-process :name "t-queue-empty-seed" :buffer nil))
+      (announced nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-empty-seed")
+        (setq-local dsh-emacs--ml-busy nil)
+        (setq dsh-emacs--queue-items nil
+              dsh-emacs--queue-process nil)
+        (cl-letf (((symbol-function 'dsh-emacs-queue--announce)
+                   (lambda (events) (setq announced events))))
+          (dsh-emacs-queue--mark-submit-suppress)
+          ;; Connection seed: empty queue, first frame on this process.
+          (dsh-emacs-queue-apply buf proc
+                                 (list (cons 'sessionId "sess-empty-seed")
+                                       (cons 'items [])))
+          (dsh-test-assert "queue-empty-seed-keeps-submit-suppression"
+            dsh-emacs--queue-submit-suppress
+            (null dsh-emacs-queue--submit-seen-p)
+            (null announced))
+          ;; Our own splice frame: still suppressed, so no row appears.
+          (dsh-emacs-queue-apply
+           buf proc
+           (list (cons 'sessionId "sess-empty-seed")
+                 (cons 'items
+                       (vector (dsh-emacs-test--queue-item
+                                "own" "queued" "hello")))))
+          (dsh-emacs-composer-render)
+          (dsh-test-assert "queue-empty-seed-splice-does-not-flash-next-row"
+            (null (dsh-test-composer-next-row))
+            dsh-emacs-queue--submit-seen-p
+            dsh-emacs--queue-submit-suppress
+            (null announced))
+          ;; The claim frame that follows the splice then disarms.
+          (dsh-emacs-queue-apply buf proc
+                                 (list (cons 'sessionId "sess-empty-seed")
+                                       (cons 'items [])))
+          (dsh-test-assert "queue-empty-seed-claim-disarms"
+            (null dsh-emacs--queue-submit-suppress)
+            (null dsh-emacs--queue-items)
+            (null announced)))
+        (dsh-emacs-queue--submit-suppress-clear))
+    (when (buffer-live-p buf) (kill-buffer buf))
+    (delete-process proc)))
+
 ;; Submit-path arming/disarming: armed whenever the mirror is EMPTY at
 ;; submit time — idle (plain path) or behind a running turn (deferred
 ;; path) — with the defensive disarm timer; parked items keep the flag

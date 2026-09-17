@@ -82,9 +82,11 @@ at the turn start (a frame without it) within milliseconds.  Diffing
 that pair flashes `queued:' then `running:' — the flash on sending a new
 message — though nothing was ever really parked: the submit path renders
 the user message directly.  While this flag is set, `dsh-emacs-queue-apply'
-updates the mirror but emits no feedback — it clears when the mirror
-settles back to empty (the claim frame), in the submit failure branch,
-or via `dsh-emacs-queue--submit-suppress-timer' (transport-safety only:
+updates the mirror but emits no feedback — it clears at the claim frame
+(the mirror empties again AFTER the submit's own item was seen in it —
+an empty baseline/seed before the splice is not a claim), in the submit
+failure branch, or via `dsh-emacs-queue--submit-suppress-timer'
+(transport-safety only:
 un-sticks the echo gate when neither a settle frame nor an RPC failure
 ever arrives; it paces NO preview).  The Next Message preview is gated
 by this flag too — with one exception: a submit that was already PARKED
@@ -120,6 +122,17 @@ after the send path lights the optimistic spinner.  Set alongside
 `dsh-emacs--queue-submit-suppress' (see
 `dsh-emacs-queue--mark-submit-suppress'), cleared with it.")
 
+(defvar-local dsh-emacs-queue--submit-seen-p nil
+  "Whether the suppressed submit's own item has reached the mirror.
+`dsh-emacs-queue-apply' sets it when an item arrives while
+`dsh-emacs--queue-submit-suppress' is up.  Only AFTER that does an empty
+frame mean \"the item was claimed\" and disarm the suppression: a fresh
+session's mirror is seeded by the connection's first frame, which can be
+empty and land between the arm and the splice, and treating that seed as
+the claim disarmed the gate early — the row then painted the very next
+frame (the `C-c C-c' flash in a new session).  The hygiene timer still
+bounds a submit whose item never reaches the mirror.")
+
 (defun dsh-emacs-queue--submit-suppress-clear ()
   "Clear the submit-suppression flag and its timer (idempotent).
 Repaints once afterwards so the preview reflects the flag change
@@ -129,6 +142,7 @@ immediately instead of waiting for the next queue frame."
   (setq dsh-emacs-queue--submit-suppress-timer nil)
   (setq dsh-emacs--queue-submit-suppress nil)
   (setq dsh-emacs-queue--submit-parked-p nil)
+  (setq dsh-emacs-queue--submit-seen-p nil)
   (dsh-emacs-queue--schedule-paint))
 
 (defun dsh-emacs-queue--mark-submit-suppress ()
@@ -290,12 +304,20 @@ settles back to empty or by its timeout."
                                          items
                                          dsh-emacs--queue-deleted)))
         (setq dsh-emacs--queue-items items)
-        ;; The claim frame of a submit transient: the mirror is empty
-        ;; again, the transient is over — re-arm the announcements.  Seeding
-        ;; (a connection's first frame) does NOT re-arm: on a fresh open the
-        ;; submit's own splice-in frame IS the seed, and the claim leg that
-        ;; must stay silent follows it.
-        (when (and dsh-emacs--queue-submit-suppress (null items))
+        ;; A suppressed submit ends at its CLAIM: the empty frame that
+        ;; follows its own splice.  Record that the splice was seen first —
+        ;; a fresh session's mirror is seeded by the connection's first
+        ;; frame, which can be empty and arrive between the arm and the
+        ;; splice; taking that baseline for the claim disarmed the gate
+        ;; before the splice landed, so the row then painted our own message
+        ;; (the `C-c C-c' flash in a new session).  Seeding still does not
+        ;; re-arm the announcements, and the hygiene timer bounds a submit
+        ;; whose item never reaches the mirror.
+        (when (and dsh-emacs--queue-submit-suppress items)
+          (setq dsh-emacs-queue--submit-seen-p t))
+        (when (and dsh-emacs--queue-submit-suppress
+                   dsh-emacs-queue--submit-seen-p
+                   (null items))
           (dsh-emacs-queue--submit-suppress-clear))
         ;; The delete is confirmed by the server (the item is gone): clear the
         ;; suppression mark so it does not swallow the feedback of a later
