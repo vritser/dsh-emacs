@@ -6,7 +6,21 @@ All notable changes to this project are documented here. Format follows
 sections carry the planned next version (pre-1.0: `fix` → patch, features →
 minor) and stay undated until the release is cut.
 
-## 0.5.0 - Unreleased
+## 0.4.1 - Unreleased
+
+### Fixed
+
+- **The server is found when the process coding system has DOS line endings**:
+  on Windows, `default-process-coding-system` normally encodes to a `-dos`
+  coding system (`locale-coding-system` carries DOS line endings), and every
+  new connection inherited it.  The hand-written `GET` requests of the
+  liveness probe, the auth probe and the launch-token exchange then left the
+  socket with `\r\r\n` line endings, which dsh's HTTP parser rejects with
+  `400 Bad Request`.  Since the probe only counts `200`/`401` as alive, a
+  running server looked down: `*dsh-sessions*` stayed empty and
+  `new-session` failed with "did not become ready".  The three raw HTTP
+  sockets now force binary (byte-exact) coding, as the WebSocket sockets
+  already did.
 
 ## 0.4.0 - 2026-09-16
 

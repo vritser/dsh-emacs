@@ -256,8 +256,19 @@ server is alive; it must not ask for Basic credentials."
          (buf (generate-new-buffer " *dsh-server-probe*"))
          (result nil))
     (unwind-protect
+        ;; A raw HTTP request must reach the wire byte-for-byte: `:coding
+        ;; 'binary' pins both directions so the ambient
+        ;; `default-process-coding-system' cannot re-encode it.  On Windows its
+        ;; ENCODING cdr is a `-dos' coding system (`locale-coding-system'
+        ;; carries DOS line endings), which rewrites every `\n' written to a
+        ;; process as `\r\n' and so turns the request's `\r\n' into `\r\r\n';
+        ;; dsh's HTTP parser then answers 400 Bad Request, the probe only
+        ;; accepts 200/401, and a live server reads as down (empty
+        ;; `*dsh-sessions*', `new-session' timing out with "did not become
+        ;; ready").  Same byte-exactness requirement as the WebSocket sockets
+        ;; in `dsh-emacs-events.el'.
         (let ((proc (open-network-stream "dsh-server-probe" buf
-                                         host port :type 'plain)))
+                                         host port :type 'plain :coding 'binary)))
           (set-process-query-on-exit-flag proc nil)
           (set-process-filter
            proc (lambda (_proc string)
@@ -484,8 +495,10 @@ with a 303 whose header is the only place the minted cookie appears."
          (buf (generate-new-buffer " *dsh-auth-exchange*"))
          (cookie nil))
     (unwind-protect
+        ;; Hand-written CRLF request: keep it byte-exact despite the ambient
+        ;; process coding (see `dsh-emacs--server-probe-plain').
         (let ((proc (open-network-stream "dsh-auth-exchange" buf
-                                         host port :type 'plain)))
+                                         host port :type 'plain :coding 'binary)))
           (set-process-query-on-exit-flag proc nil)
           (set-process-filter
            proc (lambda (_proc string)
@@ -552,9 +565,11 @@ no `url' machinery (and no username/password prompt) is involved."
          (buf (generate-new-buffer " *dsh-auth-probe*"))
          (result nil))
     (unwind-protect
+        ;; Hand-written CRLF request: keep it byte-exact despite the ambient
+        ;; process coding (see `dsh-emacs--server-probe-plain').
         (let ((proc (open-network-stream "dsh-auth-probe" buf
                                          (dsh-emacs--server-host-name)
-                                         port :type 'plain)))
+                                         port :type 'plain :coding 'binary)))
           (set-process-query-on-exit-flag proc nil)
           (set-process-filter
            proc (lambda (_proc string)

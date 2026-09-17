@@ -10257,6 +10257,80 @@ Lets a test drive a malformed content value through the result path."
   (dsh-test-assert "auth-maybe-expire-with-no-cookie"
     (null dsh-emacs--server-auth-cookie)))
 
+;; --- Test 93d3d: the three raw-socket HTTP requests stay byte-exact under a
+;; DOS-EOL ambient process coding system ---
+;; Regression (reported on Windows): `default-process-coding-system''s ENCODING
+;; cdr is a `-dos' coding system there (`locale-coding-system' carries DOS line
+;; endings), and Emacs applies it to every new process unless the socket says
+;; otherwise.  `process-send-string' then rewrites each `\n' of the hand-written
+;; "GET ... \r\n\r\n" as `\r\n', so the socket receives "\r\r\n" and dsh's HTTP
+;; parser answers 400 Bad Request; the probe only accepts 200/401, so a live
+;; server reads as down — `*dsh-sessions*' stays empty and `new-session' waits
+;; out "did not become ready".  All three raw HTTP sockets (probe, auth probe,
+;; token exchange) must pin binary (byte-exact) coding, like the WebSocket
+;; sockets.
+;; The corruption happens inside `process-send-string''s C-level coding, which a
+;; mocked `process-send-string' cannot observe: this drives a real loopback
+;; listener and inspects the bytes it actually receives.
+(let ((default-process-coding-system '(utf-8-unix . utf-8-dos))
+      (dsh-emacs-base-url nil))
+  (cl-labels
+      ((raw-socket-server (response fn)
+         "Call FN against a loopback HTTP server replying RESPONSE.
+Return (REQUEST . RESULT): REQUEST is the exact byte string the server
+received, RESULT is FN's return value."
+         (let* ((request "")
+                (server (make-network-process
+                         :name "dsh-raw-socket-test" :server t
+                         :host "127.0.0.1" :service 0 :family 'ipv4 :noquery t
+                         ;; Binary on the listener too, so the assertion reads
+                         ;; the request bytes rather than a decoded view of them.
+                         :coding 'binary
+                         :filter (lambda (proc string)
+                                   (setq request (concat request string))
+                                   (when (string-match-p "\r\n\r\n" request)
+                                     (process-send-string proc response)))))
+                (result nil))
+           (unwind-protect
+               (progn
+                 (setq dsh-emacs-base-url
+                       (format "http://127.0.0.1:%d"
+                               (process-contact server :service)))
+                 (setq result (funcall fn))
+                 (cons request result))
+             (delete-process server)))))
+    (pcase-let ((`(,probe-request . ,probe-alive)
+                 (raw-socket-server
+                  "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+                  #'dsh-emacs--server-probe-plain)))
+      (dsh-test-assert "raw-probe-request-keeps-crlf-under-dos-coding"
+        (string-match-p "GET / HTTP/1.0\r\nHost: 127\\.0\\.0\\.1:[0-9]+\r\n\r\n"
+                        probe-request)
+        (not (string-match-p "\r\r\n" probe-request)))
+      (dsh-test-assert "raw-probe-alive-under-dos-coding"
+        probe-alive))
+    (pcase-let ((`(,auth-request . ,auth-required)
+                 (raw-socket-server
+                  "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n"
+                  #'dsh-emacs--server-auth-required-plain)))
+      (dsh-test-assert "raw-auth-probe-request-keeps-crlf-under-dos-coding"
+        (not (string-match-p "\r\r\n" auth-request)))
+      (dsh-test-assert "raw-auth-probe-detects-401-under-dos-coding"
+        auth-required))
+    (pcase-let ((`(,exchange-request . ,exchange-cookie)
+                 (raw-socket-server
+                  (concat "HTTP/1.1 303 See Other\r\nLocation: /\r\n"
+                          "Set-Cookie: dsh-auth-HASH=v1.body.sig; Path=/; HttpOnly\r\n"
+                          "\r\n")
+                  (lambda ()
+                    (dsh-emacs--server-auth-exchange-plain
+                     (concat dsh-emacs-base-url "/?token=TokDos"))))))
+      (dsh-test-assert "raw-exchange-request-keeps-crlf-under-dos-coding"
+        (string-match-p "GET /\\?token=TokDos HTTP/1.0" exchange-request)
+        (not (string-match-p "\r\r\n" exchange-request)))
+      (dsh-test-assert "raw-exchange-mints-cookie-under-dos-coding"
+        (equal "dsh-auth-HASH=v1.body.sig" exchange-cookie)))))
+
 ;; --- Test 93d4: interactive auth gate --- with a known cookie, no prompting ---
 (let ((dsh-emacs-base-url "http://127.0.0.1:3080")
       (dsh-emacs--server-auth-cookie "dsh-auth-HASH=ok.sig")

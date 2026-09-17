@@ -571,6 +571,17 @@ the response body and decodes it with `decode-coding-string` as UTF-8 into a
 multibyte string, which is then parsed with `json-read-from-string` — Chinese
 titles, messages, and tool results all display correctly.
 
+The outbound direction has the mirror hazard: the raw-socket requests in
+`dsh-emacs-server.el` (liveness probe, auth probe, launch-token exchange) are
+hand-written strings ending in `\r\n`.  On Windows
+`default-process-coding-system` encodes to a `-dos` coding system (its
+`locale-coding-system` carries DOS line endings), which rewrites every `\n`
+written to a process as `\r\n`; the request then reaches the socket as
+`\r\r\n`, dsh's HTTP parser answers `400 Bad Request`, and the probe — which
+counts only `200`/`401` as alive — reads a running server as down.  Every raw
+HTTP socket therefore pins binary coding (`:coding 'binary`), so the bytes on
+the wire are exactly the ones the code wrote.
+
 ### Live thinking refresh
 
 The renderer inserts the first reasoning delta immediately, then queues raw
