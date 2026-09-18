@@ -594,6 +594,20 @@ Muted like dsh web's `label-tertiary'."
   "Pending-input queue indicator (`[Q2 S1]') in the mode line."
   :group 'dsh-emacs-faces)
 
+(defface dsh-emacs-modeline-permission-face
+  '((t :inherit dsh-emacs-modeline-face))
+  "Permission preset in the mode line while the session stays confined
+\(`read-only' / `workspace-write', or the live `auto' review mode)."
+  :group 'dsh-emacs-faces)
+
+(defface dsh-emacs-modeline-permission-warn-face
+  `((((background light)) :foreground "#c62828")
+    (((background dark))  :foreground "#ff6b6b")
+    (t :inherit error))
+  "Permission preset in the mode line when the session is unrestricted
+\(`danger-full-access') or matches no preset (`custom')."
+  :group 'dsh-emacs-faces)
+
 ;;; ---------------------------------------------------------------------------
 ;;;  Session list faces
 ;;; ---------------------------------------------------------------------------

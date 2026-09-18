@@ -93,6 +93,26 @@ Workspace and `Ungrouped` groups start expanded by default. Set
 groups collapsed. `M-x dsh-emacs-collapse-workspaces` and
 `M-x dsh-emacs-expand-workspaces` fold or unfold every group in the list.
 
+## Permission presets
+
+`M-x dsh-emacs-set-permission` switches the current session's permission
+preset (the sandbox mode + approval policy bundle). The candidate list comes
+from the host's process-level `permissionPresets/catalog`, each row showing
+the host's label and description, and the switch runs the `/permission`
+slash command — the namespace's only write path — so the result appears in
+the transcript as a command row and the mode line's `permission` segment
+follows the recorded event. The derived `custom` state is shown in the mode
+line when the effective knobs match no preset, but is never offered as a
+switch target.
+
+There is no default keybinding: the switch is deliberate and the mode-line
+segment already reports the current value. The segment itself is a shield
+icon (one cell): the dsh-web SVG shield where Emacs can draw SVG, else the
+Nerd Font shield glyph when `nerd-icons` is installed, else a short token.
+Set `dsh-emacs-modeline-permission-style` to `text` to show the full preset
+name instead, or remove `permission` from `dsh-emacs-modeline-format-spec`
+like any other segment (see [Mode-line Status](modeline.md)).
+
 ## Goal actions
 
 The composer shows the session's current goal above the input. In a chat

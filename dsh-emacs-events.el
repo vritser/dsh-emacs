@@ -176,6 +176,7 @@ generation and a new clientId.")
 (declare-function dsh-emacs-session--render "dsh-emacs-session" ())
 (declare-function dsh-emacs--normalize-archived "dsh-emacs" (archived))
 (declare-function dsh-emacs-modeline-set-context-snapshot "dsh-emacs-modeline" (pressure window))
+(declare-function dsh-emacs-modeline-set-permission "dsh-emacs-modeline" (permission))
 (declare-function dsh-emacs-queue-apply "dsh-emacs-queue" (chat process payload))
 (declare-function dsh-emacs-server--basic-auth-header "dsh-emacs-server" ())
 (declare-function dsh-emacs--server-auth-cookie-header "dsh-emacs-server" ())
@@ -372,6 +373,25 @@ lands the genuine pair."
                  (fboundp 'dsh-emacs-modeline-set-context-snapshot))
         (with-current-buffer buf
           (dsh-emacs-modeline-set-context-snapshot used window))))))
+
+(defun dsh-emacs--events-apply-permission-projection (session-id value)
+  "Update the mode-line permission preset for SESSION-ID from a `permissions' VALUE.
+VALUE is the projection's 0.1.6 wire view, `{currentValue}' — the selectable
+options moved to the `permissionPresets/catalog' Remote (see
+`dsh-emacs-set-permission').  A configured preset key, the live `auto', or
+the derived `custom'; an empty/absent value leaves the segment as it was
+\(the key being absent altogether means no permission service is mounted).
+Only the session's live chat buffer is touched."
+  (when (and (listp value)
+             (hash-table-p dsh-emacs--chat-buffers))
+    (let ((current (dsh-emacs-render--aget "currentValue" value))
+          (buf (gethash session-id dsh-emacs--chat-buffers)))
+      (when (and (stringp current)
+                 (not (string-empty-p current))
+                 (buffer-live-p buf)
+                 (fboundp 'dsh-emacs-modeline-set-permission))
+        (with-current-buffer buf
+          (dsh-emacs-modeline-set-permission current))))))
 
 (defun dsh-emacs-events--dispatch-event (chat event)
   "Dispatch EVENT received for CHAT, respecting seq and optimistic input.
@@ -634,8 +654,9 @@ opening history tail; no separate history fetch precedes the connect."
 (defun dsh-emacs-events--apply-snapshot-projections (session-id projections)
   "Apply a follow snapshot's PROJECTIONS block (`{asOfSeq, values}').
 `title' feeds the session cache/buffer name, `contextPressure' the
-mode-line ctx%, `goal' the Composer Goal Row — the same consumers as the
-`session/control' projection increment frames use."
+mode-line ctx%, `permissions' the mode-line permission preset, `goal' the
+Composer Goal Row — the same consumers as the `session/control' projection
+increment frames use."
   (let ((values (and (listp projections)
                      (dsh-emacs-render--aget "values" projections))))
     (when (listp values)
@@ -647,6 +668,9 @@ mode-line ctx%, `goal' the Composer Goal Row — the same consumers as the
       (let ((pressure (dsh-emacs-render--aget "contextPressure" values)))
         (when (listp pressure)
           (dsh-emacs--events-apply-context-projection session-id pressure)))
+      (let ((permission (dsh-emacs-render--aget "permissions" values)))
+        (when (listp permission)
+          (dsh-emacs--events-apply-permission-projection session-id permission)))
       ;; The follow snapshot is the chat open-time baseline for the Composer
       ;; Goal Row, seeded exactly like ctx/title.
       (when (boundp 'dsh-emacs--chat-buffers)
@@ -1369,14 +1393,18 @@ record is intentionally not read — no background-task UI consumes it yet
 
 (defun dsh-emacs-events--host-apply-projection (session-id key value)
   "Apply one projection cell (KEY . VALUE) of SESSION-ID locally.
-`contextPressure' feeds the mode-line ctx%, `title' the session cache and
-chat buffer name, `goal' the live chat buffer's Composer Goal Row; other keys
-are reserved for later milestones."
+`contextPressure' feeds the mode-line ctx%, `permissions' the mode-line
+permission preset, `title' the session cache and chat buffer name, `goal'
+the live chat buffer's Composer Goal Row; other keys are reserved for
+later milestones."
   (when session-id
     (pcase (if (symbolp key) (symbol-name key) key)
       ("contextPressure"
        (when (listp value)
          (dsh-emacs--events-apply-context-projection session-id value)))
+      ("permissions"
+       (when (listp value)
+         (dsh-emacs--events-apply-permission-projection session-id value)))
       ("goal"
        (dsh-emacs-events--apply-goal-projection session-id value))
       ("title"

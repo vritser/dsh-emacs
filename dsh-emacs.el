@@ -3247,6 +3247,72 @@ the filter as \"error in process filter: Quit\"."
                   (message "Failed to switch model: %S" value2))))))))
     (quit (message "Model selection cancelled"))))
 
+;;;###autoload
+(defun dsh-emacs-set-permission ()
+  "Choose a permission preset for the current session.
+Reads the process-level `permissionPresets/catalog' (dsh 0.1.6; the
+`permissions' session projection carries only the current value) and
+switches through the `/permission' slash command — the namespace's only
+write path — so the recorded `permission/preset' event drives the
+mode-line `permission' segment exactly as it does for any other client.
+The derived `custom' state is never offered: it is what the projection
+reports when the effective knobs match no preset, not a switch target."
+  (interactive)
+  (dsh-emacs-server-ensure)
+  (let ((session-id (dsh-emacs--active-session-id)))
+    (unless session-id (user-error "Open or select a session first"))
+    (dsh-emacs--rpc-async
+     "permissionPresets/catalog" nil
+     (lambda (ok value)
+       (if (not ok)
+           (message "Failed to list permission presets: %S" value)
+         (dsh-emacs--set-permission-prompt session-id value))))))
+
+(defun dsh-emacs--set-permission-prompt (session-id value)
+  "Read and apply a permission preset for SESSION-ID from catalog VALUE.
+VALUE is the `permissionPresets/catalog' wire value; each option's label
+and description come from the host so the picker matches dsh web.  Runs
+inside the async RPC callback (a process filter), so a C-g during
+`completing-read' is caught here instead of leaking out of the filter."
+  (condition-case nil
+      (let* ((catalog (dsh-protocol-permission-catalog--from-alist value))
+             (entries
+              (mapcar
+               (lambda (option)
+                 (let ((name (or (dsh-protocol-permission-option-name option)
+                                 (dsh-protocol-permission-option-value option)))
+                       (description (dsh-protocol-permission-option-description option)))
+                   (cons (if (and (stringp description)
+                                  (not (string-empty-p description)))
+                             (format "%-20s  %s" name description)
+                           name)
+                         (dsh-protocol-permission-option-value option))))
+               (dsh-protocol-permission-catalog-options catalog))))
+        (if (not entries)
+            (message "No permission preset available")
+          (let ((picked (cdr (assoc (completing-read "Permission preset: "
+                                                     entries nil t)
+                                    entries))))
+            (when picked
+              (dsh-emacs-command-execute
+               session-id (concat "/permission " picked) nil
+               (lambda (ok execution err)
+                 (cond
+                  ((null ok)
+                   (message "Permission switch failed: %S"
+                            (or err "transport error")))
+                  ((null execution)
+                   (message "The host did not admit /permission"))
+                  (t
+                   (message "%s"
+                            (or (dsh-protocol-command-execution-text execution)
+                                (if (equal "success"
+                                           (dsh-protocol-command-execution-kind
+                                            execution))
+                                    "Permission updated"
+                                  "Permission not changed")))))))))))
+    (quit (message "Permission selection cancelled"))))
+
 (defun dsh-emacs--replace-input (text)
   "Replace the input area of the current buffer with TEXT and park point."
   (when (and dsh-emacs--input-marker (marker-buffer dsh-emacs--input-marker))

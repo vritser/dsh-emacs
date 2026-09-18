@@ -26,6 +26,25 @@ minor) and stay undated until the release is cut.
   `✗ failed`.  An absent or whitespace-only reason keeps the old status text
   unchanged.
 
+- **See and switch the session's permission preset**: the mode line gains a
+  `permission` segment (on by default, between `preset` and `ctx`) showing the
+  session's current sandbox/approval preset from the `permissions` projection
+  — `workspace-write` by default, `danger-full-access` when the session runs
+  unconfined, or `custom` when the knobs match no preset.  The segment draws
+  dsh web's shield icon, so it costs one cell instead of a word: the real SVG
+  shield (check / pencil / exclamation) on a graphical Emacs with SVG, else
+  the matching Nerd Font shield glyph when `nerd-icons` is installed, else a
+  short token — an unrestricted session tints the shield red.  Emoji are never
+  used (they are double-width and do not take the face color).
+  `M-x dsh-emacs-set-permission` offers the host's
+  `permissionPresets/catalog` (dsh 0.1.6) with each preset's label and
+  description and switches through the `/permission` command, so the change is
+  recorded in the session and the segment follows it.  Set
+  `dsh-emacs-modeline-permission-style` to `text` for the unabbreviated preset
+  name, or remove `permission` from `dsh-emacs-modeline-format-spec` to hide
+  the segment.
+  (rationale: postmortem/050)
+
 ### Fixed
 
 - **Sending a message no longer flashes the Next Message row**: an idle

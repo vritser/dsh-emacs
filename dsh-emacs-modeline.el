@@ -11,10 +11,11 @@
 
 ;; The stats segments are spliced into mode-line-format (right after the DSH
 ;; mode name, in the end-of-line area) and show provider • model • effort •
-;; preset • cwd • branch • tokens • ctx% • cost.  The layout follows pi-mono's
-;; footer (a terminal bottom status bar); the ctx and model/effort data
-;; semantics align with dsh web (the server pushes the contextPressure
-;; projection).
+;; preset • permission • cwd • branch • tokens • ctx% • cost.  The layout
+;; follows pi-mono's footer (a terminal bottom status bar); the ctx and
+;; model/effort data semantics align with dsh web (the server pushes the
+;; contextPressure projection), and the permission segment reads the
+;; `permissions' projection's current value.
 ;;
 ;; Public API:
 ;;
@@ -29,6 +30,7 @@
 ;;   (dsh-emacs-modeline-set-provider "deepseek")     ;; set the model's provider
 ;;   (dsh-emacs-modeline-set-effort "max")   ;; set the reasoning effort
 ;;   (dsh-emacs-modeline-set-preset "code")  ;; set the agent preset
+;;   (dsh-emacs-modeline-set-permission "workspace-write") ;; set the permission preset
 ;;
 ;; `dsh-emacs-modeline-format-spec' lets users choose which segments are shown
 ;; (all by default).
@@ -83,20 +85,23 @@ shows the work, and the step number is diagnostic rather than actionable."
 
 (defcustom dsh-emacs-modeline-format-spec
   '(:separator " "
-    :segments (model effort preset ctx))
+    :segments (model effort preset permission ctx))
   "Plist describing the mode-line segments to render and the separator.
 The compact status line sits right next to the DSH mode name in the mode
-line, e.g.  DSH(deepseek-v4-flash·max·code CH95%).  Each segment is one of:
-  provider — provider id serving the model (e.g. deepseek; opt-in — the
-             provider also rides the model segment's tooltip)
-  model   — model id (e.g. deepseek-v4-flash)
-  effort  — reasoning effort (effortId, e.g. off/max)
-  preset  — agent preset (agentPreset: standard/minimal/code/cordis)
-  cwd     — short cwd (~/foo)
-  branch  — git current branch (or empty if unavailable)
-  tokens  — token usage (↑input ↓output CH% cache-hit)
-  ctx     — context window usage percentage
-  cost    — cumulative USD cost
+line, e.g.  DSH(deepseek-v4-flash·max·code·[shield] CH95%).  Each
+segment is one of:
+  provider   — provider id serving the model (e.g. deepseek; opt-in — the
+               provider also rides the model segment's tooltip)
+  model      — model id (e.g. deepseek-v4-flash)
+  effort     — reasoning effort (effortId, e.g. off/max)
+  preset     — agent preset (agentPreset: standard/minimal/code/cordis)
+  permission — permission preset (the `permissions' projection), drawn as
+               a shield icon (see `dsh-emacs-modeline-permission-style')
+  cwd        — short cwd (~/foo)
+  branch     — git current branch (or empty if unavailable)
+  tokens     — token usage (↑input ↓output CH% cache-hit)
+  ctx        — context window usage percentage
+  cost       — cumulative USD cost
 
 Customize by toggling checkboxes: uncheck a segment to remove it from the
 mode line; the `:separator' is a separate string field."
@@ -109,11 +114,26 @@ mode line; the `:separator' is a separate string field."
                (const :tag "model — model id" model)
                (const :tag "effort — reasoning effort" effort)
                (const :tag "preset — agent preset" preset)
+               (const :tag "permission — permission preset" permission)
                (const :tag "cwd — working directory" cwd)
                (const :tag "branch — git branch" branch)
                (const :tag "tokens — token usage ↑↓CH%" tokens)
                (const :tag "ctx — context window %" ctx)
                (const :tag "cost — cost in USD" cost)))
+  :group 'dsh-emacs-modeline)
+
+(defcustom dsh-emacs-modeline-permission-style 'icon
+  "How the mode line shows the session's permission preset.
+`icon' (default) draws the dsh-web shield icon: the real SVG shield
+\(check/pencil/exclamation for read-only/workspace-write/danger-full-access)
+when graphical Emacs has SVG support, else the matching Nerd Font shield
+glyph when `nerd-icons' is installed and its font is available, else a
+short token.  `text' always shows the preset name, unabbreviated.
+
+Icons are used instead of emoji on purpose: a mode-line glyph must be one
+cell wide and inherit the segment's face color, which emoji do not."
+  :type '(choice (const :tag "Shield icon (SVG, then Nerd Font glyph)" icon)
+                 (const :tag "Preset name text" text))
   :group 'dsh-emacs-modeline)
 
 (defcustom dsh-emacs-modeline-branch-refresh-interval 10
@@ -153,6 +173,12 @@ owning provider alongside the id — shown in the tooltip, never guessing.")
 
 (defvar-local dsh-emacs--modeline-preset nil
   "Agent preset (agentPreset id, e.g. \"standard\"/\"code\") shown in the mode-line.")
+
+(defvar-local dsh-emacs--modeline-permission nil
+  "Permission preset (the `permissions' projection's currentValue) shown here.
+A configured preset key (e.g. \"workspace-write\"/\"danger-full-access\"), the
+live \"auto\", or the derived \"custom\"; nil hides the segment (no permission
+service mounted, or no projection frame seen yet).")
 
 (defvar-local dsh-emacs--modeline-context-window-server nil
   "Context window from the server's `contextPressure' projection (tokens).
@@ -312,6 +338,108 @@ set (e.g. a session that predates request events)."
      (propertize dsh-emacs--modeline-preset 'face 'dsh-emacs-modeline-face)
      (format "Agent preset: %s" dsh-emacs--modeline-preset))))
 
+;;; ---------------------------------------------------------------------------
+;;; Permission-preset segment (dsh-web shield icons)
+;;; ---------------------------------------------------------------------------
+;; The three shields are dsh web's permission design set: one shield contour
+;; plus a check (read-only), a pencil (workspace-write) or an exclamation
+;; (danger-full-access).  `__C__' is replaced with the segment's face color,
+;; the same placeholder convention `dsh-emacs--tool-icon-svgs' uses.  A preset
+;; outside that set (`auto', `custom', a host-configured name) has no shield
+;; and renders as text.
+
+(defconst dsh-emacs--permission-icon-svgs
+  '(("read-only" . "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\"><path d=\"M8.20554 0.899994L14.7901 3.36857V7.01026C14.7901 12 11.0466 14.2103 8.20554 15.3C5.36446 14.2103 1.62012 12 1.62012 7.01026V3.36857L8.20554 0.899994Z\" stroke=\"__C__\" stroke-width=\"1.31831\" stroke-linejoin=\"round\"/><path d=\"M12.1654 5.7552L8.9447 9.41475C8.73044 9.65816 8.53628 9.8804 8.35774 10.0423C8.1713 10.2114 7.94235 10.3717 7.64016 10.4254C7.48207 10.4535 7.32 10.4552 7.16151 10.4294C6.85843 10.3801 6.62728 10.2223 6.43836 10.0559C6.25752 9.89653 6.06037 9.67732 5.84264 9.43705L4.72925 8.20897L5.63557 7.38707L6.74897 8.61594C6.98603 8.87755 7.12974 9.03533 7.24673 9.13839C7.31033 9.19443 7.34485 9.21476 7.35823 9.22122C7.38068 9.22484 7.40352 9.22515 7.42593 9.22122C7.40522 9.22502 7.42893 9.23294 7.53583 9.136C7.65132 9.03126 7.79316 8.87139 8.02643 8.60638L11.2479 4.94763L12.1654 5.7552Z\" fill=\"__C__\"/></svg>")
+    ("workspace-write" . "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\"><path d=\"M8.08887 0.251709C8.20479 0.23085 8.32486 0.241168 8.43652 0.282959L15.0215 2.75171C15.2787 2.84819 15.4492 3.09414 15.4492 3.3689V7.0105C15.4492 7.10986 15.4441 7.2081 15.4414 7.30542C15.0285 7.07175 14.5905 6.87695 14.1309 6.73022V3.82495L8.20508 1.60327L2.2793 3.82495V7.0105C2.27936 9.7171 3.4745 11.5379 5.02734 12.7947C5.01025 12.9942 5 13.1962 5 13.4001C5.00001 13.7617 5.02722 14.1169 5.08008 14.4636C2.91555 13.0393 0.961014 10.752 0.960938 7.0105V3.3689C0.960938 3.09417 1.13146 2.84821 1.38867 2.75171L7.97461 0.282959L8.08887 0.251709Z\" fill=\"__C__\"/><path d=\"M11.3525 5.64688V6.85688H5V5.64688H11.3525Z\" fill=\"__C__\"/><path d=\"M9.5824 8.29376V9.50376H5V8.29376H9.5824Z\" fill=\"__C__\"/><path d=\"M14.6647 15.6852H10.0338C10.3878 15.3751 10.7567 15.0517 11.0772 14.7706C11.2531 14.6164 11.4144 14.4746 11.5511 14.3547H14.6647V15.6852Z\" fill=\"__C__\"/><path d=\"M8.14852 14.1308L7.33925 15.4976C7.22458 15.6912 7.42245 15.9194 7.63037 15.8333L9.09785 15.2254L15.0399 10.0719L14.0905 8.97733L8.14852 14.1308Z\" fill=\"__C__\"/></svg>")
+    ("danger-full-access" . "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\"><path d=\"M8.20554 0.899994L14.7901 3.36857V7.01026C14.7901 12 11.0466 14.2103 8.20554 15.3C5.36446 14.2103 1.62012 12 1.62012 7.01026V3.36857L8.20554 0.899994Z\" stroke=\"__C__\" stroke-width=\"1.31831\" stroke-linejoin=\"round\"/><path d=\"M9.10094 4.5V8.75939H7.59888V4.5H9.10094Z\" fill=\"__C__\"/><path d=\"M9.10094 9.8114V11.5H7.59888V9.8114H9.10094Z\" fill=\"__C__\"/></svg>"))
+  "dsh-web permission shield SVGs (design set 1556), keyed by preset value.")
+
+(defconst dsh-emacs--permission-icon-names
+  '(("read-only" . "nf-md-shield_check")
+    ("workspace-write" . "nf-md-shield_edit")
+    ("danger-full-access" . "nf-md-shield_alert"))
+  "Nerd Font Material Design Icons names per permission preset.
+Their marks mirror the SVGs: check / pencil / exclamation.")
+
+(defconst dsh-emacs--permission-short-names
+  '(("read-only" . "ro")
+    ("workspace-write" . "ws")
+    ("danger-full-access" . "full"))
+  "Compact text for a preset whose icon cannot be drawn.")
+
+(defun dsh-emacs-modeline--permission-svg (value color)
+  "Return permission VALUE's shield SVG tinted COLOR, or nil.
+VALUE outside the design set (a host-configured preset, `auto', `custom')
+has no shield."
+  (let ((template (cdr (assoc value dsh-emacs--permission-icon-svgs))))
+    (when template
+      (replace-regexp-in-string "__C__" color template t t))))
+
+(defun dsh-emacs-modeline--permission-color (face)
+  "A concrete foreground color for FACE, or nil when it resolves to none."
+  (let ((fg (face-foreground face nil t)))
+    (and fg (not (equal fg "unspecified")) fg)))
+
+(defun dsh-emacs-modeline--permission-face (value)
+  "The mode-line face for permission VALUE.
+An unrestricted session and the derived `custom' state warn; every other
+value (including the live `auto') uses the plain permission face."
+  (if (member value '("danger-full-access" "custom"))
+      'dsh-emacs-modeline-permission-warn-face
+    'dsh-emacs-modeline-permission-face))
+
+(defun dsh-emacs-modeline--permission-image (value face)
+  "Return VALUE's shield as an SVG display string tinted with FACE, or nil.
+Requires a graphical frame whose Emacs can render SVG."
+  (when (and (display-graphic-p)
+             (fboundp 'image-type-available-p)
+             (image-type-available-p 'svg))
+    (let ((color (dsh-emacs-modeline--permission-color face)))
+      (when color
+        (let ((svg (dsh-emacs-modeline--permission-svg value color)))
+          (when svg
+            (condition-case nil
+                (propertize " " 'display
+                            (create-image svg 'svg t :ascent 'center :height 1.0))
+              (error nil))))))))
+
+(defun dsh-emacs-modeline--permission-nerd-icon (value face)
+  "Return VALUE's Nerd Font shield glyph inheriting FACE, or nil.
+`nerd-icons' is optional: without it (or without its font) the caller falls
+back to text.  The glyph is one cell wide, unlike an emoji."
+  (let ((name (cdr (assoc value dsh-emacs--permission-icon-names))))
+    (when (and name
+               (or (fboundp 'nerd-icons-mdicon)
+                   (require 'nerd-icons nil t))
+               (fboundp 'nerd-icons-mdicon))
+      (nerd-icons-mdicon name :face face))))
+
+(defun dsh-emacs-modeline--permission-short (value)
+  "Return VALUE's compact text form, bounded so a host preset cannot sprawl."
+  (or (cdr (assoc value dsh-emacs--permission-short-names))
+      (truncate-string-to-width value 8 nil nil "…")))
+
+(defun dsh-emacs-modeline--permission-display (value)
+  "Return the mode-line display string for permission VALUE, or nil.
+`dsh-emacs-modeline-permission-style' `text' always returns VALUE; `icon'
+prefers the SVG shield, then the Nerd Font glyph, and falls back to short
+text.  Emoji are never used: a mode-line glyph must be one cell wide and
+take the segment's face color."
+  (let ((face (dsh-emacs-modeline--permission-face value)))
+    (if (eq dsh-emacs-modeline-permission-style 'text)
+        (propertize value 'face face)
+      (or (dsh-emacs-modeline--permission-image value face)
+          (dsh-emacs-modeline--permission-nerd-icon value face)
+          (propertize (dsh-emacs-modeline--permission-short value) 'face face)))))
+
+(defun dsh-emacs-modeline--segment-permission ()
+  "Render the permission-preset segment (the `permissions' projection)."
+  (when (and dsh-emacs--modeline-permission
+             (not (string-empty-p dsh-emacs--modeline-permission)))
+    (dsh-emacs-modeline--annotate
+     (dsh-emacs-modeline--permission-display dsh-emacs--modeline-permission)
+     (format "Permission preset: %s" dsh-emacs--modeline-permission))))
+
 (defun dsh-emacs-modeline--segment-tokens ()
   "Render the token usage segment."
   (when dsh-emacs--modeline-usage
@@ -387,6 +515,7 @@ segment renders nothing (nil hides it)."
     ('model (dsh-emacs-modeline--segment-model))
     ('effort (dsh-emacs-modeline--segment-effort))
     ('preset (dsh-emacs-modeline--segment-preset))
+    ('permission (dsh-emacs-modeline--segment-permission))
     ('tokens (dsh-emacs-modeline--segment-tokens))
     ('ctx (dsh-emacs-modeline--segment-ctx))
     ('cost (dsh-emacs-modeline--segment-cost))
@@ -547,6 +676,12 @@ until the next genuine usage sample lands the live pair."
 (defun dsh-emacs-modeline-set-preset (preset)
   "Set the displayed agent preset to PRESET (an agentPreset id string, or nil)."
   (setq dsh-emacs--modeline-preset preset)
+  (dsh-emacs-modeline-update))
+
+(defun dsh-emacs-modeline-set-permission (permission)
+  "Set the displayed permission preset to PERMISSION (a preset key, or nil).
+PERMISSION is the `permissions' projection's `currentValue'."
+  (setq dsh-emacs--modeline-permission permission)
   (dsh-emacs-modeline-update))
 
 (defun dsh-emacs-modeline-set-cwd (cwd)
@@ -790,6 +925,15 @@ clip the last visible column."
                   dsh-emacs--modeline-provider dsh-emacs--modeline-effort
                   dsh-emacs--modeline-preset dsh-emacs--modeline-cwd
                   default-directory
+                  dsh-emacs--modeline-permission
+                  dsh-emacs-modeline-permission-style
+                  ;; The shield's color is baked into the SVG image, so a
+                  ;; theme change (same value, different face color) must
+                  ;; invalidate the cached inline string too.
+                  (and dsh-emacs--modeline-permission
+                       (dsh-emacs-modeline--permission-color
+                        (dsh-emacs-modeline--permission-face
+                         dsh-emacs--modeline-permission)))
                   (and (memq 'cwd segments)
                        (or (getenv "HOME") (user-login-name)))
                   (or dsh-emacs--modeline-branch

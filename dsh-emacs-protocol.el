@@ -42,6 +42,9 @@
 ;;   commands.execute → dsh-protocol-command-execution (command-id
 ;;                        result kind text)
 ;;   session/queue    → dsh-protocol-queue-item (id placement text kind)
+;;   permissionPresets/catalog → dsh-protocol-permission-catalog (options)
+;;                        └─ dsh-protocol-permission-option (value name
+;;                             description)
 ;;
 ;; Conversion entry points all accept a wire alist; note that arrays (vectors)
 ;; on the wire are always normalized to lists inside the structs.  Once
@@ -420,6 +423,39 @@ placeholder, ATTACHMENTS whether the command accepts composed attachments
   result
   kind
   text)
+
+;; ---------------------------------------------------------------------------
+;; permissionPresets/catalog
+;; ---------------------------------------------------------------------------
+;; dsh 0.1.6 split the selectable permission presets out of the `permissions'
+;; session projection (which now carries only `currentValue'): this
+;; process-level catalog is the only source of options, and the switch itself
+;; is the `/permission' slash command (the namespace has no write Remote).
+
+(cl-defstruct (dsh-protocol-permission-option
+               (:constructor dsh-protocol-permission-option--from-alist
+                             (alist
+                              &aux
+                              (value (cdr (assq 'value alist)))
+                              (name (cdr (assq 'name alist)))
+                              (description (cdr (assq 'description alist))))))
+  "One selectable permission preset: VALUE is the switch target, NAME its
+display label, DESCRIPTION the optional explanation."
+  value
+  name
+  description)
+
+(cl-defstruct (dsh-protocol-permission-catalog
+               (:constructor dsh-protocol-permission-catalog--from-alist
+                             (alist
+                              &aux
+                              (options (mapcar
+                                        #'dsh-protocol-permission-option--from-alist
+                                        (dsh-protocol--list
+                                         (cdr (assq 'options alist))))))))
+  "The `permissionPresets/catalog' value: every currently selectable preset,
+in contribution order.  The derived `custom' state is not an option."
+  options)
 
 ;; ---------------------------------------------------------------------------
 ;; user-questions/request waterfall items

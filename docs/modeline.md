@@ -9,6 +9,17 @@ following segments (separated by ` • `):
 - **effort**: reasoning effort — the `reasoningEffort` chosen via the model
   picker, or the one the host announces in `request/header` (e.g. `high`)
 - **preset**: agent preset of the session (`agentPreset`, e.g. `standard` / `code`)
+- **permission**: the `permissions` session projection's current value, drawn
+  as a shield icon so it costs one cell: the dsh-web SVG shield (check =
+  `read-only`, pencil = `workspace-write`, exclamation = `danger-full-access`)
+  in graphical Emacs with SVG, otherwise the matching Nerd Font shield glyph
+  when `nerd-icons` is installed, otherwise a short token. An unrestricted
+  session (or the derived `custom`) tints the shield with
+  `dsh-emacs-modeline-permission-warn-face`; the tooltip carries the full
+  preset name. No emoji are used — they are double-width and ignore the face
+  color. Switch it with `M-x dsh-emacs-set-permission` (see
+  [Customization](customization.md#permission-presets)); set
+  `dsh-emacs-modeline-permission-style` to `text` for the unabbreviated name
 - **tokens**: token usage (`↑input ↓output Rcache-read Wcache-write CHcache-hit%`)
 - **ctx**: context-window usage percentage (color-coded)
 - **cost**: cumulative cost (USD)
@@ -20,9 +31,9 @@ documented in [UI Styling](ui-styling.md).
 ## How ctx% is computed
 
 The dsh server computes context pressure itself and pushes it to every client
-as `session/projection` frames (`key: "contextPressure"` → projected tokens,
-pressure tokens and context window). dsh-emacs feeds this snapshot into the
-mode-line: the projected tokens are used when present (`projectedTokens ?? 
+as `session/control` `projection` frames (`key: "contextPressure"` → projected
+tokens, pressure tokens and context window). dsh-emacs feeds this snapshot into
+the mode-line: the projected tokens are used when present (`projectedTokens ??
 pressureTokens`), and the window comes from the same server projection. No local
 model→window map is maintained and no full session refresh is needed — the
 segment updates as the server's projection frames arrive. Without a server

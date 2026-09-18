@@ -567,6 +567,122 @@ symbol or an ordered list."
              (string-match "standard" txt)
              (not (string-match "m1-standard" txt)))
     (dsh-test-pass "model effort preset render as separate segments")))
+
+;; --- Test 5f: the permission segment draws the dsh-web shield icons ---
+;; `icon' style (default) prefers the SVG shield, then the Nerd Font shield
+;; glyph, then a short token — never an emoji (`char-width' 1 and the
+;; segment's face color are the reasons).  A batch run has no graphical
+;; frame and no `nerd-icons', so it pins the text fallback.
+(let ((txt (with-temp-buffer
+             (dsh-emacs-mode)
+             (let ((dsh-emacs-modeline-format-spec
+                    '(:separator " " :segments (preset permission))))
+               (setq-local dsh-emacs--modeline-preset "standard"
+                           dsh-emacs--modeline-permission "workspace-write")
+               (dsh-emacs-modeline-format)))))
+  (dsh-test-assert "permission-segment-renders-beside-preset"
+    (string-match-p "standard" txt)
+    ;; icon style without SVG display or nerd-icons -> the short token
+    (string-match-p " ws" txt)
+    (not (string-match-p "standard-ws" txt))))
+(let ((txt (with-temp-buffer
+             (dsh-emacs-mode)
+             (let ((dsh-emacs-modeline-format-spec
+                    '(:separator " " :segments (permission)))
+                   (dsh-emacs-modeline-permission-style 'text))
+               (setq-local dsh-emacs--modeline-permission "danger-full-access")
+               (dsh-emacs-modeline-format)))))
+  (dsh-test-assert "permission-segment-text-style-shows-preset-name"
+    (string-match-p "danger-full-access" txt)))
+(let ((txt (with-temp-buffer
+             (dsh-emacs-mode)
+             (let ((dsh-emacs-modeline-format-spec
+                    '(:separator " " :segments (permission))))
+               (setq-local dsh-emacs--modeline-permission nil)
+               (dsh-emacs-modeline-format)))))
+  (dsh-test-assert "permission-segment-hidden-when-unset"
+    (string-empty-p txt)))
+
+;; The inline stats string is cached on its inputs: a permission change (the
+;; projection frame path, which does NOT call the setter's cache reset here)
+;; must re-render instead of freezing the previous shield/token.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let ((dsh-emacs-modeline-format-spec '(:separator " " :segments (permission))))
+    (setq-local dsh-emacs--modeline-permission "workspace-write")
+    (let ((first (dsh-emacs-modeline--modeinline)))
+      (setq-local dsh-emacs--modeline-permission "danger-full-access")
+      (dsh-test-assert "permission-change-invalidates-modeinline-cache"
+        (string-match-p "ws" first)
+        (let ((second (dsh-emacs-modeline--modeinline)))
+          (string-match-p "full" second)
+          (not (equal first second)))))))
+
+(dsh-test-assert "permission-svg-covers-the-design-set"
+  (= 3 (length dsh-emacs--permission-icon-svgs))
+  (equal '("read-only" "workspace-write" "danger-full-access")
+         (mapcar #'car dsh-emacs--permission-icon-svgs)))
+(let ((svg (dsh-emacs-modeline--permission-svg "workspace-write" "#123456")))
+  (dsh-test-assert "permission-svg-tints-and-leaves-no-placeholder"
+    (stringp svg)
+    (string-prefix-p "<svg" svg)
+    (string-match-p "#123456" svg)
+    (not (string-match-p "__C__" svg))
+    (not (string-match-p "currentColor" svg))))
+(dsh-test-assert "permission-svg-only-for-the-design-set"
+  (null (dsh-emacs-modeline--permission-svg "auto" "#123456"))
+  (null (dsh-emacs-modeline--permission-svg "custom" "#123456"))
+  (null (dsh-emacs-modeline--permission-svg "host-preset" "#123456")))
+
+(let ((selected nil))
+  (cl-letf (((symbol-function 'nerd-icons-mdicon)
+             (lambda (name &rest args)
+               (setq selected (list name args))
+               "<glyph>")))
+    (dsh-test-assert "permission-nerd-icon-uses-the-matching-shield"
+      (equal "<glyph>"
+             (dsh-emacs-modeline--permission-nerd-icon
+              "danger-full-access" 'dsh-emacs-modeline-permission-warn-face))
+      (equal '("nf-md-shield_alert"
+               (:face dsh-emacs-modeline-permission-warn-face))
+             selected))
+    ;; No shield name outside the design set: the caller shows text instead.
+    (dsh-test-assert "permission-nerd-icon-none-for-unknown-values"
+      (null (dsh-emacs-modeline--permission-nerd-icon "auto" 'default))
+      (null (dsh-emacs-modeline--permission-nerd-icon "custom" 'default)))))
+
+(dsh-test-assert "permission-short-fallback-bounded"
+  (equal "ws" (dsh-emacs-modeline--permission-short "workspace-write"))
+  (equal "full" (dsh-emacs-modeline--permission-short "danger-full-access"))
+  (equal "custom" (dsh-emacs-modeline--permission-short "custom"))
+  (<= (string-width (dsh-emacs-modeline--permission-short "verylonghostname")) 8)
+  (not (equal "verylonghostname"
+              (dsh-emacs-modeline--permission-short "verylonghostname"))))
+
+(dsh-test-assert "permission-face-warns-only-when-unrestricted"
+  (eq 'dsh-emacs-modeline-permission-face
+      (dsh-emacs-modeline--permission-face "workspace-write"))
+  (eq 'dsh-emacs-modeline-permission-face
+      (dsh-emacs-modeline--permission-face "read-only"))
+  (eq 'dsh-emacs-modeline-permission-face
+      (dsh-emacs-modeline--permission-face "auto"))
+  (eq 'dsh-emacs-modeline-permission-warn-face
+      (dsh-emacs-modeline--permission-face "danger-full-access"))
+  (eq 'dsh-emacs-modeline-permission-warn-face
+      (dsh-emacs-modeline--permission-face "custom")))
+
+(let ((dsh-emacs-modeline-permission-style 'text))
+  ;; The style must be bound before the display call: a sibling `let' init
+  ;; runs in the outer environment.
+  (let ((s (dsh-emacs-modeline--permission-display "workspace-write")))
+    (dsh-test-assert "permission-display-text-style-faces-the-value"
+      (equal "workspace-write" s)
+      (eq 'dsh-emacs-modeline-permission-face (get-text-property 0 'face s)))))
+(let ((dsh-emacs-modeline-permission-style 'icon))
+  (let ((s (dsh-emacs-modeline--permission-display "custom")))
+    (dsh-test-assert "permission-display-icon-style-falls-back-to-warn-text"
+      (equal "custom" s)
+      (eq 'dsh-emacs-modeline-permission-warn-face (get-text-property 0 'face s)))))
 ;; modeinline rendering requires the current buffer to be in dsh-emacs-mode, and
 ;; all modeline state is buffer-local — it must be setq-local'd in the same buffer
 ;; before rendering, otherwise the value is never available (this test previously
@@ -4522,6 +4638,37 @@ Lets a test drive a malformed content value through the result path."
           (= 1000000 (buffer-local-value 'dsh-emacs--modeline-context-window-server buf))))
     (remhash "sess-zero" dsh-emacs--chat-buffers)
     (setq dsh-emacs--sessions old-sessions)
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; --- Test 43h: the `permissions' projection drives the mode-line segment ---
+;; dsh 0.1.6 narrowed the projection to `{currentValue}'; the selectable
+;; options moved to the permissionPresets/catalog Remote.  A configured key
+;; and the derived `custom' both display; an absent/unknown value must not
+;; clear the segment or guess.
+(let ((buf (get-buffer-create " *t43h-chat*")))
+  (unwind-protect
+      (progn
+        (with-current-buffer buf
+          (setq-local dsh-emacs--buffer-session "sess-perm"))
+        (puthash "sess-perm" buf dsh-emacs--chat-buffers)
+        (dsh-emacs--events-apply-permission-projection
+         "sess-perm" '((currentValue . "workspace-write")))
+        (dsh-test-assert "permission-projection-sets-segment"
+          (equal "workspace-write"
+                 (buffer-local-value 'dsh-emacs--modeline-permission buf)))
+        (dsh-emacs--events-apply-permission-projection
+         "sess-perm" '((currentValue . "custom")))
+        (dsh-test-assert "permission-projection-replaces-value"
+          (equal "custom"
+                 (buffer-local-value 'dsh-emacs--modeline-permission buf)))
+        (dsh-emacs--events-apply-permission-projection
+         "sess-perm" '((currentValue . "")))
+        (dsh-emacs--events-apply-permission-projection
+         "sess-perm" '((somethingElse . 1)))
+        (dsh-test-assert "permission-projection-ignores-empty-and-unknown"
+          (equal "custom"
+                 (buffer-local-value 'dsh-emacs--modeline-permission buf))))
+    (remhash "sess-perm" dsh-emacs--chat-buffers)
     (when (buffer-live-p buf) (kill-buffer buf))))
 
 ;; --- Test 43c: on send, a session with no stream reconnects first (self-heal);
@@ -10894,6 +11041,69 @@ received, RESULT is FN's return value."
       (null (assq 'images params))
       (equal (append (cdr (assq 'submittedAttachments params)) nil)
              '(((type . "image") (mediaType . "image/png") (data . "x")))))))
+
+;; --- Test 95b: permissionPresets/catalog parses and the switch runs the
+;; `/permission' slash command (dsh 0.1.6; the namespace has no write Remote) ---
+(let* ((catalog (dsh-protocol-permission-catalog--from-alist
+                 '((options . [((value . "workspace-write")
+                                (name . "Workspace write")
+                                (description . "Write inside the workspace"))
+                               ((value . "danger-full-access")
+                                (name . "Full access"))]))))
+       (options (dsh-protocol-permission-catalog-options catalog)))
+  (dsh-test-assert "permission-catalog-parses-options"
+    (= 2 (length options))
+    (equal "workspace-write" (dsh-protocol-permission-option-value (car options)))
+    (equal "Workspace write" (dsh-protocol-permission-option-name (car options)))
+    (equal "Write inside the workspace"
+           (dsh-protocol-permission-option-description (car options)))
+    (null (dsh-protocol-permission-option-description (cadr options)))))
+
+(let ((offered nil)
+      (executed nil))
+  (cl-letf (((symbol-function 'completing-read)
+             (lambda (_prompt collection &rest _args)
+               (setq offered (mapcar #'car collection))
+               (caar collection)))
+            ((symbol-function 'dsh-emacs-command-execute)
+             (lambda (session-id line _attachment _on-done)
+               (setq executed (list session-id line)))))
+    (dsh-emacs--set-permission-prompt
+     "sess-perm"
+     '((options . [((value . "workspace-write") (name . "Workspace write")
+                    (description . "Write inside the workspace"))
+                   ((value . "danger-full-access") (name . "Full access"))]))))
+  (dsh-test-assert "permission-prompt-offers-catalog-options"
+    (= 2 (length offered))
+    (string-match-p "Workspace write" (car offered))
+    (string-match-p "Write inside the workspace" (car offered))
+    ;; A missing description keeps the bare label (no separator/dash).
+    (equal "Full access" (cadr offered)))
+  (dsh-test-assert "permission-prompt-runs-permission-command"
+    (equal '("sess-perm" "/permission workspace-write") executed)))
+
+(let ((methods nil)
+      (executed nil)
+      (buf (generate-new-buffer " *dsh-permission-cmd*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-perm")
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method _params cb)
+                     (push method methods)
+                     (funcall cb t '((options . [((value . "workspace-write")
+                                                  (name . "Workspace write"))])))))
+                  ((symbol-function 'completing-read)
+                   (lambda (_prompt collection &rest _args) (caar collection)))
+                  ((symbol-function 'dsh-emacs-command-execute)
+                   (lambda (_session-id line _attachment _on-done)
+                     (setq executed line))))
+          (dsh-emacs-set-permission)))
+    (when (buffer-live-p buf) (kill-buffer buf)))
+  (dsh-test-assert "permission-set-fetches-catalog-and-switches"
+    (equal '("permissionPresets/catalog") methods)
+    (equal "/permission workspace-write" executed)))
 
 ;; --- Test 96: submit-prompt dispatches slash commands ---
 (let ((buf (generate-new-buffer " *dsh-slash-submit*"))
