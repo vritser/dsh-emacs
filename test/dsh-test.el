@@ -12983,14 +12983,53 @@ input-area draft (which carries no such property) is not counted."
           (null dsh-emacs--pending-user-messages)
           (null dsh-emacs--pending-user-echoes)
           (= 1 (dsh-emacs-test--user-echo-count "dup")))
-        ;; Re-send the same text; its failure must delete only its OWN echo.
-        (dsh-emacs--submit-plain "dup")
+        ;; Re-send the same text under its OWN callback capture — the first
+        ;; submit's callback belongs to the consumed entry — and fail it: it
+        ;; deletes its own echo and leaves the accepted block untouched.
+        (setq cbs nil)
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_m _p callback) (push callback cbs))))
+          (dsh-emacs--submit-plain "dup"))
         (dsh-test-assert "echo-consume-second-echo"
           (= 2 (dsh-emacs-test--user-echo-count "dup")))
         (funcall (car cbs) nil '((error . "boom")))
         (dsh-test-assert "echo-consume-failure-deletes-own-echo-only"
           (= 1 (dsh-emacs-test--user-echo-count "dup"))
-          (null dsh-emacs--pending-user-echoes))
+          (null dsh-emacs--pending-user-echoes)
+          (null dsh-emacs--pending-user-messages))
+        (dsh-emacs--ml-busy-clear))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; --- Test 98p2b: a failed duplicate submit rolls back its OWN echo ---
+;; Two in-flight submits of the same text are only distinguishable by the
+;; rollback entries they own: the pending list matches by identity while the
+;; echo list was looked up by text (`assoc'/`equal'), so when the NEWER submit
+;; failed first the older block was deleted and the newer rollback record was
+;; left pointing at a live block.
+(let ((buf (generate-new-buffer " *dsh-echo-identity*"))
+      (cbs nil)
+      (first-entry nil)
+      (second-entry nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-echo-identity")
+        (dsh-emacs--ml-busy-clear)
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_m _p callback) (push callback cbs))))
+          (dsh-emacs--submit-plain "dup")
+          (setq first-entry (car dsh-emacs--pending-user-echoes))
+          (dsh-emacs--submit-plain "dup")
+          (setq second-entry (cadr dsh-emacs--pending-user-echoes)))
+        (dsh-test-assert "echo-identity-setup"
+          (= 2 (length dsh-emacs--pending-user-echoes))
+          (= 2 (dsh-emacs-test--user-echo-count "dup")))
+        ;; `cbs' is newest-first, so the second submit's callback fails first.
+        (funcall (car cbs) nil '((error . "boom")))
+        (dsh-test-assert "echo-identity-failure-rolls-back-own-entry"
+          (memq first-entry dsh-emacs--pending-user-echoes)
+          (null (memq second-entry dsh-emacs--pending-user-echoes))
+          (= 1 (dsh-emacs-test--user-echo-count "dup")))
         (dsh-emacs--ml-busy-clear))
     (when (buffer-live-p buf) (kill-buffer buf))))
 

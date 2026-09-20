@@ -2624,7 +2624,11 @@ still empty (a newer draft typed meanwhile is left alone)."
                                 (sessionId . ,session-id)
                                 (mode . "queue")
                                 (content . ,content)
-                                (clientTimeZone . ,(dsh-emacs--client-time-zone)))))))
+                                (clientTimeZone . ,(dsh-emacs--client-time-zone))))))
+         ;; This submit's own rollback record (nil for an empty message), kept
+         ;; for the failure branch: the echo is tied to the submit that made it,
+         ;; not re-found by text.
+         (echo-entry nil))
     ;; Track the optimistic echo BEFORE the RPC round-trip: the mux may
     ;; deliver the canonical `user/message' at any moment — even before the
     ;; HTTP response is processed — and `dsh-emacs-render--consume-pending-user-message'
@@ -2642,7 +2646,9 @@ still empty (a newer draft typed meanwhile is left alone)."
           ;; pressed C-c C-c and the input is about to clear, so the
           ;; transcript must show it without waiting for the HTTP round trip
           ;; (a rejected prompt rolls the echo back, see the failure branch).
-          (dsh-emacs--render-user-message-optimistic message attachments))
+          (setq echo-entry
+                (dsh-emacs--render-user-message-optimistic
+                 message attachments)))
         ;; A submit with an empty queue still passes through the host
         ;; inbox (the wire knows only queue/steer modes): the host splices
         ;; the message in and claims it again at the turn start, and the
@@ -2711,16 +2717,20 @@ still empty (a newer draft typed meanwhile is left alone)."
                               ;; `user/message' will ever arrive to consume the
                               ;; optimistic entry; drop it, lest the same text
                               ;; sent again later swallow the real event.  Roll
-                              ;; back the transcript echo too — unless the
-                              ;; canonical event already consumed the entry (then
-                              ;; the message was in fact accepted and stays).
+                              ;; back this submit's OWN echo by entry identity
+                              ;; (two in-flight copies of the same text are only
+                              ;; distinguishable by their entries); a no-op once
+                              ;; the canonical event consumed it, because
+                              ;; `forget' then already retired the entry.
                               (when (buffer-live-p chat-buffer)
                                 (with-current-buffer chat-buffer
                                   (setq dsh-emacs--turn-awaiting nil)
-                                  (when (member message dsh-emacs--pending-user-messages)
-                                    (dsh-emacs--discard-user-message-echo message)
-                                    (setq dsh-emacs--pending-user-messages
-                                          (delq message dsh-emacs--pending-user-messages)))
+                                  (when echo-entry
+                                    (dsh-emacs--discard-user-message-echo
+                                     echo-entry))
+                                  (setq dsh-emacs--pending-user-messages
+                                        (delq message
+                                              dsh-emacs--pending-user-messages))
                                   ;; A failed prompt never produces the
                                   ;; splice/claim frames that would settle
                                   ;; the suppression: clear it here
@@ -3427,25 +3437,25 @@ is now the accepted message and must never be rolled back."
       (when (markerp (car (cdr entry))) (set-marker (car (cdr entry)) nil))
       (when (markerp (cdr (cdr entry))) (set-marker (cdr (cdr entry)) nil)))))
 
-(defun dsh-emacs--discard-user-message-echo (message)
-  "Delete MESSAGE's optimistic echo and drop its rollback entry.
-Called when MESSAGE's submit was rejected: the failure path restores the
-draft separately, and removing the echo keeps a rejected prompt from
-lingering in the transcript as a phantom message.  No-op when MESSAGE was
-already consumed by its canonical `user/message'."
-  (let ((entry (assoc message dsh-emacs--pending-user-echoes)))
-    (when entry
-      (setq dsh-emacs--pending-user-echoes
-            (delete entry dsh-emacs--pending-user-echoes))
-      (let ((start (car (cdr entry)))
-            (end (cdr (cdr entry))))
-        (when (and (markerp start) (markerp end)
-                   (marker-buffer start) (marker-buffer end))
-          (with-current-buffer (marker-buffer start)
-            (let ((inhibit-read-only t))
-              (delete-region start end))))
-        (when (markerp start) (set-marker start nil))
-        (when (markerp end) (set-marker end nil))))))
+(defun dsh-emacs--discard-user-message-echo (entry)
+  "Delete optimistic echo ENTRY and drop its rollback record.
+ENTRY is one `dsh-emacs--pending-user-echoes' item as returned by
+`dsh-emacs--render-user-message-optimistic'.  Deleting by ENTRY keeps the
+rollback tied to the submit that owns it: two in-flight submits of the same
+text are only distinguishable by their entries, not by their text.  No-op when
+the entry was already consumed by its canonical `user/message' — `forget' then
+removed it from the list and cleared its markers."
+  (setq dsh-emacs--pending-user-echoes
+        (delq entry dsh-emacs--pending-user-echoes))
+  (let ((start (car (cdr entry)))
+        (end (cdr (cdr entry))))
+    (when (and (markerp start) (markerp end)
+               (marker-buffer start) (marker-buffer end))
+      (with-current-buffer (marker-buffer start)
+        (let ((inhibit-read-only t))
+          (delete-region start end))))
+    (when (markerp start) (set-marker start nil))
+    (when (markerp end) (set-marker end nil))))
 
 (defvar-local dsh-emacs--history-loading nil
   "Non-nil while a `session/page' request for this buffer is in flight.
