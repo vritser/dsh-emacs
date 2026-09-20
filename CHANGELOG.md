@@ -47,6 +47,17 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **An idle `C-c C-c` is no longer queued as if the session were running**:
+  the session row's `running` flag is a JSON boolean, and `json-read` decodes
+  `false` as the truthy `:json-false`; the protocol struct kept that raw
+  value, so `dsh-emacs--busy-p` read every idle session as generating.  The
+  send then took the queue path — the message showed first as the blue Next
+  Message preview and only entered the transcript when the host claimed it,
+  instead of starting a turn and echoing at once.  Wire booleans are now
+  normalized where they cross into the session struct
+  (`dsh-protocol--boolean'), and the now-redundant per-caller normalizations
+  are gone.
+
 - **Sending a message no longer flashes the Next Message row**: an idle
   `C-c C-c` passes through the host inbox (a splice frame and a claim frame
   within milliseconds), and the row is suppressed for that transient — but

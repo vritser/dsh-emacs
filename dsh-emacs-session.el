@@ -225,8 +225,7 @@ which stays visible even while blank."
          (blank (dsh-protocol-session-blank session)))
     (not (or (and archived (gethash session-id archived))
              (dsh-protocol-session-origin session)
-             (and blank (not (eq blank :json-false))
-                  (not (equal session-id current)))))))
+             (and blank (not (equal session-id current)))))))
 
 (defun dsh-emacs-session--group-sessions (sessions workspaces)
   "Group SESSIONS by WORKSPACES.
@@ -467,7 +466,7 @@ rows, otherwise the generated summary title, else a cwd-derived name."
   (let ((blank (dsh-protocol-session-blank session))
         (inferred (dsh-emacs-session--title session)))
     (cond
-     ((and blank (not (eq blank :json-false))) "New Session")
+     (blank "New Session")
      ((and inferred (not (string-empty-p inferred))) inferred)
      (t (dsh-emacs-session--generate-name session)))))
 
@@ -480,8 +479,7 @@ properties as well, so commands like `c' (new session) started on ANY row
 of that workspace create the session inside it — matching dsh web, where
 the workspace context applies to the whole group."
   (let* ((session-id (or (dsh-protocol-session-session-id session) ""))
-         (running (let ((value (dsh-protocol-session-running session)))
-                    (and value (not (eq value :json-false)))))
+         (running (dsh-protocol-session-running session))
          (updated-at (dsh-protocol-session-updated-at session))
          ;; Compute status from projections
          (status (dsh-emacs-session--compute-status session running))
@@ -719,8 +717,7 @@ session list and the follow/control projection frames)."
     (if (not session)
         (user-error "No session at point")
       (let* ((cwd (or (dsh-protocol-session-cwd session) ""))
-             (running (let ((value (dsh-protocol-session-running session)))
-                        (and value (not (eq value :json-false)))))
+             (running (dsh-protocol-session-running session))
              (updated-at (dsh-protocol-session-updated-at session))
              (title (dsh-emacs-session--title session))
              (preset (or (dsh-protocol-session-agent-preset session) ""))
@@ -777,8 +774,7 @@ rows except the currently-open session."
              (claimed (gethash sid ws-sessions))
              (archived (and dsh-emacs--archived-sessions
                             (gethash sid dsh-emacs--archived-sessions)))
-             (blank (let ((b (dsh-protocol-session-blank session)))
-                      (and b (not (eq b :json-false)))))
+             (blank (dsh-protocol-session-blank session))
              (kind (cond ((dsh-protocol-session-origin session) "subagent")
                          ((dsh-protocol-session-parent-session-id session) "child")
                          (t "root"))))

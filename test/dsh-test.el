@@ -12968,6 +12968,38 @@ input-area draft (which carries no such property) is not counted."
         (dsh-emacs--ml-busy-clear))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
+;; --- Test 98p3: wire `false' booleans never read as running ---
+;; `json-read' decodes JSON false as the truthy symbol `:json-false'.  Keeping
+;; it in the session struct made `dsh-emacs--busy-p' report an IDLE session as
+;; running, so every idle `C-c C-c' was routed to the queue path — the message
+;; showed first as the blue Next Message preview and only then entered the
+;; transcript, instead of the plain send's immediate transcript echo.
+(let* ((idle (dsh-protocol-session--from-alist
+              '((sessionId . "s-idle") (running . :json-false)
+                (blank . :json-false))))
+       (busy (dsh-protocol-session--from-alist
+              '((sessionId . "s-run") (running . t) (blank . t)))))
+  (dsh-test-assert "session-wire-false-normalizes-to-nil"
+    (null (dsh-protocol-session-running idle))
+    (null (dsh-protocol-session-blank idle)))
+  (dsh-test-assert "session-wire-true-normalizes-to-t"
+    (eq t (dsh-protocol-session-running busy))))
+(let ((buf (generate-new-buffer " *dsh-busy-false*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "s-idle")
+        (dsh-emacs--ml-busy-clear)
+        (setq dsh-emacs--sessions
+              (list (dsh-protocol-session--from-alist
+                     '((sessionId . "s-idle") (running . :json-false)))))
+        (dsh-test-assert "idle-row-is-not-busy"
+          (null (dsh-emacs--busy-p)))
+        (setf (dsh-protocol-session-running (car dsh-emacs--sessions)) t)
+        (dsh-test-assert "running-row-is-busy"
+          (dsh-emacs--busy-p)))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
 ;; --- Test 98n: a socket-creation error on reconnect must not leave the
 ;; session permanently deaf ---
 ;; Regression: `dsh-emacs-events-connect' first tears down the old stream

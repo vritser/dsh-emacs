@@ -1177,7 +1177,7 @@ membership is reported separately by `workspace/follow' frames."
   (let ((item (dsh-emacs--chat-session-item session-id)))
     (when item
       (setf (dsh-protocol-session-running item)
-            (and running (not (eq running :json-false))))))
+            (dsh-protocol--boolean running))))
   (dsh-emacs-events--host-repaint))
 
 (defun dsh-emacs-events--host-dispatch (process json)

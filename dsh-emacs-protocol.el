@@ -61,6 +61,14 @@
         ((listp value) value)
         (t nil)))
 
+(defun dsh-protocol--boolean (value)
+  "Return wire VALUE as a strict boolean, mapping JSON `false' to nil.
+`json-read' decodes false as the truthy symbol `:json-false', so a flag must
+be normalized where it crosses into a struct: otherwise an idle session
+carries a truthy `running' value and every consumer that tests the field
+directly (e.g. `dsh-emacs--busy-p') misreads it as running."
+  (and value (not (eq value :json-false))))
+
 ;; ---------------------------------------------------------------------------
 ;; session/list / workspace/follow baseline
 ;; ---------------------------------------------------------------------------
@@ -85,8 +93,10 @@
                                      (and v (cdr (assq 'agentPreset v))))
                                    (cdr (assq 'agentPreset alist))))
                               (updated-at (cdr (assq 'updatedAt alist)))
-                              (blank (cdr (assq 'blank alist)))
-                              (running (cdr (assq 'running alist)))
+                              (blank (dsh-protocol--boolean
+                                      (cdr (assq 'blank alist))))
+                              (running (dsh-protocol--boolean
+                                        (cdr (assq 'running alist))))
                               ;; Sub-session markers: a subagent carries both
                               ;; origin="subagent"
                               ;; and parentSessionId; a fork child has only
