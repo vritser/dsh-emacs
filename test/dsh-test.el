@@ -8017,6 +8017,32 @@ Lets a test drive a malformed content value through the result path."
              (eq t (dsh-protocol-agent-preset-list-has-document v)))
     (dsh-test-pass "agent-preset-list-protocol-struct")))
 
+;; --- Test 74b: preset / command `false' booleans normalize at the struct
+;; --- boundary ---
+;; `AgentPresetRow.isDefault' and the roster's `authorable' / `hasDocument'
+;; are required JSON booleans, so `json-read' hands back the truthy
+;; `:json-false' for every false value.  Kept raw, `isDefault' made
+;; `dsh-emacs--preset-default-id' (a `cl-some' over the roster) return the
+;; FIRST preset instead of the host's real default whenever
+;; `dsh-emacs-default-preset' was unset.
+(let* ((roster (dsh-protocol-agent-preset-list--from-alist
+                '((presets . [((id . "alpha") (isDefault . :json-false))
+                              ((id . "beta") (isDefault . t))])
+                  (authorable . :json-false)
+                  (hasDocument . :json-false))))
+       (presets (dsh-protocol-agent-preset-list-presets roster)))
+  (dsh-test-assert "agent-preset-wire-false-is-default-normalizes-to-nil"
+    (null (dsh-protocol-agent-preset-is-default (car presets))))
+  (dsh-test-assert "agent-preset-wire-true-is-default-normalizes-to-t"
+    (eq t (dsh-protocol-agent-preset-is-default (cadr presets))))
+  (dsh-test-assert "agent-preset-roster-wire-false-flags-normalize"
+    (null (dsh-protocol-agent-preset-list-authorable roster))
+    (null (dsh-protocol-agent-preset-list-has-document roster))))
+(let ((input (dsh-protocol-command-input--from-alist
+              '((hint . "<x>") (attachments . :json-false)))))
+  (dsh-test-assert "command-input-wire-false-attachments-normalizes-to-nil"
+    (null (dsh-protocol-command-input-attachments input))))
+
 ;; --- Test 75: new-session preset candidate table (web display name +
 ;; cached roster + built-in fallback) ---
 ;; Display names match web: a system built-in preset is named via web's
@@ -8067,14 +8093,14 @@ Lets a test drive a malformed content value through the result path."
       (progn
         (setq dsh-emacs--agent-presets
               (dsh-protocol-agent-preset-list--from-alist
-               '((presets . [((id . "standard") (isDefault . t))
-                             ((id . "minimal"))]))))
-        (when (equal "standard" (dsh-emacs--preset-default-id nil))
-          (dsh-test-pass "preset-default-id-roster-is-default"))
-        (when (equal "minimal" (dsh-emacs--preset-default-id "minimal"))
-          (dsh-test-pass "preset-default-id-configured-wins"))
-        (when (equal "standard" (dsh-emacs--preset-default-id "ghost"))
-          (dsh-test-pass "preset-default-id-invalid-config-falls-back")))
+               '((presets . [((id . "minimal") (isDefault . :json-false))
+                             ((id . "standard") (isDefault . t))]))))
+        (dsh-test-assert "preset-default-id-roster-is-default"
+          (equal "standard" (dsh-emacs--preset-default-id nil)))
+        (dsh-test-assert "preset-default-id-configured-wins"
+          (equal "minimal" (dsh-emacs--preset-default-id "minimal")))
+        (dsh-test-assert "preset-default-id-invalid-config-falls-back"
+          (equal "standard" (dsh-emacs--preset-default-id "ghost"))))
     (setq dsh-emacs--agent-presets old-cache)))
 
 ;; --- Test 77: read-preset interactive read (candidates + preselect + host

@@ -47,6 +47,15 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **A new session no longer pre-selects the wrong agent preset**: the preset
+  roster's `isDefault` is a required JSON boolean, and `json-read` decodes
+  `false` as the truthy `:json-false`; the protocol struct kept that raw
+  value, so with `dsh-emacs-default-preset` unset the picker pre-selected the
+  first roster row instead of the host's default.  `isDefault` — and the
+  roster's `authorable` / `hasDocument` plus a command's `attachments` flag —
+  now normalize where they cross into the struct, like the session flags
+  below.
+
 - **An idle `C-c C-c` is no longer queued as if the session were running**:
   the session row's `running` flag is a JSON boolean, and `json-read` decodes
   `false` as the truthy `:json-false`; the protocol struct kept that raw

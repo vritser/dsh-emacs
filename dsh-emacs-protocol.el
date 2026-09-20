@@ -66,7 +66,9 @@
 `json-read' decodes false as the truthy symbol `:json-false', so a flag must
 be normalized where it crosses into a struct: otherwise an idle session
 carries a truthy `running' value and every consumer that tests the field
-directly (e.g. `dsh-emacs--busy-p') misreads it as running."
+directly (e.g. `dsh-emacs--busy-p') misreads it as running.  Every JSON
+boolean field read by a `--from-alist' constructor passes through here, so a
+struct never hands a caller `:json-false'."
   (and value (not (eq value :json-false))))
 
 ;; ---------------------------------------------------------------------------
@@ -350,7 +352,8 @@ selection, GROUPS by provider and unknown FAILURES.  The wire's
                               &aux
                               (id (cdr (assq 'id alist)))
                               (trust (cdr (assq 'trust alist)))
-                              (is-default (cdr (assq 'isDefault alist)))
+                              (is-default (dsh-protocol--boolean
+                                           (cdr (assq 'isDefault alist))))
                               (name (cdr (assq 'name alist)))
                               (description (cdr (assq 'description alist)))
                               (broken (cdr (assq 'broken alist))))))
@@ -369,8 +372,10 @@ selection, GROUPS by provider and unknown FAILURES.  The wire's
                               (presets (mapcar #'dsh-protocol-agent-preset--from-alist
                                                (dsh-protocol--list
                                                 (cdr (assq 'presets alist)))))
-                              (authorable (cdr (assq 'authorable alist)))
-                              (has-document (cdr (assq 'hasDocument alist))))))
+                              (authorable (dsh-protocol--boolean
+                                           (cdr (assq 'authorable alist))))
+                              (has-document (dsh-protocol--boolean
+                                             (cdr (assq 'hasDocument alist)))))))
   "The `agentPresets/list' response value: the PRESETS roster plus the
 AUTHORABLE / HAS-DOCUMENT flags the management UI needs."
   presets
@@ -394,7 +399,8 @@ AUTHORABLE / HAS-DOCUMENT flags the management UI needs."
                              (alist
                               &aux
                               (hint (cdr (assq 'hint alist)))
-                              (attachments (cdr (assq 'attachments alist))))))
+                              (attachments (dsh-protocol--boolean
+                                            (cdr (assq 'attachments alist)))))))
   "The optional `input' descriptor of a command item: HINT is the argument
 placeholder, ATTACHMENTS whether the command accepts composed attachments
 (images and staged file receipts)."
