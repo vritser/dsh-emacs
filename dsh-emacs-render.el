@@ -54,6 +54,7 @@
 ;; from the inline-image attachment path (placeholder fill / RET open).
 (declare-function dsh-emacs--active-session-id "dsh-emacs" ())
 (declare-function dsh-emacs--rpc-async "dsh-emacs" (method params callback))
+(declare-function dsh-emacs--forget-user-message-echo "dsh-emacs" (message))
 ;; Notification backends are built into their respective Emacs ports.
 (declare-function dsh-emacs--chat-title "dsh-emacs" (session-id))
 (declare-function notifications-notify "notifications" (&rest params))
@@ -1660,20 +1661,15 @@ already in the event); an attachment ref is fetched via
 ;;; Renderer: user messages
 ;;; ---------------------------------------------------------------------------
 
-(defun dsh-emacs-render-user-message (event &optional references)
-  "Render a `user/message' event with a prompt and the user block face.
-The block gets one blank line before and after (see
-`dsh-emacs-render--insert-chat-message' and `dsh-emacs-ui--blank-above-preserve').
-Image content blocks render as `[image …]' placeholders on their own
-line below the text; inline base64 shows immediately, attachment refs
-fill in when `session/attachment' settles (see
-`dsh-emacs-render--show-attachment').
-Optional REFERENCES (list of (LABEL . SESSION-ID)) from the immediately
-following `session-reference' recall event lets the readable `@label'
-session tokens the server persisted (canonical id stripped) render as real
-session chips; see `dsh-emacs-reference-fontify'."
-  (let* ((seq (dsh-emacs-render--event-seq event))
-         (data (dsh-emacs-render--event-data event))
+(defun dsh-emacs-render--insert-user-block (event references)
+  "Insert EVENT's user block and return its (START . END) text region, or nil.
+EVENT is a `user/message' wire event (or an optimistic look-alike carrying
+just `data.content'); non-user source kinds render nothing.  REFERENCES
+behaves as in `dsh-emacs-render-user-message'.  Split out of that renderer so
+the optimistic echo path can capture the inserted region and roll it back
+when its submit is rejected, while the canonical render keeps returning the
+event seq."
+  (let* ((data (dsh-emacs-render--event-data event))
          (kind (dsh-emacs-render--aget "kind" (dsh-emacs-render--aget "source" data)))
          (content (dsh-emacs-render--aget "content" data))
          (text (dsh-emacs-reference-fontify
@@ -1699,15 +1695,30 @@ session chips; see `dsh-emacs-reference-fontify'."
                                         (dsh-emacs-render--image-placeholder
                                          (car spec) (cdr spec)))
                                       specs "\n"))))
-      (dsh-emacs-render--insert-chat-message
-       (concat (propertize "❯ " 'face 'dsh-emacs-input-prompt-face)
-               text)
-       'dsh-emacs-user-block-face insert-point
-       (format "%s-%s" (dsh-emacs-render--make-namespace) block-id)
-       'user)
-      (dolist (spec specs)
-        (dsh-emacs-render--show-attachment (car spec) (cdr spec))))
-    seq))
+      (prog1
+          (dsh-emacs-render--insert-chat-message
+           (concat (propertize "❯ " 'face 'dsh-emacs-input-prompt-face)
+                   text)
+           'dsh-emacs-user-block-face insert-point
+           (format "%s-%s" (dsh-emacs-render--make-namespace) block-id)
+           'user)
+        (dolist (spec specs)
+          (dsh-emacs-render--show-attachment (car spec) (cdr spec)))))))
+
+(defun dsh-emacs-render-user-message (event &optional references)
+  "Render a `user/message' event with a prompt and the user block face.
+The block gets one blank line before and after (see
+`dsh-emacs-render--insert-chat-message' and `dsh-emacs-ui--blank-above-preserve').
+Image content blocks render as `[image …]' placeholders on their own
+line below the text; inline base64 shows immediately, attachment refs
+fill in when `session/attachment' settles (see
+`dsh-emacs-render--show-attachment').
+Optional REFERENCES (list of (LABEL . SESSION-ID)) from the immediately
+following `session-reference' recall event lets the readable `@label'
+session tokens the server persisted (canonical id stripped) render as real
+session chips; see `dsh-emacs-reference-fontify'.  Returns the event seq."
+  (dsh-emacs-render--insert-user-block event references)
+  (dsh-emacs-render--event-seq event))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Renderer: assistant messages
@@ -3463,10 +3474,15 @@ render twice."
                      (equal (substring-no-properties
                              (dsh-emacs-reference-fontify message))
                             text)))
-            (setq matched t)
+            (setq matched message)
           (push message remaining)))
       (when matched
-        (setq dsh-emacs--pending-user-messages (nreverse remaining)))
+        (setq dsh-emacs--pending-user-messages (nreverse remaining))
+        ;; The canonical message now owns this echo: its optimistic rollback
+        ;; record must go, or a later re-send of the same text that fails
+        ;; could delete this accepted block instead.
+        (when (fboundp 'dsh-emacs--forget-user-message-echo)
+          (dsh-emacs--forget-user-message-echo matched)))
       matched)))
 
 (defun dsh-emacs-render--trim-buffer ()

@@ -133,6 +133,33 @@ the claim disarmed the gate early — the row then painted the very next
 frame (the `C-c C-c' flash in a new session).  The hygiene timer still
 bounds a submit whose item never reaches the mirror.")
 
+(defvar-local dsh-emacs-queue--optimistic-submit nil
+  "Locally submitted message not yet reflected in the host queue mirror.
+A `dsh-protocol-queue-item' shown as the Next Message preview from the
+moment the user queues it until the host's own `session/queue' frame lands,
+so the row appears with the keystroke instead of one HTTP round trip later.
+nil when no local queued submit is in flight.")
+
+(defun dsh-emacs-queue--optimistic-submit-show (text)
+  "Preview a just-submitted TEXT as the pending next message.
+Call in the chat buffer on the busy submit path (after
+`dsh-emacs-queue--mark-submit-suppress'): the queued message is real but its
+host `session/queue' frame is still a round trip away, so the local preview
+keeps the send from feeling sticky.  The host's confirming frame, the submit
+failure branch, or the hygiene timer clears it."
+  (when (and text (not (string-empty-p text)))
+    (setq dsh-emacs-queue--optimistic-submit
+          (make-dsh-protocol-queue-item
+           :id (format "local-%s" (float-time))
+           :placement 'queued
+           :text text
+           :kind "user"))
+    (dsh-emacs-queue--refresh-ui)))
+
+(defun dsh-emacs-queue--optimistic-submit-clear ()
+  "Drop the optimistic Next Message preview (painting is the caller's job)."
+  (setq dsh-emacs-queue--optimistic-submit nil))
+
 (defun dsh-emacs-queue--submit-suppress-clear ()
   "Clear the submit-suppression flag and its timer (idempotent).
 Repaints once afterwards so the preview reflects the flag change
@@ -143,6 +170,7 @@ immediately instead of waiting for the next queue frame."
   (setq dsh-emacs--queue-submit-suppress nil)
   (setq dsh-emacs-queue--submit-parked-p nil)
   (setq dsh-emacs-queue--submit-seen-p nil)
+  (dsh-emacs-queue--optimistic-submit-clear)
   (dsh-emacs-queue--schedule-paint))
 
 (defun dsh-emacs-queue--mark-submit-suppress ()
@@ -304,6 +332,11 @@ settles back to empty or by its timeout."
                                          items
                                          dsh-emacs--queue-deleted)))
         (setq dsh-emacs--queue-items items)
+        ;; The host has now spoken about the queue: its frame carries the
+        ;; optimistic submit's own item (or the items ahead of it), so the
+        ;; local preview is no longer the source of truth.
+        (when items
+          (dsh-emacs-queue--optimistic-submit-clear))
         ;; A suppressed submit ends at its CLAIM: the empty frame that
         ;; follows its own splice.  Record that the splice was seen first —
         ;; a fresh session's mirror is seeded by the connection's first
@@ -338,13 +371,17 @@ settles back to empty or by its timeout."
 Steering (next-step) precedes queued (next-turn); context entries are never
 previewed.  Suppress the client's transient self-submit — unless that submit
 was already parked behind a running turn, which must show at once (see
-`dsh-emacs-queue--submit-parked-p').  The raw mirror is unchanged."
-  (when (or (null dsh-emacs--queue-submit-suppress)
-            dsh-emacs-queue--submit-parked-p)
-    (or (cl-find 'steering dsh-emacs--queue-items
-                 :key #'dsh-protocol-queue-item-placement)
-        (cl-find 'queued dsh-emacs--queue-items
-                 :key #'dsh-protocol-queue-item-placement))))
+`dsh-emacs-queue--submit-parked-p').  When the mirror does not offer an item
+yet, fall back to the local optimistic queued submit so the preview appears
+with the keystroke rather than one round trip later.  The raw mirror is
+unchanged."
+  (or (when (or (null dsh-emacs--queue-submit-suppress)
+                dsh-emacs-queue--submit-parked-p)
+        (or (cl-find 'steering dsh-emacs--queue-items
+                     :key #'dsh-protocol-queue-item-placement)
+            (cl-find 'queued dsh-emacs--queue-items
+                     :key #'dsh-protocol-queue-item-placement)))
+      dsh-emacs-queue--optimistic-submit))
 
 (defun dsh-emacs-queue--paint-after-burst ()
   "Repaint Composer and mode-line from the settled queue mirror."

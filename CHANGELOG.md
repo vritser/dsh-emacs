@@ -78,6 +78,17 @@ minor) and stay undated until the release is cut.
   bounded batch like an older-history page, so it now renders to completion,
   yielding between groups instead of being abandoned.
 
+- **Sent messages show up the moment the input clears**: the transcript echo
+  was rendered in the `session/prompt` HTTP callback, and a queued (busy)
+  message waited for the host's `session/queue` frame, so `C-c C-c` left a
+  visible gap before the message appeared.  The idle path now echoes the
+  message optimistically at submit; the host's canonical `user/message` is
+  deduped against it, and a rejected prompt deletes the echo and restores
+  the draft.  The busy path shows the queued message in the Next Message row
+  immediately from a local optimistic item, which the host's own frame (or a
+  failed submit) retires.
+  (rationale: postmortem/051)
+
 ## 0.4.1 - 2026-09-17
 
 ### Fixed

@@ -299,7 +299,10 @@ diffed against the previous mirror, with locally-deleted ids suppressed),
 the Composer Next Message row, and the `C-c C-q` manager.
 `dsh-emacs-queue-next-item` determines the visible next message from delivery
 order and the transient gate: steering (next-step) takes priority over queued
-(next-turn). Composer owns its clock icon, width fitting and buffer geometry.
+(next-turn), and a locally-submitted queued message not yet in the mirror is
+the fallback (`dsh-emacs-queue--optimistic-submit') so the row appears with
+the keystroke, not one round trip later. Composer owns its clock icon, width
+fitting and buffer geometry.
 Our steer/delete/edit RPCs still update the mirror optimistically on success,
 so Composer and the mode-line refresh immediately. Queue-triggered repaints
 are coalesced per frame burst with the existing zero-delay timer, preserving
@@ -330,12 +333,21 @@ a submit that was already PARKED when it was made — a turn was running
 then, recorded by `dsh-emacs-queue--mark-submit-suppress' in
 `dsh-emacs-queue--submit-parked-p' — shows its preview at once, because
 such an item can only be claimed at the turn end and is genuinely
-parked.  An IDLE submit is not parked (the host claims it at the turn
-START), so its transient stays hidden even after the send path lights
+parked.  The deferred path does not wait for the host's confirming frame
+to do so: `dsh-emacs-queue--optimistic-submit-show' records the
+just-submitted text as a local queue item and repaints, and the host's own
+`session/queue' frame (or the submit-failure branch) retires it.
+An IDLE submit is not parked (the host claims it at the turn
+START), so its queue transient stays hidden even after the send path lights
 the optimistic spinner; keying this on the live spinner instead painted
 and cleared the row within milliseconds (the `C-c C-c' flash), and
 taking a fresh session's empty seed for the claim did the same on the
-first send of a newly opened session.
+first send of a newly opened session.  The idle path echoes the message
+into the transcript at submit time
+(`dsh-emacs--render-user-message-optimistic') instead, so the message
+appears the instant the input clears rather than one HTTP round trip later;
+the pending entry dedups the host's canonical `user/message', and a
+rejected prompt deletes the echo and restores the draft.
 Genuine queueing — items already parked — keeps its feedback,
 its preview, and its mode-line count.
 This is the queue-frame complement of the anchor-gated replay dedup

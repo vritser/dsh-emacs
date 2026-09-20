@@ -75,6 +75,8 @@
 (require 'dsh-emacs-markdown)
 (require 'dsh-emacs-render)
 (declare-function dsh-emacs-render--cancel-markdown "dsh-emacs-render" ())
+(declare-function dsh-emacs-render--insert-user-block "dsh-emacs-render"
+                  (event references))
 (require 'dsh-emacs-composer)
 (require 'dsh-emacs-events)
 (require 'dsh-emacs-modeline)
@@ -310,6 +312,14 @@ NOT resolve their target from this variable alone — they read
 
 (defvar-local dsh-emacs--pending-user-messages nil
   "Text of messages the user sent but that are not yet rendered in the transcript.")
+
+(defvar-local dsh-emacs--pending-user-echoes nil
+  "Optimistic transcript echoes awaiting their submit's acceptance.
+An alist of (TEXT START-MARKER . END-MARKER) recorded by
+`dsh-emacs--render-user-message-optimistic'.  An entry is dropped when the
+canonical `user/message' consumes the pending text (the echo stays on
+screen), or deleted from the buffer when the submit's RPC fails, so a
+rejected prompt never lingers as a phantom message.")
 
 (defvar-local dsh-emacs--buffer-session nil
   "Session ID owned by this chat buffer (buffer-local).
@@ -2554,6 +2564,10 @@ against); genuinely parked items keep their feedback."
     ;; already covers (see `dsh-emacs-queue--mark-submit-suppress').
     (when (null (dsh-emacs-queue-items))
       (dsh-emacs-queue--mark-submit-suppress))
+    ;; A queued message is real but its host `session/queue' frame is still a
+    ;; round trip away; show it in the Next Message row now so the send does
+    ;; not feel sticky.  The host's frame or the failure branch clears it.
+    (dsh-emacs-queue--optimistic-submit-show message)
     (dsh-emacs--rpc-async "session/prompt" payload
                           (lambda (ok value)
                             (if ok
@@ -2561,7 +2575,9 @@ against); genuinely parked items keep their feedback."
                                 ;; `session/queue' frame diff — and the
                                 ;; transcript shows the message when the
                                 ;; host claims it (user/message).  Nothing
-                                ;; to render here.
+                                ;; to render here; the optimistic Next row is
+                                ;; already up and is replaced by the host's
+                                ;; own item.
                                 nil
                               ;; A failed prompt never produces the
                               ;; splice/claim frames that would settle the
@@ -2613,8 +2629,7 @@ still empty (a newer draft typed meanwhile is left alone)."
     ;; deliver the canonical `user/message' at any moment — even before the
     ;; HTTP response is processed — and `dsh-emacs-render--consume-pending-user-message'
     ;; is the only dedup gate.  The entry must already exist when the event
-    ;; arrives, or the echo (rendered on acceptance) and the canonical copy
-    ;; would both render.
+    ;; arrives, or the echo and the canonical copy would both render.
     (when (buffer-live-p chat-buffer)
       (with-current-buffer chat-buffer
         ;; Register before the RPC round-trip: a fast run can end before its
@@ -2622,15 +2637,20 @@ still empty (a newer draft typed meanwhile is left alone)."
         (setq dsh-emacs--turn-awaiting t)
         (unless (string-empty-p message)
           (setq dsh-emacs--pending-user-messages
-                (append dsh-emacs--pending-user-messages (list message))))
+                (append dsh-emacs--pending-user-messages (list message)))
+          ;; Echo the message NOW, not in the response callback: the user
+          ;; pressed C-c C-c and the input is about to clear, so the
+          ;; transcript must show it without waiting for the HTTP round trip
+          ;; (a rejected prompt rolls the echo back, see the failure branch).
+          (dsh-emacs--render-user-message-optimistic message attachments))
         ;; A submit with an empty queue still passes through the host
         ;; inbox (the wire knows only queue/steer modes): the host splices
         ;; the message in and claims it again at the turn start, and the
         ;; mirror would diff those two frames into `queued:' / `running:'
         ;; echoes — the flash on sending a new message.  The message
-        ;; itself is already rendered directly in the response callback,
-        ;; so this transient should stay silent.  Genuine queueing (items
-        ;; already parked) keeps its feedback.
+        ;; itself is already on screen, so this transient should stay
+        ;; silent.  Genuine queueing (items already parked) keeps its
+        ;; feedback.
         (when (null (dsh-emacs-queue-items))
           (dsh-emacs-queue--mark-submit-suppress))))
     ;; Clear the input on submit (same feel as the
@@ -2649,9 +2669,9 @@ still empty (a newer draft typed meanwhile is left alone)."
                                     (dsh-emacs--push-input-history message))
                                   (setq dsh-emacs--input-history-pos nil
                                         dsh-emacs--input-history-pending nil)
-                                  ;; Render immediately in the transcript even
-                                  ;; when the request originated in the fixed
-                                  ;; bottom input buffer.
+                                  ;; The echo is already on screen (rendered
+                                  ;; optimistically at submit); the callback
+                                  ;; only arms the live-follow state.
                                   (when (buffer-live-p chat-buffer)
                                     (with-current-buffer chat-buffer
                                       ;; The host accepted the prompt.  Light
@@ -2669,9 +2689,6 @@ still empty (a newer draft typed meanwhile is left alone)."
                                       ;; Confirm the stream keeps delivering
                                       ;; while this turn runs.
                                       (dsh-emacs-events--watchdog-start)
-                                      (unless (string-empty-p message)
-                                        (dsh-emacs--render-user-message
-                                         message attachments))
                                       (dsh-emacs-render--follow-stream)
                                       (unless dsh-emacs--event-ready
                                         ;; Self-heal when the stream is offline:
@@ -2693,12 +2710,17 @@ still empty (a newer draft typed meanwhile is left alone)."
                               ;; The server rejected the prompt, so no
                               ;; `user/message' will ever arrive to consume the
                               ;; optimistic entry; drop it, lest the same text
-                              ;; sent again later swallow the real event.
+                              ;; sent again later swallow the real event.  Roll
+                              ;; back the transcript echo too — unless the
+                              ;; canonical event already consumed the entry (then
+                              ;; the message was in fact accepted and stays).
                               (when (buffer-live-p chat-buffer)
                                 (with-current-buffer chat-buffer
                                   (setq dsh-emacs--turn-awaiting nil)
-                                  (setq dsh-emacs--pending-user-messages
-                                        (delq message dsh-emacs--pending-user-messages))
+                                  (when (member message dsh-emacs--pending-user-messages)
+                                    (dsh-emacs--discard-user-message-echo message)
+                                    (setq dsh-emacs--pending-user-messages
+                                          (delq message dsh-emacs--pending-user-messages)))
                                   ;; A failed prompt never produces the
                                   ;; splice/claim frames that would settle
                                   ;; the suppression: clear it here
@@ -3369,16 +3391,61 @@ prompts when `dsh-emacs-input-history-cross-session' is nil."
        (nth dsh-emacs--input-history-pos
             (dsh-emacs--input-history-active))))))
 
-(defun dsh-emacs--render-user-message (message &optional attachments)
-  "Render the optimistic echo of MESSAGE, with ATTACHMENTS if any.
+(defun dsh-emacs--render-user-message-optimistic (message attachments)
+  "Render MESSAGE's transcript echo immediately, before its RPC settles.
 ATTACHMENTS is a list of wire-ready attachment alists; they become
-`{type: \"image\"}' content blocks so the renderer displays them
-inline immediately — the bytes are already local, no
-`session/attachment' round-trip is needed."
-  (let ((event `((type . "user/message")
-                 (data . ((content . ,(dsh-emacs--attachments-prompt-content
-                                       message attachments)))))))
-    (dsh-emacs-render-event event)))
+`{type: \"image\"}' content blocks so the renderer displays them inline
+immediately — the bytes are already local, no `session/attachment'
+round-trip is needed.  The inserted region is recorded in
+`dsh-emacs--pending-user-echoes' so
+`dsh-emacs--discard-user-message-echo' can roll it back when the submit is
+rejected."
+  (let* ((event `((type . "user/message")
+                  (data . ((content . ,(dsh-emacs--attachments-prompt-content
+                                        message attachments))))))
+         (region (dsh-emacs-render--insert-user-block event nil)))
+    (when region
+      (let ((entry (cons message
+                         (cons (copy-marker (car region))
+                               (copy-marker
+                                (save-excursion
+                                  (goto-char (cdr region))
+                                  (skip-chars-forward "\n")
+                                  (point)))))))
+        (setq dsh-emacs--pending-user-echoes
+              (append dsh-emacs--pending-user-echoes (list entry)))
+        entry))))
+
+(defun dsh-emacs--forget-user-message-echo (message)
+  "Drop MESSAGE's rollback entry, leaving its optimistic echo on screen.
+Called when the canonical `user/message' consumes the pending text: the echo
+is now the accepted message and must never be rolled back."
+  (let ((entry (assoc message dsh-emacs--pending-user-echoes)))
+    (when entry
+      (setq dsh-emacs--pending-user-echoes
+            (delete entry dsh-emacs--pending-user-echoes))
+      (when (markerp (car (cdr entry))) (set-marker (car (cdr entry)) nil))
+      (when (markerp (cdr (cdr entry))) (set-marker (cdr (cdr entry)) nil)))))
+
+(defun dsh-emacs--discard-user-message-echo (message)
+  "Delete MESSAGE's optimistic echo and drop its rollback entry.
+Called when MESSAGE's submit was rejected: the failure path restores the
+draft separately, and removing the echo keeps a rejected prompt from
+lingering in the transcript as a phantom message.  No-op when MESSAGE was
+already consumed by its canonical `user/message'."
+  (let ((entry (assoc message dsh-emacs--pending-user-echoes)))
+    (when entry
+      (setq dsh-emacs--pending-user-echoes
+            (delete entry dsh-emacs--pending-user-echoes))
+      (let ((start (car (cdr entry)))
+            (end (cdr (cdr entry))))
+        (when (and (markerp start) (markerp end)
+                   (marker-buffer start) (marker-buffer end))
+          (with-current-buffer (marker-buffer start)
+            (let ((inhibit-read-only t))
+              (delete-region start end))))
+        (when (markerp start) (set-marker start nil))
+        (when (markerp end) (set-marker end nil))))))
 
 (defvar-local dsh-emacs--history-loading nil
   "Non-nil while a `session/page' request for this buffer is in flight.

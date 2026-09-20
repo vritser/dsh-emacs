@@ -5676,7 +5676,7 @@ Lets a test drive a malformed content value through the result path."
         (dsh-emacs-mode)
         (dsh-emacs-modeline-setup)
         (setq dsh-emacs--buffer-session "sess-opt")
-        (dsh-emacs--render-user-message
+        (dsh-emacs--render-user-message-optimistic
          "the pixel"
          (list (list (cons 'mediaType "image/png")
                      (cons 'data png-b64)
@@ -12690,6 +12690,28 @@ received, RESULT is FN's return value."
                                     (length needle)))))
     n))
 
+(defun dsh-emacs-test--user-echo-count (needle)
+  "Count transcript user blocks whose body contains NEEDLE.
+Blocks are located by the `dsh-emacs-user-message' property, so a restored
+input-area draft (which carries no such property) is not counted."
+  (let ((prop 'dsh-emacs-user-message)
+        (pos (point-min))
+        (n 0))
+    (while (< pos (point-max))
+      (let ((start (if (get-text-property pos prop)
+                       pos
+                     (next-single-property-change pos prop nil (point-max)))))
+        (if (or (null start) (>= start (point-max)))
+            (setq pos (point-max))
+          (let ((end (or (next-single-property-change start prop nil (point-max))
+                         (point-max))))
+            (when (string-match-p
+                   (regexp-quote needle)
+                   (buffer-substring-no-properties start end))
+              (setq n (1+ n)))
+            (setq pos end)))))
+    n))
+
 ;; --- Test 98o: mux reconnect replaying the full backlog must not render
 ;; twice ---
 ;; Regression: the protocol has no baseline-sync, so mux replays the whole
@@ -12855,6 +12877,7 @@ received, RESULT is FN's return value."
       (with-current-buffer buf
         (dsh-emacs-mode)
         (setq dsh-emacs--current-session "sess-plain-clear")
+        (setq-local dsh-emacs--buffer-session "sess-plain-clear")
         (dsh-emacs--ml-busy-clear)
         ;; Scenario 1: clear on submit (without waiting for the RPC to return);
         ;; on failure with the input area still empty → restore the original text
@@ -12865,11 +12888,17 @@ received, RESULT is FN's return value."
           (dsh-emacs--submit-plain "draft one"))
         (dsh-test-assert "plain-submit-clears-input-immediately"
           (string-empty-p (dsh-emacs-test--input-text)))
+        (dsh-test-assert "plain-submit-echoes-before-rpc"
+          (= 1 (dsh-emacs-test--user-echo-count "draft one")))
         (funcall cb nil '((error . "boom")))
         (dsh-test-assert "plain-submit-failure-restores-draft"
           (string= "draft one" (dsh-emacs-test--input-text)))
+        (dsh-test-assert "plain-submit-failure-rolls-back-echo"
+          (= 0 (dsh-emacs-test--user-echo-count "draft one")))
         (dsh-test-assert "plain-submit-failure-drops-pending"
           (null dsh-emacs--pending-user-messages))
+        (dsh-test-assert "plain-submit-failure-drops-echo-entry"
+          (null dsh-emacs--pending-user-echoes))
         ;; Scenario 2: failure must not overwrite a draft typed during the round
         ;; trip
         (dsh-emacs--clear-input)
@@ -12881,8 +12910,11 @@ received, RESULT is FN's return value."
         (funcall cb nil '((error . "boom")))
         (dsh-test-assert "plain-submit-failure-keeps-newer-draft"
           (string= "newer draft" (dsh-emacs-test--input-text)))
-        ;; Scenario 3: the success path no longer clears the input area (a new
-        ;; draft from the round trip is kept)
+        (dsh-test-assert "plain-submit-failure-rolls-back-echo-two"
+          (= 0 (dsh-emacs-test--user-echo-count "draft two")))
+        ;; Scenario 3: the success path leaves the echo on screen (the
+        ;; canonical `user/message' consumes the pending entry) and never
+        ;; touches a draft typed during the round trip
         (dsh-emacs--clear-input)
         (setq cb nil)
         (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
@@ -12892,6 +12924,47 @@ received, RESULT is FN's return value."
         (funcall cb t '((ok . t)))
         (dsh-test-assert "plain-submit-success-keeps-newer-draft"
           (string= "typed during flight" (dsh-emacs-test--input-text)))
+        (dsh-test-assert "plain-submit-success-keeps-echo"
+          (= 1 (dsh-emacs-test--user-echo-count "draft three")))
+        (dsh-emacs--ml-busy-clear))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; --- Test 98p2: a consumed echo is never rolled back by a later same-text
+;; --- failure ---
+;; Once the canonical `user/message' takes over an optimistic echo, its
+;; rollback record must retire with the pending entry.  A stale record left
+;; behind made a later FAILED re-send of the same text delete the accepted
+;; block instead of its own echo.
+(let ((buf (generate-new-buffer " *dsh-echo-consume*"))
+      (cbs nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-echo-consume")
+        (dsh-emacs--ml-busy-clear)
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_m _p callback) (push callback cbs))))
+          (dsh-emacs--submit-plain "dup"))
+        (dsh-test-assert "echo-consume-setup"
+          (= 1 (dsh-emacs-test--user-echo-count "dup"))
+          (= 1 (length dsh-emacs--pending-user-echoes)))
+        ;; The canonical event takes over: pending + rollback record retire,
+        ;; the block stays on screen.
+        (dsh-emacs-events--dispatch-event
+         buf '((type . "user/message") (seq . 1)
+               (data . ((content . [((type . "text") (text . "dup"))])))))
+        (dsh-test-assert "echo-consume-drops-rollback-record"
+          (null dsh-emacs--pending-user-messages)
+          (null dsh-emacs--pending-user-echoes)
+          (= 1 (dsh-emacs-test--user-echo-count "dup")))
+        ;; Re-send the same text; its failure must delete only its OWN echo.
+        (dsh-emacs--submit-plain "dup")
+        (dsh-test-assert "echo-consume-second-echo"
+          (= 2 (dsh-emacs-test--user-echo-count "dup")))
+        (funcall (car cbs) nil '((error . "boom")))
+        (dsh-test-assert "echo-consume-failure-deletes-own-echo-only"
+          (= 1 (dsh-emacs-test--user-echo-count "dup"))
+          (null dsh-emacs--pending-user-echoes))
         (dsh-emacs--ml-busy-clear))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
@@ -14217,6 +14290,50 @@ candidates as the UI would via `all-completions', not by destructuring."
           dsh-emacs--queue-submit-suppress
           dsh-emacs-queue--submit-parked-p)
         (dsh-emacs-queue--submit-suppress-clear))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; A queued submit previews in the Next Message row immediately, before the
+;; host's own `session/queue' frame: that frame is one RPC round trip away,
+;; and waiting for it made the queued send feel sticky.  The optimistic item
+;; is the only local preview state; the host frame (or a failed submit)
+;; retires it.
+(let ((buf (get-buffer-create " *t-queue-optimistic-submit*"))
+      (proc (make-pipe-process :name "t-queue-opt" :buffer nil))
+      (cbs nil))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-opt-submit")
+        (setq dsh-emacs--queue-items nil
+              dsh-emacs--queue-process nil)
+        (setq-local dsh-emacs--ml-busy t)
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_m _p callback) (push callback cbs))))
+          (dsh-emacs--submit-deferred "queued now" nil nil))
+        (dsh-test-assert "queued-submit-previews-before-host-frame"
+          (let ((item (dsh-emacs-queue-next-item)))
+            (and item
+                 (string= "queued now" (dsh-protocol-queue-item-text item))
+                 (eq 'queued (dsh-protocol-queue-item-placement item))))
+          (dsh-test-composer-next-row))
+        ;; The host's own frame carries the real item: the local preview retires.
+        (dsh-emacs-queue-apply
+         buf proc
+         (list (cons 'items
+                     (vector (dsh-emacs-test--queue-item
+                              "real" "queued" "queued now")))))
+        (dsh-test-assert "queued-submit-preview-cleared-by-host-frame"
+          (null dsh-emacs-queue--optimistic-submit)
+          (string= "queued now"
+                   (dsh-protocol-queue-item-text (dsh-emacs-queue-next-item))))
+        ;; A rejected submit drops the local preview with the suppression.
+        (dsh-emacs--submit-deferred "queued lost" nil nil)
+        (dsh-test-assert "queued-submit-preview-shown-again"
+          dsh-emacs-queue--optimistic-submit)
+        (funcall (car cbs) nil '((code . "down")))
+        (dsh-test-assert "queued-submit-preview-cleared-on-failure"
+          (null dsh-emacs-queue--optimistic-submit)))
+    (when (process-live-p proc) (delete-process proc))
     (when (buffer-live-p buf) (kill-buffer buf))))
 
 ;; An IDLE submit is NOT parked: the host claims it at the turn START, and
