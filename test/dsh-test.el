@@ -12474,6 +12474,52 @@ received, RESULT is FN's return value."
           (dsh-test-pass "turn-end-extinguishes-busy")))
     (kill-buffer buf)))
 
+;; --- Test 98j2: the opening follow snapshot completes even while input is
+;; --- pending --- a dropped tail wedges the mode-line spinner ---
+;; Regression: the snapshot seed ran inside `while-no-input', whose early exit
+;; drops the whole batch whenever input is pending (fast typing while a session
+;; opens from the list).  The snapshot caller still advanced
+;; `dsh-emacs--anchor-seq' to the snapshot cursor afterwards, so the dropped
+;; records were never re-delivered — a dropped trailing `turn/end' left the
+;; mode-line running animation lit with no later event to stop it.
+(let ((buf (generate-new-buffer " *dsh-snapshot-input*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-snapshot-input")
+        (dsh-emacs--ml-busy-clear)
+        (setq dsh-emacs--anchor-seq 0)
+        (let ((unread-command-events (list ?x)))
+          (dsh-emacs-events--follow-snapshot
+           (current-buffer)
+           (list (cons "type" "snapshot")
+                 (cons "cursor" 3)
+                 (cons "records"
+                       (vector
+                        (list (cons "type" "event")
+                              (cons "event"
+                                    '((type . "turn/start") (seq . 1))))
+                        (list (cons "type" "event")
+                              (cons "event"
+                                    '((type . "user/message") (seq . 2)
+                                      (data . ((content
+                                                . [((type . "text")
+                                                    (text . "hello"))]))))))
+                        (list (cons "type" "event")
+                              (cons "event"
+                                    '((type . "turn/end") (seq . 3))))))
+                 (cons "hasMore" :json-false))))
+        (when (string-match "hello" (buffer-substring-no-properties
+                                     (point-min) (point-max)))
+          (dsh-test-pass "snapshot-completes-with-input-pending"))
+        (when (null dsh-emacs--ml-busy)
+          (dsh-test-pass "snapshot-turn-end-extinguishes-busy"))
+        (when (= 3 dsh-emacs--anchor-seq)
+          (dsh-test-pass "snapshot-anchor-lands-on-cursor"))
+        (dsh-emacs--ml-busy-clear))
+    (remhash "sess-snapshot-input" dsh-emacs--input-history-by-session)
+    (kill-buffer buf)))
+
 ;; --- Test 98k: multi-session concurrency --- busy / command spinner
 ;; state is per-buffer ---
 ;; Regression: the ml-busy timer and command-spinners were once global ---

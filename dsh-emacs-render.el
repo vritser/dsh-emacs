@@ -3572,8 +3572,13 @@ the real id+label is delivered by the immediately-following `session-reference'
 recall context.  Before rendering, the batch is scanned once to key each
 citing message's seq to those references, so the message's `@label' renders
 as a real session chip.
-The loop yields to the input queue every 5 events so that user keystrokes
-interrupt the batch and keep the UI responsive."
+Every batch this renderer receives is settled and bounded (an older-history
+page or the opening follow snapshot), so it runs to completion; it yields to
+the input queue between groups to keep redisplay moving, but never abandons
+the batch.  Dropping records was the root cause of a wedged mode-line
+spinner: the snapshot caller advances `dsh-emacs--anchor-seq' to the snapshot
+cursor once the render returns, so a dropped trailing `turn/end' was never
+re-delivered and the running animation had no later event to stop it."
   (let* ((entries (if (vectorp events) (append events nil) events))
          (refs-map (and (null stream)
                         (dsh-emacs-render--recall-refs-by-message-seq entries)))
@@ -3621,9 +3626,13 @@ interrupt the batch and keep the UI responsive."
                         (when (dsh-emacs-render-event ev)
                           (setq rendered (1+ rendered))
                           t)))))))
-      ;; A prepended page is a settled, bounded batch: run it to completion
-      ;; without the live path's `while-no-input' early exit, which would
-      ;; otherwise drop the page whenever input is pending.
+      ;; Both batches this renderer receives are settled and bounded: an older
+      ;; history page (PREPEND-P) and the opening follow snapshot.  Run either
+      ;; to completion.  The snapshot used to take `while-no-input's early
+      ;; exit, which dropped records whenever input was pending; the caller
+      ;; then advanced `dsh-emacs--anchor-seq' to the snapshot cursor, so the
+      ;; dropped tail was never re-delivered (a dropped `turn/end' wedged the
+      ;; mode-line running animation).
       (if prepend-p
           ;; Old pages share the transcript and its fragment index, but must
           ;; not flush a live reply or consume pending turn/command state.
@@ -3639,13 +3648,14 @@ interrupt the batch and keep the UI responsive."
             (dolist (entry entries)
               (consume-entry entry))
             (dsh-emacs-render--flush-deliverables))
-        (while-no-input
-          (dolist (entry entries)
-            (consume-entry entry)
-            ;; Yield every 5 events so the user can interrupt and see progress.
-            (cl-incf counter)
-            (when (and (>= counter 5) (sit-for 0))
-              (setq counter 0))))))
+        (dolist (entry entries)
+          (consume-entry entry)
+          ;; Yield to the input queue between groups so a long seed still
+          ;; redisplays; unlike `while-no-input', the batch is not abandoned.
+          (cl-incf counter)
+          (when (>= counter 5)
+            (setq counter 0)
+            (sit-for 0)))))
     ;; The message-aligned tail can end mid-turn, with a collected
     ;; `deliverables/presented' whose `turn/end' is outside the window; the
     ;; batch end is then the turn's tail, so nothing stays buffered.

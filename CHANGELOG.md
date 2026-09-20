@@ -67,6 +67,17 @@ minor) and stay undated until the release is cut.
   own splice — the real claim — while the hygiene timer still bounds a
   submit whose item never reaches the mirror.
 
+- **Opening a session no longer leaves the mode-line running animation
+  stuck**: the `session/follow` opening snapshot rendered inside
+  `while-no-input`, whose early exit drops the whole batch whenever input is
+  pending — a fast keystroke while a session opened from `*dsh-sessions*`
+  cut the seed short.  The caller then advanced `dsh-emacs--anchor-seq` to
+  the snapshot cursor, so the dropped tail was never re-delivered: a dropped
+  trailing `turn/end` left the spinner ticking with no later event to stop
+  it (and the transcript missing its tail).  The snapshot is a settled,
+  bounded batch like an older-history page, so it now renders to completion,
+  yielding between groups instead of being abandoned.
+
 ## 0.4.1 - 2026-09-17
 
 ### Fixed
