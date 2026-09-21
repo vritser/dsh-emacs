@@ -76,12 +76,18 @@ expanding reveals the call body.  Icons correspond one-to-one with dsh web's
 | code (run_code) | `</>` | IconCodeOutline16 (code brackets) |
 | others (cordis_run, etc.) | ✨ | IconSparkle16 (sparkle) |
 
+A row with a known variant shows a humanized tool name (`grep` → `Grep`), or
+the `dsh-emacs-tool-titles` override when one is configured.  A variant-less
+tool with no curated title instead takes dsh web's generic header
+(`Tool Call` + wire tool name, see the summary rules below), and its
+arguments appear only in the expanded card.
+
 Status semantics align with dsh web's `leadingFor`/`stateStatus`:
 
 - **Running**: keeps the variant icon with purple highlighting (no spinner animation)
-- **Success** (exit 0): keeps the variant icon; ioCard rows still append
-  `✓ exit 0`, a bash terminal card shows no success footer (a clean exit has
-  no news to print, matching the web card whose exit-0 pill never renders)
+- **Success** (exit 0): keeps the variant icon and prints no status line on
+  any card — the header's green tint already says the call settled, and dsh
+  web's exit-0 pill never renders
 - **Failure**: leading switches to the red status dot `●`; the body shows
   `✗ exit N`, `✗ signal …`, or `✗ failed` according to the result
 - **Interrupted**: leading switches to `◐` in the stopped face; the body
@@ -153,8 +159,19 @@ for no added meaning (see
   independent of argument order.  The titles are `Job Output`, `Jobs` and
   `Kill Job`.  A `job_output` without a status line (a
   malformed or failed read) keeps the generic ioCard.
-- Every other variant keeps a dsh web-style **ioCard** (an `IN` arguments /
-  `OUT` result pair with the status line on top).
+- Every other variant keeps a dsh web-style **ioCard**: one aligned block in
+  which the `IN` (arguments) and `OUT` (result) labels share a label column
+  and their text starts in a shared text column.  The `IN` value reads as a
+  **single row** — a pretty-printed argument object is flattened, and one
+  wider than the card is ellipsized with the full value in its tooltip, the
+  treatment the bash card gives a long command — while the `OUT` result keeps
+  its own lines, hanging at the text column.  A thin `─` rule sized to the
+  content separates the two sections, and the whole block is indented like
+  the bash card so rows of either kind keep one left edge.  A failed or
+  interrupted call prints its status line above the block (`✗ exit N`,
+  `✗ failed`, `⏸ interrupted`); a clean success prints none.  A
+  zero-argument call (`{}`) drops the empty `IN` section instead of printing
+  a bare pair of braces.
 
 The collapsed state is a **compact single line** (no ellipsis placeholders, no
 extra blank lines), and adjacent tool rows stack tightly; pressing `RET` on a
@@ -167,6 +184,16 @@ read→`path|file_path|url`, search→`query|pattern|url`,
 write/edit→`path|file_path`, code→`description`,
 job_output/job_kill→`job_id`.  A `present` row is different again: it names
 the call's declared `files[].path` list rather than one argument value.
+A **variant-less** tool is titled `Tool Call` and carries its wire name as the
+summary instead: `Tool Call · <tool name>`.  Its arguments are deliberately
+absent from the header — the expanded card already shows them in the `IN`
+row, so repeating the raw JSON on the collapsed line would only crowd it.  A
+curated `dsh-emacs-tool-titles` entry still owns its row, so the `present`
+and job headers above keep their documented titles and summaries.  A row that
+still has no summary — a curated title with unusable arguments, or a variant
+row called with none — falls back to the first line of its result, capped by
+`dsh-emacs-max-tool-result-chars` (with a trailing `…` when the result had
+more lines), rather than showing a bare title.
 
 ## Thinking blocks
 

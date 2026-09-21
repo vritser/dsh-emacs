@@ -45,6 +45,22 @@ minor) and stay undated until the release is cut.
   the segment.
   (rationale: postmortem/050)
 
+### Changed
+
+- **Generic tool cards line up and say what happened**: a tool with no
+  dedicated card (any variant-less tool — for example a plugin's `dev_*`
+  tools) now expands into one aligned block: the `IN` arguments read as a
+  single row (a pretty-printed object is flattened, and one wider than the
+  card is ellipsized with the full value in its tooltip), the `OUT` result
+  keeps its own lines hanging under a content-sized `─` rule, and a
+  zero-argument call drops the empty `IN {}` section entirely.  A clean
+  success no longer prints `✓ exit 0` (an exit code these tools never had;
+  failures and interrupts keep their status line), and the header now reads
+  `Tool Call · <tool name>` — the wire tool name, with the call's arguments
+  shown only once the card is expanded — instead of a humanized title.  A
+  curated `dsh-emacs-tool-titles` entry still wins, so `Present files` and
+  the job rows keep their headers.
+
 ### Fixed
 
 - **A slow first server start no longer reads as a failure**: `M-x

@@ -3489,7 +3489,7 @@ Lets a test drive a malformed content value through the result path."
       (eq 'error (plist-get (dsh-emacs-render--tool-state "j4") :state))
       (string-match-p "unknown job id nope" body)
       (string-match-p "job_id" body)
-      (string-match-p "^OUT$" body))))
+      (string-match-p "^  OUT unknown job id nope$" body))))
 
 ;; A `present' row names the files it declared in the header (web PresentRow)
 ;; and shows the result text as its body; the argument JSON is never repeated.
@@ -3735,6 +3735,78 @@ Lets a test drive a malformed content value through the result path."
                    (string-match-p "Bash" recollapsed))
           (dsh-test-pass "tool-recollapse-single-line"))))))
 
+;; --- Test 31b: the generic ioCard is one aligned block — both labels share a
+;; column, the IN value is flattened to a single row, OUT keeps its lines
+;; hanging at the text column under a content-sized divider, and a clean
+;; success prints no status line ---
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "g1" "my_tool" "{\"x\":\"1\"}"))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event 2 "g1" nil nil "ok\nsecond line"))
+  (let ((block (dsh-emacs-test--tool-block-text
+                (dsh-emacs-render--make-namespace) "tool-g1")))
+    (dsh-test-assert "tool-io-in-is-one-row"
+      (string-match-p "^  IN  { \"x\": \"1\" }$" block))
+    (dsh-test-assert "tool-io-out-hangs-under-its-column"
+      (string-match-p "^  OUT ok$" block)
+      (string-match-p "^      second line$" block))
+    (dsh-test-assert "tool-io-divider-and-success-has-no-status-line"
+      (string-match-p "^  ─\\{4,\\}$" block)
+      (not (string-match-p (regexp-quote "✓ exit 0") block)))))
+
+;; --- Test 31c: a zero-argument generic call drops the empty IN section and
+;; keeps its input out of the header entirely ---
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "g2" "dev_injected_list" "{}"))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event 2 "g2" nil nil "（无注入记录）"))
+  (let* ((block (dsh-emacs-test--tool-block-text
+                 (dsh-emacs-render--make-namespace) "tool-g2"))
+         (header (dsh-emacs-render--first-line block)))
+    (dsh-test-assert "tool-io-empty-args-hide-IN"
+      (not (string-match-p "^  IN" block)))
+    (dsh-test-assert "tool-generic-header-hides-empty-input"
+      (string-match-p "✨ Tool Call · dev_injected_list$" header)
+      (not (string-match-p "{}" header))
+      (string-match-p "^  OUT （无注入记录）$" block))))
+
+;; --- Test 31e: a known-variant row whose arguments yield no summary still
+;; falls back to the result preview in the header ---
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "g4" "glob" "{}"))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event 2 "g4" nil nil "alpha.md\nbeta.md"))
+  (let ((block (dsh-emacs-test--tool-block-text
+                (dsh-emacs-render--make-namespace) "tool-g4")))
+    (dsh-test-assert "tool-known-variant-result-preview-summary"
+      (string-match-p "🔍 Glob · alpha.md …" block))))
+
+;; --- Test 31d: a failed generic call keeps its status line above the block ---
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "g3" "dev_plugin_status" "{}"))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event 2 "g3" t 1 "boom"))
+  (let ((block (dsh-emacs-test--tool-block-text
+                (dsh-emacs-render--make-namespace) "tool-g3")))
+    (dsh-test-assert "tool-io-failure-keeps-status-line"
+      (string-match-p (regexp-quote "✗ exit 1") block)
+      (string-match-p "^  OUT boom$" block))))
+
 ;; Collapsed snapshots retain complete content and faces across repeated folds.
 (dolist (style '(minimal rounded sharp))
   (with-temp-buffer
@@ -3845,13 +3917,22 @@ Lets a test drive a malformed content value through the result path."
 (with-temp-buffer
   (dsh-emacs-mode)
   (dsh-emacs-modeline-setup)
+  (setq-local dsh-emacs-tool-expand-by-default t)
   (dsh-emacs-render-tool-call
    (dsh-emacs-test--tool-call-event 1 "u1" "my_tool" "{\"x\":\"1\"}"))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event 2 "u1" nil nil "ok"))
   (let* ((ns (dsh-emacs-render--make-namespace))
-         (block (dsh-emacs-test--tool-block-text ns "tool-u1")))
-    (when (and block (string-match-p "✨ My Tool" block))
-      (dsh-test-pass "tool-unknown-humanized-title"))))
+         (block (dsh-emacs-test--tool-block-text ns "tool-u1"))
+         (header (dsh-emacs-render--first-line block)))
+    (dsh-test-assert "tool-generic-header-is-tool-call-name"
+      (string-match-p "✨ Tool Call · my_tool$" header)
+      (not (string-match-p "{\"x\"" header)))
+    (dsh-test-assert "tool-generic-input-only-when-expanded"
+      (string-match-p "^  IN  { \"x\": \"1\" }$" block))))
 
+;; A curated title still owns the row (present / job rows keep their documented
+;; headers and summaries) and is not rewritten to the generic format.
 (with-temp-buffer
   (dsh-emacs-mode)
   (dsh-emacs-modeline-setup)
@@ -3860,8 +3941,9 @@ Lets a test drive a malformed content value through the result path."
      (dsh-emacs-test--tool-call-event 1 "u2" "my_tool" "{\"x\":\"1\"}")))
   (let* ((ns (dsh-emacs-render--make-namespace))
          (block (dsh-emacs-test--tool-block-text ns "tool-u2")))
-    (when (and block (string-match-p "✨ Curated" block))
-      (dsh-test-pass "tool-title-defcustom-override"))))
+    (dsh-test-assert "tool-title-defcustom-override"
+      (string-match-p "✨ Curated" block)
+      (not (string-match-p "Tool Call" block)))))
 
 ;; --- Test 33: adjacent tool lines stack compactly (no extra blank lines) ---
 (defun dsh-emacs-test--t32-call (seq id name args)

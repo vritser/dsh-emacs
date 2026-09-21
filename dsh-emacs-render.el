@@ -472,13 +472,24 @@ Returns \"Tool\" for empty or missing names."
       "Tool"
     (mapconcat #'capitalize (split-string name "[_-]+" t) " ")))
 
-(defun dsh-emacs-render--tool-title (tool-name)
-  "Display title for TOOL-NAME, independent of its icon variant.
-Uses `dsh-emacs-tool-titles' overrides, else a humanized name, so
-grep / glob / web_search all keep the search magnifier icon but show
-distinct titles."
-  (or (cdr (assoc tool-name dsh-emacs-tool-titles))
-      (dsh-emacs-render--humanize-name tool-name)))
+(defun dsh-emacs-render--tool-header (tool-name variant args-raw)
+  "Return the (TITLE . SUMMARY) header pair for TOOL-NAME of VARIANT.
+TITLE comes from `dsh-emacs-tool-titles'; otherwise a variant-less tool (dsh
+web's `others', for example a plugin's `dev_*' tools) is titled \"Tool Call\"
+with its wire name as the summary — `Tool Call · <tool name>'.  Its
+arguments are deliberately NOT in the header: the expanded card already
+carries them in its IN row, and repeating the raw JSON on the collapsed line
+only crowds it.  Every other row keeps the humanized tool name — so grep /
+glob / web_search share the search magnifier icon but show distinct titles —
+and the summary chosen by `dsh-emacs-render--tool-summary'."
+  (let ((curated (cdr (assoc tool-name dsh-emacs-tool-titles))))
+    (cond
+     (curated (cons curated
+                    (dsh-emacs-render--tool-summary tool-name variant args-raw)))
+     ((equal variant "others")
+      (cons "Tool Call" tool-name))
+     (t (cons (dsh-emacs-render--humanize-name tool-name)
+              (dsh-emacs-render--tool-summary tool-name variant args-raw))))))
 
 (defun dsh-emacs-render--first-line (text)
   "First line of TEXT, trimmed."
@@ -571,7 +582,11 @@ call instead names the files it declared."
      (t (or args-raw "")))))
 
 (defun dsh-emacs-render--tool-result-preview (text)
-  "Format TEXT as a tool result body (max ~`dsh-emacs-max-tool-result-chars' chars)."
+  "Format TEXT as the one-line preview of a settled tool result.
+The first line, capped at `dsh-emacs-max-tool-result-chars' chars, with a
+trailing \" …\" when TEXT carried more lines.  Used as the collapsed row's
+summary when the call's arguments yield none (a zero-argument tool), so the
+row states its outcome instead of showing a bare title."
   (let* ((lines (split-string text "\n" t))
          (first (or (car lines) ""))
          (line (dsh-emacs-render--trim first dsh-emacs-max-tool-result-chars)))
@@ -1957,8 +1972,9 @@ the event seq but renders no ordinary tool card."
                (variant-info (dsh-emacs-render--tool-variant name))
                (variant (car variant-info))
                (icon (cdr variant-info))
-               (title (dsh-emacs-render--tool-title name))
-               (summary (dsh-emacs-render--tool-summary name variant args))
+               (header (dsh-emacs-render--tool-header name variant args))
+               (title (car header))
+               (summary (cdr header))
                (body-text (dsh-emacs-render--tool-body-text variant args))
                ;; bash and file-mutation rows draw their (running) expanded body
                ;; as the card the settled result will complete — the `$' prompt
@@ -2026,28 +2042,93 @@ colored status dot (red / warning-yellow)."
     ('stopped "◐ ")
     (_ (concat icon " "))))
 
+(defconst dsh-emacs-render--tool-io-label-width 3
+  "Width of the generic ioCard's section-label column.
+`IN' is padded to this width so both labels leave their text at the same
+column (`IN  foo' above `OUT bar'), and continuation lines align there too.")
+
+(defun dsh-emacs-render--tool-io-rows (label text)
+  "Return the ioCard rows for section LABEL and its TEXT.
+The label opens the first row in the section-label column; every following
+line of TEXT hangs at the shared text column.  LABEL carries
+`dsh-emacs-tool-io-face'; TEXT stays unstyled."
+  (let* ((lines (split-string text "\n"))
+         (text-column (+ 2 dsh-emacs-render--tool-io-label-width 1))
+         (hang (make-string text-column ?\s)))
+    (cons (concat "  "
+                  (propertize label 'face 'dsh-emacs-tool-io-face)
+                  (make-string (- dsh-emacs-render--tool-io-label-width
+                                  (length label))
+                               ?\s)
+                  " "
+                  (car lines))
+          (mapcar (lambda (line) (concat hang line)) (cdr lines)))))
+
+(defun dsh-emacs-render--tool-io-inline (text)
+  "Flatten TEXT to one display line for the ioCard's IN section.
+Newlines and runs of whitespace collapse to single spaces, so a
+pretty-printed argument object reads as one compact row.  A value wider than
+the card box is ellipsized and keeps the full text as a `help-echo' tooltip —
+the treatment the bash card gives an over-long command — so the IN row never
+grows the block and the OUT rows below it stay where the eye expects them."
+  (let* ((flat (string-trim
+                (replace-regexp-in-string
+                 "[ \t]+" " "
+                 (replace-regexp-in-string "[\n\r]+" " " text))))
+         (limit (max 20 (- (dsh-emacs-ui--box-width) 8))))
+    (if (> (string-width flat) limit)
+        (let ((short (truncate-string-to-width flat limit nil nil "…")))
+          (put-text-property 0 (length short) 'help-echo flat short)
+          short)
+      flat)))
+
 (defun dsh-emacs-render--tool-body-io (in-text out-text &optional status-text)
   "Compose the expanded tool body from IN-TEXT (args) and OUT-TEXT (result).
-Mirrors dsh web's ioCard: an `IN` section, then an `OUT` section.  When
-STATUS-TEXT is non-empty it is prepended as a first status line.
-Returns a multi-line body string (IN/OUT are literal labels so the fold
-toggle preserves them along with the rest of the body).  Section labels and
-the divider carry their own faces; the args/output text stays unstyled —
+Mirrors dsh web's ioCard as one aligned block: the `IN` and `OUT` labels sit
+in a shared label column, their text in a shared text column, and a thin `─'
+divider sized to the content separates the sections.  The block is indented
+like the bash terminal card, so rows of either kind keep one left edge.
+
+The `IN` arguments read as ONE row (flattened and ellipsized, see
+`dsh-emacs-render--tool-io-inline'); the `OUT` result keeps its own lines,
+hanging at the text column.
+
+STATUS-TEXT, when non-empty, is a leading line — callers pass it only for a
+failed or interrupted call, because a clean success carries no status text
+outside the bash card (dsh web's exit-0 pill never renders).
+
+A zero-argument body (`{}`/`[]`) drops the IN section instead of printing an
+empty pair of braces, so such a card shows its result alone.  Section labels
+and the divider carry their own faces; the args/output text stays unstyled —
 the tool's state face belongs to the header row, not the body."
-  (let ((parts '()))
-    (when (and status-text (not (string-empty-p status-text)))
-      (push status-text parts))
-    (when (and in-text (not (string-empty-p in-text)))
-      (push (propertize "IN" 'face 'dsh-emacs-tool-io-face) parts)
-      (dolist (line (split-string (string-trim in-text) "\n"))
-        (push (concat "   " line) parts)))
-    (when (and out-text (not (string-empty-p out-text)))
-      (when (and in-text (not (string-empty-p in-text)))
-        (push (propertize "────" 'face 'dsh-emacs-divider-face) parts))
-      (push (propertize "OUT" 'face 'dsh-emacs-tool-io-face) parts)
-      (dolist (line (split-string (string-trim out-text) "\n"))
-        (push (concat "   " line) parts)))
-    (mapconcat #'identity (nreverse parts) "\n")))
+  (let* ((trimmed-in (and (stringp in-text) (string-trim in-text)))
+         (in-rows (and trimmed-in
+                       (not (member trimmed-in '("{}" "[]")))
+                       (dsh-emacs-render--tool-io-rows
+                        "IN" (dsh-emacs-render--tool-io-inline trimmed-in))))
+         (out-text (and (stringp out-text)
+                        (not (string-empty-p (string-trim out-text)))
+                        (string-trim-right out-text "\n")))
+         (out-rows (and out-text (dsh-emacs-render--tool-io-rows "OUT" out-text)))
+         (divider (when (and in-rows out-rows)
+                    (let ((content-width (apply #'max 0
+                                                (mapcar #'string-width
+                                                        (append in-rows
+                                                                out-rows)))))
+                      (concat "  "
+                              (propertize
+                               (make-string
+                                (min 80 (max 4 (- content-width 2))) ?─)
+                               'face 'dsh-emacs-divider-face)))))
+         (status (and (stringp status-text)
+                      (not (string-empty-p status-text))
+                      (concat "  " status-text))))
+    (mapconcat #'identity
+               (append (and status (list status))
+                       in-rows
+                       (and divider (list divider))
+                       out-rows)
+               "\n")))
 
 (defun dsh-emacs-render--tool-status-text (state exit-code signal &optional reason)
   "Short human status for STATE/EXIT-CODE/SIGNAL, or nil.
@@ -2579,8 +2660,15 @@ everything else `success'."
                          ('error 'dsh-emacs-tool-error-face)
                          ('stopped 'dsh-emacs-tool-stopped-face)
                          (_ 'dsh-emacs-tool-pending-face)))
-                 (status-text (dsh-emacs-render--tool-status-text
-                               state exit-code signal error-reason))
+                 ;; The generic ioCard prints a status line only when the
+                 ;; call failed or was interrupted: the header's green tint
+                 ;; already says a clean call settled, and "✓ exit 0" is
+                 ;; shell news a non-shell tool never had (see the bash card,
+                 ;; which suppresses it too).  The line stays unstyled — a
+                 ;; state face tints the header row, never a body.
+                 (status-text (and (memq state '(error stopped))
+                                   (dsh-emacs-render--tool-status-text
+                                    state exit-code signal error-reason)))
                  ;; A settled bash/pwsh call expands into a terminal card
                  ;; (`$' prompt rows + output + status footer), a file read into
                  ;; the line-numbered read card, a write/edit into its diff
@@ -2608,7 +2696,10 @@ everything else `success'."
               :label-left (concat
                            (dsh-emacs-render--tool-leading icon state)
                            (propertize title 'face 'dsh-emacs-tool-title-face))
-              :label-right summary
+              :label-right (if (string-empty-p summary)
+                                (dsh-emacs-render--tool-result-preview
+                                 full-text)
+                              summary)
               :body body
               :style 'minimal
               ;; State tint on the header row only: the ioCard body keeps its
