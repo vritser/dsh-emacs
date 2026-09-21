@@ -47,6 +47,17 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **A slow first server start no longer reads as a failure**: `M-x
+  dsh-emacs` starts `dsh web` in the background and then polls for it, but
+  that poll gave up after a fixed ten half-second attempts.  A cold boot
+  composes the profile and loads the whole plugin tree — measured at about
+  4.5 s here, a fraction of a second inside that window — so a slightly
+  slower boot ended with an empty session list and "server did not become
+  ready".  The poll now waits for `dsh-emacs-server-wait-seconds` (the same
+  grace period a blocking server start uses) and, when it does give up,
+  says whether the process it started exited and points at `*dsh-server*`.
+  (rationale: postmortem/052)
+
 - **A new session no longer pre-selects the wrong agent preset**: the preset
   roster's `isDefault` is a required JSON boolean, and `json-read` decodes
   `false` as the truthy `:json-false`; the protocol struct kept that raw

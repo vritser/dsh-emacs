@@ -10301,6 +10301,52 @@ Lets a test drive a malformed content value through the result path."
   (when (eq t (dsh-emacs--server-wait-ready))
     (dsh-test-pass "server-wait-ready-alive-returns-t")))
 
+;; --- Test 89b: list-sessions polls for the grace period a blocking start
+;; would use, not a fixed few seconds ---
+;; A cold `dsh web' boot composes the profile and loads the whole plugin tree
+;; (measured ~4.5 s here), so a hardcoded 5 s window loses the race.  The
+;; deadline must derive from `dsh-emacs-server-wait-seconds'.
+(let ((dsh-emacs-server-wait-seconds 30)
+      (deadline nil)
+      (dsh-emacs--server-process nil))
+  (cl-letf (((symbol-function 'dsh-emacs-server-start) (lambda (&optional _) nil))
+            ((symbol-function 'dsh-emacs-events--host-refresh-begin)
+             (lambda () nil))
+            ((symbol-function 'float-time) (lambda () 1000.0))
+            ((symbol-function 'dsh-emacs-list-sessions--fetch-when-ready)
+             (lambda (arg) (setq deadline arg))))
+    (dsh-emacs-list-sessions))
+  (dsh-test-assert "list-sessions-waits-the-configured-grace-period"
+    (equal deadline 1030.0)))
+
+;; --- Test 89c: the non-blocking poll keeps retrying while the deadline
+;; remains, and reports the timeout instead of scheduling once it passed ---
+(let ((scheduled 0)
+      (now 10.0)
+      (reported nil))
+  (cl-letf (((symbol-function 'dsh-emacs--server-alive-p) (lambda () nil))
+            ((symbol-function 'dsh-emacs-list-sessions--fetch)
+             (lambda () (setq reported "fetched")))
+            ((symbol-function 'float-time) (lambda () now))
+            ((symbol-function 'run-at-time)
+             (lambda (&rest _) (setq scheduled (1+ scheduled))))
+            ((symbol-function 'message)
+             (lambda (fmt &rest args) (setq reported (apply #'format fmt args)))))
+    ;; 10 s in with a 30 s deadline: still polling (the old window had ended).
+    (dsh-emacs-list-sessions--fetch-when-ready 30.0)
+    (dsh-test-assert "server-ready-poll-keeps-waiting-past-five-seconds"
+      (= 1 scheduled)
+      (null reported))
+    ;; Past the deadline: report, do not schedule another attempt.
+    (setq scheduled 0
+          now 31.0
+          reported nil)
+    (dsh-emacs-list-sessions--fetch-when-ready 30.0)
+    (dsh-test-assert "server-ready-poll-reports-the-timeout"
+      (= 0 scheduled)
+      (and (stringp reported)
+           (string-match-p "did not become ready" reported)))))
+
 ;; --- Test 90: clean up the managed process when Emacs exits ---
 (when (memq 'dsh-emacs-server--teardown kill-emacs-hook)
   (dsh-test-pass "server-teardown-registered-on-kill-emacs-hook"))

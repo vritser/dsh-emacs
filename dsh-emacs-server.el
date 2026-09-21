@@ -67,10 +67,12 @@ the server is started lazily on the first command that needs it."
   :group 'dsh-emacs-server)
 
 (defcustom dsh-emacs-server-wait-seconds 30
-  "How long `dsh-emacs-server-ensure' waits for a freshly started server.
+  "How long dsh-emacs waits for a freshly started server to become ready.
 The first boot of `dsh web' loads the whole plugin tree and can take
-several seconds; this is the grace period before \"did not become ready\".
-Only applies to servers this package starts itself."
+several seconds; this is the grace period before \"did not become
+ready\".  It bounds both the blocking wait of `dsh-emacs-server-ensure'
+and the non-blocking readiness poll `dsh-emacs-list-sessions' runs
+after it starts the server itself."
   :type 'integer
   :group 'dsh-emacs-server)
 

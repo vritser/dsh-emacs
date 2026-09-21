@@ -795,16 +795,25 @@ known value."
                             ;; rolls back below the stream's latest state.
                             (dsh-emacs-events--host-refresh-drain)))))
 
-(defun dsh-emacs-list-sessions--fetch-when-ready (attempts)
+(defun dsh-emacs-list-sessions--fetch-when-ready (deadline)
   "Poll until the server is alive, then fetch the session list.
-ATTEMPTS counts remaining retries (0.5 s apart).  Gives up silently
-after exhausting attempts so the user is not spammed with errors."
+DEADLINE is a `float-time' value: retry every 0.5 s until it passes,
+then report why the list stayed empty.  The chain is non-blocking (a
+`run-at-time' timer per retry), so a cold server boot never freezes the
+UI, and the grace period is the same `dsh-emacs-server-wait-seconds' a
+blocking start uses — a first `dsh web' boot composes the profile and
+loads the plugin tree, which does not fit in a fixed few seconds."
   (if (dsh-emacs--server-alive-p)
       (dsh-emacs-list-sessions--fetch)
-    (if (> attempts 0)
+    (if (< (float-time) deadline)
         (run-at-time 0.5 nil #'dsh-emacs-list-sessions--fetch-when-ready
-                     (1- attempts))
-      (message "dsh: server did not become ready — retry with M-x dsh-emacs"))))
+                     deadline)
+      (message "dsh: server did not become ready within %ds%s — retry with M-x dsh-emacs"
+               dsh-emacs-server-wait-seconds
+               (if (and dsh-emacs--server-process
+                        (not (process-live-p dsh-emacs--server-process)))
+                   " (the server process this package started has exited; see `*dsh-server*')"
+                 " (see `*dsh-server*')")))))
 
 (defun dsh-emacs-list-sessions ()
   "Fetch the session list and refresh workspaces."
@@ -816,8 +825,11 @@ after exhausting attempts so the user is not spammed with errors."
     (dsh-emacs-events--host-refresh-begin)
     (if alive
         (dsh-emacs-list-sessions--fetch)
-      ;; Server just launched — wait for it (up to ~5 s).
-      (dsh-emacs-list-sessions--fetch-when-ready 10))))
+      ;; Server just launched — wait for it within the same grace period a
+      ;; blocking start would use (see `dsh-emacs-server-wait-seconds'); a
+      ;; cold boot regularly outlives a fixed few seconds.
+      (dsh-emacs-list-sessions--fetch-when-ready
+       (+ (float-time) dsh-emacs-server-wait-seconds)))))
 
 ;;;###autoload
 (defun dsh-emacs--new-session-workspace ()
