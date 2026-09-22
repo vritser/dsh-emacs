@@ -1682,16 +1682,30 @@ already in the event); an attachment ref is fetched via
 ;;; Renderer: user messages
 ;;; ---------------------------------------------------------------------------
 
+(defun dsh-emacs-render--user-authored-p (event)
+  "Whether EVENT is a `user/message' the human actually wrote.
+The host appends its own model-facing copies to the same surface and names
+their origin in `data.source.kind': workspace instructions
+\(`agent-instructions'), runtime-context snapshots, compaction checkpoints
+and other plugin notices (`plugin'), goal, agent and subagent traffic
+\(`goal', `agent-message', `subagent-settled', `subagent-report'), and
+recall context (`session-reference').  Only `user' — or a source-less
+fixture or the optimistic echo — is conversation the user typed: the
+transcript hides the rest, and `M-p' recall must not offer it back."
+  (let ((kind (dsh-emacs-render--aget-nested
+               '("source" "kind") (dsh-emacs-render--event-data event))))
+    (or (null kind) (equal kind "user"))))
+
 (defun dsh-emacs-render--insert-user-block (event references)
   "Insert EVENT's user block and return its (START . END) text region, or nil.
 EVENT is a `user/message' wire event (or an optimistic look-alike carrying
-just `data.content'); non-user source kinds render nothing.  REFERENCES
+just `data.content'); a host-injected copy (see
+`dsh-emacs-render--user-authored-p') renders nothing.  REFERENCES
 behaves as in `dsh-emacs-render-user-message'.  Split out of that renderer so
 the optimistic echo path can capture the inserted region and roll it back
 when its submit is rejected, while the canonical render keeps returning the
 event seq."
   (let* ((data (dsh-emacs-render--event-data event))
-         (kind (dsh-emacs-render--aget "kind" (dsh-emacs-render--aget "source" data)))
          (content (dsh-emacs-render--aget "content" data))
          (text (dsh-emacs-reference-fontify
                 (dsh-emacs-render--text-from-content content)
@@ -1700,7 +1714,7 @@ event seq."
          (insert-point (dsh-emacs-render--input-insert-point))
          (block-id (dsh-emacs-render--make-block-id event))
          (specs nil))
-    (when (or (null kind) (equal kind "user"))
+    (when (dsh-emacs-render--user-authored-p event)
       ;; Placeholder lines follow the body: one per image, with a unique id
       ;; that lets the async fill-in locate it.
       (let ((index 0))

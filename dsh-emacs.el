@@ -77,6 +77,7 @@
 (declare-function dsh-emacs-render--cancel-markdown "dsh-emacs-render" ())
 (declare-function dsh-emacs-render--insert-user-block "dsh-emacs-render"
                   (event references))
+(declare-function dsh-emacs-render--user-authored-p "dsh-emacs-render" (event))
 (require 'dsh-emacs-composer)
 (require 'dsh-emacs-events)
 (require 'dsh-emacs-modeline)
@@ -2405,7 +2406,13 @@ session's earlier messages are backfilled here, on every history load
 (open, refresh, backfill).  Texts already present are skipped, so
 reloading the same window never duplicates entries; the shared
 cross-session list is untouched.  With OLDER, append missing prompts behind
-existing entries instead of treating the batch as a newer snapshot."
+existing entries instead of treating the batch as a newer snapshot.
+
+Only messages the user wrote are recorded: the host injects its own
+model-facing `user/message' copies (workspace instructions, runtime-context
+snapshots, goal and subagent notices) into the same surface, and recalling
+one through `M-p' would paste a system-reminder wall of text back into the
+input; see `dsh-emacs-render--user-authored-p'."
   (when (and events session-id)
     (let ((own (gethash session-id dsh-emacs--input-history-by-session))
           (missing nil))
@@ -2414,7 +2421,8 @@ existing entries instead of treating the batch as a newer snapshot."
                (data (and ev (dsh-emacs--alist-state ev "data"))))
           (when (and data
                      (string= (dsh-emacs--alist-state ev "type")
-                              "user/message"))
+                              "user/message")
+                     (dsh-emacs-render--user-authored-p ev))
             (let ((text (mapconcat
                          #'identity
                          (delq nil

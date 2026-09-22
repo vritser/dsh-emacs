@@ -85,6 +85,18 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **`M-p` no longer recalls the host's own injected messages**: alongside a
+  prompt the host appends `user/message` copies of model-facing text —
+  workspace instructions (`<system-reminder>…</system-reminder>`),
+  runtime-context snapshots, goal and subagent notices — marked with their
+  origin in `data.source.kind`.  The transcript already skipped them, but
+  the per-session history backfill took every `user/message` text, so `M-p`
+  on an existing session could drop a wall of system-reminder prose into the
+  input.  Backfill now records only messages whose source kind is `user`
+  (or that carry no source at all, like fixtures and the optimistic echo);
+  the same predicate decides what the transcript renders, so the two views
+  of "a message the user wrote" cannot drift apart.
+
 - **A slow first server start no longer reads as a failure**: `M-x
   dsh-emacs` starts `dsh web` in the background and then polls for it, but
   that poll gave up after a fixed ten half-second attempts.  A cold boot

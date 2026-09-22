@@ -6502,6 +6502,57 @@ Lets a test drive a malformed content value through the result path."
     (setq dsh-emacs--input-history old-hist)
     (kill-buffer buf)))
 
+;; --- Test 52f: host-injected user messages never enter M-p recall ---
+;; Regression: the host appends its own model-facing `user/message' copies
+;; (workspace instructions, runtime-context snapshots, goal/subagent
+;; notices) to the same surface, naming their origin in `data.source.kind'.
+;; The transcript already hides them, but the history seeder took every
+;; user/message, so M-p recalled a `<system-reminder>' wall of text the
+;; user never typed.
+(let ((old-hist dsh-emacs--input-history)
+      (old-opt dsh-emacs-input-history-cross-session)
+      (buf (generate-new-buffer " *dsh-seed-injected*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-injected")
+        (setq dsh-emacs-input-history-cross-session nil)
+        (dsh-emacs--seed-input-history
+         '((("event" . ((type . "user/message") (seq . 1)
+                        (data . ((content . [((type . "text")
+                                              (text . "real prompt"))]))))))
+           (("event" . ((type . "user/message") (seq . 2)
+                        (data . ((content .
+                                          [((type . "text")
+                                            (text . "<system-reminder>AGENTS.md</system-reminder>"))])
+                                 (source . ((kind . "agent-instructions"))))))))
+           (("event" . ((type . "user/message") (seq . 3)
+                        (data . ((content .
+                                          [((type . "text")
+                                            (text . "Current runtime context."))])
+                                 (source . ((kind . "plugin"))))))))
+           (("event" . ((type . "user/message") (seq . 4)
+                        (data . ((content . [((type . "text")
+                                              (text . "legacy no-source"))])))))))
+         "sess-injected")
+        (dsh-test-assert "seed-skips-host-injected-user-messages"
+          (equal '("legacy no-source" "real prompt")
+                 (gethash "sess-injected" dsh-emacs--input-history-by-session)))
+        ;; The reported symptom: M-p lands on the recalled prompt, never on
+        ;; an injected reminder
+        (dsh-emacs-input-history-back)
+        (dsh-test-assert "seed-recall-never-offers-a-system-reminder"
+          (and (string= "legacy no-source" (dsh-emacs--get-input))
+               (null (cl-find-if
+                      (lambda (entry)
+                        (string-match-p "\\`<system-reminder>" entry))
+                      (gethash "sess-injected"
+                               dsh-emacs--input-history-by-session))))))
+    (remhash "sess-injected" dsh-emacs--input-history-by-session)
+    (setq dsh-emacs-input-history-cross-session old-opt)
+    (setq dsh-emacs--input-history old-hist)
+    (kill-buffer buf)))
+
 ;; --- Test 55: thinking face has no explicit background (inherits
 ;; the theme background) ---
 (let ((bg (face-attribute 'dsh-emacs-thinking-face :background nil)))
