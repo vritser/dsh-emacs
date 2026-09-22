@@ -70,6 +70,7 @@ for list management and navigation.
 | `C-c C-f` | Toggle mode-line stats |
 | `C-c C-!` | Stop the tracked local shell process |
 | `M-p` / `M-n` | Previous / next input |
+| `C-/` / `C-_` / `C-x u` | Undo input editing; redo with `C-g C-/`, or `undo-redo` on Emacs 28+ (the transcript is never undone) |
 | `TAB` | Complete a slash command |
 
 **Sending during a running turn:** by default, `C-c C-c` queues a non-empty

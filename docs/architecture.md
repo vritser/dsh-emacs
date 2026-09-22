@@ -146,6 +146,43 @@ avoids rewriting unchanged rows; resize reflows Next Message even without a
 goal. The input prompt remains a plain `❯ ` run, with no queue-prefix scanning
 or text matching needed to remove stale previews.
 
+## Undo (`dsh-emacs.el`)
+
+Undo/redo covers the editable input area only; the transcript is never
+undone.  A chat buffer is a live view of a session, and `undo` itself binds
+`inhibit-read-only`, so the transcript's read-only text property cannot stop
+a stale record from deleting rendered text.  Two rules keep them apart:
+
+- Every programmatic write above the input — message bodies, tool cards,
+  streamed Markdown, Composer chrome, the mode-line separator — runs with
+  `buffer-undo-list` bound to `t`, so it leaves no undo entry (and no copy of
+  the text it replaced).  Input-area writes stay recorded: typing, yanks,
+  `M-p` recall and the clear after a send are all undoable.
+- A write above the input still shifts the draft down, and undo records hold
+  absolute positions that Emacs does not adjust when text lands elsewhere.
+  `dsh-emacs--note-undo-change` (`after-change-functions`) flags that;
+  `dsh-emacs--reset-undo-history` (`pre-command-hook`, so before the command
+  can reach a stale record) drops the history and re-records the input as one
+  unit.  `C-/` then clears the draft; `C-g C-/` restores it, as does
+  `undo-redo` on Emacs 28+. Typing from there is undoable step by step again.
+  Submission also rebuilds stale history before clearing the input, after
+  its optimistic echo has finished rendering, so that deletion remains
+  undoable at the next command.
+
+Point discipline: `undo` re-inserts a restored region at the position it was
+deleted from and parks point there, which would leave the cursor at the start
+of a draft it just brought back.  `dsh-emacs--note-undo-change` therefore
+remembers the end of input text restored at the input's tail
+(`undo-in-progress`), and `dsh-emacs--park-point-after-undo`
+(`post-command-hook`) puts point after it; an undo that only removed input
+text leaves point where that text was, which is where the user was editing.
+
+`atomic-change-group` (streamed Markdown replacement, fragment rewrites)
+requires that nothing edits `buffer-undo-list` while its handle is live, so
+the history is rebuilt at command boundaries or before an input clear,
+outside transcript change groups. See
+[postmortem/054](../postmortem/054-undo-scoped-to-input.md).
+
 ## Shell commands (`dsh-emacs-shell.el`)
 
 `!<command>` inputs without attachments are **client-side** commands:

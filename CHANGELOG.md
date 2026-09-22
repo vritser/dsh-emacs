@@ -10,6 +10,22 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Undo/redo in the chat buffer, scoped to the input area**: `C-/`, `C-_`
+  and `C-x u` now undo input editing — typing, yanks, `M-p` recall, the clear
+  after a send — and `C-g C-/` (or `undo-redo` on Emacs 28+) redoes it;
+  previously the buffer disabled undo and `C-/` answered "No undo information".
+  The transcript is never
+  undone: rendered messages, tool cards, streamed bodies and Composer chrome
+  leave no undo step, so a `C-/` cannot delete rendered text (undo binds
+  `inhibit-read-only` internally, so the read-only transcript was no
+  protection).  A reply rendered above the draft moves the input, which
+  invalidates the positions in the records made for it; those are rebuilt
+  before the next command runs, so the first undo after a reply clears the
+  draft instead of touching the transcript.  Redo leaves the cursor where
+  typing continues — after the text it brought back — rather than at the
+  start of the restored draft, where stock `undo` parks it.
+  (rationale: postmortem/054)
+
 - **Ask rows record the decision**: an `ask_user_question` call no longer
   dumps both of its JSON documents into an ioCard.  The row collapses to
   `Ask question · waiting`, then `2/2 answered` (or `cancelled` /
@@ -84,6 +100,9 @@ minor) and stay undated until the release is cut.
   the job rows keep their headers.
 
 ### Fixed
+
+- **Undo immediately after sending restores the draft**: inserting the
+  transcript echo no longer discards the undo record for clearing the input.
 
 - **`M-p` no longer recalls the host's own injected messages**: alongside a
   prompt the host appends `user/message` copies of model-facing text —

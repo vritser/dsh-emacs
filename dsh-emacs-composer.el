@@ -457,7 +457,8 @@ still belongs to Composer.  Never infer its extent from line contents."
 (defun dsh-emacs-composer--clear ()
   "Remove only the owned chrome region and release its markers and cache."
   (when-let* ((region (dsh-emacs-composer--region)))
-    (let ((inhibit-read-only t))
+    (let ((inhibit-read-only t)
+          (buffer-undo-list t))
       (delete-region (car region) (cdr region))))
   (dolist (marker (list dsh-emacs--composer-top-marker
                         dsh-emacs--composer-end-marker))
@@ -495,7 +496,8 @@ Repeated renders preserve the region when content and width are unchanged."
                        (propertize
                         (concat (dsh-emacs-composer--render-next-row next) "\n")
                         'dsh-emacs-composer-next-row t))))
-              (inhibit-read-only t))
+              (inhibit-read-only t)
+              (buffer-undo-list t))
           (save-excursion
             (dsh-emacs-composer--clear)
             (unless (string-empty-p text)

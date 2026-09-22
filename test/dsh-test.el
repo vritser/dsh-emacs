@@ -373,7 +373,7 @@ symbol or an ordered list."
         (equal (dsh-emacs-ui-find-block "global" "1")
                (cons (point-min) (point-max)))))))
 
-;; The index preserves duplicate-ID ordering, delete/undo and buffer isolation.
+;; The index preserves duplicate-ID ordering, delete and buffer isolation.
 (with-temp-buffer
   (buffer-enable-undo)
   (let ((model (dsh-emacs-ui-make-fragment :style 'minimal :label-left "Later")))
@@ -392,9 +392,19 @@ symbol or an ordered list."
     (dsh-emacs-ui-delete-fragment "global" "1")
     (dsh-test-assert "fragment-index-delete-reveals-earlier-duplicate"
       (equal (dsh-emacs-ui-find-block "global" "1") '(1 . 9)))
-    (let ((inhibit-read-only t)) (undo-boundary) (undo 1))
-    (dsh-test-assert "fragment-index-undo-restores-last-duplicate"
-      (= (car (dsh-emacs-ui-find-block "global" "1")) 9))
+    ;; Drive undo itself: it must run out of history without restoring Later
+    ;; or disturbing the remaining fragment and its cached index.
+    (let ((before (buffer-string))
+          (last-command nil) (this-command 'undo) (pending-undo-list nil)
+          (undo-equiv-table (make-hash-table :test 'eq))
+          exhausted)
+      (condition-case nil
+          (undo)
+        (user-error (setq exhausted t)))
+      (dsh-test-assert "fragment-delete-is-not-undoable"
+        exhausted
+        (equal-including-properties before (buffer-string))
+        (equal (dsh-emacs-ui-find-block "global" "1") '(1 . 9))))
     (with-temp-buffer
       (dsh-test-assert "fragment-index-is-buffer-local"
         (not (dsh-emacs-ui-find-block "global" "1"))))))
@@ -6551,6 +6561,148 @@ Lets a test drive a malformed content value through the result path."
     (remhash "sess-injected" dsh-emacs--input-history-by-session)
     (setq dsh-emacs-input-history-cross-session old-opt)
     (setq dsh-emacs--input-history old-hist)
+    (kill-buffer buf)))
+
+;; Regression: undo immediately after sending restores the cleared draft.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (setq-local dsh-emacs--buffer-session "undo-submit")
+  (let ((dsh-emacs--current-session "undo-submit"))
+    (goto-char dsh-emacs--input-marker)
+    (insert "draft to send")
+    (undo-boundary)
+    (run-hooks 'pre-command-hook)
+    (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+               (lambda (&rest _) nil)))
+      (dsh-emacs--submit-plain "draft to send"))
+    (undo-boundary)
+    (let ((last-command 'dsh-emacs-send-or-stop) (this-command 'undo)
+          (pending-undo-list nil)
+          (undo-equiv-table (make-hash-table :test 'eq))
+          (transcript (buffer-substring-no-properties
+                       (point-min) dsh-emacs--input-marker)))
+      (run-hooks 'pre-command-hook)
+      (undo)
+      (run-hooks 'post-command-hook)
+      (dsh-test-assert "undo-send-restores-draft-without-changing-echo"
+        (equal (dsh-emacs--get-input) "draft to send")
+        (= (point) (dsh-emacs--input-end))
+        (equal transcript (buffer-substring-no-properties
+                           (point-min) dsh-emacs--input-marker))))))
+
+;; --- Test 52g: undo/redo covers the input area, never the transcript ---
+;; A chat buffer is a live view: rendered messages, tool cards and streamed
+;; bodies must stay out of the undo history (undo binds `inhibit-read-only'
+;; itself, so the transcript's read-only property cannot protect it), while
+;; typing after `❯ ' stays undoable.
+(let ((buf (generate-new-buffer " *dsh-undo*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        ;; A programmatic transcript write leaves no undo entry at all
+        (dsh-emacs-render--insert-chat-message
+         "agent reply" 'dsh-emacs-assistant-body-face
+         (dsh-emacs-render--input-insert-point) nil 'assistant)
+        (dsh-test-assert "undo-transcript-write-not-recorded"
+          (null buffer-undo-list))
+        ;; Typing in the input is recorded and undoable (the command loop
+        ;; closes the group with an undo boundary after every command)
+        (goto-char (dsh-emacs--input-end))
+        (insert "draft")
+        (undo-boundary)
+        (dsh-test-assert "undo-input-edit-recorded"
+          (consp buffer-undo-list))
+        (let ((last-command nil) (this-command nil) (pending-undo-list nil)
+              (undo-equiv-table (make-hash-table :test 'eq)))
+          (undo)
+          (dsh-test-assert "undo-clears-the-draft-not-the-transcript"
+            (and (string= "" (dsh-emacs--get-input))
+                 (string-match-p "agent reply" (buffer-string))))
+          (if (fboundp 'undo-redo)
+              (undo-redo)
+            ;; Emacs 27 redoes by starting a new undo sequence.
+            (undo-boundary)
+            (let ((last-command nil)) (undo)))
+          (dsh-test-assert "undo-redo-restores-the-draft"
+            (and (string= "draft" (dsh-emacs--get-input))
+                 (string-match-p "agent reply" (buffer-string))))))
+    (kill-buffer buf)))
+
+;; --- Test 52h: a transcript write rebuilds the input's undo history ---
+;; Undo entries hold absolute positions that Emacs does not adjust when text
+;; lands elsewhere, so a message rendered above the input leaves the records
+;; made for the draft pointing at transcript text.  The stale flag is set by
+;; `after-change-functions' and acted on by `pre-command-hook' before the
+;; command can use such a record.
+(let ((buf (generate-new-buffer " *dsh-undo-shift*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (goto-char (dsh-emacs--input-end))
+        (insert "first draft")
+        (dsh-emacs-render--insert-chat-message
+         "streamed reply" 'dsh-emacs-assistant-body-face
+         (dsh-emacs-render--input-insert-point) nil 'assistant)
+        (dsh-test-assert "undo-stale-flagged-after-transcript-write"
+          dsh-emacs--undo-stale)
+        ;; `pre-command-hook' runs this before the command can use a record
+        (run-hooks 'pre-command-hook)
+        (dsh-test-assert "undo-history-rebuilt-around-the-input"
+          (and (null dsh-emacs--undo-stale)
+               (equal (list nil (cons (marker-position dsh-emacs--input-marker)
+                                      (dsh-emacs--input-end)))
+                      buffer-undo-list)))
+        (let ((last-command nil) (this-command nil) (pending-undo-list nil)
+              (undo-equiv-table (make-hash-table :test 'eq)))
+          (undo)
+          (dsh-test-assert "undo-after-transcript-write-spares-the-transcript"
+            (and (string= "" (dsh-emacs--get-input))
+                 (string-match-p "streamed reply" (buffer-string))))
+          (run-hooks 'post-command-hook)
+          ;; Undo removed the draft: point is its (now empty) end
+          (dsh-test-assert "undo-leaves-point-at-the-input-start"
+            (= (point) (marker-position dsh-emacs--input-marker)))
+          ;; Repairing the draft must also move the cursor back for typing:
+          ;; `undo' parks point at the restored region's start on its own.
+          (if (fboundp 'undo-redo)
+              (undo-redo)
+            (undo-boundary)
+            (let ((last-command nil)) (undo)))
+          (run-hooks 'post-command-hook)
+          (dsh-test-assert "redo-parks-point-after-the-restored-draft"
+            (and (string= "first draft" (dsh-emacs--get-input))
+                 (= (point) (dsh-emacs--input-end))))))
+    (kill-buffer buf)))
+
+;; --- Test 52i: typing after a rebuild is undoable step by step ---
+(let ((buf (generate-new-buffer " *dsh-undo-steps*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (goto-char (dsh-emacs--input-end))
+        (insert "draft")
+        (dsh-emacs-render--insert-chat-message
+         "reply" 'dsh-emacs-assistant-body-face
+         (dsh-emacs-render--input-insert-point) nil 'assistant)
+        (dsh-emacs--reset-undo-history)
+        ;; Typing after the rebuild records normal granular entries
+        (goto-char (dsh-emacs--input-end))
+        (insert " more")
+        (undo-boundary)
+        (let ((last-command nil) (this-command nil) (pending-undo-list nil)
+              (undo-equiv-table (make-hash-table :test 'eq)))
+          (undo)
+          (dsh-test-assert "undo-after-rebuild-drops-the-last-typing"
+            (string= "draft" (dsh-emacs--get-input)))
+          (run-hooks 'post-command-hook)
+          (if (fboundp 'undo-redo)
+              (undo-redo)
+            (undo-boundary)
+            (let ((last-command nil)) (undo)))
+          (run-hooks 'post-command-hook)
+          (dsh-test-assert "redo-parks-point-after-the-typing-it-restores"
+            (and (string= "draft more" (dsh-emacs--get-input))
+                 (= (point) (dsh-emacs--input-end))))))
     (kill-buffer buf)))
 
 ;; --- Test 55: thinking face has no explicit background (inherits

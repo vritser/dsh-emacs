@@ -802,7 +802,8 @@ input area."
     (add-text-properties 0 len '(read-only t front-sticky (read-only)) txt)
     (when face
       (add-text-properties 0 len (list 'face face) txt))
-    (insert txt)))
+    (let ((buffer-undo-list t))
+      (insert txt))))
 
 (defun dsh-emacs-render--insert-divider (&optional position)
   "Insert a subtle divider at POSITION when dividers are enabled."
@@ -810,7 +811,8 @@ input area."
     (let* ((w (max 40 (- (window-width) 4)))
            (line (concat (propertize (make-string w ?─)
                                     'face 'dsh-emacs-divider-face))))
-      (let ((inhibit-read-only t))
+      (let ((inhibit-read-only t)
+            (buffer-undo-list t))
         (when position (goto-char position))
         (insert line "\n")))))
 
@@ -831,7 +833,8 @@ Return (START . END) for the inserted message text, excluding separators."
     ;; Rendering happens from an asynchronous callback.  Never leave point at
     ;; the transcript insertion position; the user's cursor belongs after ❯.
     (save-excursion
-      (let ((inhibit-read-only t))
+      (let ((inhibit-read-only t)
+            (buffer-undo-list t))
         (if insert-point
             (progn (goto-char insert-point) (beginning-of-line))
           ;; Robust fallback: never append below the input when the prompt
@@ -1056,6 +1059,7 @@ STATE is always an assistant stream, so the region is also tagged as an
 assistant message body for the copy commands."
   (when (< start end)
     (let ((inhibit-read-only t)
+          (buffer-undo-list t)
           (event-id (plist-get state :event-id)))
       (add-text-properties
        start end
@@ -1112,6 +1116,7 @@ NEW-TEXT lets long partial lines skip formatting until a newline arrives."
                   (dsh-emacs-render--schedule-markdown))
               (save-excursion
                 (let* ((inhibit-read-only t)
+                       (buffer-undo-list t)
                        (end-marker (plist-get state :end))
                        (insertion-type (marker-insertion-type end-marker)))
                   (unwind-protect
@@ -1188,7 +1193,8 @@ IDLE-ONLY is set by the timer; nil permits an explicit immediate attempt."
                   (when (and (consp result) (= tick (buffer-chars-modified-tick)))
                     (pcase-let ((`(,text ,frontier) result)
                                 (windows (dsh-emacs-render--following-windows))
-                                (inhibit-read-only t))
+                                (inhibit-read-only t)
+                                (buffer-undo-list t))
                       (save-excursion
                         (atomic-change-group
                           ;; Available since Emacs 27.1.  Preserve reading
@@ -1253,7 +1259,8 @@ FINAL also finishes deferred markup when no timer is pending."
               (cancel-timer timer)
               (setf (plist-get state :timer) nil))
             (when text
-              (let ((inhibit-read-only t))
+              (let ((inhibit-read-only t)
+                    (buffer-undo-list t))
                 (save-excursion
                   (goto-char (plist-get state :end))
                   (insert (propertize text
@@ -1294,7 +1301,8 @@ FINAL also finishes deferred markup when no timer is pending."
                                  (dsh-emacs-render--make-namespace) key))
                start end)
           (save-excursion
-            (let ((inhibit-read-only t))
+            (let ((inhibit-read-only t)
+                  (buffer-undo-list t))
               (if insert-point
                   (progn (goto-char insert-point) (beginning-of-line))
                 ;; Never append below the input when the prompt marker was
@@ -1358,7 +1366,8 @@ pending incremental pass; changed text is replaced and rendered in full."
           (let ((start (marker-position (plist-get state :start)))
                 (end (marker-position (plist-get state :end)))
                 (windows (dsh-emacs-render--following-windows))
-                (inhibit-read-only t))
+                (inhibit-read-only t)
+                (buffer-undo-list t))
             (when (and start end)
               (save-excursion
                 (goto-char start)
@@ -1389,7 +1398,8 @@ pending incremental pass; changed text is replaced and rendered in full."
         (setf (plist-get state :timer) nil)
         (let ((windows (dsh-emacs-render--following-windows))
               (text (apply #'concat (reverse (plist-get state :chunks))))
-              (inhibit-read-only t))
+              (inhibit-read-only t)
+              (buffer-undo-list t))
           (save-excursion
             (goto-char (plist-get state :end))
             (insert (propertize text 'face 'dsh-emacs-thinking-body-face)))
@@ -1424,7 +1434,8 @@ text arrives."
                (windows (dsh-emacs-render--following-windows))
                start end)
           (save-excursion
-            (let ((inhibit-read-only t))
+            (let ((inhibit-read-only t)
+                  (buffer-undo-list t))
               (if insert-point
                   (progn (goto-char insert-point) (beginning-of-line))
                 (if-let* ((anchor (dsh-emacs-render--input-anchor-pos)))
@@ -1462,7 +1473,8 @@ when a live stream existed and was replaced."
       (let ((start (marker-position (plist-get state :start)))
             (end (marker-position (plist-get state :end))))
         (when (and start end (> end start))
-          (let ((inhibit-read-only t))
+          (let ((inhibit-read-only t)
+                (buffer-undo-list t))
             (delete-region start end)
             (setq dsh-emacs--streaming-thinking nil)
             (dsh-emacs-render--render-thinking-block
@@ -1639,7 +1651,8 @@ missing placeholder (re-render, trimmed buffer) is a no-op."
         (when pos
           (let ((end (next-single-property-change pos 'dsh-emacs-image-id
                                                   nil (point-max)))
-                (inhibit-read-only t))
+                (inhibit-read-only t)
+                (buffer-undo-list t))
             (when image
               (put-text-property pos end 'display image))
             (when data
@@ -3181,7 +3194,8 @@ replayed from history has no live body."
             (end (marker-position (plist-get state :end)))
             (timer (plist-get state :timer))
             (windows (dsh-emacs-render--following-windows))
-            (inhibit-read-only t))
+            (inhibit-read-only t)
+            (buffer-undo-list t))
         (when timer (cancel-timer timer))
         ;; Pending deferred Markdown targets the region being removed; it also
         ;; releases the state's start/end markers.
@@ -3833,7 +3847,8 @@ Deletes the earliest content while preserving the input prompt area."
     (let* ((limit dsh-emacs-max-buffer-size)
            (trim-to (- (point-max) (/ limit 2))))
       (when (> trim-to (point-min))
-        (let ((inhibit-read-only t))
+        (let ((inhibit-read-only t)
+              (buffer-undo-list t))
           (delete-region (point-min) trim-to))))))
 
 (defun dsh-emacs-render--json-boolean (value)

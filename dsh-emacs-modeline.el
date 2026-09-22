@@ -1055,9 +1055,11 @@ works without reopening the session.  Should be called from
   ;; drop any usage left over from a previous visit to this buffer.
   (setq dsh-emacs--modeline-usage nil)
   ;; Create the structural end-of-buffer overlay (kept purely as the
-  ;; separator the input-area geometry relies on).
+  ;; separator the input-area geometry relies on).  The newline is input-area
+  ;; geometry, not user text: it must never become an undo step of its own.
   (unless dsh-emacs--modeline-overlay
-    (let ((inhibit-read-only t))
+    (let ((inhibit-read-only t)
+          (buffer-undo-list t))
       (goto-char (point-max))
       (insert "\n")
       (setq dsh-emacs--modeline-overlay (make-overlay (point) (point) nil t t))

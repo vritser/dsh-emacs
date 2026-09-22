@@ -403,6 +403,7 @@ Rendering completes before editing; failed replacements roll back and signal."
     (unwind-protect
         (save-mark-and-excursion
           (let* ((inhibit-read-only t)
+                 (buffer-undo-list t)
                  (block (unless create-new
                           (dsh-emacs-ui-find-block namespace-id block-id)))
                  (state (and block (get-text-property
@@ -538,6 +539,7 @@ Local actions use property boundaries rather than searching by identity."
                 ((not (map-elt state :non-foldable)))
                 (block (dsh-emacs-ui--block-at (point))))
       (let ((inhibit-read-only t)
+            (buffer-undo-list t)
             (text (dsh-emacs-ui--render-fragment
                    state (map-elt state :collapsed))))
         (atomic-change-group
@@ -584,6 +586,7 @@ Silent no-op when no fragment exists at or after point."
   "Delete fragment with NAMESPACE-ID and BLOCK-ID."
   (save-mark-and-excursion
     (let* ((inhibit-read-only t)
+           (buffer-undo-list t)
            (match (dsh-emacs-ui-find-block namespace-id block-id)))
       (when match
         (delete-region (car match) (cdr match))
@@ -630,7 +633,8 @@ Silent no-op when no fragment exists at or after point."
 (defun dsh-emacs-ui-clear ()
   "Clear all UI fragments from the buffer."
   (interactive)
-  (let ((inhibit-read-only t))
+  (let ((inhibit-read-only t)
+        (buffer-undo-list t))
     (erase-buffer)))
 
 ;;; ---------------------------------------------------------------------------

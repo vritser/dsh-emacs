@@ -2075,6 +2075,107 @@ vertico, etc.)."
             (goto-char (1+ pos))))))
     (nreverse index)))
 
+;;; ---------------------------------------------------------------------------
+;;;  Undo (scoped to the input area)
+;;; ---------------------------------------------------------------------------
+
+;; A chat buffer is a live view of a session, not a document: everything
+;; above the input is written by the renderer (history, streamed replies,
+;; tool cards, Composer chrome), and only the text after `❯ ' is the user's.
+;; `undo' therefore has to work on that input alone — undoing rendered
+;; transcript text would corrupt the view, and `primitive-undo' binds
+;; `inhibit-read-only' internally, so the transcript's read-only property is
+;; no protection.  Two mechanisms keep the two apart:
+;;
+;; 1. Programmatic writes run under `buffer-undo-list' bound to t (every
+;;    `(let ((inhibit-read-only t)) ...)' around transcript text carries the
+;;    binding), so they leave no undo entry at all.
+;; 2. A write above the input still SHIFTS it down, which invalidates the
+;;    absolute positions in the entries already recorded for the draft;
+;;    `dsh-emacs--note-undo-change' flags that, and
+;;    `dsh-emacs--reset-undo-history' rebuilds the history before the next
+;;    command can reach a stale entry.
+
+(defvar-local dsh-emacs--undo-stale nil
+  "Non-nil when a transcript write invalidated the input's undo records.
+Set by `dsh-emacs--note-undo-change' from `after-change-functions';
+`dsh-emacs--reset-undo-history' rebuilds the history from it before the next
+command runs.")
+
+(defvar-local dsh-emacs--undo-restored-end nil
+  "End of the input text a running undo command re-inserted, or nil.
+Set by `dsh-emacs--note-undo-change' while `undo-in-progress' is non-nil and
+the restored text reaches the input's end; `dsh-emacs--park-point-after-undo'
+consumes it in `post-command-hook'.")
+
+(defun dsh-emacs--transcript-change-p (beg)
+  "Whether the change starting at BEG belongs to the transcript, not the input.
+Everything left of the editable input is transcript text or the Composer
+chrome above it.  Without a live input marker nothing can be classified as
+input, so every change counts as transcript."
+  (let ((input-start (and (markerp dsh-emacs--input-marker)
+                          (eq (marker-buffer dsh-emacs--input-marker)
+                              (current-buffer))
+                          (marker-position dsh-emacs--input-marker))))
+    (or (null input-start) (< beg input-start))))
+
+(defun dsh-emacs--note-undo-change (beg end &rest _)
+  "`after-change-functions' hook: keep this buffer's undo state honest.
+A change left of the input is a transcript write: it shifts the input down,
+so the records made for the draft no longer point at it.  Runs for writes
+kept out of the undo history as well — they still move the input.  A change
+INSIDE the input while an undo runs is text that command just restored:
+remember where it ends when it reaches the input's end, so the cursor can
+follow it (see `dsh-emacs--park-point-after-undo')."
+  (if (dsh-emacs--transcript-change-p beg)
+      (setq dsh-emacs--undo-stale t)
+    (when (and undo-in-progress
+               (> end beg)
+               (= end (dsh-emacs--input-end)))
+      (setq dsh-emacs--undo-restored-end end))))
+
+(defun dsh-emacs--input-undo-history ()
+  "Return an undo list that undoes the current input as one step, or nil.
+The list holds one boundary and one record saying the input text was inserted
+at its current position, so `undo' deletes the draft and `undo-redo' restores
+it.  Nil when the input is empty or has no live marker."
+  (when-let* ((start (and (markerp dsh-emacs--input-marker)
+                          (eq (marker-buffer dsh-emacs--input-marker)
+                              (current-buffer))
+                          (marker-position dsh-emacs--input-marker)))
+              (end (dsh-emacs--input-end))
+              ((< start end)))
+    (list nil (cons start end))))
+
+(defun dsh-emacs--park-point-after-undo ()
+  "`post-command-hook': leave point after input text an undo command restored.
+`undo' re-inserts a restored region at the position it was deleted from and
+parks point there, so a draft comes back with the cursor at its beginning —
+while the next keystroke belongs at its end.  Consumes the position
+`dsh-emacs--note-undo-change' recorded; a command that only removed input
+text leaves point where that text was, which is where the user was editing."
+  (when (and dsh-emacs--undo-restored-end
+             (memq this-command '(undo undo-redo undo-only)))
+    (goto-char dsh-emacs--undo-restored-end)
+    (setq dsh-emacs--undo-restored-end nil)))
+
+(defun dsh-emacs--reset-undo-history ()
+  "Prepare this buffer's undo state at the start of a command.
+Rebuild `buffer-undo-list' around the input area, the only undoable region,
+once a transcript write has shifted the input (see `dsh-emacs--undo-stale'):
+undo records hold absolute buffer positions, and Emacs does not adjust them
+when text lands elsewhere, so records made for the draft before the write
+point at transcript text now.  Dropping them costs nothing — the transcript
+is kept out of the history anyway — and re-recording the draft as one unit
+leaves it undoable (`C-/' clears it, `undo-redo' restores it) with typing
+after that undoable step by step again.  The restored-text position the
+previous command recorded goes with it, so it can only describe the command
+that just ran."
+  (setq dsh-emacs--undo-restored-end nil)
+  (when dsh-emacs--undo-stale
+    (setq dsh-emacs--undo-stale nil
+          buffer-undo-list (dsh-emacs--input-undo-history))))
+
 (define-derived-mode dsh-emacs-mode fundamental-mode "DSH"
   "DeepSeek Harness chat mode.
 \\{dsh-emacs-mode-map}"
@@ -2090,7 +2191,7 @@ vertico, etc.)."
   (setq-local scroll-error-top-bottom t)
   (setq-local buffer-invisibility-spec '(t))
   (setq-local line-spacing 0.15)
-  (buffer-disable-undo)
+  (buffer-enable-undo)
   (setq-local comment-start "// ")
   (setq-local comment-end "")
   ;; Complete slash commands when the input starts with "/"; complete
@@ -2144,6 +2245,12 @@ vertico, etc.)."
   (add-hook 'after-change-functions #'dsh-emacs--chat-buffer-keep-clean nil t)
   ;; Lock the cursor to the input area (after `❯ ') when a session opens
   (add-hook 'post-command-hook #'dsh-emacs--lock-cursor-to-input nil t)
+  ;; Undo/redo is scoped to the input area: flag the records a transcript
+  ;; write invalidated, rebuild them before the next command runs, and leave
+  ;; point after text an undo restores.
+  (add-hook 'after-change-functions #'dsh-emacs--note-undo-change nil t)
+  (add-hook 'pre-command-hook #'dsh-emacs--reset-undo-history nil t)
+  (add-hook 'post-command-hook #'dsh-emacs--park-point-after-undo nil t)
   ;; Before insert/edit commands, move point back to the input
   ;; area if it sits in the read-only region
   (add-hook 'pre-command-hook #'dsh-emacs--route-typing-to-input nil t)
@@ -2176,8 +2283,11 @@ vertico, etc.)."
 
 (defun dsh-emacs--setup-input-area ()
   "Set up the input area (a read-only transcript plus a writable input box).
-All welcome text is marked read-only; only the region after ❯ is writable."
-  (let ((inhibit-read-only t))
+All welcome text is marked read-only; only the region after ❯ is writable.
+The layout is buffer structure, not user input: it leaves no undo entry, and
+the erase discards any history an earlier layout left behind."
+  (let ((inhibit-read-only t)
+        (buffer-undo-list t))
     ;; Clear the buffer
     (erase-buffer)
     ;; Add a minimal chat header and operation hints
@@ -2207,7 +2317,10 @@ All welcome text is marked read-only; only the region after ❯ is writable."
                          '(read-only face font-lock-face)))
     ;; Mark the input start position (the marker follows text
     ;; insertion/deletion automatically)
-    (setq dsh-emacs--input-marker (point-marker))))
+    (setq dsh-emacs--input-marker (point-marker)))
+  ;; The erase above invalidated any record an earlier layout left behind.
+  (setq buffer-undo-list nil)
+  (setq dsh-emacs--undo-stale nil))
 
 (defun dsh-emacs--ensure-input-area ()
   "Ensure the input area exists and point is at the right position."
@@ -2336,6 +2449,9 @@ through unchanged."
 (defun dsh-emacs--clear-input ()
   "Clear the input area, keeping the mode-line newline."
   (when (and dsh-emacs--input-marker (marker-buffer dsh-emacs--input-marker))
+    ;; Submission may have just inserted its transcript echo.  Rebase before
+    ;; recording this deletion, so the next command keeps the undoable clear.
+    (dsh-emacs--reset-undo-history)
     (let ((inhibit-read-only t))
       (delete-region dsh-emacs--input-marker (dsh-emacs--input-end))
       (goto-char dsh-emacs--input-marker))))
@@ -3472,7 +3588,8 @@ removed it from the list and cleared its markers."
     (when (and (markerp start) (markerp end)
                (marker-buffer start) (marker-buffer end))
       (with-current-buffer (marker-buffer start)
-        (let ((inhibit-read-only t))
+        (let ((inhibit-read-only t)
+              (buffer-undo-list t))
           (delete-region start end))))
     (when (markerp start) (set-marker start nil))
     (when (markerp end) (set-marker end nil))))
