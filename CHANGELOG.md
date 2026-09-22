@@ -105,12 +105,38 @@ minor) and stay undated until the release is cut.
   after text, code blocks and tables can no longer be edited while a reply
   streams or after it finishes; the input area remains editable.
 
+- **Live Think output is read-only from the first chunk**: its header,
+  streamed body and separator can no longer be edited with newline or
+  deletion commands while reasoning is arriving. The input remains editable.
+
+- **Typing no longer stalls a streamed block transition**: unfinished
+  Markdown stays queued until idle when reasoning starts. A corrected final
+  answer cancels any queued formatting for the text it replaces.
+
 - **Markdown after a code fence renders in the same chunk**: headings,
   emphasis and subsequent code blocks are formatted even when they arrive
   with the previous block's closing fence or the final message.
 
+- **Interleaved answers keep their order when finalized**: unchanged text
+  and thinking blocks no longer move or duplicate because of the separators
+  between protocol blocks.
+
 - **Undo immediately after sending restores the draft**: inserting the
   transcript echo no longer discards the undo record for clearing the input.
+
+- **Thinking no longer rewrites the transcript while it streams**: a step's
+  blocks now render where they arrive.  A reasoning block folds into its own
+  collapsible `Think` fragment as soon as the answer starts, and a later
+  reasoning block opens a new `Think` fragment below the answer, so a step
+  with text–reasoning–text streams in that order.  Previously the whole step
+  shared one live text region: a reasoning block inserted mid-stream sat
+  inside it, so the Markdown passes rewrote the reasoning text (a table or
+  fence in the thinking became a rendered card, inserting line breaks into
+  the Think body) and the final message could delete the Think block — and
+  the answer around it — when it repaired the body.  The authoritative
+  message now reconciles only what has not been rendered: finished bodies are
+  left in place, and only a genuinely divergent body is replaced.
+  (rationale: postmortem/056)
 
 - **A streamed code block no longer rearranges what is already on screen**:
   the card chrome (label and panel lines) is written the moment the opening

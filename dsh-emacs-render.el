@@ -713,12 +713,72 @@ The body between :start and :end contains the painted transcript.")
 
 (defvar-local dsh-emacs--streaming-thinking nil
   "Current live reasoning/Think block stream state, or nil.
-The plist contains :key, :start, :end, :chunks and :timer.
-Pending deltas are collected in reverse order and inserted every 100ms.
-Reasoning
-deltas grow a raw body below the \"✶ Think\" header; on finalization
-(`block-end' or `assistant/message') the raw region is replaced by the
-collapsible Think fragment.")
+The plist contains :key, :start, :end, :chunks, :all, :ns, :block-id and
+:timer.  Pending deltas are collected in reverse order (…:chunks) and inserted
+every 100ms; :all keeps every delta of the block for finalization.  Reasoning
+deltas grow a raw body below the \"✶ Think\" header; when the block ends
+(text resumes, `block-end' or `assistant/message') the raw region is replaced
+by the collapsible Think fragment.")
+
+(defvar-local dsh-emacs--markdown-pending nil
+  "Stream states awaiting interruptible Markdown formatting, in order.")
+
+(defvar-local dsh-emacs--streamed-step nil
+  "Record of what the live step has already put on screen, or nil.
+Plist with :key (turn/step), :text (text committed into finished assistant
+bodies), :text-regions (their stream states, so a divergent authoritative body can
+drop them) and :reasoning (reasoning folded into Think fragments).  A step can
+carry several protocol blocks, and each block owns its own transcript region;
+the record lets the authoritative `assistant/message' render only what is
+missing instead of rewriting blocks the user has already read.")
+
+(defun dsh-emacs-render--step-record (key)
+  "Return the live step's record for KEY, creating it when needed.
+A new KEY (turn/step) starts a fresh record."
+  (unless (equal (plist-get dsh-emacs--streamed-step :key) key)
+    (setq dsh-emacs--streamed-step
+          (list :key key :text "" :reasoning "" :text-regions nil)))
+  dsh-emacs--streamed-step)
+
+(defun dsh-emacs-render--commit-text-segment (state)
+  "Record STATE's streamed text as a body the user has already seen.
+The body's region is kept so a divergent authoritative message can drop it."
+  (let* ((step (dsh-emacs-render--step-record (plist-get state :key)))
+         (seen (apply #'concat (reverse (plist-get state :chunks))))
+         (committed (plist-get step :text)))
+    (plist-put step :text (if (string-empty-p committed) seen
+                           (concat committed "\n" seen)))
+    ;; The deferred renderer and reconciliation share the same boundaries.
+    ;; Later blocks must not extend this finished body's end marker.
+    (set-marker-insertion-type (plist-get state :end) nil)
+    (push state (plist-get step :text-regions))))
+
+(defun dsh-emacs-render--uncommitted-content (committed content)
+  "Return CONTENT after COMMITTED blocks, or nil when they diverge.
+Both strings join protocol blocks with newlines.  The separator before an
+uncommitted block belongs to the join, not to that block's Markdown body."
+  (cond
+   ((string-empty-p committed) content)
+   ((equal committed content) "")
+   ((string-prefix-p (concat committed "\n") content)
+    (substring content (1+ (length committed))))))
+
+(defun dsh-emacs-render--drop-committed-text (step)
+  "Delete the finished assistant bodies STEP recorded.
+A divergent authoritative body supersedes them; keeping them would leave the
+wrong text above the repaired one.  The caller binds `inhibit-read-only'."
+  (dolist (state (plist-get step :text-regions))
+    (setq dsh-emacs--markdown-pending
+          (delq state dsh-emacs--markdown-pending))
+    (let ((rs (marker-position (plist-get state :start)))
+          (re (marker-position (plist-get state :end))))
+      (when (and rs re (< rs re))
+        (delete-region rs re)))
+    (dsh-emacs-render--reset-markdown-state state)
+    (set-marker (plist-get state :start) nil)
+    (set-marker (plist-get state :end) nil))
+  (plist-put step :text-regions nil)
+  (plist-put step :text ""))
 
 (cl-defun dsh-emacs-render--follow-stream
     (&optional (windows
@@ -923,9 +983,6 @@ one definition of \"this render belongs to a settled page, not to the live
 turn\" means the marker stays a positioning concern."
   (and (boundp 'dsh-emacs--history-page) dsh-emacs--history-page))
 
-(defvar-local dsh-emacs--markdown-pending nil
-  "Stream states awaiting interruptible Markdown formatting, in order.")
-
 (defvar-local dsh-emacs--markdown-timer nil
   "One-shot idle timer for this buffer's pending Markdown.")
 
@@ -976,6 +1033,7 @@ miss the entry is cleaned up.")
   (dsh-emacs-render--cancel-markdown)
   (setq dsh-emacs--streaming-assistant nil
         dsh-emacs--streaming-thinking nil
+        dsh-emacs--streamed-step nil
         dsh-emacs--tool-states (make-hash-table :test 'equal)
         dsh-emacs--command-blocks (make-hash-table :test 'equal)
         dsh-emacs--command-spinners (make-hash-table :test 'equal)
@@ -1268,7 +1326,9 @@ IDLE-ONLY is set by the timer; nil permits an explicit immediate attempt."
           (when finished
             (setq dsh-emacs--markdown-pending
                   (delq state dsh-emacs--markdown-pending))
-            (unless (eq state dsh-emacs--streaming-assistant)
+            (unless (or (eq state dsh-emacs--streaming-assistant)
+                        (memq state (plist-get dsh-emacs--streamed-step
+                                               :text-regions)))
               (dsh-emacs-render--reset-markdown-state state)
               (set-marker (plist-get state :start) nil)
               (set-marker (plist-get state :end) nil)))))
@@ -1314,6 +1374,21 @@ FINAL also finishes deferred markup when no timer is pending."
               (dsh-emacs-render--stream-render-region state nil final text)
               (dsh-emacs-render--follow-stream windows))))))))
 
+(defun dsh-emacs-render--close-live-text-block ()
+  "Detach the live text body above the block that is about to start.
+The text streamed so far stays on screen as its own assistant body and is
+recorded on the step; a later text block starts fresh below the new block.
+Without this the live region would span the new block, so the Markdown passes
+would rewrite that block's text and the final repair would delete it."
+  (when-let* ((state dsh-emacs--streaming-assistant))
+    (dsh-emacs-render--flush-stream)
+    ;; An unfinished fence/table belongs to the text that just ended.
+    ;; Deferred work keeps its bounded region and finishes at idle; retrying
+    ;; while input is pending would prevent the command loop consuming it.
+    (dsh-emacs-render--stream-render-region state nil t)
+    (dsh-emacs-render--commit-text-segment state)
+    (setq dsh-emacs--streaming-assistant nil)))
+
 (defun dsh-emacs-render--start-assistant-stream (event text)
   "Create or extend the live assistant stream with TEXT from EVENT."
   (when (and (stringp text) (not (string-empty-p text)))
@@ -1327,10 +1402,12 @@ FINAL also finishes deferred markup when no timer is pending."
       ;; stream.
       (when (and state
                  (not (equal key (dsh-emacs-render--stream-state-key state))))
-        (dsh-emacs-render--flush-stream nil t)
-        (setq state nil
-              dsh-emacs--streaming-assistant nil))
+        (dsh-emacs-render--close-live-text-block)
+        (setq state nil))
       (unless state
+        ;; A new text block starts: the block above it (reasoning) owns the
+        ;; transcript up to here and must be folded before this body opens.
+        (dsh-emacs-render--close-live-thinking-block)
         (setq windows (dsh-emacs-render--following-windows))
         (let* ((insert-point (dsh-emacs-render--input-insert-point))
                (event-id (format "%s-stream-%s"
@@ -1385,39 +1462,55 @@ FINAL also finishes deferred markup when no timer is pending."
                              (current-buffer)))))
       state)))
 
-(defun dsh-emacs-render--finish-assistant-stream (event final-text)
+(defun dsh-emacs-render--finish-assistant-stream (event final-text &optional step)
   "Replace the live stream with FINAL-TEXT from assistant/message EVENT.
-The final event repairs missing chunks.  Matching text needs only the
-pending incremental pass; changed text is replaced and rendered in full."
+STEP records the text this step already rendered (see `--step-record'), so only
+the live segment is reconciled and finished bodies are left alone.  Matching
+text needs only the pending incremental pass; changed text is replaced and
+rendered in full."
   (let ((state dsh-emacs--streaming-assistant))
     (when (and state
                (equal (dsh-emacs-render--stream-key event)
                       (dsh-emacs-render--stream-state-key state)))
-      (let ((text (or final-text "")))
-        (if (equal text (apply #'concat (reverse (plist-get state :chunks))))
+      (let* ((step (or step
+                       (dsh-emacs-render--step-record (plist-get state :key))))
+             (committed (or (plist-get step :text) ""))
+             (text (or final-text ""))
+             (seen (apply #'concat (reverse (plist-get state :chunks))))
+             ;; What this live body should show once finished: the part of the
+             ;; authoritative text that was not already committed.
+             (replacement (dsh-emacs-render--uncommitted-content committed text)))
+        (if (equal replacement seen)
             (dsh-emacs-render--flush-stream nil t)
           (when-let* ((timer (plist-get state :timer)))
             (cancel-timer timer)
             (setf (plist-get state :timer) nil))
-          (let ((start (marker-position (plist-get state :start)))
-                (end (marker-position (plist-get state :end)))
-                (windows (dsh-emacs-render--following-windows))
-                (inhibit-read-only t)
-                (buffer-undo-list t))
-            (when (and start end)
-              (save-excursion
-                (goto-char start)
-                (delete-region start end)
-                (insert (propertize text
-                                    'face 'dsh-emacs-assistant-body-face
-                                    'dsh-emacs-assistant-message
-                                    (plist-get state :event-id)))
-                (set-marker (plist-get state :start) start)
-                (set-marker (plist-get state :end) (point)))
-              (dsh-emacs-render--protect-stream-region
-               state start (plist-get state :end))
-              (dsh-emacs-render--stream-render-region state t t)
-              (dsh-emacs-render--follow-stream windows)))))
+          (let ((inhibit-read-only t)
+                (buffer-undo-list t)
+                (windows (dsh-emacs-render--following-windows)))
+            ;; A divergent body supersedes everything this step painted as
+            ;; text: drop the finished bodies so the wrong text does not stay
+            ;; above the repaired one.  A prefix divergence only repairs the
+            ;; live segment and leaves them alone.
+            (unless replacement
+              (dsh-emacs-render--drop-committed-text step)
+              (setq replacement text))
+            (let ((start (marker-position (plist-get state :start)))
+                  (end (marker-position (plist-get state :end))))
+              (when (and start end)
+                (save-excursion
+                  (goto-char start)
+                  (delete-region start end)
+                  (insert (propertize replacement
+                                      'face 'dsh-emacs-assistant-body-face
+                                      'dsh-emacs-assistant-message
+                                      (plist-get state :event-id)))
+                  (set-marker (plist-get state :start) start)
+                  (set-marker (plist-get state :end) (point)))
+                (dsh-emacs-render--protect-stream-region
+                 state start (plist-get state :end))
+                (dsh-emacs-render--stream-render-region state t t)
+                (dsh-emacs-render--follow-stream windows))))))
       (unless (memq state dsh-emacs--markdown-pending)
         (set-marker (plist-get state :start) nil)
         (set-marker (plist-get state :end) nil))
@@ -1438,7 +1531,8 @@ pending incremental pass; changed text is replaced and rendered in full."
               (buffer-undo-list t))
           (save-excursion
             (goto-char (plist-get state :end))
-            (insert (propertize text 'face 'dsh-emacs-thinking-body-face)))
+            (dsh-emacs-render--insert-read-only
+             text 'dsh-emacs-thinking-body-face))
           (setf (plist-get state :chunks) nil)
           (dsh-emacs-render--follow-stream windows))))))
 
@@ -1466,6 +1560,10 @@ text arrives."
         (setq state nil
               dsh-emacs--streaming-thinking nil))
       (unless state
+        ;; A new reasoning block starts: the text above it owns the
+        ;; transcript up to here and must be closed before this raw body
+        ;; opens, or the text stream's Markdown region would span it.
+        (dsh-emacs-render--close-live-text-block)
         (let* ((insert-point (dsh-emacs-render--input-insert-point))
                (windows (dsh-emacs-render--following-windows))
                start end)
@@ -1479,19 +1577,24 @@ text arrives."
                   (goto-char (point-max))))
               (dsh-emacs-ui--consume-blanks-above)
               (setq start (point))
-              (insert (propertize (concat (dsh-emacs-render--think-icon) " " "Think")
-                                  'face 'dsh-emacs-thinking-face)
-                      "\n")
-              (insert (propertize text 'face 'dsh-emacs-thinking-body-face) "\n")
+              (dsh-emacs-render--insert-read-only
+               (concat (dsh-emacs-render--think-icon) " Think\n")
+               'dsh-emacs-thinking-face)
+              (dsh-emacs-render--insert-read-only
+               (concat text "\n") 'dsh-emacs-thinking-body-face)
               (setq end (copy-marker (- (point) 1) t))))
           (setq state (list :key key
                             :start (copy-marker start nil)
-                            :end end :chunks nil :timer nil)
+                            :end end :chunks nil :timer nil
+                            :all (list text)
+                            :ns (dsh-emacs-render--make-namespace)
+                            :block-id (dsh-emacs-render--make-block-id event))
                 dsh-emacs--streaming-thinking state
                 new-state t)
           (dsh-emacs-render--follow-stream windows)))
       (when (and state (not new-state))
         (push text (plist-get state :chunks))
+        (push text (plist-get state :all))
         (unless (plist-get state :timer)
           (setf (plist-get state :timer)
                 (run-at-time 0.1 nil #'dsh-emacs-render--flush-thinking
@@ -1521,13 +1624,31 @@ when a live stream existed and was replaced."
         (setq dsh-emacs--streaming-thinking nil))
       t)))
 
+(defun dsh-emacs-render--close-live-thinking-block ()
+  "Fold the live Think body into its fragment above the next text block.
+The reasoning streamed so far stays on screen, collapsed behind its label, and
+is recorded on the step; a later reasoning block opens a new Think block below
+the text.  Without this the raw reasoning region would span the text that
+follows and be deleted when the stream is finalized."
+  (when-let* ((state dsh-emacs--streaming-thinking))
+    (dsh-emacs-render--flush-thinking)
+    (let* ((step (dsh-emacs-render--step-record (plist-get state :key)))
+           (streamed (apply #'concat (reverse (plist-get state :all))))
+           (committed (plist-get step :reasoning)))
+      (plist-put step :reasoning
+                 (if (string-empty-p committed) streamed
+                   (concat committed "\n" streamed)))
+      (dsh-emacs-render--replace-live-thinking-text
+       (plist-get state :ns) (plist-get state :block-id) streamed))))
+
 
 (defun dsh-emacs-render-assistant-chunk (event)
   "Render an `assistant/chunk' EVENT incrementally.
-Text-delta chunks are appended to one live body and re-rendered in place;
-reasoning-delta chunks grow a live Thinking block (mind the `block-start'
-with blockType \"reasoning\" that precedes them); block-end chunks are only
-used as a fallback when no deltas were received."
+Each protocol block owns its own transcript region: a `text-delta' opens or
+extends the live assistant body and closes any live Thinking block, while a
+`reasoning-delta' opens or extends the live Thinking block and closes the live
+assistant body.  `block-end' chunks are only used as a fallback when no deltas
+were received."
   (let* ((data (dsh-emacs-render--event-data event))
          (chunk (dsh-emacs-render--aget "chunk" data))
          (chunk-type (dsh-emacs-render--aget "type" chunk))
@@ -1817,41 +1938,58 @@ session chips; see `dsh-emacs-reference-fontify'.  Returns the event seq."
          (text (dsh-emacs-render--text-from-content content))
          (reasoning (dsh-emacs-render--reasoning-from-content content))
          (ts (dsh-emacs-render--event-time event))
+         (key (dsh-emacs-render--stream-key event))
          (ns (dsh-emacs-render--make-namespace))
-         (block-id (dsh-emacs-render--make-block-id event)))
+         (block-id (dsh-emacs-render--make-block-id event))
+         (step (dsh-emacs-render--step-record key)))
+    ;; Blocks already folded into Think fragments or finished assistant
+    ;; bodies are left alone: only the remainder is rendered here.
     (when dsh-emacs-show-reasoning
-      (unless (string-empty-p reasoning)
-        (if (dsh-emacs-render--thinking-stream-alive-for-p
-             (dsh-emacs-render--stream-key event))
-            (dsh-emacs-render--replace-live-thinking-text
-             (dsh-emacs-render--make-namespace)
-             (dsh-emacs-render--make-block-id event)
-             reasoning)
-          (dsh-emacs-render--render-thinking-block
-           ns block-id reasoning ts (dsh-emacs-render--input-insert-point)))))
-    (unless (dsh-emacs-render--finish-assistant-stream event text)
-      (unless (string-empty-p text)
-        ;; An older-history page renders synchronously: it is settled text,
-        ;; so it must not join the buffer's idle queue — that queue is how a
-        ;; live stream formats its tail, and page jobs would compete with it.
-        (let* ((defer (and (not (dsh-emacs-render--history-page-p))
-                           dsh-emacs-stream-markdown-limit
-                           (> (length text) dsh-emacs-stream-markdown-limit)))
-               (event-id (format "%s-%s" ns block-id))
-               (body (if defer
-                         (if (string-suffix-p "\n" text) text (concat text "\n"))
-                       (dsh-emacs-markdown-render text)))
-               (range (dsh-emacs-render--insert-chat-message
-                       body 'dsh-emacs-assistant-body-face
-                       (dsh-emacs-render--input-insert-point) event-id
-                       'assistant)))
-          (when defer
-            (dsh-emacs-render--stream-render-region
-             (list :start (copy-marker (car range))
-                   :end (copy-marker (cdr range) t)
-                   :event-id event-id :render-final nil
-                   :markdown (list :scan nil :pending nil :kind nil :watermark nil))
-             nil t)))))
+      (let* ((committed (or (plist-get step :reasoning) ""))
+             (todo (or (dsh-emacs-render--uncommitted-content committed reasoning)
+                       reasoning)))
+        (unless (string-empty-p todo)
+          (if (dsh-emacs-render--thinking-stream-alive-for-p key)
+              (dsh-emacs-render--replace-live-thinking-text ns block-id todo)
+            (dsh-emacs-render--render-thinking-block
+             ns block-id todo ts (dsh-emacs-render--input-insert-point))))))
+    (unless (dsh-emacs-render--finish-assistant-stream event text step)
+      (let* ((committed (or (plist-get step :text) ""))
+             (todo (dsh-emacs-render--uncommitted-content committed text)))
+        (unless todo
+          (let ((inhibit-read-only t)
+                (buffer-undo-list t))
+            (dsh-emacs-render--drop-committed-text step))
+          (setq todo text))
+        (unless (string-empty-p todo)
+          ;; An older-history page renders synchronously: it is settled text,
+          ;; so it must not join the buffer's idle queue — that queue is how a
+          ;; live stream formats its tail, and page jobs would compete with it.
+          (let* ((defer (and (not (dsh-emacs-render--history-page-p))
+                             dsh-emacs-stream-markdown-limit
+                             (> (length todo) dsh-emacs-stream-markdown-limit)))
+                 (event-id (format "%s-%s" ns block-id))
+                 (body (if defer
+                           (if (string-suffix-p "\n" todo) todo (concat todo "\n"))
+                         (dsh-emacs-markdown-render todo)))
+                 (range (dsh-emacs-render--insert-chat-message
+                         body 'dsh-emacs-assistant-body-face
+                         (dsh-emacs-render--input-insert-point) event-id
+                         'assistant)))
+            (when defer
+              (dsh-emacs-render--stream-render-region
+               (list :start (copy-marker (car range))
+                     :end (copy-marker (cdr range) t)
+                     :event-id event-id :render-final nil
+                     :markdown (list :scan nil :pending nil :kind nil :watermark nil))
+               nil t))))))
+    ;; Deferred jobs retain their markers until their idle render completes.
+    (dolist (state (plist-get step :text-regions))
+      (unless (memq state dsh-emacs--markdown-pending)
+        (dsh-emacs-render--reset-markdown-state state)
+        (set-marker (plist-get state :start) nil)
+        (set-marker (plist-get state :end) nil)))
+    (setq dsh-emacs--streamed-step nil)
     seq))
 
 (defun dsh-emacs-render--render-thinking-block (namespace-id block-id text timestamp insert-point)
@@ -3240,7 +3378,8 @@ replayed from history has no live body."
           (save-excursion
             (goto-char start)
             (delete-region start end)))
-        (setq dsh-emacs--streaming-assistant nil)
+        (setq dsh-emacs--streaming-assistant nil
+              dsh-emacs--streamed-step nil)
         (dsh-emacs-render--follow-stream windows)
         t))))
 
@@ -4045,6 +4184,7 @@ re-delivered and the running animation had no later event to stop it."
           ;; not flush a live reply or consume pending turn/command state.
           (let ((dsh-emacs--streaming-assistant nil)
                 (dsh-emacs--streaming-thinking nil)
+                (dsh-emacs--streamed-step nil)
                 (dsh-emacs--turn-awaiting nil)
                 (dsh-emacs--pending-command nil)
                 (dsh-emacs--todo-list nil)

@@ -1780,6 +1780,58 @@ symbol or an ordered list."
     (dsh-emacs-render--finish-assistant-stream
      event (concat header (apply #'concat (make-list 80 row)) "```\n"))))
 
+;; Regression: closing a text block must yield to pending keyboard input.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let* ((dsh-emacs-stream-markdown-limit 8)
+         (event '((data . ((turn . 1) (step . 1)))))
+         (state (dsh-emacs-render--start-assistant-stream event "**before**\n"))
+         (runner (symbol-function 'dsh-emacs-render--run-markdown))
+         (attempts 0)
+         completed)
+    (let ((unread-command-events '(?x)))
+      ;; Bound a broken retry loop so the regression fails instead of hanging.
+      (catch 'stalled
+        (cl-letf (((symbol-function 'dsh-emacs-render--run-markdown)
+                   (lambda (&rest args)
+                     (if (> (cl-incf attempts) 2)
+                         (throw 'stalled nil)
+                       (apply runner args)))))
+          (dsh-emacs-render--start-thinking-stream event "thinking"))
+        (setq completed t))
+      (dsh-test-assert "stream-block-close-yields-to-input"
+        completed (equal unread-command-events '(?x))))
+    (when completed
+      (dsh-test-assert "stream-closed-block-keeps-deferred-work"
+        (memq state dsh-emacs--markdown-pending))
+      (dsh-emacs-render--run-markdown (current-buffer))
+      (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+        (dsh-test-assert "stream-closed-block-formats-before-thinking"
+          (string-match-p "before\n.*Think\nthinking" text)
+          (not (string-match-p (regexp-quote "**before**") text)))))
+    (dsh-emacs-render--cancel-markdown)))
+
+;; A corrected final body cancels old deferred work and keeps nearby thinking.
+(dolist (finish-early '(nil t))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (let* ((dsh-emacs-stream-markdown-limit 8)
+           (dsh-emacs-thinking-expand-by-default t)
+           (event '((data . ((turn . 1) (step . 1)))))
+           (old (dsh-emacs-render--start-assistant-stream event "**wrong**\n")))
+      (dsh-emacs-render--start-thinking-stream event "keep thinking")
+      (when finish-early (dsh-emacs-render--run-markdown (current-buffer)))
+      (dsh-emacs-render--start-assistant-stream event "old tail")
+      (dsh-emacs-render--finish-assistant-stream event "**correct**\n")
+      (dsh-test-assert "stream-repair-cancels-committed-job"
+        (not (memq old dsh-emacs--markdown-pending)))
+      (dsh-emacs-render--run-markdown (current-buffer))
+      (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+        (dsh-test-assert "stream-repair-keeps-thinking-without-old-text"
+          (string-match-p "correct" text)
+          (string-match-p "keep thinking" text)
+          (not (string-match-p "wrong\\|old tail\\|\\*\\*" text)))))))
+
 ;; Regression: Markdown after a streamed closing fence must still render.
 (dolist (final '(nil t))
   (with-temp-buffer
@@ -2624,6 +2676,40 @@ symbol or an ordered list."
       (equal (dsh-emacs-modeline--escape-percent "plain") "plain"))))
 
 ;; --- Test 21b: thinking / reasoning stream rendering ---
+;; Regression: live Think text is read-only before its final fragment exists.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (goto-char (dsh-emacs--input-end))
+  (insert "draft")
+  (let ((event '((data . ((turn . 1) (step . 1))))))
+    (dolist (chunk '("first" " second" "\nthird\n"))
+      (let ((state (dsh-emacs-render--start-thinking-stream event chunk)))
+        (dsh-emacs-render--flush-thinking)
+        (let* ((start (marker-position (plist-get state :start)))
+               (end (marker-position (plist-get state :end)))
+               (body (save-excursion (goto-char start)
+                                    (line-beginning-position 2)))
+               (before (buffer-substring-no-properties start (1+ end))))
+          (dsh-test-assert "thinking-live-header-body-and-separator-are-read-only"
+            (null (text-property-not-all start (1+ end) 'read-only t)))
+          (dolist (pos (list start body (1- end) end))
+            (goto-char pos)
+            (dsh-test-assert "thinking-live-block-rejects-insertion"
+              (condition-case nil
+                  (progn (insert "\n") nil)
+                (text-read-only t)))
+            (dsh-test-assert "thinking-live-block-rejects-deletion"
+              (condition-case nil
+                  (progn (delete-char 1) nil)
+                (text-read-only t))))
+          (dsh-test-assert "thinking-live-block-survives-edit-attempts"
+            (equal before (buffer-substring-no-properties start (1+ end)))
+            (equal "draft" (dsh-emacs--get-input))))))
+    (goto-char (dsh-emacs--input-end))
+    (insert " more")
+    (dsh-test-assert "thinking-live-protection-keeps-input-editable"
+      (equal "draft more" (dsh-emacs--get-input)))))
+
 (with-temp-buffer
   (let ((icons 0)
         (event '((data . ((turn . 1) (step . 1))))))
@@ -2745,7 +2831,141 @@ symbol or an ordered list."
                (string-match-p "shown" text))
       (dsh-test-pass "thinking-disabled-hides-block")))))
 
-;; step/start·end feed the mode-line badge, never the transcript.
+;; Regression: unchanged interleaved blocks keep their order at finalization.
+(dolist (types '(("text" "reasoning" "text" "reasoning" "text")
+                 ("reasoning" "text" "reasoning" "text" "reasoning")))
+  (dolist (limit '(nil 8))
+    (with-temp-buffer
+      (dsh-emacs-mode)
+      (let ((dsh-emacs-stream-markdown-limit limit)
+            (dsh-emacs-thinking-expand-by-default t)
+            (seq 0)
+            content)
+        (dolist (type types)
+          (let ((text (format "%s-%d" type (cl-incf seq))))
+            (push `((type . ,type) (text . ,text)) content)
+            (dsh-emacs-render-event
+             `((type . "assistant/chunk") (seq . ,seq)
+               (data . ((turn . 1) (step . 1)
+                        (chunk . ((type . ,(concat type "-delta"))
+                                  (index . ,(1- seq)) (text . ,text))))))))
+          (dsh-emacs-render--flush-stream)
+          (dsh-emacs-render--flush-thinking))
+        (dsh-emacs-render-event
+         `((type . "assistant/message") (seq . 6)
+           (data . ((turn . 1) (step . 1)
+                    (message . ((role . "assistant")
+                                (content . ,(vconcat (nreverse content)))))))))
+        (dotimes (_ 6)
+          (when dsh-emacs--markdown-pending
+            (dsh-emacs-render--run-markdown (current-buffer))))
+        (let ((text (buffer-substring-no-properties (point-min) (point-max)))
+              (previous 0))
+          (dsh-test-assert "stream-final-keeps-one-think-per-block"
+            (= (cl-count ?✶ text) (cl-count "reasoning" types :test #'equal)))
+          (cl-loop for type in types for index from 1
+                   for pos = (string-match (format "%s-%d" type index) text)
+                   do (dsh-test-assert "stream-final-keeps-block-order"
+                        pos (> pos previous))
+                   do (setq previous (or pos previous))))))))
+
+;; A step can carry several protocol blocks.  Each owns its own transcript
+;; region: the text stream's Markdown passes must never reach a reasoning body
+;; that sits between two text blocks, and the authoritative message must not
+;; re-render or delete a block that already streamed.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (let ((dsh-emacs-thinking-expand-by-default t))
+    (dsh-emacs-render-event
+     (json-read-from-string
+      "{\"type\":\"assistant/chunk\",\"seq\":1,\"data\":{\"turn\":1,\"step\":1,\"chunk\":{\"type\":\"text-delta\",\"index\":0,\"text\":\"first answer\\n\"}}}"))
+    (dsh-emacs-render--flush-stream)
+    (dsh-emacs-render-event
+     (json-read-from-string
+      "{\"type\":\"assistant/chunk\",\"seq\":2,\"data\":{\"turn\":1,\"step\":1,\"chunk\":{\"type\":\"reasoning-delta\",\"index\":1,\"text\":\"| a | b |\\n|---|---|\\n\"}}}"))
+    (dsh-emacs-render--flush-thinking)
+    (dsh-emacs-render-event
+     (json-read-from-string
+      "{\"type\":\"assistant/chunk\",\"seq\":3,\"data\":{\"turn\":1,\"step\":1,\"chunk\":{\"type\":\"text-delta\",\"index\":2,\"text\":\"second answer\\n\"}}}"))
+    (dsh-emacs-render--flush-stream)
+    (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
+           (first (string-match "first answer" text))
+           (think (string-match "✶ Think" text))
+           (second (string-match "second answer" text)))
+      (dsh-test-assert "thinking-body-keeps-raw-markdown"
+        (string-match-p (regexp-quote "| a | b |") text)
+        (not (string-match-p "├───" text)))
+      (dsh-test-assert "thinking-blocks-stack-in-arrival-order"
+        (and first think second (< first think second))))
+    (dsh-emacs-render-event
+     (json-read-from-string
+      "{\"type\":\"assistant/message\",\"seq\":4,\"data\":{\"turn\":1,\"step\":1,\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"first answer\\n\"},{\"type\":\"reasoning\",\"text\":\"| a | b |\\n|---|---|\\n\"},{\"type\":\"text\",\"text\":\"second answer\\n\"}]}}}"))
+    (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+      (dsh-test-assert "thinking-interleaved-final-keeps-every-block"
+        (= (cl-count ?✶ text) 1)
+        (string-match-p "first answer" text)
+        (string-match-p "second answer" text)
+        (not (string-match-p "├───" text))))))
+
+;; A text block that ends before reasoning is a finished body: the final
+;; message must not repaint it when it matches what streamed.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (let ((dsh-emacs-thinking-expand-by-default t))
+    (dsh-emacs-render-event
+     (json-read-from-string
+      "{\"type\":\"assistant/chunk\",\"seq\":1,\"data\":{\"turn\":1,\"step\":1,\"chunk\":{\"type\":\"text-delta\",\"index\":0,\"text\":\"only answer\\n\"}}}"))
+    (dsh-emacs-render--flush-stream)
+    (dsh-emacs-render-event
+     (json-read-from-string
+      "{\"type\":\"assistant/chunk\",\"seq\":2,\"data\":{\"turn\":1,\"step\":1,\"chunk\":{\"type\":\"reasoning-delta\",\"index\":1,\"text\":\"why\\n\"}}}"))
+    (dsh-emacs-render--flush-thinking)
+    (dsh-emacs-render-event
+     (json-read-from-string
+      "{\"type\":\"assistant/message\",\"seq\":3,\"data\":{\"turn\":1,\"step\":1,\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"only answer\\n\"},{\"type\":\"reasoning\",\"text\":\"why\\n\"}]}}}"))
+    (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
+           (copies 0)
+           (pos 0))
+      (while (string-match "only answer" text pos)
+        (setq copies (1+ copies)
+              pos (match-end 0)))
+      (dsh-test-assert "thinking-final-does-not-repaint-committed-text"
+        (= (cl-count ?✶ text) 1)
+        (= copies 1)
+        (null dsh-emacs--streamed-step)))))
+
+;; Two reasoning blocks around a text block: when the authoritative text
+;; diverges and the middle body is dropped, neither Think block may go with it.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (let ((dsh-emacs-thinking-expand-by-default t))
+    (dsh-emacs-render-event
+     (json-read-from-string
+      "{\"type\":\"assistant/chunk\",\"seq\":1,\"data\":{\"turn\":1,\"step\":1,\"chunk\":{\"type\":\"reasoning-delta\",\"index\":0,\"text\":\"think A\\n\"}}}"))
+    (dsh-emacs-render--flush-thinking)
+    (dsh-emacs-render-event
+     (json-read-from-string
+      "{\"type\":\"assistant/chunk\",\"seq\":2,\"data\":{\"turn\":1,\"step\":1,\"chunk\":{\"type\":\"text-delta\",\"index\":1,\"text\":\"text one\\n\"}}}"))
+    (dsh-emacs-render--flush-stream)
+    (dsh-emacs-render-event
+     (json-read-from-string
+      "{\"type\":\"assistant/chunk\",\"seq\":3,\"data\":{\"turn\":1,\"step\":1,\"chunk\":{\"type\":\"reasoning-delta\",\"index\":2,\"text\":\"think B\\n\"}}}"))
+    (dsh-emacs-render--flush-thinking)
+    (dsh-emacs-render-event
+     (json-read-from-string
+      "{\"type\":\"assistant/message\",\"seq\":4,\"data\":{\"turn\":1,\"step\":1,\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"reasoning\",\"text\":\"think A\\nthink B\\n\"},{\"type\":\"text\",\"text\":\"text one.\"}]}}}"))
+    (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
+           (a (string-match "think A" text))
+           (b (string-match "think B" text)))
+      (dsh-test-assert "thinking-two-blocks-survive-a-divergent-repair"
+        (= (cl-count ?✶ text) 2)
+        (and a b (< a b))
+        (string-match-p "text one" text)))))
+
+
 (with-temp-buffer
   (dsh-emacs-mode)
   (dsh-emacs-modeline-setup)

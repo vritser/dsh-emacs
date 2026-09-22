@@ -428,7 +428,19 @@ user has already read. Extending tables still re-render their rows
 (see [postmortem/055](../postmortem/055-append-only-streamed-blocks.md)).
 The assistant stream creates and retains its Markdown
 scan state from the outset, so successive flushes scan only new complete
-lines of unfinished blocks.
+lines of unfinished blocks.  Each protocol block owns its own transcript
+region: starting a text block folds the live Thinking body into its fragment,
+starting a reasoning block closes the live text body, and a per-step record
+(`dsh-emacs--streamed-step`) lets the authoritative message render only what
+has not been shown, so a reasoning body is never inside the text stream's
+Markdown region and the final repair cannot delete it
+(see [postmortem/056](../postmortem/056-thinking-block-boundaries.md)).
+The step record joins committed blocks with the same newline separators as
+the final content, removing the joining separator before rendering the next
+body. Closed text blocks retain their stream states until reconciliation;
+unfinished formatting stays on the idle queue with those bounded regions.
+Transitions never spin waiting for pending keyboard input to disappear, and
+a divergent final body cancels queued work for the regions it drops.
 An open block is never deferred to the idle
 queue, and a block that a queued (temp-buffer) render opened is handed to the
 live state with its body-start marker, so a streamed body is never re-read as
