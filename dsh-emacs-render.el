@@ -1047,11 +1047,15 @@ miss the entry is cleaned up.")
 
 (defun dsh-emacs-render--reset-markdown-state (state)
   "Release and clear STATE's parsing markers."
-  (dolist (key '(:scan :pending :watermark))
-    (when-let* ((marker (plist-get (plist-get state :markdown) key)))
-      (set-marker marker nil)
-      (setf (plist-get (plist-get state :markdown) key) nil)))
-  (setf (plist-get (plist-get state :markdown) :kind) nil))
+  (let ((markdown (plist-get state :markdown)))
+    (dolist (key '(:scan :pending :watermark))
+      (when-let* ((marker (plist-get markdown key)))
+        (set-marker marker nil)
+        (setf (plist-get markdown key) nil)))
+    ;; A reset invalidates the open block along with the scan markers it was
+    ;; opened against, so drop its identity and release its markers too.
+    (dsh-emacs-markdown--release-open-block markdown)
+    (setf (plist-get markdown :kind) nil)))
 
 (defun dsh-emacs-render--protect-stream-region (state start end)
   "Apply STATE's transcript protection and event identity to START..END.
@@ -1090,6 +1094,10 @@ NEW-TEXT lets long partial lines skip formatting until a newline arrives."
         (end (marker-position (plist-get state :end))))
     (when (and start end (<= start end)
                (or force final (null new-text)
+                   ;; An open block's flush only styles the chars that just
+                   ;; arrived — no parsing — so the wait-for-a-newline
+                   ;; throttle has nothing to save there.
+                   (plist-get (plist-get state :markdown) :open-block)
                    (null dsh-emacs-stream-markdown-limit)
                    (<= (- end (or (plist-get (plist-get state :markdown)
                                              :watermark)
@@ -1104,6 +1112,10 @@ NEW-TEXT lets long partial lines skip formatting until a newline arrives."
                  (begin (dsh-emacs-markdown--watermark-start markdown)))
             (if (or (memq state dsh-emacs--markdown-pending)
                     (and dsh-emacs-stream-markdown-limit
+                         ;; An open block must keep streaming into the live
+                         ;; buffer: deferred work re-reads the body as
+                         ;; markdown and cannot see the block.
+                         (not (plist-get markdown :open-block))
                          (> (- ready begin) dsh-emacs-stream-markdown-limit)))
                 (progn
                   ;; Future messages inserted at this boundary belong to
@@ -1163,7 +1175,10 @@ IDLE-ONLY is set by the timer; nil permits an explicit immediate attempt."
           (condition-case err
               (if (not (and (marker-buffer (plist-get state :start))
                             (marker-buffer (plist-get state :end))))
-                  (setq finished t)
+                  (progn
+                    (when (eq state dsh-emacs--streaming-assistant)
+                      (dsh-emacs-render--flush-stream))
+                    (setq finished t))
                 (when (eq state dsh-emacs--streaming-assistant)
                   (dsh-emacs-render--flush-stream))
                 (let* ((body-start (marker-position (plist-get state :start)))
@@ -1189,9 +1204,17 @@ IDLE-ONLY is set by the timer; nil permits an explicit immediate attempt."
                               (list (buffer-string)
                                     (when-let* ((frontier
                                                  (plist-get markdown :watermark)))
-                                      (- frontier (point-min)))))))))
+                                      (- frontier (point-min)))
+                                    ;; A block the temp render opened is on
+                                    ;; screen once TEXT lands; carry its
+                                    ;; identity out so the live state can keep
+                                    ;; streaming that body raw.
+                                    (when-let* ((open (plist-get markdown :open-block)))
+                                      (list :lang (plist-get open :lang)
+                                            :fence (plist-get open :fence)
+                                            :prefix (plist-get open :prefix)))))))))
                   (when (and (consp result) (= tick (buffer-chars-modified-tick)))
-                    (pcase-let ((`(,text ,frontier) result)
+                    (pcase-let ((`(,text ,frontier ,open) result)
                                 (windows (dsh-emacs-render--following-windows))
                                 (inhibit-read-only t)
                                 (buffer-undo-list t))
@@ -1222,7 +1245,20 @@ IDLE-ONLY is set by the timer; nil permits an explicit immediate attempt."
                           (setf (plist-get markdown :scan)
                                 (copy-marker (+ start frontier))
                                 (plist-get markdown :watermark)
-                                (copy-marker (+ start frontier)))))
+                                (copy-marker (+ start frontier)))
+                          ;; The temp render wrote a card's chrome into the
+                          ;; transcript: the live state must own the same open
+                          ;; block, or the next pass re-reads the body as
+                          ;; markdown and leaves the closing fence raw.
+                          (when open
+                            (plist-put markdown :kind (plist-get open :fence))
+                            (plist-put markdown :open-block
+                                       (list :lang (plist-get open :lang)
+                                             :fence (plist-get open :fence)
+                                             :prefix (plist-get open :prefix)
+                                             :body-start
+                                             (copy-marker (+ start frontier)
+                                                          nil))))))
                       (setq finished t)
                       (dsh-emacs-render--follow-stream windows)))))
             (error
@@ -1320,8 +1356,8 @@ FINAL also finishes deferred markup when no timer is pending."
                                   'rear-nonsticky '(read-only)
                                   'face 'dsh-emacs-assistant-body-face
                                   'dsh-emacs-assistant-message event-id
-                                  'dsh-emacs-event-block event-id)
-                      "\n\n")
+                                  'dsh-emacs-event-block event-id))
+              (dsh-emacs-render--insert-read-only "\n\n")
               (setq end (copy-marker (- (point) 2) t))))
           (setq state (list :key key
                             :start (copy-marker start nil)

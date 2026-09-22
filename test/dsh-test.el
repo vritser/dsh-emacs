@@ -1750,17 +1750,23 @@ symbol or an ordered list."
          (scanned 0)
          (parses 0)
          (scan (symbol-function 'dsh-emacs-markdown--source-block-ranges)))
+    ;; Opening the fence is the one call that renders: it writes the card
+    ;; chrome before any body line exists, so the card is already on screen.
+    (dsh-emacs-render--start-assistant-stream event header)
+    (dsh-emacs-render--flush-stream)
+    (dsh-test-assert "stream-open-fence-renders-card-at-opening-line"
+      (not (string-match-p "```" (buffer-string)))
+      (string-match-p "elisp ⧉" (buffer-string)))
     (cl-letf (((symbol-function 'dsh-emacs-markdown--source-block-ranges)
                (lambda ()
                  (cl-incf parses)
                  (cl-incf scanned (- (point-max) (point-min)))
                  (funcall scan))))
-      (dsh-emacs-render--start-assistant-stream event header)
       (dotimes (_ 80)
         (dsh-emacs-render--start-assistant-stream event row)
         (dsh-emacs-render--flush-stream)))
     (dsh-test-assert "stream-open-fence-avoids-repeated-full-scans"
-      (< scanned 1000)
+      (= scanned 0)
       (string-match-p (regexp-quote row) (buffer-string)))
     (dsh-test-assert "stream-open-fence-skips-empty-markdown-passes"
       (= parses 0))
@@ -1773,6 +1779,162 @@ symbol or an ordered list."
                              'dsh-emacs-markdown-source-block-body nil))
     (dsh-emacs-render--finish-assistant-stream
      event (concat header (apply #'concat (make-list 80 row)) "```\n"))))
+
+;; Regression: Markdown after a streamed closing fence must still render.
+(dolist (final '(nil t))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (let* ((event '((data . ((turn . 1) (step . 1)))))
+           (first "```text\nx\n")
+           (tail "```\n**BOLD**\n\n# TITLE\n\n```text\ny\n```\n")
+           (source (concat first tail))
+           (expected (dsh-emacs-markdown-render source))
+           (state (dsh-emacs-render--start-assistant-stream event first))
+           (start (copy-marker (plist-get state :start))))
+      (dsh-emacs-render--flush-stream)
+      (dsh-emacs-render--start-assistant-stream event tail)
+      (unless final (dsh-emacs-render--flush-stream))
+      (dsh-emacs-render--finish-assistant-stream event source)
+      (dsh-test-assert "stream-fence-tail-matches-complete-markdown"
+        (equal (substring-no-properties expected)
+               (buffer-substring-no-properties
+                start (+ start (length expected)))))
+      (goto-char start)
+      (search-forward "BOLD")
+      (dsh-test-assert "stream-fence-tail-retains-bold-face"
+        (memq 'dsh-emacs-markdown-bold
+              (get-text-property (1- (point)) 'face))))))
+
+;; A streamed code block is append-only: once its card chrome is written at
+;; the opening fence, every later flush adds text at the tail and nothing the
+;; user has already seen is rewritten (no line break is ever inserted into
+;; shown text).  The renderer's trailing separator sits after the stream body,
+;; so the body region is what must stay stable.
+(defun dsh-test--stream-body-text ()
+  (let ((end (plist-get dsh-emacs--streaming-assistant :end)))
+    (buffer-substring-no-properties
+     (point-min) (if (markerp end) (marker-position end) (point-max)))))
+
+(with-temp-buffer
+  (let* ((event '((data . ((turn . 1) (step . 1)))))
+         (row "(message \"hi\")\n")
+         previous)
+    (dsh-emacs-render--start-assistant-stream event "Before.\n\n```elisp\n")
+    (dsh-emacs-render--flush-stream)
+    (dsh-emacs-render--start-assistant-stream event row)
+    (dsh-emacs-render--flush-stream)
+    (setq previous (dsh-test--stream-body-text))
+    (dotimes (_ 20)
+      (dsh-emacs-render--start-assistant-stream event row)
+      (dsh-emacs-render--flush-stream)
+      (let ((now (dsh-test--stream-body-text)))
+        (dsh-test-assert "stream-open-fence-body-appends-without-rewriting"
+          (string-prefix-p previous now))
+        (setq previous now)))
+    (dsh-emacs-render--start-assistant-stream event "```\nAfter.\n")
+    (dsh-emacs-render--flush-stream)
+    ;; Closing consumes the fence line and appends the panel's bottom line;
+    ;; everything above the fence line is untouched.
+    (dsh-test-assert "stream-close-appends-below-the-body"
+      (string-prefix-p previous (dsh-test--stream-body-text)))))
+
+;; A block whose chrome is written by the deferred (idle) render must hand its
+;; open state to the live stream: otherwise the next pass re-reads the body as
+;; markdown (`*x*' loses its asterisks) and leaves the closing fence raw.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let* ((dsh-emacs-stream-markdown-limit 8)
+         (event '((data . ((turn . 1) (step . 1)))))
+         (text "intro\n```text\n*x*\n| a | b |\n```\n")
+         (expected (with-temp-buffer
+                     (insert text)
+                     (dsh-emacs-markdown-replace-markup
+                      :base-face 'dsh-emacs-assistant-body-face)
+                     (buffer-substring-no-properties (point-min) (point-max))))
+         (state (dsh-emacs-render--start-assistant-stream
+                 event "intro\n```text\n*x*\n"))
+         body-start)
+    (dsh-emacs-render--run-markdown (current-buffer))
+    (dsh-test-assert "stream-deferred-open-fence-hands-over-the-block"
+      (plist-get (plist-get state :markdown) :open-block))
+    (dsh-emacs-render--start-assistant-stream event "| a | b |\n```\n")
+    (dsh-emacs-render--flush-stream)
+    (setq body-start (copy-marker (plist-get state :start)))
+    (dsh-emacs-render--finish-assistant-stream event text)
+    (while dsh-emacs--markdown-pending
+      (dsh-emacs-render--run-markdown (current-buffer)))
+    (dsh-test-assert "stream-deferred-open-fence-keeps-the-body-raw"
+      (equal expected
+             (buffer-substring-no-properties
+              body-start (+ body-start (length expected)))))))
+
+;; A repaired final body re-renders from scratch: `--reset-markdown-state' has
+;; to drop the block it was streaming, or the queued final pass is skipped and
+;; the body keeps its raw fences.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let* ((dsh-emacs-stream-markdown-limit 100)
+         (event '((data . ((turn . 1) (step . 1)))))
+         (final (concat "```text\n" (make-string 300 ?a) "\n```\n"))
+         (state (dsh-emacs-render--start-assistant-stream event "```text\n"))
+         body-start)
+    (setq body-start (copy-marker (plist-get state :start)))
+    (dsh-emacs-render--finish-assistant-stream event final)
+    (while dsh-emacs--markdown-pending
+      (dsh-emacs-render--run-markdown (current-buffer)))
+    (dsh-test-assert "stream-forced-final-repair-formats-the-body"
+      (not (string-match-p
+            "```"
+            (buffer-substring-no-properties body-start (point-max)))))))
+
+;; A closer and the next opener in one flush must not leave the first block
+;; looking open: both cards render, with no fence line left raw.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let* ((event '((data . ((turn . 1) (step . 1)))))
+         (text "```a\nx\n```\n```b\ny\n```\n")
+         (expected (with-temp-buffer
+                     (insert text)
+                     (dsh-emacs-markdown-replace-markup
+                      :base-face 'dsh-emacs-assistant-body-face)
+                     (buffer-substring-no-properties (point-min) (point-max))))
+         (state (dsh-emacs-render--start-assistant-stream event "```a\nx\n"))
+         body-start)
+    (dsh-emacs-render--start-assistant-stream event "```\n```b\ny\n")
+    (dsh-emacs-render--flush-stream)
+    ;; The closer ends the first block and the remainder opens the next card
+    ;; in the same flush: the live block must belong to b, not a.
+    (dsh-test-assert "stream-closer-closes-before-the-next-opener"
+      (equal "b" (plist-get (plist-get (plist-get state :markdown)
+                                       :open-block)
+                            :lang)))
+    (dsh-emacs-render--start-assistant-stream event "```\n")
+    (dsh-emacs-render--flush-stream)
+    (setq body-start (copy-marker (plist-get state :start)))
+    (dsh-emacs-render--finish-assistant-stream event text)
+    (dsh-test-assert "stream-closer-and-next-opener-in-one-flush"
+      (equal expected
+             (buffer-substring-no-properties
+              body-start (+ body-start (length expected)))))))
+
+;; An open block never goes back to the idle queue: its flush only styles the
+;; characters that just arrived, and deferring it would re-read code as
+;; markdown in a temp buffer that cannot see the block.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let* ((dsh-emacs-stream-markdown-limit 8)
+         (event '((data . ((turn . 1) (step . 1)))))
+         (row "(message \"hi\")\n")
+         (state (dsh-emacs-render--start-assistant-stream event "```text\n")))
+    (dsh-emacs-render--flush-stream)
+    (dotimes (_ 30)
+      (dsh-emacs-render--start-assistant-stream event row)
+      (dsh-emacs-render--flush-stream))
+    (dsh-test-assert "stream-open-fence-never-defers"
+      (plist-get (plist-get state :markdown) :open-block)
+      (null (memq state dsh-emacs--markdown-pending)))
+    (dsh-emacs-render--finish-assistant-stream
+     event (concat "```text\n" (apply #'concat (make-list 30 row)) "```\n"))))
 
 ;; Reformatting a partial line must not accumulate the assistant base face.
 (with-temp-buffer
@@ -1971,6 +2133,52 @@ symbol or an ordered list."
       (null dsh-emacs--markdown-pending)
       (string-match-p "elisp ⧉" (buffer-string))
       (not (string-match-p "unfinished preparation" (buffer-string))))))
+
+;; Regression: streamed replies protect their trailing separators as well.
+(dolist (limit '(8 100000))
+  (dolist (chunks '(("hello" " world\nsecond line")
+                    ("```elisp\n(message" " \"hello\")\n```\n**tail**")
+                    ("| A | B |\n|---|---|\n" "| alpha | beta |\n")))
+    (with-temp-buffer
+      (dsh-emacs-mode)
+      (goto-char (dsh-emacs--input-end))
+      (insert "draft")
+      (let* ((dsh-emacs-stream-markdown-limit limit)
+             (event '((data . ((turn . 1) (step . 1)))))
+             (state (dsh-emacs-render--start-assistant-stream
+                     event (car chunks)))
+             (start (copy-marker (plist-get state :start)))
+             (end (copy-marker (+ 2 (plist-get state :end)))))
+        (dolist (phase '(first append final idle))
+          (pcase phase
+            ('append
+             (dsh-emacs-render--start-assistant-stream event (cadr chunks))
+             (dsh-emacs-render--flush-stream))
+            ('final
+             (dsh-emacs-render--finish-assistant-stream
+              event (apply #'concat chunks)))
+            ('idle
+             (dsh-emacs-render--run-markdown (current-buffer))))
+          (let ((before (buffer-substring-no-properties start end)))
+            (dsh-test-assert "stream-body-and-separators-are-read-only"
+              (null (text-property-not-all start end 'read-only t)))
+            (dolist (pos (list (- end 2) (1- end)))
+              (goto-char pos)
+              (dsh-test-assert "stream-separator-rejects-insertion"
+                (condition-case nil
+                    (progn (insert "\n") nil)
+                  (text-read-only t)))
+              (dsh-test-assert "stream-separator-rejects-deletion"
+                (condition-case nil
+                    (progn (delete-char 1) nil)
+                  (text-read-only t))))
+            (dsh-test-assert "stream-separators-survive-edit-attempts"
+              (equal before (buffer-substring-no-properties start end))
+              (equal "draft" (dsh-emacs--get-input)))))
+        (goto-char (dsh-emacs--input-end))
+        (insert " more")
+        (dsh-test-assert "stream-separator-protection-keeps-input-editable"
+          (equal "draft more" (dsh-emacs--get-input)))))))
 
 ;; A corrected final reply replaces the source of queued work.
 (with-temp-buffer

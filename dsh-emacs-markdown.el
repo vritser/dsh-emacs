@@ -209,25 +209,45 @@ For example:
 (defun dsh-emacs-markdown--stream-end (state)
   "Return the renderable frontier, advancing STATE over new complete lines.
 STATE is a stream-owned plist with :scan, :pending and :kind slots.
-Markers follow earlier markup replacements.  An unfinished table or fence
-stays raw; :kind is `table' or the opening fence's backtick count."
+Markers follow earlier markup replacements.  An unfinished table stays raw;
+:kind is `table' or the opening fence's backtick count.
+
+A fence that has just opened is renderable up to the end of its opening line:
+its card chrome is written eagerly, before any body line is displayed (see
+`--open-source-block').  While that block is open (:open-block) its body owns
+the whole ready range, so the frontier is `point-max' and the markup passes
+never see it; the scan only looks for the closing fence and stops right after
+that line, leaving anything that follows for the next call and flagging
+:closed so the renderer finalizes the block even when it scans the ready range
+a second time."
   (save-excursion
     (save-match-data
       (let* ((scan (or (plist-get state :scan)
                        (copy-marker (point-min))))
              (pending (plist-get state :pending))
              (kind (plist-get state :kind))
-             (pos (marker-position scan)))
+             (open (plist-get state :open-block))
+             (pos (marker-position scan))
+             (stop nil))
         (goto-char pos)
-        (while (search-forward "\n" nil t)
+        (while (and (not stop) (search-forward "\n" nil t))
           (let ((next (point)))
             (goto-char pos)
             (cond
              ((integerp kind)
               (when (and (looking-at "[ \t]*\\(`\\{3,\\}\\)")
                          (>= (- (match-end 1) (match-beginning 1)) kind))
-                (set-marker pending nil)
-                (setq pending nil kind nil)))
+                ;; A block handed over from a deferred render carries :kind
+                ;; without the opening-line marker.
+                (when (markerp pending) (set-marker pending nil))
+                (setq pending nil kind nil)
+                ;; The open block's closer ends its ready range: a fence line
+                ;; right after it opens a new card, it does not mean this
+                ;; block is still running.  Sticky, since the caller may scan
+                ;; the ready range again before rendering it.
+                (when open
+                  (setq stop t)
+                  (plist-put state :closed t))))
              (t
               (when (and (eq kind 'table)
                          (or (not dsh-emacs-markdown-prettify-tables)
@@ -251,7 +271,15 @@ stays raw; :kind is `table' or the opening fence's backtick count."
               (plist-get state :kind) kind)
         (goto-char pos)
         (cond
-         (pending (marker-position pending))
+         ;; An open block's body is raw by design and owns the ready range;
+         ;; `replace-markup' styles it without running the markup passes.
+         (open (point-max))
+         (pending (if (integerp kind)
+                      ;; The opening fence line is complete: let the card
+                      ;; chrome be written now, above the body.
+                      (save-excursion (goto-char (marker-position pending))
+                                      (line-beginning-position 2))
+                    (marker-position pending)))
          ;; A partial opening line must not be styled as inline markup.
          ((and (not (get-text-property pos 'dsh-emacs-markdown-frozen))
                (or (looking-at-p "[ \t]*`\\{3,\\}")
@@ -328,8 +356,75 @@ all stream markers.  Return the (START . END) formatted range."
          (start (if force (point-min)
                   (dsh-emacs-markdown--watermark-start stream-state))))
     (unwind-protect
-        (if (= start end)
-            (cons start end)
+        (if (or (= start end)
+                (and stream-state (plist-get stream-state :open-block)))
+            (if (= start end)
+                (cons start end)
+              ;; An open source block owns the buffer: its card chrome was
+              ;; written when the fence opened, its body streams raw, and the
+              ;; markup passes must not see any of it (code would be rewritten
+              ;; as prose).  Style the body lines that arrived since the last
+              ;; call — properties only, never text — and finalize once the
+              ;; closing fence is in, or when the message ends.
+              (let* ((open (plist-get stream-state :open-block))
+                     (prefix (plist-get open :prefix))
+                     (body-marker (plist-get open :body-start))
+                     (body-start (and (markerp body-marker)
+                                      (marker-position body-marker)))
+                     ;; The stream scanner clears :kind once it has consumed
+                     ;; the closing fence and flags :closed; a force/final
+                     ;; pass never consults either.
+                     (closed (or final (plist-get stream-state :closed)))
+                     ;; The block's own closing fence bounds its body.  Looked
+                     ;; up only once the block is done — while it is open, the
+                     ;; body runs to the end of the ready range.
+                     (closer (and closed body-start
+                                  (dsh-emacs-markdown--find-block-closer
+                                   body-start (plist-get open :fence))))
+                     (tail (and closer (copy-marker (cdr closer) t)))
+                     (body-end (and body-start
+                                    (if closer
+                                        (max body-start (1- (car closer)))
+                                      (point-max)))))
+                (when (and body-start body-end (< body-start body-end))
+                  (let* ((styled (plist-get open :styled-end))
+                         (from (if (and (markerp styled)
+                                        (marker-position styled)
+                                        (>= (marker-position styled) body-start))
+                                   (marker-position styled)
+                                 body-start))
+                         ;; Include the body's trailing newline so the panel
+                         ;; background reaches the right edge of that line.
+                         (to (min (1+ body-end) (point-max))))
+                    (when (< from to)
+                      (dsh-emacs-markdown--apply-source-block-body from to prefix)
+                      (plist-put open :styled-end (copy-marker to nil)))))
+                (when closed
+                  (dsh-emacs-markdown--close-source-block
+                   stream-state open highlight-blocks closer)
+                  (dsh-emacs-markdown--mirror-face-to-font-lock-face
+                   (point-min) (point-max) base-face))
+                (if tail
+                    (progn
+                      ;; The closer can share a chunk with more Markdown.
+                      ;; Resume at its tail, after the new bottom padding;
+                      ;; none of that text has passed through the formatter.
+                      (dolist (key '(:scan :pending :watermark))
+                        (when-let* ((marker (plist-get stream-state key)))
+                          (set-marker marker nil))
+                        (plist-put stream-state key nil))
+                      (plist-put stream-state :kind nil)
+                      (set-marker-insertion-type tail nil)
+                      (plist-put stream-state :watermark tail)
+                      (save-restriction
+                        (narrow-to-region tail (point-max))
+                        (dsh-emacs-markdown-replace-markup
+                         :render-images render-images
+                         :highlight-blocks highlight-blocks
+                         :base-face base-face :stream-state stream-state
+                         :final final)))
+                  (dsh-emacs-markdown--set-watermark stream-state))
+                (cons start (point-max))))
           (save-restriction
             (narrow-to-region (point-min) end)
             (when scan (set-marker-insertion-type scan t))
@@ -378,7 +473,8 @@ all stream markers.  Return the (START . END) formatted range."
                     (dsh-emacs-markdown--style-dividers :avoid-ranges avoid-ranges)
                     (dsh-emacs-markdown--style-blockquotes :avoid-ranges avoid-ranges)
                     (dsh-emacs-markdown--style-source-blocks
-                     :highlight-blocks highlight-blocks)
+                     :highlight-blocks highlight-blocks
+                     :stream-state stream-state)
                     ;; Tables run last so cell content has already been processed by
                     ;; every other pass (bold, italic, links, inline code, etc.).
                     ;; The cell parser respects face and `dsh-emacs-markdown-frozen'
@@ -845,7 +941,188 @@ characters when no usable window is available (e.g. batch)."
   (or (ignore-errors (window-body-width dsh-emacs-markdown--render-window))
       80))
 
-(cl-defun dsh-emacs-markdown--style-source-blocks (&key (highlight-blocks t))
+(defun dsh-emacs-markdown--source-block-prefix ()
+  "Return the `line-prefix' that insets a source block's body lines.
+Two plain columns then two panel-tinted ones (see `--style-source-blocks')."
+  (concat "  "
+          (propertize "  " 'face 'dsh-emacs-markdown-source-block)))
+
+(defun dsh-emacs-markdown--source-block-vpad-line (prefix)
+  "Return the tinted blank line that pads a source block's panel.
+PREFIX is the body `line-prefix'."
+  (propertize "\n"
+              'face 'dsh-emacs-markdown-source-block
+              'line-prefix prefix
+              'wrap-prefix prefix
+              'dsh-emacs-non-trimmable t
+              'rear-nonsticky '(dsh-emacs-non-trimmable)))
+
+(defun dsh-emacs-markdown--source-block-header (lang prefix)
+  "Return the propertized card header for a source block.
+LANG is the fence's language tag (may be empty), PREFIX the body
+`line-prefix'.  The string is `<vpad>\\n<label>\\n<vpad><vpad>': the trailing
+newlines become the first column of the line carrying the first body row.
+The label kills the body to the kill ring on RET or mouse-1."
+  (let* ((label-text (concat (if (string-empty-p lang) "snippet" lang)
+                             " ⧉"))
+         (kill-action (lambda ()
+                        (interactive)
+                        ;; Locate the body by text property in the current
+                        ;; buffer so copy works in any buffer that received a
+                        ;; propertized copy of the rendered block (e.g. the
+                        ;; viewport).
+                        (when-let* ((start (next-single-property-change
+                                            (point)
+                                            'dsh-emacs-markdown-source-block-body))
+                                    ((get-text-property
+                                      start
+                                      'dsh-emacs-markdown-source-block-body))
+                                    (end (next-single-property-change
+                                          start
+                                          'dsh-emacs-markdown-source-block-body)))
+                          (kill-new (buffer-substring-no-properties start end))
+                          (message "Copied"))))
+         (vpad-line (dsh-emacs-markdown--source-block-vpad-line prefix))
+         (label (propertize
+                 label-text
+                 'face 'dsh-emacs-markdown-source-block-language
+                 'mouse-face 'highlight
+                 'pointer 'hand
+                 'keymap (dsh-emacs-markdown--make-ret-binding-map
+                          kill-action)
+                 'cursor-sensor-functions
+                 (list (lambda (_window _old-pos sensor-action)
+                         (when (eq sensor-action 'entered)
+                           (message "Press RET to copy"))))
+                 'dsh-emacs-markdown-frozen t
+                 'rear-nonsticky '(dsh-emacs-markdown-frozen)
+                 'line-prefix prefix
+                 'wrap-prefix prefix)))
+    ;; Top vpad `\\n' + label + middle vpad `\\n' + a second `\\n' that
+    ;; becomes the first column of the line carrying body content.
+    (concat vpad-line label vpad-line vpad-line)))
+
+(defun dsh-emacs-markdown--apply-source-block-body (start end prefix)
+  "Give START..END the source-block body look without touching its text.
+Sets the panel face, the panel `line-prefix' / `wrap-prefix', the
+`yank-handler' that drops all of it on paste, and the
+`dsh-emacs-markdown-frozen' tag the rest of the formatter keys on."
+  (when (< start end)
+    (put-text-property start end 'face 'dsh-emacs-markdown-source-block)
+    (add-text-properties start end
+                         `(dsh-emacs-markdown-frozen t
+                           dsh-emacs-non-trimmable t
+                           rear-nonsticky (dsh-emacs-markdown-frozen
+                                           dsh-emacs-non-trimmable)
+                           yank-handler (dsh-emacs-markdown--yank-plain)
+                           line-prefix ,prefix
+                           wrap-prefix ,prefix))))
+
+(defun dsh-emacs-markdown--find-block-closer (start fence)
+  "Return (START . END) of the fence line at or after START closing FENCE.
+FENCE is the backtick count of the opening fence; a shorter run inside the
+body is body text, so only a line with at least that many backticks closes.
+The returned END includes the line's trailing newline.  Nil when the block is
+still open."
+  (save-excursion
+    (goto-char start)
+    (let (found)
+      (while (and (not found)
+                  (re-search-forward
+                   (rx bol (zero-or-more blank) (group (>= 3 "`"))
+                       (zero-or-more blank) (or "\n" eol))
+                   nil t))
+        (when (>= (- (match-end 1) (match-beginning 1)) fence)
+          (setq found (cons (match-beginning 0) (match-end 0)))))
+      found)))
+
+(defun dsh-emacs-markdown--open-source-block (open-start lang fence stream-state)
+  "Open the still-streaming fenced block at OPEN-START as a card.
+LANG is the fence's language tag, FENCE its backtick count.  The card chrome
+is written NOW — before any body line is displayed — so the body streams into
+a settled layout: no line break is ever inserted into text the user has
+already seen.  The body stays raw, styled by properties only (new body lines
+are styled by `dsh-emacs-render--flush-stream'), and the closing fence
+finalizes the block through `--close-source-block'."
+  (let* ((line-end (save-excursion (goto-char open-start)
+                                   (line-beginning-position 2)))
+         (prefix (dsh-emacs-markdown--source-block-prefix))
+         (heading (dsh-emacs-markdown--source-block-header lang prefix))
+         (carried (dsh-emacs-markdown--carry-properties open-start)))
+    (delete-region open-start line-end)
+    (goto-char open-start)
+    (insert heading)
+    (let ((body-start (point)))
+      (when carried
+        (add-text-properties open-start body-start carried))
+      (dsh-emacs-markdown--apply-source-block-body body-start (point-max) prefix)
+      ;; `plist-put', not `setf (plist-get ...)': the latter rebuilds a plist
+      ;; with an absent key instead of extending the caller's state.
+      (plist-put stream-state :open-block
+                 (list :lang lang :fence fence :prefix prefix
+                       ;; Insertion type nil: the body is appended at the
+                       ;; stream's end, which is this marker's position while
+                       ;; the body is empty — it must stay at the body's start.
+                       :body-start (copy-marker body-start nil)))
+      (plist-put stream-state :closed nil))))
+
+(defun dsh-emacs-markdown--release-open-block (stream-state)
+  "Drop STREAM-STATE's open source block and release its markers.
+Used when the block is finalized and whenever a stream state is reset: the
+block's identity is only valid for the generation of scan markers it was
+opened with."
+  (let ((open (plist-get stream-state :open-block)))
+    (when open
+      (dolist (key '(:body-start :styled-end))
+        (let ((marker (plist-get open key)))
+          (when (markerp marker) (set-marker marker nil))))))
+  (plist-put stream-state :open-block nil)
+  (plist-put stream-state :closed nil))
+
+(defun dsh-emacs-markdown--close-source-block
+    (stream-state open highlight-blocks closer)
+  "Finalize OPEN, the source block STREAM-STATE holds open.
+The body above the closing fence already streamed raw inside the card, so
+this only consumes the closing fence line, appends the bottom panel line and
+layers the language's face properties — all at the buffer's tail.  CLOSER is
+the (START . END) of that fence line, or nil when the block has none (the
+message ended inside it); the body then runs to the end of the ready range."
+  (let* ((lang (plist-get open :lang))
+         (prefix (plist-get open :prefix))
+         (body-marker (plist-get open :body-start))
+         (body-start (and (markerp body-marker)
+                          (eq (marker-buffer body-marker) (current-buffer))
+                          (marker-position body-marker)))
+         (body-end (and body-start
+                        (if closer
+                            ;; Content ends at the newline before the closer.
+                            (max body-start (1- (car closer)))
+                          ;; Unfinished block: drop a trailing newline only.
+                          (let ((end (point-max)))
+                            (if (and (> end body-start)
+                                     (eq (char-before end) ?\n))
+                                (1- end)
+                              end))))))
+    (when (and body-start body-end (>= body-end body-start))
+      (when highlight-blocks
+        (dsh-emacs-markdown--apply-faces-from
+         (dsh-emacs-markdown--highlight-code
+          (buffer-substring-no-properties body-start body-end) lang)
+         body-start))
+      (put-text-property body-start body-end
+                         'dsh-emacs-markdown-source-block-body t)
+      ;; Consume the closing fence line before appending the bottom panel
+      ;; line, so both land at the tail and nothing above them moves.
+      (when closer
+        (delete-region (car closer) (cdr closer)))
+      (save-excursion
+        (when (and (< body-end (point-max))
+                   (eq (char-after body-end) ?\n))
+          (goto-char (1+ body-end))
+          (insert (dsh-emacs-markdown--source-block-vpad-line prefix)))))
+    (dsh-emacs-markdown--release-open-block stream-state)))
+
+(cl-defun dsh-emacs-markdown--style-source-blocks (&key (highlight-blocks t) stream-state)
   "Strip fenced code block markup and syntax-highlight the body.
 
 For each complete `\\`\\`\\`LANG' / `\\`\\`\\`' fenced block,
@@ -875,7 +1152,13 @@ becomes:
   (message \"hi\")
 
 with `emacs-lisp-mode' face properties on the body and a
-`dsh-emacs-markdown-frozen' tag covering those same chars."
+`dsh-emacs-markdown-frozen' tag covering those same chars.
+
+With STREAM-STATE, a fence that is still open when the ready range ends is
+rendered eagerly: its card chrome is written before any body line has been
+displayed, and the body streams raw inside it (see `--open-source-block').
+The open block then belongs to the stream state — `replace-markup' styles its
+body and finalizes it — so this pass only ever sees the opening fence."
   (let ((case-fold-search nil))
     (goto-char (point-min))
     ;; Group 2 captures the opening backtick run; `backref' on the
@@ -895,7 +1178,7 @@ with `emacs-lisp-mode' face properties on the body and a
                 (group bol (zero-or-more blank)
                        (backref 2)
                        (zero-or-more blank) (or "\n" eol)))
-            nil t)
+                nil t)
       (let* ((open-start (match-beginning 1))
              (open-end (match-end 1))
              (lang (buffer-substring-no-properties (match-beginning 3)
@@ -964,53 +1247,8 @@ with `emacs-lisp-mode' face properties on the body and a
           ;; inserts ignore stickiness, and without this the inserted
           ;; prefix punches a hole in the caller's contiguous block
           ;; range and breaks toggle/replace operations.
-          (let* ((label-text (concat (if (string-empty-p lang) "snippet" lang)
-                                     " ⧉"))
-                 (content-start (copy-marker (marker-position body-start) t))
-                 (kill-action (lambda ()
-                                (interactive)
-                                ;; Locate the body by text property in
-                                ;; the current buffer so copy works in
-                                ;; any buffer that received a propertized
-                                ;; copy of the rendered block (e.g. the
-                                ;; viewport).
-                                (when-let* ((start (next-single-property-change
-                                                    (point)
-                                                    'dsh-emacs-markdown-source-block-body))
-                                            ((get-text-property
-                                              start
-                                              'dsh-emacs-markdown-source-block-body))
-                                            (end (next-single-property-change
-                                                  start
-                                                  'dsh-emacs-markdown-source-block-body)))
-                                  (kill-new (buffer-substring-no-properties start end))
-                                  (message "Copied"))))
-                 (vpad-line (propertize "\n"
-                                        'face 'dsh-emacs-markdown-source-block
-                                        'line-prefix prefix
-                                        'wrap-prefix prefix
-                                        'dsh-emacs-non-trimmable t
-                                        'rear-nonsticky
-                                        '(dsh-emacs-non-trimmable)))
-                 (label (propertize
-                         label-text
-                         'face 'dsh-emacs-markdown-source-block-language
-                         'mouse-face 'highlight
-                         'pointer 'hand
-                         'keymap (dsh-emacs-markdown--make-ret-binding-map
-                                  kill-action)
-                         'cursor-sensor-functions
-                         (list (lambda (_window _old-pos sensor-action)
-                                 (when (eq sensor-action 'entered)
-                                   (message "Press RET to copy"))))
-                         'dsh-emacs-markdown-frozen t
-                         'rear-nonsticky '(dsh-emacs-markdown-frozen)
-                         'line-prefix prefix
-                         'wrap-prefix prefix))
-                 ;; Top vpad `\\n' + label + middle vpad `\\n' + a
-                 ;; second `\\n' that becomes the first column of the
-                 ;; line carrying body content.
-                 (header (concat vpad-line label vpad-line vpad-line))
+          (let* ((content-start (copy-marker (marker-position body-start) t))
+                 (header (dsh-emacs-markdown--source-block-header lang prefix))
                  (carried (dsh-emacs-markdown--carry-properties body-start)))
             (goto-char body-start)
             (insert header)
@@ -1034,13 +1272,33 @@ with `emacs-lisp-mode' face properties on the body and a
                          (eq (char-after (marker-position body-end)) ?\n))
                 (goto-char (1+ (marker-position body-end)))
                 (let ((vpad-start (point)))
-                  (insert vpad-line)
+                  (insert (dsh-emacs-markdown--source-block-vpad-line prefix))
                   (when carried
                     (add-text-properties vpad-start (point) carried)))))
             ;; Move point past the body so the outer `re-search-forward'
             ;; loop doesn't backtrack into body content (e.g. shorter
             ;; inner fences inside a wider outer fence).
-            (goto-char (marker-position body-end))))))))
+            (goto-char (marker-position body-end))))))
+      ;; Everything complete has been rendered.  A fence that is still open at
+      ;; the end of the ready range is rendered eagerly when a live stream is
+      ;; attached, so its chrome lands before its body is displayed.  The
+      ;; stream scanner holds its opening line in :pending / :kind.
+      (when (and stream-state
+                 (integerp (plist-get stream-state :kind)))
+        (let ((pos (plist-get stream-state :pending)))
+          (when (markerp pos)
+            (save-excursion
+              (goto-char (marker-position pos))
+              (when (looking-at
+                     (rx (zero-or-more blank)
+                         (group (>= 3 "`"))
+                         (zero-or-more blank)
+                         (group (zero-or-more (or alphanumeric "-" "+" "#")))))
+                (dsh-emacs-markdown--open-source-block
+                 (point)
+                 (match-string-no-properties 2)
+                 (- (match-end 1) (match-beginning 1))
+                 stream-state))))))))
 
 (defconst dsh-emacs-markdown--table-line-regexp
   (rx line-start
@@ -2326,33 +2584,50 @@ span a newline, so backing off to start-of-last-line covers their
 split-across-chunks case.  Open inline backticks already extend
 only to end-of-line, so they're naturally within that zone."
   (when (> (point-max) (point-min))
-    (let* ((source-ranges
-            (save-restriction
-              ;; Stable text cannot acquire a new open fence.  Keep this
-              ;; final scan incremental too, like the rendering passes.
-              (narrow-to-region (dsh-emacs-markdown--watermark-start stream-state)
-                                (point-max))
-              (dsh-emacs-markdown--source-block-ranges)))
-           (open-fence-start
-            (let ((last (car (last source-ranges))))
-              (when (and last (= (cdr last) (point-max)))
-                (car last))))
-           (extending-table-start
-            (dsh-emacs-markdown--extending-table-start))
-           (last-line-start
-            (save-excursion (goto-char (point-max))
-                            (line-beginning-position)))
-           (frontier (apply #'min
-                            (delq nil (list last-line-start
-                                            open-fence-start
-                                            extending-table-start)))))
-      (if stream-state
-          (if-let* ((marker (plist-get stream-state :watermark)))
-              (set-marker marker frontier)
-            (setf (plist-get stream-state :watermark) (copy-marker frontier)))
-        (with-silent-modifications
-          (put-text-property (point-min) (1+ (point-min))
-                             'dsh-emacs-markdown-watermark frontier))))))
+    (let ((open-start (let ((marker (and stream-state
+                                         (plist-get (plist-get stream-state :open-block)
+                                                    :body-start))))
+                        (and (markerp marker)
+                             (eq (marker-buffer marker) (current-buffer))
+                             (marker-position marker)))))
+      (if open-start
+          ;; An open source block's body is raw by design: the frontier stays
+          ;; at its start, and no scan is needed to know that — which is what
+          ;; keeps a flush inside a streamed code block free of markdown work.
+          (if stream-state
+              (if-let* ((marker (plist-get stream-state :watermark)))
+                  (set-marker marker open-start)
+                (plist-put stream-state :watermark (copy-marker open-start)))
+            (with-silent-modifications
+              (put-text-property (point-min) (1+ (point-min))
+                                 'dsh-emacs-markdown-watermark open-start)))
+        (let* ((source-ranges
+                (save-restriction
+                  ;; Stable text cannot acquire a new open fence.  Keep this
+                  ;; final scan incremental too, like the rendering passes.
+                  (narrow-to-region (dsh-emacs-markdown--watermark-start stream-state)
+                                    (point-max))
+                  (dsh-emacs-markdown--source-block-ranges)))
+               (open-fence-start
+                (let ((last (car (last source-ranges))))
+                  (when (and last (= (cdr last) (point-max)))
+                    (car last))))
+               (extending-table-start
+                (dsh-emacs-markdown--extending-table-start))
+               (last-line-start
+                (save-excursion (goto-char (point-max))
+                                (line-beginning-position)))
+               (frontier (apply #'min
+                                (delq nil (list last-line-start
+                                                open-fence-start
+                                                extending-table-start)))))
+          (if stream-state
+              (if-let* ((marker (plist-get stream-state :watermark)))
+                  (set-marker marker frontier)
+                (plist-put stream-state :watermark (copy-marker frontier)))
+            (with-silent-modifications
+              (put-text-property (point-min) (1+ (point-min))
+                                 'dsh-emacs-markdown-watermark frontier))))))))
 
 (defun dsh-emacs-markdown--make-markers (ranges)
   "Convert each (start . end) in RANGES to (start-marker . end-marker)."

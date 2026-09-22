@@ -46,11 +46,19 @@ amount as the removed writes.
 
 ## Empty deferred-block work
 
-An unfinished fence/table advances the complete-line scanner but holds the
-render frontier at its opening line. Previously each flush still constructed
+An unfinished table advances the complete-line scanner but holds the render
+frontier at its opening line. Previously each flush still constructed
 range collections, invoked inline/block formatting passes and updated the
 watermark over an empty ready range. The formatter now returns the empty
 range directly, after scanning new lines, with finalization cleanup preserved.
+
+A **fence** is different: since a card's chrome can be written before its body
+exists, the opening fence line is rendered as soon as it completes (the card
+label and panel lines) and the body then streams raw inside it. Each flush
+inside an open block styles only the lines that arrived since the last call —
+properties, never text — and no range scan runs at all, so a streamed code
+block costs less per flush than the old hold-everything-raw path while never
+rewriting text the user has already seen.
 
 ## Wrapped viewport reproduction
 

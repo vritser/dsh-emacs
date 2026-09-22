@@ -101,8 +101,27 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Streamed replies protect their trailing blank lines**: the separators
+  after text, code blocks and tables can no longer be edited while a reply
+  streams or after it finishes; the input area remains editable.
+
+- **Markdown after a code fence renders in the same chunk**: headings,
+  emphasis and subsequent code blocks are formatted even when they arrive
+  with the previous block's closing fence or the final message.
+
 - **Undo immediately after sending restores the draft**: inserting the
   transcript echo no longer discards the undo record for clearing the input.
+
+- **A streamed code block no longer rearranges what is already on screen**:
+  the card chrome (label and panel lines) is written the moment the opening
+  fence completes, so the body streams into a settled layout and the closing
+  fence only appends the bottom panel line.  Previously the whole block stayed
+  raw until its closing fence arrived and was then replaced by the card, which
+  inserted blank lines above text the user had already read and shifted
+  everything below it.  Highlighting and the body's panel properties are
+  applied as the body arrives (properties only, never text).  Tables still
+  re-render their rows while they extend; that part of the same fix is
+  pending.  (rationale: postmortem/055)
 
 - **`M-p` no longer recalls the host's own injected messages**: alongside a
   prompt the host appends `user/message` copies of model-facing text —

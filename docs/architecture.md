@@ -419,11 +419,25 @@ skipped and only message-aligned `event` records seed the buffer, so old
 `assistant/message` is used directly; new chunks from live follow events
 are handled directly. The streamed body uses
 a render watermark and frozen properties so that only the not-yet-stable tail is
-re-rendered and styled. The assistant stream creates and retains its Markdown
+re-rendered and styled. Fenced code blocks render **append-only**: a block
+writes its card chrome as soon as the opening
+fence line completes and then streams its body raw inside it (each flush
+styles only the new body lines, properties only), so the closing fence merely
+appends the bottom panel line — no line break is ever inserted into text the
+user has already read. Extending tables still re-render their rows
+(see [postmortem/055](../postmortem/055-append-only-streamed-blocks.md)).
+The assistant stream creates and retains its Markdown
 scan state from the outset, so successive flushes scan only new complete
-lines of unfinished blocks. Its render watermark is a non-advancing marker
+lines of unfinished blocks.
+An open block is never deferred to the idle
+queue, and a block that a queued (temp-buffer) render opened is handed to the
+live state with its body-start marker, so a streamed body is never re-read as
+Markdown. Its render watermark is a non-advancing marker
 owned by that state, avoiding property writes to the first character of an
-otherwise stable reply. Empty ready ranges bypass Markdown passes. Force
+otherwise stable reply. Empty ready ranges bypass Markdown passes.
+After closing a source block, formatting resumes at the text after its bottom
+padding before advancing the watermark, including when that tail arrived in
+the same chunk as the closing fence. Force
 replacement resets the watermark; finalization detaches it after the final
 formatting attempt. Queued replies retain their body markers until publication
 or cancellation. Non-stream Markdown conversions keep their serializable watermark
