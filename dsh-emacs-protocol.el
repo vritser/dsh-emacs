@@ -61,6 +61,15 @@
         ((listp value) value)
         (t nil)))
 
+(defun dsh-protocol--objects (value)
+  "JSON array VALUE as a list of its object elements.
+A non-object element — a string, number, or null where the wire promised an
+object — is dropped here, at the boundary: the `--from-alist' constructors
+unpack their fields with `assq', which signals on anything but a list, so a
+malformed element must decline rather than break the caller."
+  (delq nil (mapcar (lambda (item) (and (consp item) item))
+                    (dsh-protocol--list value))))
+
 (defun dsh-protocol--boolean (value)
   "Return wire VALUE as a strict boolean, mapping JSON `false' to nil.
 `json-read' decodes false as the truthy symbol `:json-false', so a flag must
@@ -498,10 +507,17 @@ in contribution order.  The derived `custom' state is not an option."
                               (options
                                (mapcar
                                 #'dsh-protocol-question-option--from-alist
-                                (dsh-protocol--list
+                                (dsh-protocol--objects
                                  (cdr (assq 'options alist)))))
                               (multi-select
-                               (eq t (cdr (assq 'multiSelect alist)))))))
+                               ;; The ask request spells this flag
+                               ;; `multiSelect'; the `ask_user_question'
+                               ;; tool's own arguments spell it
+                               ;; `multi_select'.  Same flag, same
+                               ;; question, so both decode here.
+                               (dsh-protocol--boolean
+                                (or (cdr (assq 'multiSelect alist))
+                                    (cdr (assq 'multi_select alist))))))))
   "One `user-questions/request' item, with options in their offered order."
   id
   text

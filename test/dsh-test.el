@@ -3807,6 +3807,183 @@ Lets a test drive a malformed content value through the result path."
       (string-match-p (regexp-quote "✗ exit 1") block)
       (string-match-p "^  OUT boom$" block))))
 
+;; --- Test 31f: an ask row renders dsh web's question card — the questions
+;; and their numbered options with descriptions replace the argument JSON, and
+;; the settled answers check the chosen options and carry free-text answers ---
+(defconst dsh-emacs-test--ask-args
+  (json-encode
+   '((questions . [((id . "q1") (header . "Layout")
+                    (question . "Which layout?")
+                    (options . [((label . "Stacked")
+                                 (description . "Classic rhythm."))
+                                ((label . "Compact"))])
+                    (multi_select . :json-false))
+                   ((id . "q2") (question . "Which details?")
+                    (options . [((label . "Chip"))])
+                    (multi_select . t))])))
+  "Wire arguments of a two-question `ask_user_question' call.")
+
+(dsh-test-assert "ask-tool-uses-question-variant"
+  (equal "question" (car (dsh-emacs-render--tool-variant "ask_user_question")))
+  (equal "❓" (cdr (assoc "question" dsh-emacs--variant-icons)))
+  (stringp (cdr (assoc "question" dsh-emacs--tool-icon-svgs))))
+
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "k1" "ask_user_question"
+                                    dsh-emacs-test--ask-args))
+  (let ((block (dsh-emacs-test--tool-block-text
+                (dsh-emacs-render--make-namespace) "tool-k1")))
+    (dsh-test-assert "ask-pending-card-shows-questionnaire"
+      (string-match-p "Ask question · waiting" block)
+      (string-match-p "^  Q1 · Layout — Which layout\\?$" block)
+      (string-match-p "^  Q2 · Which details\\?$" block)
+      (string-match-p "^   1\\.   Stacked$" block)
+      (string-match-p "^        Classic rhythm\\.$" block)
+      (string-match-p "^   1\\.   Chip$" block)
+      (not (string-match-p "^  IN" block))
+      (not (string-match-p "^  OUT" block)))))
+
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "k2" "ask_user_question"
+                                    dsh-emacs-test--ask-args))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event
+    2 "k2" nil 0
+    (json-encode '((answers . [((id . "q1") (selected . ["Stacked"]))
+                               ((id . "q2") (selected . [])
+                                (custom . "and a summary"))])))))
+  (let ((block (dsh-emacs-test--tool-block-text
+                (dsh-emacs-render--make-namespace) "tool-k2")))
+    (dsh-test-assert "ask-answered-card-marks-choices-and-free-text"
+      (string-match-p "Ask question · 2/2 answered" block)
+      (string-match-p "^   1\\. ✓ Stacked$" block)
+      (string-match-p "^   2\\.   Compact$" block)
+      (string-match-p "^  → and a summary$" block))))
+
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "k3" "ask_user_question"
+                                    dsh-emacs-test--ask-args))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event
+    2 "k3" nil 0
+    (json-encode '((answers . [((id . "q1") (selected . []))])))))
+  (let ((block (dsh-emacs-test--tool-block-text
+                (dsh-emacs-render--make-namespace) "tool-k3")))
+    (dsh-test-assert "ask-settled-empty-question-reads-not-answered"
+      ;; The total is the answer document's own length, like dsh web.
+      (string-match-p "Ask question · 0/1 answered" block)
+      (string-match-p "^  Not answered$" block))))
+
+;; An abandoned ask is the user's own decision: the row interrupts instead of
+;; failing red, like dsh web's ASK_ABORTED state.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "k4" "ask_user_question"
+                                    dsh-emacs-test--ask-args))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event
+    2 "k4" t nil "Error: ask_user_question was aborted before the user answered"
+    '((name . "UserQuestionError") (code . "ASK_ABORTED")
+      (reason . "User abandoned the questions"))))
+  (let ((block (dsh-emacs-test--tool-block-text
+                (dsh-emacs-render--make-namespace) "tool-k4")))
+    (dsh-test-assert "ask-aborted-row-interrupts-instead-of-failing"
+      (string-match-p "◐ Ask question · interrupted" block)
+      (string-match-p
+       (regexp-quote
+        "This question set was interrupted before answers were submitted.")
+       block)
+      (not (string-match-p (regexp-quote "✗ failed") block)))))
+
+;; A dismissed ask (ASK_CANCELLED) is the user's own decision too: the row
+;; settles green with the outcome, and the questionnaire stays as the record.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "k8" "ask_user_question"
+                                    dsh-emacs-test--ask-args))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event
+    2 "k8" t nil "the user cancelled ask_user_question"
+    '((name . "UserQuestionError") (code . "ASK_CANCELLED")
+      (reason . "the user cancelled ask_user_question"))))
+  (let ((block (dsh-emacs-test--tool-block-text
+                (dsh-emacs-render--make-namespace) "tool-k8")))
+    (dsh-test-assert "ask-cancelled-row-settles-instead-of-failing"
+      (string-match-p "Ask question · cancelled" block)
+      (string-match-p "^  Q1 · Layout — Which layout\\?$" block)
+      (string-match-p
+       (regexp-quote
+        "This question set was cancelled before answers were submitted.")
+       block)
+      (not (string-match-p (regexp-quote "✗ failed") block)))))
+
+;; A malformed option element (a string or a number where the wire promised
+;; an object) is dropped at the protocol boundary: the question still renders
+;; and nothing signals out of the event stream.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event
+    1 "k7" "ask_user_question"
+    "{\"questions\":[{\"id\":\"q1\",\"header\":\"Layout\",\"question\":\"Which?\",\"options\":[\"Yes\",42,{\"label\":\"Stacked\"}]}]}"))
+  (let ((block (dsh-emacs-test--tool-block-text
+                (dsh-emacs-render--make-namespace) "tool-k7")))
+    (dsh-test-assert "ask-malformed-option-elements-are-dropped"
+      (string-match-p "Ask question · waiting" block)
+      (string-match-p "^  Layout — Which\\?$" block)
+      (string-match-p "^   1\\.   Stacked$" block)
+      (not (string-match-p "Yes" block)))))
+
+;; A call the ask card cannot describe (no usable questions) keeps the ioCard.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "k5" "ask_user_question" "{}"))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event 2 "k5" nil 0 "no questions given"))
+  (let ((block (dsh-emacs-test--tool-block-text
+                (dsh-emacs-render--make-namespace) "tool-k5")))
+    (dsh-test-assert "ask-unusable-arguments-keep-the-iocard"
+      (string-match-p "^  OUT no questions given$" block))))
+
+;; A malformed question element (a string or a number where the wire promised
+;; an object) must decline instead of signalling out of the event stream.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "k6" "ask_user_question"
+                                    "{\"questions\":[\"oops\",42,null]}"))
+  (let ((block (dsh-emacs-test--tool-block-text
+                (dsh-emacs-render--make-namespace) "tool-k6")))
+    (dsh-test-assert "ask-malformed-question-elements-keep-the-iocard"
+      (string-match-p "Ask question" block)
+      (string-match-p "oops" block)
+      (not (string-match-p "Q1" block)))))
+
 ;; Collapsed snapshots retain complete content and faces across repeated folds.
 (dolist (style '(minimal rounded sharp))
   (with-temp-buffer
@@ -8855,6 +9032,25 @@ Lets a test drive a malformed content value through the result path."
       (not (dsh-protocol-question-multi-select
             (dsh-protocol-question--from-alist
              `((multiSelect . ,false-value))))))))
+
+;; The ask tool's own arguments spell the flag `multi_select' where the ask
+;; request spells it `multiSelect'; both decode to the same struct.
+(dsh-test-assert "question-protocol-decodes-tool-argument-spelling"
+  (dsh-protocol-question-multi-select
+   (dsh-protocol-question--from-alist '((id . "q") (multi_select . t))))
+  (not (dsh-protocol-question-multi-select
+        (dsh-protocol-question--from-alist
+         '((id . "q") (multi_select . :json-false))))))
+
+;; A malformed option element declines at the wire boundary instead of
+;; signalling out of the constructor's `assq'.
+(dsh-test-assert "question-protocol-drops-malformed-option-elements"
+  (equal '("Stacked")
+         (mapcar #'dsh-protocol-question-option-label
+                 (dsh-protocol-question-options
+                  (dsh-protocol-question--from-alist
+                   '((id . "q") (question . "Which?")
+                     (options . ["oops" ((label . "Stacked")) 42])))))))
 
 ;; session identifier: prefer the active chat buffer's name; with no buffer
 ;; fall back to dsh: <id>, truncated; empty when there is no session-id (a

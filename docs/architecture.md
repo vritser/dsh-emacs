@@ -217,7 +217,12 @@ when the server protocol changes you sync exactly one file. Covered payloads:
   objective, phase, blocked-reason, max-goal-rounds, rounds-started)
 - `user-questions/request` items → `dsh-protocol-question` (id, text, header,
   detail, multi-select, options) → `dsh-protocol-question-option` (label,
-  description)
+  description). The `ask_user_question` tool's own arguments are the same
+  question, so the ask card decodes them through this constructor too; it
+  accepts the tool's `multi_select` spelling beside the request's
+  `multiSelect`, which keeps both spellings in one place, and unpacks its
+  `options` array through `dsh-protocol--objects` so a non-object element
+  declines at the boundary rather than signalling out of the constructor.
 
 Conversion is one-way and lossless: `session/modelCatalog` responses become a
 `dsh-protocol-model-directory` before the picker reads them; the cached

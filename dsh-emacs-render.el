@@ -27,6 +27,7 @@
 (require 'subr-x)
 (require 'dsh-emacs-ui)
 (require 'dsh-emacs-faces)
+(require 'dsh-emacs-protocol)
 (require 'dsh-emacs-tokens)
 (require 'dsh-emacs-markdown)
 
@@ -217,6 +218,7 @@ collapsible checklist."
     ("write"      . "write")
     ("edit"       . "edit")
     ("run_code"   . "code")
+    ("ask_user_question" . "question")
     ("cordis_package_inspect" . "read")
     ("cordis_runtime_inspect" . "read")
     ("cordis_run" . "others")
@@ -241,6 +243,7 @@ magnifier family.")
     ("edit"   . "✏️")
     ("code"   . "</>")
     ("command" . "⚡")
+    ("question" . "❓")
     ("others" . "✨"))
   "Variant -> emoji fallback icon, mirroring dsh web's VariantIcons by meaning:
 - bash    = terminal            (IconApiOutline14)
@@ -251,6 +254,7 @@ magnifier family.")
 - edit    = pencil              (IconEditOutline16)
 - code    = code brackets       (IconCodeOutline16)
 - command = lightning           (slash commands, IconFlash16 style)
+- question = question mark       (IconQuestionOutline14, the ask row's icon)
 - others  = sparkle             (IconSparkle16)
 
 The emoji is only a terminal / non-SVG fallback; graphical Emacs renders the
@@ -269,6 +273,7 @@ real dsh-web SVG icons (see `dsh-emacs--tool-icon-svgs').")
     ("edit" . "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\"><path d=\"M9.94076 1.34942C10.7047 0.90231 11.6503 0.902415 12.4143 1.34942C12.7061 1.52015 12.9688 1.79118 13.3104 2.13284C13.6521 2.47448 13.9231 2.73721 14.0939 3.02894C14.5408 3.79294 14.5409 4.73856 14.0939 5.50251C13.9231 5.79415 13.652 6.05704 13.3104 6.39861L6.65932 13.0497C6.28068 13.4284 6.00695 13.7108 5.66543 13.9097C5.32391 14.1085 4.94315 14.2074 4.42705 14.3498L3.24394 14.6761C2.77527 14.8054 2.34538 14.9262 2.00131 14.9684C1.65196 15.0112 1.17964 15.0013 0.810764 14.6325C0.441921 14.2637 0.432107 13.7913 0.47486 13.442C0.517035 13.0979 0.6379 12.668 0.767181 12.1993L1.09352 11.0162C1.23588 10.5001 1.33481 10.1193 1.5336 9.77784C1.7325 9.43632 2.0149 9.1626 2.39355 8.78395L9.04466 2.13284C9.38625 1.79126 9.64911 1.52016 9.94076 1.34942ZM15.5427 14.8398H7.55223L8.96707 13.425H15.5427V14.8398ZM3.39382 9.78422C2.965 10.213 2.84244 10.3436 2.75709 10.49C2.67183 10.6366 2.61862 10.8079 2.45733 11.3925L2.13099 12.5756C2.00183 13.0439 1.92194 13.3419 1.88863 13.5536C2.10041 13.5204 2.39872 13.4416 2.86764 13.3123L4.05075 12.9859C4.63544 12.8246 4.80669 12.7715 4.95323 12.6862C5.09968 12.6008 5.23022 12.4783 5.65905 12.0494L10.721 6.98644L8.45577 4.72121L3.39382 9.78422ZM11.7 2.57079C11.3774 2.38198 10.9777 2.38198 10.6551 2.57079C10.5602 2.62647 10.4487 2.72931 10.0449 3.13311L9.45604 3.72094L11.7213 5.98617L12.3102 5.39833C12.7139 4.99457 12.8168 4.88307 12.8725 4.78818C13.0613 4.46561 13.0612 4.06585 12.8725 3.74326C12.8169 3.64827 12.7146 3.53752 12.3102 3.13311C11.9057 2.72863 11.795 2.6264 11.7 2.57079Z\" fill=\"__C__\" stroke=\"none\"/></svg>")
     ("code" . "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\"><path d=\"M12.3368 1.53569L11.931 4.43172H14.8086V5.79673H11.7404L11.1962 9.67859H14.2839V11.0436H11.0056L10.4994 14.6529L9.14873 14.4643L9.62731 11.0436H5.75876L5.25252 14.6529L3.90186 14.4643L4.38043 11.0436H1.69141V9.67859H4.57104L5.11417 5.79673H2.21609V4.43172H5.30581L5.73724 1.34713L7.08995 1.53569L6.68414 4.43172H10.5527L10.9841 1.34713L12.3368 1.53569ZM5.94937 9.67859H9.81791L10.361 5.79673H6.49353L5.94937 9.67859Z\" fill=\"__C__\" stroke=\"none\"/></svg>")
     ("command" . "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\"><path d=\"M9.64572 1.0455C9.76513 0.755118 10.0095 0.530578 10.309 0.437078C10.6086 0.343578 10.9369 0.394798 11.1939 0.575858L11.2012 0.581418C11.3182 0.661738 11.4221 0.760918 11.5034 0.8755C11.6954 1.14086 11.8542 1.4732 12.0085 1.8645C12.3203 2.6551 12.5387 3.65868 12.7963 5.00636L13.1411 6.51662C13.3881 6.97662 13.2748 7.53122 12.8678 7.86842C12.4607 8.20542 11.9025 8.19562 11.5073 7.84522C11.475 7.81655 11.4443 7.78658 11.4152 7.75542C11.4172 8.25776 11.3912 8.75092 11.3373 9.22898C11.2168 10.2971 11.0096 11.2154 10.7187 11.9567C10.5838 12.3118 10.3567 12.6263 10.0195 12.8129C9.92472 12.8645 9.82446 12.9061 9.72037 12.9368C9.82774 13.3274 9.86604 13.7345 9.83316 14.1389C9.80302 14.5069 9.62146 14.8444 9.32762 15.0619C9.03356 15.2793 8.65482 15.3692 8.27122 15.2454C7.87092 15.116 7.52282 14.872 7.26235 14.5431C6.89096 14.0741 6.55986 13.2548 6.16811 11.9501C5.80842 10.7459 5.40551 9.12869 4.97117 7.10983C4.86597 6.62643 4.98747 6.12163 5.29587 5.74463C5.60427 5.36763 6.06447 5.16503 6.53547 5.19483C7.22692 5.23743 7.92050 5.30787 8.60580 5.40420C8.62320 5.31802 8.64380 5.23258 8.66757 5.14810C8.69923 5.08838 8.71202 5.02050 8.70402 4.95382C8.68602 4.79682 8.55462 4.67382 8.41242 4.58502C8.29972 4.51512 8.17252 4.44762 8.03562 4.39882C7.76116 4.30336 7.57267 4.01694 7.56703 3.73038C7.56103 3.41998 7.68723 3.12158 7.92803 2.91498C8.14663 2.72838 8.43559 2.64336 8.71785 2.68403C9.14985 2.74463 9.48305 2.83943 9.64572 1.0455ZM11.9092 9.31463C11.8775 9.97603 11.6655 10.5722 11.3551 11.0817C11.1287 11.4805 10.8322 11.8266 10.4862 12.0999C10.3972 12.1841 10.3009 12.2605 10.1987 12.328C10.5802 13.5469 10.8160 14.1493 10.9275 14.1975C11.4897 14.4287 12.0083 14.0268 12.0416 13.4145C12.0657 12.9633 11.9724 12.3789 11.7989 11.7176C11.7692 11.6139 11.7377 11.5103 11.7043 11.4070C12.0070 11.0933 12.2912 10.7631 12.4902 10.3871C12.7589 9.87770 12.8951 9.32482 12.8930 8.76790C12.7832 8.96782 12.6543 9.15691 12.5087 9.32210C12.3467 9.51423 12.1243 9.65222 11.9092 9.31463Z\" fill=\"__C__\" stroke=\"none\"/></svg>")
+    ("question" . "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 14 14\" fill=\"none\"><path d=\"M12.5757 7.00012C12.5757 3.92085 10.0794 1.42463 7.00012 1.42456C3.9208 1.42456 1.42456 3.9208 1.42456 7.00012C1.42463 10.0794 3.92085 12.5757 7.00012 12.5757C10.0793 12.5756 12.5756 10.0793 12.5757 7.00012ZM13.8002 7.00012C13.8001 10.7559 10.7559 13.8001 7.00012 13.8002C3.2443 13.8002 0.199291 10.7559 0.199219 7.00012C0.199219 3.24426 3.24426 0.199219 7.00012 0.199219C10.7559 0.199291 13.8002 3.2443 13.8002 7.00012Z\" fill=\"__C__\" stroke=\"none\"/><path d=\"M6.18042 8.68184C6.18043 8.09153 6.32893 7.34655 6.92127 6.8481C7.28566 6.54148 7.76104 6.27318 8.0022 6.10811C8.28964 5.91137 8.42234 5.76562 8.48328 5.58944C8.57774 5.31609 8.53121 5.00904 8.34912 4.76741C8.17409 4.53522 7.83879 4.32222 7.28186 4.32222C5.99668 4.32225 5.46969 5.11832 5.46949 5.78939H4.24414C4.24436 4.39942 5.36327 3.09691 7.28186 3.09688C8.17773 3.09688 8.89489 3.45606 9.32752 4.02999C9.75287 4.59438 9.86938 5.32775 9.64026 5.99019C9.44847 6.5444 9.04722 6.87743 8.69434 7.11898C8.29506 7.39226 8.02318 7.52192 7.70996 7.78548C7.51943 7.94582 7.40577 8.24899 7.40577 8.68184V8.75533H6.18042V8.68184Z\" fill=\"__C__\" stroke=\"none\"/><path d=\"M7.39455 9.44026V10.8109H6.16921V9.44026H7.39455Z\" fill=\"__C__\" stroke=\"none\"/></svg>")
     ("others" . "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\"><path d=\"M6.1 3.1Q6.6 7.8 11.3 8.3Q6.6 8.8 6.1 13.5Q5.6 8.8 0.9 8.3Q5.6 7.8 6.1 3.1Z\" fill=\"__C__\" stroke=\"none\"/><path d=\"M11.9 1Q12.2 3.7 14.9 4Q12.2 4.3 11.9 7Q11.6 4.3 8.9 4Q11.6 3.7 11.9 1Z\" fill=\"__C__\" stroke=\"none\"/><path d=\"M12.5 9.4Q12.7 11.4 14.7 11.6Q12.7 11.8 12.5 13.8Q12.3 11.8 10.3 11.6Q12.3 11.4 12.5 9.4Z\" fill=\"__C__\" stroke=\"none\"/></svg>"))
   "Variant -> dsh-web SVG icon template, with a \"__C__\" fill placeholder.
 Graphical Emacs renders these via `create-image'; terminal Emacs falls back to
@@ -285,6 +290,7 @@ template with a \"__C__\" fill placeholder.  Graphical Emacs renders it via
 (defcustom dsh-emacs-tool-titles
   '(("pwsh" . "PowerShell")
     ("present" . "Present files")
+    ("ask_user_question" . "Ask question")
     ("job_output" . "Job Output")
     ("job_list" . "Jobs")
     ("job_kill" . "Kill Job"))
@@ -1974,7 +1980,16 @@ the event seq but renders no ordinary tool card."
                (icon (cdr variant-info))
                (header (dsh-emacs-render--tool-header name variant args))
                (title (car header))
-               (summary (cdr header))
+               ;; An ask call's questions were decoded from its arguments:
+               ;; its row states which stage the question set is in, and its
+               ;; body is the questionnaire (see the ask card section).  The
+               ;; variant is the gate, like the bash and write/edit cards.
+               (ask-questions (and (equal variant "question")
+                                   (dsh-emacs-render--ask-questions args)))
+               (summary (or (and ask-questions
+                                 (dsh-emacs-render--ask-summary
+                                  nil nil nil))
+                            (cdr header)))
                (body-text (dsh-emacs-render--tool-body-text variant args))
                ;; bash and file-mutation rows draw their (running) expanded body
                ;; as the card the settled result will complete — the `$' prompt
@@ -1982,7 +1997,10 @@ the event seq but renders no ordinary tool card."
                ;; matches.  read waits for its metadata, like dsh web.  The
                ;; variant gate keeps the other variants from re-parsing their
                ;; arguments for a card they cannot have.
-               (display-body (cond ((equal variant "bash")
+               (display-body (cond (ask-questions
+                                    (dsh-emacs-render--ask-body
+                                     ask-questions nil nil))
+                                   ((equal variant "bash")
                                     (or (dsh-emacs-render--bash-card-body body-text)
                                         body-text))
                                    ((member variant '("write" "edit"))
@@ -2572,6 +2590,182 @@ generic card."
       (mapconcat #'identity (dsh-emacs-render--job-list-rows text) "\n"))
      (t (mapconcat #'identity (dsh-emacs-render--body-rows text) "\n")))))
 
+;;; ---------------------------------------------------------------------------
+;;; Renderer: ask card (dsh web `AskQuestionCard')
+;;; ---------------------------------------------------------------------------
+;;; dsh's `ask_user_question' call carries its questions in the arguments and
+;;; the settled answers in its result — both the shapes the protocol decoder
+;;; and the answer reader below consume.  The card records the decision
+;;; instead of dumping the two JSON documents into an ioCard: every question
+;;; with its numbered options and descriptions, the chosen options marked, and
+;;; `Not answered' where the batch settled empty.  A call whose arguments name
+;;; no usable question keeps the generic ioCard.
+
+(defun dsh-emacs-render--ask-json (text)
+  "Decode TEXT as one JSON document, or return nil.
+Nil for a non-string, an empty document, or anything `json-read-from-string'
+rejects: the ask card declines instead of signalling on malformed wire data,
+so its caller keeps the generic card."
+  (when (and (stringp text) (not (string-empty-p (string-trim text))))
+    (let ((parsed (condition-case nil
+                      (json-read-from-string (string-trim text))
+                    (error nil))))
+      (and (listp parsed) parsed))))
+
+(defun dsh-emacs-render--ask-questions (args-raw)
+  "Decode an `ask_user_question' call's ARGS-RAW into question structs.
+Returns the questions in their offered order, or nil when the arguments name
+no usable question — a missing `questions' array, a question without text, or
+malformed JSON — so the caller keeps the generic ioCard.  The protocol module
+owns both argument spellings of the multi-select flag and drops a malformed
+element instead of signalling."
+  (let ((parsed (dsh-emacs-render--ask-json args-raw)))
+    (when parsed
+      (delq nil
+            (mapcar
+             (lambda (item)
+               (let ((question (dsh-protocol-question--from-alist item)))
+                 (when (and (dsh-protocol-question-p question)
+                            (let ((text (dsh-protocol-question-text question)))
+                              (and (stringp text)
+                                   (not (string-empty-p text)))))
+                   question)))
+             (dsh-protocol--objects
+              (dsh-emacs-render--aget "questions" parsed)))))))
+
+(defun dsh-emacs-render--ask-answers (text)
+  "Decode an `ask_user_question' result TEXT into (ID SELECTED CUSTOM) cells.
+SELECTED is the list of labels the user chose; CUSTOM is the free-text answer,
+or nil when none was typed.  Returns nil when TEXT is not the tool's answer
+document — an error message or an empty result — so the card renders its
+questions unanswered."
+  (let* ((parsed (dsh-emacs-render--ask-json text))
+         (answers (and parsed (dsh-protocol--objects
+                               (dsh-emacs-render--aget "answers" parsed)))))
+    (when answers
+      (mapcar
+       (lambda (answer)
+         (list (dsh-emacs-render--aget "id" answer)
+               (delq nil
+                     (mapcar (lambda (label) (and (stringp label) label))
+                             (dsh-emacs-render--wire-list
+                              (dsh-emacs-render--aget "selected" answer))))
+               (let ((custom (dsh-emacs-render--aget "custom" answer)))
+                 (and (stringp custom)
+                      (not (string-empty-p custom))
+                      custom))))
+       answers))))
+
+(defun dsh-emacs-render--ask-summary (answers error-code settled)
+  "Collapsed-row summary for an ask call, or nil to keep the caller's summary.
+ANSWERS is `dsh-emacs-render--ask-answers' output, nil while the call runs or
+when its result carried no answer entry; ERROR-CODE is the settled
+`data.error.code'; SETTLED non-nil means the call has a result.  Mirrors dsh
+web, whose total is the answer document's own length: `A/B answered' once the
+answers are known, `cancelled' for a user-dismissed question set,
+`interrupted' for an abandoned one, `waiting' while the call runs — and nil
+for any other settled outcome, which the caller reports with its result
+preview."
+  (cond
+   (answers
+    (format "%d/%d answered"
+            (cl-count-if (lambda (cell) (or (nth 1 cell) (nth 2 cell)))
+                         answers)
+            (length answers)))
+   ((equal error-code "ASK_CANCELLED") "cancelled")
+   ((equal error-code "ASK_ABORTED") "interrupted")
+   ((not settled) "waiting")))
+
+(defun dsh-emacs-render--ask-question-row (index multi header text)
+  "Return the heading row for question INDEX of a MULTI-question batch.
+The question's own HEADER is the chip dsh web shows as its eyebrow and leads
+the row in the accent face; a batch of several questions prefixes the index as
+`Q2 · '.  Both parts are optional, so a bare question still renders as one
+clean row."
+  (let* ((number (and multi (concat "Q" (number-to-string index) " · ")))
+         (chip (and (stringp header)
+                    (not (string-empty-p header))
+                    (propertize header 'face 'dsh-emacs-accent-face))))
+    (concat "  "
+            (and number (propertize number 'face 'dsh-emacs-tool-meta-face))
+            chip
+            (and chip " — ")
+            text)))
+
+(defun dsh-emacs-render--ask-question-block (question index multi answer)
+  "Return one ask QUESTION as a block of body rows, joined by newlines.
+INDEX and MULTI place the question in its batch; QUESTION is a
+`dsh-protocol-question' struct and ANSWER its settled (ID SELECTED CUSTOM)
+cell, or nil while the call runs.  Every option keeps the reader's own
+numbering, with the chosen ones checked and accented; an option's description
+hangs at the label column, and a settled question closes with its free-text
+answer or `Not answered'."
+  (let* ((selected (nth 1 answer))
+         (custom (nth 2 answer))
+         (rows (list (dsh-emacs-render--ask-question-row
+                      index multi
+                      (dsh-protocol-question-header question)
+                      (dsh-protocol-question-text question))))
+         (number 0))
+    (dolist (option (dsh-protocol-question-options question))
+      (setq number (1+ number))
+      (let* ((label (or (dsh-protocol-question-option-label option) ""))
+             (chosen (and selected (member label selected)))
+             (indent (concat "  " (format "%2d. " number)
+                             (if chosen "✓ " "  ")))
+             (description (dsh-protocol-question-option-description option))
+             (label-row (concat indent
+                                (if chosen
+                                    (propertize label
+                                                'face 'dsh-emacs-accent-face)
+                                  label)))
+             (description-row
+              (and (stringp description)
+                   (not (string-empty-p description))
+                   (concat (make-string (string-width indent) ?\s)
+                           (propertize description
+                                       'face 'dsh-emacs-tool-meta-face)))))
+        (setq rows (append rows (list label-row)
+                           (and description-row (list description-row))))))
+    (let ((answer-row (cond
+                       (custom
+                        (concat "  "
+                                (propertize "→ " 'face 'dsh-emacs-accent-face)
+                                custom))
+                       ((and answer (null selected))
+                        (concat "  " (propertize "Not answered"
+                                                 'face
+                                                 'dsh-emacs-tool-meta-face))))))
+      (mapconcat #'identity
+                 (append rows (and answer-row (list answer-row)))
+                 "\n"))))
+
+(defun dsh-emacs-render--ask-body (questions answers status-text)
+  "Compose the expanded body of an ask card, or nil without QUESTIONS.
+ANSWERS is `dsh-emacs-render--ask-answers' output (nil while the call runs);
+STATUS-TEXT, when non-empty, is the settled call's failure line or the ask
+verdict for a cancelled / interrupted set, printed above the questions like
+the other cards' status lines.  One question is one block of rows; a batch
+separates its questions with a blank line.  Faces are baked onto the rows,
+so fold/unfold preserves the styling."
+  (when questions
+    (let ((multi (> (length questions) 1))
+          (index 0)
+          (blocks '()))
+      (dolist (question questions)
+        (setq index (1+ index))
+        (push (dsh-emacs-render--ask-question-block
+               question index multi
+               (and answers
+                    (assoc (dsh-protocol-question-id question) answers)))
+              blocks))
+      (mapconcat #'identity
+                 (append (and (stringp status-text)
+                              (not (string-empty-p status-text))
+                              (list (concat "  " status-text)))
+                         (nreverse blocks))
+                 "\n\n"))))
+
 (defun dsh-emacs-render--shell-status (text)
   "Split TEXT into (BODY EXIT-CODE SIGNAL).
 dsh's shell renderer appends `[exit code: N]' or `[killed by signal: X]' to
@@ -2655,6 +2849,41 @@ everything else `success'."
                  (signal (or block-signal (nth 2 shell)))
                  (state (dsh-emacs-render--result-state
                          is-error error-code exit-code signal))
+                 ;; The two user-driven ask outcomes are the human's own
+                 ;; decision, not a tool failure: a cancelled question set
+                 ;; settles and an abandoned one interrupts, the mapping dsh
+                 ;; web's AskQuestionRow applies.  `result-state' cannot know
+                 ;; that, so the ask call corrects its own state here.
+                 (state (if (equal variant "question")
+                            (pcase error-code
+                              ("ASK_CANCELLED" 'success)
+                              ("ASK_ABORTED" 'stopped)
+                              (_ state))
+                          state))
+                 ;; An ask call also explains those two outcomes in its body
+                 ;; (web's `ask.cancelledDetail' / `ask.interruptedDetail'),
+                 ;; where the generic status line would say only "interrupted".
+                 (ask-verdict (and (equal variant "question")
+                                   (pcase error-code
+                                     ("ASK_CANCELLED"
+                                      "This question set was cancelled before answers were submitted.")
+                                     ("ASK_ABORTED"
+                                      "This question set was interrupted before answers were submitted."))))
+                 (ask-questions (and (equal variant "question")
+                                     (dsh-emacs-render--ask-questions
+                                      args-raw)))
+                 (ask-answers (and ask-questions
+                                   (dsh-emacs-render--ask-answers full-text)))
+                 ;; An ask row's header states the outcome of its question
+                 ;; set (`2/3 answered', `interrupted', `cancelled'); a
+                 ;; settled set the card cannot describe falls back to the
+                 ;; result preview like any other row.
+                 (row-summary (if ask-questions
+                                  (or (dsh-emacs-render--ask-summary
+                                       ask-answers error-code t)
+                                      (dsh-emacs-render--tool-result-preview
+                                       full-text))
+                                summary))
                  (face (pcase state
                          ('success 'dsh-emacs-tool-success-face)
                          ('error 'dsh-emacs-tool-error-face)
@@ -2672,10 +2901,15 @@ everything else `success'."
                  ;; A settled bash/pwsh call expands into a terminal card
                  ;; (`$' prompt rows + output + status footer), a file read into
                  ;; the line-numbered read card, a write/edit into its diff
-                 ;; card; a call the card models cannot describe (or a failed
-                 ;; one) keeps the generic ioCard (IN/OUT).  The variant gate
-                 ;; keeps the other variants from re-parsing their arguments.
-                 (body (or (and (equal variant "bash")
+                 ;; card, an ask call into its question/answer record; a call
+                 ;; the card models cannot describe (or a failed one) keeps the
+                 ;; generic ioCard (IN/OUT).  The variant gate keeps the other
+                 ;; variants from re-parsing their arguments.
+                 (body (or (and ask-questions
+                                (dsh-emacs-render--ask-body
+                                 ask-questions ask-answers
+                                 (or ask-verdict status-text)))
+                           (and (equal variant "bash")
                                 (dsh-emacs-render--bash-card-body
                                  args (nth 0 shell) state exit-code signal
                                  error-reason))
@@ -2696,10 +2930,10 @@ everything else `success'."
               :label-left (concat
                            (dsh-emacs-render--tool-leading icon state)
                            (propertize title 'face 'dsh-emacs-tool-title-face))
-              :label-right (if (string-empty-p summary)
+              :label-right (if (string-empty-p row-summary)
                                 (dsh-emacs-render--tool-result-preview
                                  full-text)
-                              summary)
+                              row-summary)
               :body body
               :style 'minimal
               ;; State tint on the header row only: the ioCard body keeps its

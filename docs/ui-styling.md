@@ -23,7 +23,8 @@ builds on agent-shell, the mode-line stats on pi-mono):
   + status color (pending=orange, success=green, error=red); bash/pwsh rows
   expand into a terminal card (`$` prompt + output, error/interrupt footer),
   read rows into a line-numbered file card, write/edit rows into a diff card,
-  and every other variant into an IN/OUT section
+  `ask_user_question` rows into their question/answer record, and every other
+  variant into an IN/OUT section
 - **Mode-line stats**: a compact status section spliced into the mode line (cwd, git branch, model,
   tokens, context%, and cost)
 - **Session list**: card view showing session title, working directory, branch,
@@ -74,6 +75,7 @@ expanding reveals the call body.  Icons correspond one-to-one with dsh web's
 | write | ✏️ | IconEditOutline16 (pencil) |
 | edit | ✏️ | IconEditOutline16 (pencil) |
 | code (run_code) | `</>` | IconCodeOutline16 (code brackets) |
+| question (ask_user_question) | ❓ | IconQuestionOutline14 (question mark) |
 | others (cordis_run, etc.) | ✨ | IconSparkle16 (sparkle) |
 
 A row with a known variant shows a humanized tool name (`grep` → `Grep`), or
@@ -159,6 +161,19 @@ for no added meaning (see
   independent of argument order.  The titles are `Job Output`, `Jobs` and
   `Kill Job`.  A `job_output` without a status line (a
   malformed or failed read) keeps the generic ioCard.
+- **`ask_user_question` rows expand into the decision record** (dsh web
+  `AskQuestionCard` plus the options its composer showed): one block per
+  question — its `header` chip in the accent face and its prompt, then the
+  options under the minibuffer reader's own numbering, the chosen ones checked
+  (`✓ `) with the label in the accent face, each description hanging at the
+  label column in the muted meta face, and a closing `→ <free text>` answer or
+  `Not answered` once that question settled.  The collapsed row states the
+  outcome instead (`waiting`, `2/3 answered`, `cancelled`, `interrupted`).  A
+  question set the user dismissed (`ASK_CANCELLED`) settles and an abandoned
+  one (`ASK_ABORTED`) reads as interrupted rather than a failed call, and the
+  body then opens with dsh web's explanation sentence instead of a status
+  line; the argument and answer JSON are never shown, and a call whose
+  arguments name no usable question keeps the generic ioCard.
 - Every other variant keeps a dsh web-style **ioCard**: one aligned block in
   which the `IN` (arguments) and `OUT` (result) labels share a label column
   and their text starts in a shared text column.  The `IN` value reads as a
@@ -183,7 +198,10 @@ first and by variant second: bash→`description|command`,
 read→`path|file_path|url`, search→`query|pattern|url`,
 write/edit→`path|file_path`, code→`description`,
 job_output/job_kill→`job_id`.  A `present` row is different again: it names
-the call's declared `files[].path` list rather than one argument value.
+the call's declared `files[].path` list rather than one argument value, and an
+`ask_user_question` row carries its question set's outcome — `waiting` while
+the call runs, `A/B answered` once the answers are known, `cancelled` or
+`interrupted` for the two user-driven outcomes its error codes name.
 A **variant-less** tool is titled `Tool Call` and carries its wire name as the
 summary instead: `Tool Call · <tool name>`.  Its arguments are deliberately
 absent from the header — the expanded card already shows them in the `IN`

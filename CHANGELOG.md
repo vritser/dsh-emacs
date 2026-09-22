@@ -10,6 +10,20 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Ask rows record the decision**: an `ask_user_question` call no longer
+  dumps both of its JSON documents into an ioCard.  The row collapses to
+  `Ask question · waiting`, then `2/2 answered` (or `cancelled` /
+  `interrupted`), and expands into the questionnaire: each question's header
+  chip and prompt, its options under the reader's own numbering with their
+  descriptions, the chosen ones checked, and the free-text answer or
+  `Not answered` where the batch settled empty.  The row takes dsh web's
+  question icon (`IconQuestionOutline14`), and a question set the user
+  dismissed or abandoned no longer paints the row as a red failure — its
+  expanded body states the outcome in dsh web's wording.
+  Arguments that name no usable question keep the generic ioCard; a malformed
+  question or option element is dropped instead of breaking the row.
+  (rationale: postmortem/053)
+
 - **Restore an archived session without leaving Emacs**: `M-x
   dsh-emacs-unarchive-session`, and `u` in `*dsh-sessions*`, bring a session
   back from the archive set through the dsh 0.1.6 `workspace/unarchiveSession`
