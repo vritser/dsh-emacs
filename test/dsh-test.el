@@ -9137,10 +9137,14 @@ Lets a test drive a malformed content value through the result path."
         (dsh-protocol-question-options dsh-emacs--question-current))
        (dsh-emacs--question-roster '("Alpha" "Beta")))
   (dsh-test-assert "question-annotation-carries-description"
-    (equal "  [Safe route.]" (dsh-emacs--question-annotation "1. Alpha"))
-    (equal "  [Safe route.]" (dsh-emacs--question-annotation "Alpha"))
+    (equal "  Safe route." (dsh-emacs--question-annotation "1. Alpha"))
+    (equal "  Safe route." (dsh-emacs--question-annotation "Alpha"))
     (equal "" (dsh-emacs--question-annotation "2. Beta"))
-    (equal "" (dsh-emacs--question-annotation "something else"))))
+    (equal "" (dsh-emacs--question-annotation "something else"))
+    ;; The suffix carries a face of its own: a frontend adds
+    ;; `completions-annotations' only to an annotation that has none.
+    (eq 'dsh-emacs-meta-face
+        (get-text-property 0 'face (dsh-emacs--question-annotation "Alpha")))))
 
 ;; single select: likewise one read (CRM takes only one value),
 ;; numeric candidate -> original label.
@@ -9296,8 +9300,8 @@ Lets a test drive a malformed content value through the result path."
       (let ((annotation (plist-get completion-extra-properties
                                    :annotation-function)))
         (dsh-test-assert "question-reader-setup-annotations-and-echo"
-          (equal "  [Go ahead]" (funcall annotation "1. Yes"))
-          (equal "  [Go ahead]" (funcall annotation "Yes"))
+          (equal "  Go ahead" (funcall annotation "1. Yes"))
+          (equal "  Go ahead" (funcall annotation "Yes"))
           (equal "" (funcall annotation "2. No"))
           (equal "Context here" echoed))))))
 

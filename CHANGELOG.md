@@ -61,6 +61,14 @@ minor) and stay undated until the release is cut.
 
 ### Changed
 
+- **Ask option descriptions read as one face, without brackets**: the
+  description riding along with each option candidate in the `ask` reader
+  now carries `dsh-emacs-meta-face` — the face the transcript's ask card
+  gives the same text — instead of the frontend's generic
+  `completions-annotations` default, and the suffix is the bare description
+  rather than `[description]`, so the reader and the settled row read as one
+  surface.  (rationale: postmortem/042)
+
 - **Generic tool cards line up and say what happened**: a tool with no
   dedicated card (any variant-less tool — for example a plugin's `dev_*`
   tools) now expands into one aligned block: the `IN` arguments read as a

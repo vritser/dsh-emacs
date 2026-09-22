@@ -4122,7 +4122,11 @@ echo area; an empty TEXT clears help this reader owns."
 (defun dsh-emacs--question-annotation (candidate)
   "Return CANDIDATE's option description, or an empty string.
 The description rides along with its candidate, so it is visible in the
-completion list without a tooltip."
+completion list without a tooltip, styled with `dsh-emacs-meta-face' — the
+face the ask card gives the same description in the transcript.  The
+annotation must carry a face of its own: a frontend adds
+`completions-annotations' only to a suffix that has none, so a bare string
+would be repainted by whatever default the user's UI applies."
   (let* ((label (or (dsh-emacs--question-label-of
                      candidate dsh-emacs--question-roster)
                     candidate))
@@ -4133,7 +4137,8 @@ completion list without a tooltip."
                            (dsh-protocol-question-option-description option))))
     (if (or (null description) (string-empty-p description))
         ""
-      (format "  [%s]" description))))
+      (propertize (format "  %s" description)
+                  'face 'dsh-emacs-meta-face))))
 
 (defun dsh-emacs--question-skip-command ()
   "Skip the current question with an empty selection.

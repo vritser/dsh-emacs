@@ -166,7 +166,7 @@ for no added meaning (see
   question — its `header` chip in the accent face and its prompt, then the
   options under the minibuffer reader's own numbering, the chosen ones checked
   (`✓ `) with the label in the accent face, each description hanging at the
-  label column in the muted meta face, and a closing `→ <free text>` answer or
+  label column in `dsh-emacs-meta-face`, and a closing `→ <free text>` answer or
   `Not answered` once that question settled.  The collapsed row states the
   outcome instead (`waiting`, `2/3 answered`, `cancelled`, `interrupted`).  A
   question set the user dismissed (`ASK_CANCELLED`) settles and an abandoned
@@ -277,7 +277,7 @@ not a working grouping surface.
 |---|---|
 | `dsh-emacs-divider-face` | Divider line |
 | `dsh-emacs-timestamp-face` | Timestamp |
-| `dsh-emacs-meta-face` | Meta information |
+| `dsh-emacs-meta-face` | Meta information and ask option descriptions |
 | `dsh-emacs-error-face` | Error message |
 | `dsh-emacs-running-face` | Generating status |
 | `dsh-emacs-input-box-face` | Input box background |

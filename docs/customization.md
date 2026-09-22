@@ -158,8 +158,11 @@ and leaves the raw reply visible. See
 Each question is one minibuffer read. The question text is the prompt, the
 options are the completion candidates, and each candidate carries its own
 description as a completion annotation (visible in the `*Completions*`
-buffer or in the frontend's list). Nothing is toggled in place and the reader
-never reopens, so the menu can neither flicker nor reorder.
+buffer or in the frontend's list), styled with `dsh-emacs-meta-face` — the
+same face the transcript's ask card gives it, rather than whatever
+`completions-annotations` default the frontend would otherwise apply.
+Nothing is toggled in place and the reader never reopens, so the menu can
+neither flicker nor reorder.
 
 | Key | Single choice | Multiple choices |
 |---|---|---|

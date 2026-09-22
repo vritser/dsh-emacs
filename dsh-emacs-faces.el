@@ -481,7 +481,7 @@ Muted like dsh web's `label-tertiary'."
 
 (defface dsh-emacs-meta-face
   '((t :inherit font-lock-comment-face))
-  "Meta info (inline notes next to labels, idle state)."
+  "Meta info (inline notes next to labels, idle state, ask option descriptions)."
   :group 'dsh-emacs-faces)
 
 (defface dsh-emacs-timestamp-face

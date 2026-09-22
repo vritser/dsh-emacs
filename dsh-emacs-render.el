@@ -2698,8 +2698,9 @@ INDEX and MULTI place the question in its batch; QUESTION is a
 `dsh-protocol-question' struct and ANSWER its settled (ID SELECTED CUSTOM)
 cell, or nil while the call runs.  Every option keeps the reader's own
 numbering, with the chosen ones checked and accented; an option's description
-hangs at the label column, and a settled question closes with its free-text
-answer or `Not answered'."
+hangs at the label column in `dsh-emacs-meta-face' (the transcript's note
+face), and a settled question closes with its free-text answer or
+`Not answered'."
   (let* ((selected (nth 1 answer))
          (custom (nth 2 answer))
          (rows (list (dsh-emacs-render--ask-question-row
@@ -2724,7 +2725,7 @@ answer or `Not answered'."
                    (not (string-empty-p description))
                    (concat (make-string (string-width indent) ?\s)
                            (propertize description
-                                       'face 'dsh-emacs-tool-meta-face)))))
+                                       'face 'dsh-emacs-meta-face)))))
         (setq rows (append rows (list label-row)
                            (and description-row (list description-row))))))
     (let ((answer-row (cond

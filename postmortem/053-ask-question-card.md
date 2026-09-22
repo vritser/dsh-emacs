@@ -36,8 +36,9 @@ protocol structs:
   web's own denominator: the answer document's length); and `--ask-body`
   renders the questionnaire — one block per question, its `header` chip and
   text, then that question's options with the reader's own numbering, the
-  chosen ones checked in the accent face, descriptions in the muted meta
-  face, and a closing free-text answer or `Not answered`.
+  chosen ones checked in the accent face, descriptions in `dsh-emacs-meta-face`
+  (the transcript's note face), and a closing free-text answer or
+  `Not answered`.
 - The ask call renders through the ordinary tool-card path (same namespace,
   block id and state tracking), so its result updates the row in place.
 - The row gets its own `question` variant with dsh web's
@@ -63,7 +64,7 @@ appear, so the card keeps them: the record then answers "what was I asked,
 what were my choices, which did I take" in one place, and the numbering
 matches the candidates the minibuffer reader presented.  Descriptions stay
 because they are what a reader needs to re-read a decision, and the accent
-`✓` plus the muted descriptions make the choice legible without a second
+`✓` plus the note-face descriptions make the choice legible without a second
 face.
 
 The collapsed line can only carry one thing, so it carries the outcome in
