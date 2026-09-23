@@ -139,8 +139,14 @@ for no added meaning (see
   none (it can match nothing), a call that did not succeed (a failure, an
   `interrupted` abort, a nonzero exit, or a signal), or unusable arguments
   keep the generic ioCard, preserving the diagnostic output.
-  Like dsh web, the card shows the whole old block then the whole new block
-  rather than a line-by-line alignment.
+  Matching lines appear once as plain context, aligned with the text after
+  the `- ` / `+ ` gutter; only changed rows count in the totals. Literal
+  signs in file contents are preserved. Common leading and trailing lines
+  are matched first, then the remaining lines are aligned in order. For a
+  very large replacement (more than 262144 comparison-table cells), a muted
+  `⋯ Large replacement: middle shown without alignment` row introduces the
+  whole old/new middle, and totals count those displayed replacement rows.
+  This bound keeps comparison work limited on the live event path.
 - **`present` rows expand into a declared-files card** (dsh web `PresentRow`):
   the header summary is the call's `files[].path` list, comma-joined under the
   `Present files` title, and the body is the result text (`Presented <path>`

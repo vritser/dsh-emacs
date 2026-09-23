@@ -2620,13 +2620,71 @@ argument-derived diff for a `write' and the generic ioCard for an `edit')."
                 (push (list path old new) out))))
           (nreverse out))))))
 
+(defun dsh-emacs-render--diff-align (old new)
+  "Align OLD and NEW text as (KIND . LINE) cells.
+KIND is `context', `del' or `add'.  Strip common edges before computing a
+longest common subsequence of the middle lines.  Limit the comparison table
+to 262144 cells so a large replacement cannot stall the event renderer;
+above that limit, a `note' cell introduces the unaligned middle replacement."
+  (let* ((old (vconcat (dsh-emacs-render--diff-lines old)))
+         (new (vconcat (dsh-emacs-render--diff-lines new)))
+         (start 0) (old-end (length old)) (new-end (length new))
+         rows tail)
+    (while (and (< start old-end) (< start new-end)
+                (equal (aref old start) (aref new start)))
+      (push (cons 'context (aref old start)) rows)
+      (setq start (1+ start)))
+    (while (and (< start old-end) (< start new-end)
+                (equal (aref old (1- old-end)) (aref new (1- new-end))))
+      (setq old-end (1- old-end) new-end (1- new-end))
+      (push (cons 'context (aref old old-end)) tail))
+    (let* ((n (- old-end start)) (m (- new-end start))
+           (i 0) (j 0)
+           (align-p (and (> n 0) (> m 0)
+                         (<= (* (1+ n) (1+ m)) 262144)))
+           (table (and align-p (make-vector (1+ n) nil))))
+      (when align-p
+        (dotimes (row (1+ n))
+          (aset table row (make-vector (1+ m) 0)))
+        (let ((row n))
+          (while (> row 0)
+            (setq row (1- row))
+            (let ((col m))
+              (while (> col 0)
+                (setq col (1- col))
+                (aset (aref table row) col
+                      (if (equal (aref old (+ start row))
+                                 (aref new (+ start col)))
+                          (1+ (aref (aref table (1+ row)) (1+ col)))
+                        (max (aref (aref table (1+ row)) col)
+                             (aref (aref table row) (1+ col))))))))))
+      (when (and (> n 0) (> m 0) (not align-p))
+        (push '(note . "⋯ Large replacement: middle shown without alignment")
+              rows))
+      (while (or (< i n) (< j m))
+        (cond
+         ((and align-p (< i n) (< j m)
+               (equal (aref old (+ start i)) (aref new (+ start j))))
+          (push (cons 'context (aref old (+ start i))) rows)
+          (setq i (1+ i) j (1+ j)))
+         ((and (< i n)
+               (or (not align-p) (= j m)
+                   (>= (aref (aref table (1+ i)) j)
+                       (aref (aref table i) (1+ j)))))
+          (push (cons 'del (aref old (+ start i))) rows)
+          (setq i (1+ i)))
+         (t
+          (push (cons 'add (aref new (+ start j))) rows)
+          (setq j (1+ j))))))
+    (nconc (nreverse rows) tail)))
+
 (defun dsh-emacs-render--diff-rows (hunks)
   "Return the rendered rows and totals for HUNKS as (ROWS ADDED REMOVED FILES).
 HUNKS is a list of (PATH OLD-TEXT NEW-TEXT).  The rows mirror dsh web's
-DiffBlock: a bold path row per file (an `⋯' gap row when a later hunk stays
-in the same file), every removed line as `- TEXT' in the error color, then
-every added line as `+ TEXT' in the success color.  FILES is the number of
-distinct paths."
+DiffBlock's path and gap rows, but align unchanged lines as plain context.
+Removed lines use `- TEXT' in the error color and added lines `+ TEXT' in
+the success color.  Only those changed rows contribute to the totals.
+FILES is the number of distinct paths."
   (let ((rows '()) (added 0) (removed 0) (files '()) (previous nil))
     (dolist (hunk hunks)
       (pcase-let ((`(,path ,old ,new) hunk))
@@ -2637,16 +2695,22 @@ distinct paths."
               rows)
         (setq previous path)
         (unless (member path files) (push path files))
-        (dolist (line (dsh-emacs-render--diff-lines old))
-          (push (concat "  " (propertize (concat "- " line)
-                                         'face 'dsh-emacs-tool-diff-del-face))
-                rows)
-          (setq removed (1+ removed)))
-        (dolist (line (dsh-emacs-render--diff-lines new))
-          (push (concat "  " (propertize (concat "+ " line)
-                                         'face 'dsh-emacs-tool-diff-add-face))
-                rows)
-          (setq added (1+ added)))))
+        (dolist (change (dsh-emacs-render--diff-align old new))
+          (pcase-let ((`(,kind . ,line) change))
+            (push
+             (pcase kind
+               ('context (concat "    " line))
+               ('note (concat "  " (propertize line 'face
+                                               'dsh-emacs-tool-meta-face)))
+               ('del
+                (setq removed (1+ removed))
+                (concat "  " (propertize (concat "- " line)
+                                        'face 'dsh-emacs-tool-diff-del-face)))
+               ('add
+                (setq added (1+ added))
+                (concat "  " (propertize (concat "+ " line)
+                                        'face 'dsh-emacs-tool-diff-add-face))))
+             rows)))))
     (list (nreverse rows) added removed (length files))))
 
 (defun dsh-emacs-render--diff-card-body (name args-raw meta state)

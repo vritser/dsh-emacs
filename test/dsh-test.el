@@ -3624,7 +3624,7 @@ Lets a test drive a malformed content value through the result path."
       (not (string-match-p "Showing" block))
       (not (string-match-p "IN" block)))))
 
-;; --- Test 29d: write/edit rows expand into a dsh web diff card ---
+;; --- Test 29d: write/edit rows expand into an aligned diff card ---
 (with-temp-buffer
   (dsh-emacs-mode)
   (dsh-emacs-modeline-setup)
@@ -3633,10 +3633,15 @@ Lets a test drive a malformed content value through the result path."
   (dsh-emacs-render-tool-call
    (dsh-emacs-test--tool-call-event
     1 "d1" "edit"
-    "{\"file_path\":\"src/x.el\",\"old_string\":\"(old a)\\n(old b)\",\"new_string\":\"(new a)\"}"))
+    (json-encode '((file_path . "src/x.el")
+                   (old_string . "(head)\n(old a)\n(old b)\n(tail)")
+                   (new_string . "(head)\n(new a)\n(tail)")))))
   (let* ((ns (dsh-emacs-render--make-namespace))
          (running (dsh-emacs-test--tool-block-text ns "tool-d1")))
     (dsh-test-assert "tool-edit-running-shows-intended-diff"
+      (string-match-p "^    (head)$" running)
+      (string-match-p "^    (tail)$" running)
+      (not (string-match-p "[-+] (head)" running))
       (string-match-p "- (old a)" running)
       (string-match-p "- (old b)" running)
       (string-match-p "+ (new a)" running)
@@ -3653,11 +3658,13 @@ Lets a test drive a malformed content value through the result path."
          (full (buffer-string))
          (settled (dsh-emacs-test--tool-block-text ns "tool-d1"))
          (del (string-match "- one" full))
-         (add (string-match "+ ONE" full)))
+         (add (string-match "+ ONE" full))
+         (context (string-match "    two" full)))
     (dsh-test-assert "tool-edit-settled-shows-applied-diff"
-      (string-match-p "- two" settled)
+      (string-match-p "^    two$" settled)
+      (not (string-match-p "[-+] two" settled))
       (string-match-p "+ three" settled)
-      (string-match-p (regexp-quote "└ +3 -2 · 1 file") settled)
+      (string-match-p (regexp-quote "└ +2 -1 · 1 file") settled)
       (not (string-match-p "(old a)" settled)))
     (dsh-test-assert "tool-diff-lines-carry-state-faces"
       (and del add
@@ -3665,12 +3672,57 @@ Lets a test drive a malformed content value through the result path."
                  (ensure-list (get-text-property del 'face full)))
            (memq 'dsh-emacs-tool-diff-add-face
                  (ensure-list (get-text-property add 'face full)))))
+    (dsh-test-assert "tool-diff-context-has-no-change-face"
+      (and context
+           (not (cl-intersection
+                 '(dsh-emacs-tool-diff-add-face dsh-emacs-tool-diff-del-face
+                   dsh-emacs-tool-success-face)
+                 (ensure-list (get-text-property (+ context 4) 'face full))))))
     ;; Expanded card rows are drawn on the transcript background and are not
     ;; padded to the box width, so each row ends at its own content.
     (dsh-test-assert "tool-diff-card-rows-are-unpadded"
       (string-match-p "^  - one$" settled)
       (string-match-p "^  \\+ three$" settled)
       (string-match-p "^  src/x\\.el$" settled))))
+
+;; Alignment keeps unchanged source lines intact, including literal signs,
+;; repeated lines and blank context between separate changes.
+(dolist (case '(("empty" "" "" nil)
+                ("creation" nil "a\n\nb\n"
+                 ((add . "a") (add . "") (add . "b")))
+                ("deletion" "a\n" "" ((del . "a")))
+                ("identical" "+ literal\n- literal\n"
+                 "+ literal\n- literal\n"
+                 ((context . "+ literal") (context . "- literal")))
+                ("insert-middle" "head\ntail" "head\nnew\ntail"
+                 ((context . "head") (add . "new") (context . "tail")))
+                ("delete-middle" "head\nold\ntail" "head\ntail"
+                 ((context . "head") (del . "old") (context . "tail")))
+                ("separate-edits" "old\nshared\n旧" "new\nshared\n新"
+                 ((del . "old") (add . "new") (context . "shared")
+                  (del . "旧") (add . "新")))
+                ("repeated-lines" "a\nb\na" "b\na\nb"
+                 ((del . "a") (context . "b") (context . "a") (add . "b")))
+                ("blank-context" "old\n\ntail" "new\n\ntail"
+                 ((del . "old") (add . "new") (context . "")
+                  (context . "tail")))))
+  (pcase-let ((`(,name ,old ,new ,expected) case))
+    (dsh-test-assert (concat "tool-diff-align-" name)
+      (equal expected (dsh-emacs-render--diff-align old new)))))
+
+;; Huge changed middles stay bounded, but identical edges still align and
+;; the card explicitly identifies the unaligned replacement.
+(let* ((old (concat "head\n" (apply #'concat (make-list 513 "old\n")) "tail"))
+       (new (concat "head\n" (apply #'concat (make-list 513 "new\n")) "tail"))
+       (diff (dsh-emacs-render--diff-rows (list (list "large.txt" old new))))
+       (rows (car diff)))
+  (dsh-test-assert "tool-diff-large-replacement-keeps-edges-and-totals"
+    (equal '(513 513 1) (cdr diff))
+    (equal "    head" (nth 1 rows))
+    (equal "  ⋯ Large replacement: middle shown without alignment" (nth 2 rows))
+    (equal "  - old" (nth 3 rows))
+    (equal "  + new" (nth 516 rows))
+    (equal "    tail" (car (last rows)))))
 
 ;; A write keeps its argument-derived whole-file diff when the result records
 ;; none, and repeated paths get a gap row instead of a second path row.

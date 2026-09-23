@@ -94,6 +94,11 @@ Hover over the preview for its full text, or use `C-c C-q` to manage pending
 messages. Goal shortcuts and inline controls are described in
 [Goal actions](docs/customization.md#goal-actions).
 
+Expanded file-edit cards show unchanged lines once as context, with red/green
+rows and totals for the changes. See
+[Tool cards](docs/ui-styling.md#tool-calls-dsh-web-style) for the display
+rules, including the limit for very large replacements.
+
 ### Answering questions
 
 Agent `ask` prompts are answered in one minibuffer read. The question text is

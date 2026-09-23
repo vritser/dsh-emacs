@@ -124,6 +124,13 @@ minor) and stay undated until the release is cut.
 - **Undo immediately after sending restores the draft**: inserting the
   transcript echo no longer discards the undo record for clearing the input.
 
+- **File diffs distinguish unchanged context from edits**: expanded `edit`
+  and `write` cards align matching lines and show them once in plain text.
+  Only removed and added lines receive red/green prefixes and contribute to
+  the footer totals, in both running previews and settled results.  Very
+  large replacement middles are explicitly marked as unaligned.
+  (rationale: postmortem/057)
+
 - **Thinking no longer rewrites the transcript while it streams**: a step's
   blocks now render where they arrive.  A reasoning block folds into its own
   collapsible `Think` fragment as soon as the answer starts, and a later

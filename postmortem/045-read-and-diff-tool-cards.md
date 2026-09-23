@@ -1,5 +1,7 @@
 # 045 — Read and file-mutation tool cards
 
+Diff alignment superseded by [057](057-aligned-diff-context.md).
+
 ## Background
 
 At the `233bdfb` baseline only bash/pwsh had a bespoke expanded body (the
