@@ -93,6 +93,12 @@ Workspace and `Ungrouped` groups start expanded by default. Set
 groups collapsed. `M-x dsh-emacs-collapse-workspaces` and
 `M-x dsh-emacs-expand-workspaces` fold or unfold every group in the list.
 
+Opening the list (`M-x dsh-emacs`, `C-c C-l`) puts the cursor on the current
+session's row and scrolls it into view; when that session sits in a folded
+group, the group is unfolded to show it, and a `w` workspace filter that
+would hide the row is cleared. Refreshing the list in place (`g`, events,
+auto-refresh) instead keeps the row you are on.
+
 ## Permission presets
 
 `M-x dsh-emacs-set-permission` switches the current session's permission

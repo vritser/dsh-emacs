@@ -3748,12 +3748,31 @@ always pointing at the last-opened chat buffer, which mixed sessions)."
     (message "No session to refresh"))))
 
 (defun dsh-emacs-list-sessions-display ()
-  "Display the session list buffer."
+  "Display the session list buffer.
+The cursor lands on the last active session's row, not on whatever row
+the buffer happened to be showing: opening the list is an explicit
+\"where am I\" request, whereas a plain refresh (`g', events,
+auto-refresh) keeps the row you are on.  The list is populated
+asynchronously, so when that session is not in the cache yet the jump
+stays pending until it is; if it sits in a folded group, that group is
+expanded to show the row.  An active `w' workspace filter is cleared when
+it would hide the row."
   (interactive)
-  (dsh-emacs-list-sessions)
   (let ((buf (get-buffer-create dsh-emacs-sessions-buffer)))
+    ;; Arm the target before the fetch so the list's repaints know where to
+    ;; land, but *after* `dsh-emacs-session-mode' — entering a major mode
+    ;; runs `kill-all-local-variables', which would erase a buffer-local
+    ;; target armed earlier (the mode also renders once itself).
     (with-current-buffer buf
       (dsh-emacs-session-mode))
+    (dsh-emacs-list-sessions)
+    (with-current-buffer buf
+      (setq dsh-emacs-session--auto-jump-session dsh-emacs--current-session)
+      ;; Repaint now: a warm cache already holds the target row and the list
+      ;; may be on screen, so the jump must not wait for the snapshot's own
+      ;; repaint (which is a round-trip away).  A cold cache finds no row and
+      ;; keeps the target armed for that repaint.
+      (dsh-emacs-session--render))
     (pop-to-buffer buf)))
 
 (defun dsh-emacs--code-block-region-at (pos)

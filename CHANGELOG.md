@@ -10,6 +10,16 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+
+
+- **Opening the session list lands on the session you are in**: `M-x
+  dsh-emacs` (and `C-c C-l`) now puts the cursor and `hl-line` on the current
+  session's row instead of the first row, scrolling it into view — a folded
+  workspace group it lives in is unfolded to show it, and a `w' filter that
+  would hide it is cleared.  The row arrives asynchronously for a brand-new
+  session, so the jump waits for it.  A plain refresh (`g', events,
+  auto-refresh) still keeps the row you are on.
+
 - **Undo/redo in the chat buffer, scoped to the input area**: `C-/`, `C-_`
   and `C-x u` now undo input editing — typing, yanks, `M-p` recall, the clear
   after a send — and `C-g C-/` (or `undo-redo` on Emacs 28+) redoes it;

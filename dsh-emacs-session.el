@@ -24,6 +24,10 @@
 ;; (`projections.values.title', same as dsh web: condensed from the first
 ;; user message); a blank session shows "New Session".  Details appear in
 ;; the minibuffer via the `i' key.
+;;;; Opening the list (`dsh-emacs-list-sessions-display') places point on the
+;; current session's row, unfolding the group that holds it when needed (see
+;; `dsh-emacs-session--auto-jump-session'); plain refreshes keep the row the
+;; user is on.
 ;;
 ;; Keys:
 ;;   RET     open session
@@ -82,6 +86,9 @@ Interactively resolve command targets through `dsh-emacs--active-session-id'
 ;; down (the header/render uses near the top precede their `defvar-local').
 (defvar dsh-emacs-session--filter-ws-id)
 (defvar dsh-emacs-session--filter-ws-title)
+;; Same reason: `dsh-emacs-session--render' unfolds a folded group by writing
+;; this state, whose `defvar-local' sits with the other fold state below.
+(defvar dsh-emacs-session--workspace-fold-overrides)
 
 ;;; ---------------------------------------------------------------------------
 ;;; Buffer and mode
@@ -89,6 +96,17 @@ Interactively resolve command targets through `dsh-emacs--active-session-id'
 
 (defvar dsh-emacs-sessions-buffer "*dsh-sessions*"
   "Buffer name for the session list.")
+
+(defvar-local dsh-emacs-session--auto-jump-session nil
+  "Session id the next session-list render should move point to.
+Set when the list is *opened* for the last active session
+(`dsh-emacs-list-sessions-display'), not on plain refreshes: a refresh
+keeps the row the user is on (see the focus restore in
+`dsh-emacs-session--render').  While set, every render tries to land on
+that row — the session list is populated asynchronously, so the target
+may only exist a few repaints later — and the render clears it once the
+row is reached.  `dsh-emacs-session--render' expands the target's
+collapsed group so the row exists at all.")
 
 (defvar dsh-emacs-session-mode-map
   (let ((map (make-sparse-keymap)))
@@ -166,8 +184,43 @@ buffer; `dsh-emacs-collapse-workspaces' and
         (restore-group-id
          (and (null (dsh-emacs-session-id-at-point))
               (get-text-property (point)
-                                 'dsh-emacs-workspace-group-id))))
-    (erase-buffer)
+                                 'dsh-emacs-workspace-group-id)))
+        ;; An auto-jump target (opening the list) outranks that row restore;
+        ;; the row restore is dropped while the jump is pending so the two
+        ;; cannot fight over point (see below).
+        (jump-id dsh-emacs-session--auto-jump-session))
+    (when (and jump-id dsh-emacs-session--filter-ws-id)
+      ;; An active `w' filter hides the target's row when it lives in another
+      ;; workspace; a pending jump wins over it.
+      (setq dsh-emacs-session--filter-ws-id nil
+            dsh-emacs-session--filter-ws-title nil))
+    ;; Groups are decided up front: the jump needs to know which group owns
+    ;; its target before rendering, so a folded one can be unfolded below.
+    (let ((groups (dsh-emacs-session--group-sessions sessions workspaces)))
+      (when jump-id
+        (setq restore-id nil
+              restore-group-id nil)
+        ;; A folded group does not render its rows, so the target would not
+        ;; exist for the jump: unfold just the group that owns it (an
+        ;; override, so only this group is affected — the buffer-wide
+        ;; default and every other group keep their fold).  A target that is
+        ;; not listed at all (not fetched yet) resolves no group: the jump
+        ;; stays pending for the repaint that brings the session in.
+        (let ((owner (cl-find-if
+                      (lambda (group)
+                        (cl-find-if (lambda (session)
+                                      (equal jump-id
+                                             (dsh-protocol-session-session-id
+                                              session)))
+                                    (plist-get group :sessions)))
+                      groups)))
+          (when owner
+            (let ((group-id (or (plist-get owner :workspace-id) :ungrouped)))
+              (when (dsh-emacs-session--workspace-collapsed-p group-id)
+                (setf (alist-get group-id
+                                 dsh-emacs-session--workspace-fold-overrides)
+                      nil))))))
+      (erase-buffer)
     
     ;; Header
     (insert (propertize "Sessions" 'face 'dsh-emacs-header-face))
@@ -184,8 +237,8 @@ buffer; `dsh-emacs-collapse-workspaces' and
           (insert (propertize "Press 'c' to create one." 'face 'dsh-emacs-hint-face)))
       
       ;; Group sessions by workspace
-      (dolist (group (dsh-emacs-session--group-sessions sessions workspaces))
-        (dsh-emacs-session--render-group group)))
+      (dolist (group groups)
+        (dsh-emacs-session--render-group group))))
     ;; Restore the previously focused session row or workspace header, if it
     ;; is still listed.  Header restoration matters when toggling a fold:
     ;; the rows below it disappear, but the cursor should stay on the group.
@@ -205,13 +258,24 @@ buffer; `dsh-emacs-collapse-workspaces' and
     ;; leave point at the end; park it on the first session row instead so the
     ;; list opens with the cursor (and hl-line) at the top, not the bottom.
     ;; A buffer with no rows simply stays at the header.
-    (unless (or restore-id restore-group-id)
+    (unless (or restore-id restore-group-id jump-id)
       (goto-char (point-min))
       (catch 'dsh-first-row
         (while (not (eobp))
           (when (dsh-emacs-session-id-at-point)
             (throw 'dsh-first-row t))
-          (forward-line 1))))))
+          (forward-line 1))))
+    (when (and jump-id (dsh-emacs-session--find-session-row jump-id))
+      ;; The target is consumed: later repaints keep point where the user
+      ;; left it.
+      (setq dsh-emacs-session--auto-jump-session nil)
+      ;; Put the row in the window's middle when the list is on screen.  A
+      ;; buffer with no window (batch render, daemon, background repaint)
+      ;; has nothing to scroll, and `recenter' signals there instead of
+      ;; doing nothing.
+      (let ((win (get-buffer-window (current-buffer) t)))
+        (when win
+          (recenter win (line-number-at-pos (point))))))))
 
 (defun dsh-emacs-session--visible-p (session &optional current-session-id)
   "Non-nil when SESSION passes dsh web's visible-session rule.
@@ -226,6 +290,26 @@ which stays visible even while blank."
     (not (or (and archived (gethash session-id archived))
              (dsh-protocol-session-origin session)
              (and blank (not (equal session-id current)))))))
+
+(defun dsh-emacs-session--find-session-row (session-id)
+  "Move point to SESSION-ID's row in the current session list, or nil.
+Scans `dsh-emacs-session-id' text properties, so a row hidden by a
+collapsed group is not found; leaves point unmoved when it finds none."
+  (let ((prop 'dsh-emacs-session-id)
+        (pos (point-min))
+        found)
+    (while (and (not found) (< pos (point-max)))
+      (let ((at (if (get-text-property pos prop)
+                    pos
+                  (next-single-property-change pos prop nil (point-max)))))
+        (if (or (null at) (>= at (point-max)))
+            (setq pos (point-max))
+          (if (equal session-id (get-text-property at prop))
+              (setq found at)
+            (setq pos (next-single-property-change at prop nil (point-max)))))))
+    (when found
+      (goto-char found)
+      found)))
 
 (defun dsh-emacs-session--group-sessions (sessions workspaces)
   "Group SESSIONS by WORKSPACES.

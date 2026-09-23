@@ -6766,6 +6766,100 @@ Lets a test drive a malformed content value through the result path."
                    (not (string-match-p "Loose" folded)))))))
     (kill-buffer buf)))
 
+;; --- Test 51c: opening the list auto-jumps to the active session ---
+;; Two sessions in one workspace: "active" is the older one, so a plain
+;; render parks point on "other" (newest first).  Only the pending
+;; `dsh-emacs-session--auto-jump-session' target moves it.
+(let* ((sessions (dsh-emacs-test--session-items
+                  (list (list (cons 'sessionId "other") (cons 'updatedAt 200)
+                              (cons 'cwd "/tmp/ws-a")
+                              (cons 'projections
+                                    (list (cons 'values
+                                                (list (cons 'title "Other"))))))
+                        (list (cons 'sessionId "active") (cons 'updatedAt 100)
+                              (cons 'cwd "/tmp/ws-a")
+                              (cons 'projections
+                                    (list (cons 'values
+                                                (list (cons 'title
+                                                            "Active")))))))))
+       (workspaces (list (dsh-protocol-workspace--from-alist
+                          (list (cons 'workspaceId "w1")
+                                (cons 'title "WS A")
+                                (cons 'sessionIds ["other" "active"])))))
+       (buf (generate-new-buffer " *dsh-auto-jump*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (let ((dsh-emacs--sessions sessions)
+              (dsh-emacs--workspaces workspaces)
+              (dsh-emacs--archived-sessions nil))
+          (dsh-emacs-session--render)
+          (dsh-test-assert "session-row-finder-absent-session"
+            (null (dsh-emacs-session--find-session-row "nope")))
+          (dsh-test-assert "session-row-finder-picks-row"
+            (equal "other" (progn (dsh-emacs-session--find-session-row "other")
+                                  (dsh-emacs-session-id-at-point))))
+          (dsh-emacs-session--render)
+          (dsh-test-assert "session-render-parks-on-newest"
+            (equal "other" (dsh-emacs-session-id-at-point)))
+          (setq dsh-emacs-session--auto-jump-session "active")
+          (dsh-emacs-session--render)
+          (dsh-test-assert "auto-jump-lands-on-target"
+            (equal "active" (dsh-emacs-session-id-at-point)))
+          (dsh-test-assert "auto-jump-target-cleared"
+            (null dsh-emacs-session--auto-jump-session))
+          ;; A pending target outranks the active `w' workspace filter.
+          (setq dsh-emacs-session--filter-ws-id "w1"
+                dsh-emacs-session--filter-ws-title "WS A"
+                dsh-emacs-session--auto-jump-session "active")
+          (dsh-emacs-session--render)
+          (dsh-test-assert "auto-jump-clears-hiding-filter"
+            (and (null dsh-emacs-session--filter-ws-id)
+                 (equal "active" (dsh-emacs-session-id-at-point))))))
+    (kill-buffer buf)))
+
+;; --- Test 51d: a target inside a folded group expands just that group ---
+(let* ((sessions (dsh-emacs-test--session-items
+                  (list (list (cons 'sessionId "a1") (cons 'updatedAt 100)
+                              (cons 'cwd "/tmp/ws-a")
+                              (cons 'projections
+                                    (list (cons 'values
+                                                (list (cons 'title "A1"))))))
+                        (list (cons 'sessionId "b1") (cons 'updatedAt 100)
+                              (cons 'cwd "/tmp/ws-b")
+                              (cons 'projections
+                                    (list (cons 'values
+                                                (list (cons 'title
+                                                            "B1")))))))))
+       (workspaces (list (dsh-protocol-workspace--from-alist
+                          (list (cons 'workspaceId "w1")
+                                (cons 'title "WS A")
+                                (cons 'sessionIds ["a1"])))
+                         (dsh-protocol-workspace--from-alist
+                          (list (cons 'workspaceId "w2")
+                                (cons 'title "WS B")
+                                (cons 'sessionIds ["b1"])))))
+       (buf (generate-new-buffer " *dsh-auto-jump-fold*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (let ((dsh-emacs--sessions sessions)
+              (dsh-emacs--workspaces workspaces)
+              (dsh-emacs--archived-sessions nil))
+          (dsh-emacs-session--render)
+          (dsh-emacs-collapse-workspaces)
+          (dsh-test-assert "auto-jump-fold-hides-rows"
+            (not (string-match-p
+                  "A1" (buffer-substring-no-properties (point-min) (point-max)))))
+          (setq dsh-emacs-session--auto-jump-session "a1")
+          (dsh-emacs-session--render)
+          (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+            (dsh-test-assert "auto-jump-expands-target-group"
+              (equal "a1" (dsh-emacs-session-id-at-point))
+              (string-match-p "A1" text)
+              ;; Only the target's group unfolds; WS B keeps its fold.
+              (not (string-match-p "B1" text))
+              (null dsh-emacs-session--auto-jump-session)))))
+    (kill-buffer buf)))
+
 (let* ((sessions (dsh-emacs-test--session-items
                   (list (list (cons 'sessionId "default-loose")
                               (cons 'updatedAt 100)
