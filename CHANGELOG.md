@@ -85,6 +85,13 @@ minor) and stay undated until the release is cut.
 
 ### Changed
 
+- **Opening the session list no longer re-fetches or reconnects**: the list
+  is kept live by the server's event stream (and by the local cache update
+  session creation already does), so `M-x dsh-emacs` / `C-c C-l` now reuses
+  the cached rows instead of POSTing `session/list` and re-opening the
+  `workspace/follow` stream on every open.  A cold cache (nothing fetched
+  yet) still fetches, and `g` still refreshes on demand.  (rationale: postmortem/059)
+
 - **Ask option descriptions read as one face, without brackets**: the
   description riding along with each option candidate in the `ask` reader
   now carries `dsh-emacs-meta-face` — the face the transcript's ask card
@@ -108,6 +115,14 @@ minor) and stay undated until the release is cut.
   the job rows keep their headers.
 
 ### Fixed
+
+- **Re-opening the session list no longer resets your folded groups**:
+  `M-x dsh-emacs` / `C-c C-l` skipped the list's major mode when the buffer
+  was already in it, which used to run `kill-all-local-variables` and wipe
+  the per-buffer fold overrides (a group folded with `TAB` came back
+  expanded), the workspace filter, and the host-stream binding — the last
+  one silently orphaned the live stream and forced a reconnect on every
+  open.  Re-opening now keeps the buffer's state and its connection.
 
 - **A session-list refresh no longer scrolls the list**: a repaint (event,
   auto-refresh, `g`) now puts every window's scroll position back — keyed to

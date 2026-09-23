@@ -1455,6 +1455,13 @@ mode-line state."
                                    (dsh-emacs-events-host-connect))))
                              buffer)))))))
 
+(defun dsh-emacs-events-host-connected-p ()
+  "Non-nil when the current buffer's host stream is already live.
+A live process covers a handshake still in flight: keeping it preserves the
+work already done instead of starting the connect over."
+  (and (boundp 'dsh-emacs--host-process)
+       (process-live-p dsh-emacs--host-process)))
+
 (defun dsh-emacs-events-host-connect ()
   "Connect BUFFER's core stream to dsh's `/api/remote.mux'.
 The core connection is scoped to the session-list buffer (owned by
@@ -1462,8 +1469,15 @@ The core connection is scoped to the session-list buffer (owned by
 `workspace/follow' and `$events' logical streams after the handshake
 (`dsh-emacs-events--host-open') and repaints the list on workspace/
 session/archive/queue/projection changes while the list is open;
-everything tears down with the buffer."
-  (when (buffer-live-p (current-buffer))
+everything tears down with the buffer.
+
+Already connected is a no-op: the session-list mode re-runs on every open
+(`dsh-emacs-list-sessions-display'), and re-opening a list that is already
+live must not tear its streams down and handshake again.  A dropped
+connection clears `dsh-emacs--host-process' first (see
+`dsh-emacs-events--host-lost'), so the reconnect path still connects."
+  (when (and (buffer-live-p (current-buffer))
+             (not (dsh-emacs-events-host-connected-p)))
     (dsh-emacs-events-host-disconnect)
     (when (and (bound-and-true-p dsh-emacs-base-url)
                (not (string-empty-p dsh-emacs-base-url)))

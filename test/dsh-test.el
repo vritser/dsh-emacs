@@ -6982,6 +6982,116 @@ Lets a test drive a malformed content value through the result path."
                                           'dsh-emacs-row-id)))))))
     (kill-buffer buf)))
 
+;; --- Test 51g: opening a warm list costs no RPC; a cold one fetches ---
+;; The list is kept live by the core `$events' stream and by the cache
+;; updates session creation already does, so re-opening it must not fetch
+;; `session/list' (nor re-baseline workspaces).
+(let ((calls 0)
+      (dsh-emacs--current-session "warm")
+      (dsh-emacs--workspaces nil)
+      (dsh-emacs--archived-sessions nil))
+  (unwind-protect
+      (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (&rest _) (setq calls (1+ calls))))
+                ((symbol-function 'dsh-emacs-server-start)
+                 (lambda (&optional _) t))
+                ((symbol-function 'dsh-emacs-events-host-connect) #'ignore)
+                ((symbol-function 'dsh-emacs-events-host-disconnect) #'ignore)
+                ((symbol-function 'dsh-emacs-events--host-refresh-begin)
+                 #'ignore))
+        ;; warm cache: a row is already known
+        (let ((dsh-emacs--sessions
+               (dsh-emacs-test--session-items
+                (list (list (cons 'sessionId "warm") (cons 'updatedAt 10)
+                            (cons 'cwd "/tmp/ws-a")
+                            (cons 'projections
+                                  (list (cons 'values
+                                              (list (cons 'title "Warm"))))))))))
+          (dsh-emacs-list-sessions-display)
+          (dsh-test-assert "warm-open-costs-no-rpc" (zerop calls))
+          (dsh-test-assert "warm-open-renders-and-jumps"
+            (with-current-buffer dsh-emacs-sessions-buffer
+              (equal "warm" (dsh-emacs-session-id-at-point)))))
+        ;; cold cache: nothing to show, so it fetches
+        (setq calls 0
+              dsh-emacs--sessions nil)
+        (dsh-emacs-list-sessions-display)
+        (dsh-test-assert "cold-open-fetches" (= 1 calls)))
+    (when (get-buffer dsh-emacs-sessions-buffer)
+      (kill-buffer dsh-emacs-sessions-buffer))))
+
+;; --- Test 51h: connecting an already-connected host stream is a no-op ---
+(let* ((proc (condition-case nil
+                 (start-process "dsh-test-host" nil "sleep" "2")
+               (error nil)))
+       (dsh-emacs--host-process proc)
+       (disconnects 0))
+  (unwind-protect
+      (when proc
+        (cl-letf (((symbol-function 'dsh-emacs-events-host-disconnect)
+                   (lambda () (setq disconnects (1+ disconnects)))))
+          (dsh-emacs-events-host-connect)
+          (dsh-test-assert "host-connect-is-idempotent"
+            (zerop disconnects)
+            (dsh-emacs-events-host-connected-p))))
+    (when (processp proc) (delete-process proc))))
+
+;; --- Test 51i: re-opening the list keeps the user's folded groups ---
+;; Re-running the major mode on every open runs `kill-all-local-variables',
+;; which wipes the buffer's fold overrides and workspace filter — a group the
+;; user folded with TAB (or collapsed with `dsh-emacs-collapse-workspaces')
+;; came back expanded on the next `C-c C-l'.
+(let ((dsh-emacs--current-session "s1")
+      (dsh-emacs--archived-sessions nil))
+  (unwind-protect
+      (cl-letf (((symbol-function 'dsh-emacs-list-sessions) #'ignore)
+                ((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (&rest _) nil))
+                ((symbol-function 'dsh-emacs-events-host-connect) #'ignore)
+                ((symbol-function 'dsh-emacs-events-host-disconnect) #'ignore))
+        (let ((dsh-emacs--sessions
+               (dsh-emacs-test--session-items
+                (list (list (cons 'sessionId "s1") (cons 'updatedAt 20)
+                            (cons 'cwd "/tmp/ws-a")
+                            (cons 'projections
+                                  (list (cons 'values
+                                              (list (cons 'title "One"))))))
+                      (list (cons 'sessionId "s2") (cons 'updatedAt 10)
+                            (cons 'cwd "/tmp/ws-b")
+                            (cons 'projections
+                                  (list (cons 'values
+                                              (list (cons 'title
+                                                          "Two")))))))))
+              (dsh-emacs--workspaces
+               (list (dsh-protocol-workspace--from-alist
+                      (list (cons 'workspaceId "w1")
+                            (cons 'title "WS A")
+                            (cons 'sessionIds ["s1"])))
+                     (dsh-protocol-workspace--from-alist
+                      (list (cons 'workspaceId "w2")
+                            (cons 'title "WS B")
+                            (cons 'sessionIds ["s2"]))))))
+          (dsh-emacs-list-sessions-display)
+          ;; the user folds WS B
+          (with-current-buffer dsh-emacs-sessions-buffer
+            (goto-char (point-min))
+            (search-forward "WS B")
+            (beginning-of-line)
+            (dsh-emacs-session-toggle-workspace))
+          ;; ... and re-opens the list
+          (dsh-emacs-list-sessions-display)
+          (dsh-test-assert "reopen-keeps-folded-group"
+            (with-current-buffer dsh-emacs-sessions-buffer
+              (dsh-emacs-session--workspace-collapsed-p "w2")))
+          (dsh-test-assert "reopen-keeps-folded-session-hidden"
+            (not (string-match-p
+                  "Two"
+                  (with-current-buffer dsh-emacs-sessions-buffer
+                    (buffer-substring-no-properties (point-min)
+                                                    (point-max))))))))
+    (when (get-buffer dsh-emacs-sessions-buffer)
+      (kill-buffer dsh-emacs-sessions-buffer))))
+
 (let* ((sessions (dsh-emacs-test--session-items
                   (list (list (cons 'sessionId "default-loose")
                               (cons 'updatedAt 100)

@@ -97,7 +97,11 @@ Opening the list (`M-x dsh-emacs`, `C-c C-l`) puts the cursor on the current
 session's row and scrolls it into view; when that session sits in a folded
 group, the group is unfolded to show it, and a `w` workspace filter that
 would hide the row is cleared. Refreshing the list in place (`g`, events,
-auto-refresh) instead keeps the row you are on.
+auto-refresh) instead keeps the row you are on. Opening a list that is
+already live reuses the cached rows — the server's event stream keeps them
+current — and makes no request; a cold list (nothing fetched yet) is
+fetched, and `g` refreshes on demand. Re-opening keeps the list's state:
+folded groups stay folded and an active `w` filter stays set.
 
 ## Permission presets
 

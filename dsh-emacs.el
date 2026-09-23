@@ -3756,17 +3756,33 @@ auto-refresh) keeps the row you are on.  The list is populated
 asynchronously, so when that session is not in the cache yet the jump
 stays pending until it is; if it sits in a folded group, that group is
 expanded to show the row.  An active `w' workspace filter is cleared when
-it would hide the row."
+it would hide the row.
+
+Opening does not fetch: the session list is kept live by the core
+`$events' stream (added/removed/title/archive frames) and by the local
+cache update session creation already does, so a warm list is already
+current and re-opening it costs no round trip (and no `workspace/follow'
+re-baseline).  Only a cold cache (nothing fetched yet) is fetched as
+before; `g' and `dsh-emacs-list-sessions' remain the explicit refresh."
   (interactive)
   (let ((buf (get-buffer-create dsh-emacs-sessions-buffer)))
-    ;; Arm the target before the fetch so the list's repaints know where to
-    ;; land, but *after* `dsh-emacs-session-mode' — entering a major mode
-    ;; runs `kill-all-local-variables', which would erase a buffer-local
-    ;; target armed earlier (the mode also renders once itself).
+    ;; Re-opening a live list must not re-run the major mode: that runs
+    ;; `kill-all-local-variables', which wipes the buffer's fold overrides
+    ;; (so groups the user folded with TAB come back expanded), its workspace
+    ;; filter and its host-stream binding — the last one orphaned the live
+    ;; stream and forced a reconnect on every open.  Keep the state and just
+    ;; make sure the stream is up (an already-live stream is a no-op).
     (with-current-buffer buf
-      (dsh-emacs-session-mode))
-    (dsh-emacs-list-sessions)
+      (if (derived-mode-p 'dsh-emacs-session-mode)
+          (dsh-emacs-events-host-connect)
+        (dsh-emacs-session-mode)))
+    ;; A warm cache is the whole state the list needs; only a cold one
+    ;; (nothing fetched yet) has to be fetched.
+    (unless (consp dsh-emacs--sessions)
+      (dsh-emacs-list-sessions))
     (with-current-buffer buf
+      ;; Arm the target after the mode/connect step: entering a major mode
+      ;; would erase a buffer-local target armed earlier.
       (setq dsh-emacs-session--auto-jump-session dsh-emacs--current-session)
       ;; Repaint now: a warm cache already holds the target row and the list
       ;; may be on screen, so the jump must not wait for the snapshot's own
