@@ -1,5 +1,7 @@
 # 040 — Consuming the remaining V3 core events
 
+_Live attempt cleanup is superseded by [060](060-stream-settlement.md)._
+
 _Status: complete; one known limitation is lifted by 041 — `deliverables/presented`
 (a plugin event) now renders as the turn-tail deliverables row._
 

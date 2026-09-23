@@ -23,23 +23,20 @@
 (require 'cl-lib)
 (require 'json)
 (require 'url-parse)
+(require 'dsh-emacs-protocol)
 
 (defvar-local dsh-emacs--event-process nil)
 (defvar-local dsh-emacs--event-ready nil)
 (defvar-local dsh-emacs--event-reconnect-timer nil)
 (defvar-local dsh-emacs--event-connect-timer nil)
 
-;; Highest `assistant-stream' generation revision this buffer has rendered
-;; (dsh 0.1.5 process-local frames).  Reset on every `session/follow' opening;
-;; an older-revision frame is stale (the snapshot already replayed it).
+;; Last accepted process-local revision; dense within an Agent lifecycle.
+;; A new lifecycle may send start/revision=1 on the same follow connection.
 (defvar-local dsh-emacs--assistant-stream-revision nil)
 
-;; (TURN . STEP) of the active assistant attempt for this buffer's follow
-;; stream.  The host sends it on the `start' frame and in the opening snapshot
-;; baseline only — `chunk' frames carry no turn/step — while the incremental
-;; renderer keys its live body on that pair, so the last seen pair is kept
-;; here and reused for chunks.
-(defvar-local dsh-emacs--assistant-stream-position nil)
+;; Active attempt's :id, :position (TURN . STEP), and dense :next-index.
+;; Chunk block indices are unrelated to this frame counter.
+(defvar-local dsh-emacs--assistant-stream-attempt nil)
 
 ;; Last wall-clock time (float-time) at which the stream delivered an event,
 ;; and watchdog bookkeeping for confirming the stream stays healthy mid-turn.
@@ -185,7 +182,10 @@ generation and a new clientId.")
 ;; at runtime from teardown only.
 (declare-function dsh-emacs--ml-busy-clear "dsh-emacs-modeline" ())
 (declare-function dsh-emacs--ml-busy-set "dsh-emacs-modeline" (flag))
-(declare-function dsh-emacs-render--flush-stream "dsh-emacs-render" (&optional buffer final))
+(declare-function dsh-emacs-render--flush-stream "dsh-emacs-render"
+                  (&optional buffer final))
+(declare-function dsh-emacs-render--discard-stream "dsh-emacs-render"
+                  (&optional key))
 (declare-function dsh-emacs--command-spinner-clear-all "dsh-emacs-render" ())
 (declare-function dsh-emacs--command-spinner-revive "dsh-emacs-render" ())
 ;; Runtime dependencies defined in dsh-emacs.el / dsh-emacs-render.el.
@@ -453,8 +453,7 @@ connections without a session (the core list connection opens
 frames (dsh 0.1.5).  They are the only incremental text source left:
 `assistant/chunk' is no longer a durable Session event, so without the
 opt-in a reply would appear only once its `assistant/message' settles.
-Each generation gets a fresh revision, so the local revision guard is
-reset here."
+The opening snapshot replaces the local revision and attempt baseline."
   (let ((session-id (process-get process 'dsh-emacs-follow-session)))
     (when (and session-id (process-live-p process))
       (let* ((stream-id (or (process-get process 'dsh-emacs-follow-stream-id)
@@ -475,7 +474,7 @@ reset here."
         (when (buffer-live-p chat)
           (with-current-buffer chat
             (setq dsh-emacs--assistant-stream-revision nil
-                  dsh-emacs--assistant-stream-position nil)))
+                  dsh-emacs--assistant-stream-attempt nil)))
         (process-send-string process (dsh-emacs-events--frame 1 json))))))
 
 (defun dsh-emacs-events--dispatch-follow (process message)
@@ -513,29 +512,28 @@ deltas that used to arrive as `assistant/chunk' events."
                          chat (dsh-emacs-render--aget "frame" value)))
     (_ nil)))
 
-(defun dsh-emacs-events--assistant-stream-accept-p (revision)
-  "Record REVISION as this buffer's assistant-stream generation and say whether
-the frame carrying it may be rendered.  A frame from an older revision than
-the generation this buffer already saw is stale: a reconnect bumps the
-revision and replays the accumulated attempt in the opening snapshot, so
-accepting it would interleave two generations into one live body."
-  (when (and (integerp revision)
-             (or (null dsh-emacs--assistant-stream-revision)
-                 (>= revision dsh-emacs--assistant-stream-revision)))
-    (setq dsh-emacs--assistant-stream-revision revision)
-    t))
-
-(defun dsh-emacs-events--assistant-stream-remember-position (turn step)
-  "Remember (TURN . STEP) as the active attempt position when both are integers."
-  (when (and (integerp turn) (integerp step))
-    (setq dsh-emacs--assistant-stream-position (cons turn step))))
+(defun dsh-emacs-events--follow-rebaseline ()
+  "Replace this chat's logical follow stream after a presentation gap.
+Retire the stream id before reopening so queued frames from the old stream
+cannot affect the replacement snapshot. Keep the socket and durable anchor."
+  (let ((process dsh-emacs--event-process))
+    (when (and (process-live-p process)
+               (process-get process 'dsh-emacs-follow-session))
+      (let ((old (process-get process 'dsh-emacs-follow-stream-id)))
+        (when old
+          (process-send-string
+           process (dsh-emacs-events--frame
+                    1 (dsh-emacs-events--cancel-message old)))))
+      (process-put process 'dsh-emacs-follow-stream-id
+                   (dsh-emacs-events--stream-id))
+      (dsh-emacs-events--follow-open process))))
 
 (defun dsh-emacs-events--assistant-stream-render-chunk (chat chunk)
   "Render raw CHUNK as live assistant output in CHAT.
 CHUNK is exactly the payload a durable `assistant/chunk' event used to carry,
 so the durable envelope is rebuilt around it and the ordinary event path —
 and therefore the ordinary incremental renderer — does the work."
-  (let ((position dsh-emacs--assistant-stream-position))
+  (let ((position (plist-get dsh-emacs--assistant-stream-attempt :position)))
     (when (and position (listp chunk))
       (dsh-emacs-events--dispatch-event
        chat
@@ -548,33 +546,66 @@ and therefore the ordinary incremental renderer — does the work."
   "Render one assistant-stream FRAME for CHAT.
 FRAME is `start' / `chunk' / `end' (dsh 0.1.5).  Frames are process-local
 presentation state, not durable events: they carry no `seq', so they bypass
-the seq gate and never advance `dsh-emacs--anchor-seq'.  Only `start' (and
-the opening snapshot baseline) names the attempt's turn/step, so the pair is
-remembered for the chunks that follow."
+the seq gate and never advance `dsh-emacs--anchor-seq'. Keep the attempt id,
+turn/step and next frame index from start or the opening baseline. A gap
+requests a fresh baseline instead of publishing an incomplete body."
   (when (and (buffer-live-p chat) (listp frame))
     (with-current-buffer chat
-      (let ((type (dsh-emacs-render--aget "type" frame))
-            (revision (dsh-emacs-render--aget "revision" frame)))
-        (when (dsh-emacs-events--assistant-stream-accept-p revision)
-          (pcase type
-            ("start"
-             (dsh-emacs-events--assistant-stream-remember-position
-              (dsh-emacs-render--aget "turn" frame)
-              (dsh-emacs-render--aget "step" frame)))
-            ("chunk"
-             (dsh-emacs-events--assistant-stream-render-chunk
-              chat (dsh-emacs-render--aget "chunk" frame)))
-            ("end"
-             ;; A committed attempt settles through its durable
-             ;; `assistant/message' / `assistant/attempt' (which finishes or
-             ;; takes over the live body); an abandoned one has no such event,
-             ;; so publish what arrived.
-             (let ((outcome (dsh-emacs-render--aget "outcome" frame)))
-               (when (equal (dsh-emacs-render--aget "kind" outcome)
+      (let* ((frame (dsh-protocol-assistant-frame--from-alist frame))
+             (type (dsh-protocol-assistant-frame-type frame))
+             (revision (dsh-protocol-assistant-frame-revision frame))
+             (id (dsh-protocol-assistant-frame-attempt-id frame))
+             (attempt dsh-emacs--assistant-stream-attempt))
+        ;; An attached Agent can restart its counter without reconnecting.
+        ;; Revision 1 is emitted once per Agent lifecycle, so it is a reset
+        ;; whenever the watermark has already advanced past it; the attempt
+        ;; id cannot stand in for that (ids restart per lifecycle too).
+        (when (and (equal type "start") (equal revision 1)
+                   (integerp dsh-emacs--assistant-stream-revision)
+                   (> dsh-emacs--assistant-stream-revision 1))
+          (dsh-emacs-render--discard-stream)
+          (setq dsh-emacs--assistant-stream-revision nil
+                dsh-emacs--assistant-stream-attempt nil
+                attempt nil))
+        (when (and (integerp revision)
+                   (or (null dsh-emacs--assistant-stream-revision)
+                       (> revision dsh-emacs--assistant-stream-revision)))
+          (if (or (and dsh-emacs--assistant-stream-revision
+                       (/= revision
+                           (1+ dsh-emacs--assistant-stream-revision)))
+                  (if (equal type "start")
+                      (or attempt (not (stringp id))
+                          (not (integerp
+                                (dsh-protocol-assistant-frame-turn frame)))
+                          (not (integerp
+                                (dsh-protocol-assistant-frame-step frame))))
+                    (or (null attempt)
+                        (not (equal id (plist-get attempt :id)))
+                        (not (equal (dsh-protocol-assistant-frame-index frame)
+                                    (plist-get attempt :next-index))))))
+              (dsh-emacs-events--follow-rebaseline)
+            (setq dsh-emacs--assistant-stream-revision revision)
+            (pcase type
+              ("start"
+               (setq dsh-emacs--assistant-stream-attempt
+                     (list :id id :next-index 0
+                           :position
+                           (cons (dsh-protocol-assistant-frame-turn frame)
+                                 (dsh-protocol-assistant-frame-step frame)))))
+              ("chunk"
+               (cl-incf (plist-get attempt :next-index))
+               (dsh-emacs-events--assistant-stream-render-chunk
+                chat (dsh-protocol-assistant-frame-chunk frame)))
+              ("end"
+               ;; A committed attempt settles through its durable
+               ;; `assistant/message' / `assistant/attempt' (which finishes or
+               ;; takes over the live body); an abandoned one has no such event,
+               ;; so publish what arrived.
+               (when (equal (dsh-protocol-assistant-frame-outcome-kind frame)
                             "abandoned")
                  (dsh-emacs-render--flush-stream (current-buffer) t))
-               (setq dsh-emacs--assistant-stream-position nil)))
-            (_ nil)))))))
+               (setq dsh-emacs--assistant-stream-attempt nil))
+              (_ nil))))))))
 
 (defun dsh-emacs-events--follow-event (chat event)
   "Handle one live follow EVENT for CHAT.
@@ -614,6 +645,11 @@ opening history tail; no separate history fetch precedes the connect."
                                                   "event")
                                            rec))
                                     records))))
+        ;; A snapshot replaces transient output with its durable window
+        ;; and active prefix; it must not append onto the disconnected
+        ;; socket's partial text or folded Think fragments.
+        (dsh-emacs-render--discard-stream)
+        (setq dsh-emacs--assistant-stream-attempt nil)
         (when entries
           (dsh-emacs-render-history-events entries nil)
           (when (fboundp 'dsh-emacs--seed-input-history)
@@ -632,21 +668,30 @@ opening history tail; no separate history fetch precedes the connect."
         ;; process-local stream so the live body continues instead of starting
         ;; empty.  These frames are presentation state, so the anchor must not
         ;; move (and the records carry no seq to move it with).
-        (let ((baseline (dsh-emacs-render--aget "assistantStream" value)))
-          (when (listp baseline)
-            (setq dsh-emacs--assistant-stream-revision
-                  (dsh-emacs-render--aget "revision" baseline))
-            (let ((attempt (dsh-emacs-render--aget "activeAttempt" baseline)))
-              (when (listp attempt)
-                (dsh-emacs-events--assistant-stream-remember-position
-                 (dsh-emacs-render--aget "turn" attempt)
-                 (dsh-emacs-render--aget "step" attempt))
-                (let ((records (dsh-emacs-render--aget "stream" attempt)))
-                  (dolist (chunk (cond ((vectorp records) (append records nil))
-                                       ((listp records) records)
-                                       (t nil)))
-                    (dsh-emacs-events--assistant-stream-render-chunk
-                     chat chunk)))))))
+        (let* ((baseline (dsh-protocol-assistant-baseline--from-snapshot value))
+               (id (dsh-protocol-assistant-baseline-attempt-id baseline))
+               (turn (dsh-protocol-assistant-baseline-turn baseline))
+               (step (dsh-protocol-assistant-baseline-step baseline))
+               (next (dsh-protocol-assistant-baseline-next-index baseline)))
+          (setq dsh-emacs--assistant-stream-revision
+                (dsh-protocol-assistant-baseline-revision baseline))
+          (when (and (stringp id) (integerp turn) (integerp step)
+                     (integerp next) (>= next 0))
+            (setq dsh-emacs--assistant-stream-attempt
+                  (list :id id :position (cons turn step) :next-index next))
+            (dolist (record (dsh-protocol-assistant-baseline-stream baseline))
+              (pcase (dsh-protocol-assistant-record-type record)
+                ("chunk"
+                 (dsh-emacs-events--assistant-stream-render-chunk
+                  chat (dsh-protocol-assistant-record-chunk record)))
+                ((and type (or "text-chunks" "reasoning-chunks"))
+                 (dolist (text (dsh-protocol-assistant-record-texts record))
+                   (dsh-emacs-events--assistant-stream-render-chunk
+                    chat `((type . ,(if (equal type "text-chunks")
+                                        "text-delta" "reasoning-delta"))
+                           (index . ,(dsh-protocol-assistant-record-index
+                                      record))
+                           (text . ,text)))))))))
         (dsh-emacs-events--apply-snapshot-projections
          session-id (dsh-emacs-render--aget "projections" value))
         (setq dsh-emacs--ws-last-event-time (float-time))))))

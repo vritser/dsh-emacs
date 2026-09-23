@@ -2813,17 +2813,24 @@ symbol or an ordered list."
                (= (cl-count ?✶ text) 1))
       (dsh-test-pass "thinking-final-replaces-stream-single-block"))))
 
-(with-temp-buffer
-  (dsh-emacs-mode)
-  (dsh-emacs-modeline-setup)
-  (dsh-emacs-render-event
-   (json-read-from-string
-    "{\"type\":\"assistant/message\",\"seq\":1,\"data\":{\"turn\":1,\"step\":1,\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"reasoning\",\"text\":\"history think\"},{\"type\":\"text\",\"text\":\"history body\"}]}}}"))
-  (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-    (when (and (string-match-p "✶ Think" text)
-               (string-match-p "history body" text)
-               (null dsh-emacs--streaming-thinking))
-      (dsh-test-pass "thinking-history-renders-final-block"))))
+;; Reasoning first supplied by the final message still precedes its body.
+(dolist (stream '(nil t))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (when stream
+      (dsh-emacs-render--start-assistant-stream
+       '((data . ((turn . 1) (step . 1)))) "history body"))
+    (dsh-emacs-render-event
+     '((type . "assistant/message") (seq . 1)
+       (data . ((turn . 1) (step . 1)
+                (message . ((role . "assistant")
+                            (content . [((type . "reasoning") (text . "history think"))
+                                        ((type . "text") (text . "history body"))])))))))
+    (let ((text (buffer-string)))
+      (dsh-test-assert "thinking-history-renders-final-block-before-text"
+        (and (string-match "Think" text) (string-match "history body" text)
+             (< (string-match "Think" text) (string-match "history body" text)))
+        (null dsh-emacs--streaming-thinking)))))
 
 (with-temp-buffer
   (dsh-emacs-mode)
@@ -2841,14 +2848,102 @@ symbol or an ordered list."
                (string-match-p "shown" text))
       (dsh-test-pass "thinking-disabled-hides-block")))))
 
+;; Providers can defer all block-end chunks until after the answer's deltas.
+;; Closing an already displayed block must not append it a second time.
+;; With no deltas, block-end still supplies the content exactly once.
+(dolist (deltas '(t nil))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (let ((dsh-emacs-thinking-expand-by-default t)
+          (dsh-emacs-thinking-preview-max 0))
+      ;; Block indices are reused by the next step.
+      (dotimes (step 2)
+        (let ((content
+               (vector
+                `((type . "reasoning") (text . ,(format "why-%d-a" step)))
+                `((type . "text") (text . ,(format "answer-%d-a" step)))
+                `((type . "reasoning") (text . ,(format "why-%d-b" step)))
+                `((type . "text") (text . ,(format "answer-%d-b" step))))))
+          (dolist (phase (if deltas '(start delta end) '(start end)))
+            (cl-loop for block across content for index from 0
+                     for type = (cdr (assq 'type block))
+                     for chunk = (pcase phase
+                                   ('start `((type . "block-start")
+                                             (index . ,index) (blockType . ,type)))
+                                   ('delta `((type . ,(concat type "-delta"))
+                                             (index . ,index)
+                                             (text . ,(cdr (assq 'text block)))))
+                                   ('end `((type . "block-end")
+                                           (index . ,index) (block . ,block))))
+                     do (dsh-emacs-render-event
+                         `((type . "assistant/chunk")
+                           (data . ((turn . 1) (step . ,step)
+                                    (chunk . ,chunk)))))))
+          (dsh-emacs-render-event
+           `((type . "assistant/message")
+             (data . ((turn . 1) (step . ,step)
+                      (message . ((role . "assistant") (content . ,content)))))))
+          (let ((previous (point-min)))
+            (cl-loop for block across content
+                     for body = (cdr (assq 'text block))
+                     do (dsh-test-assert
+                         (format "block-end-%s-keeps-%s-once-in-order"
+                                 (if deltas "delayed" "fallback") body)
+                         (= (how-many body (point-min) (point-max)) 1)
+                         (save-excursion
+                           (goto-char previous)
+                           (when (search-forward body nil t)
+                             (setq previous (point)))))))
+          (dsh-test-assert "block-end-final-clears-live-step"
+                           (null dsh-emacs--streamed-step)
+                           (null dsh-emacs--streaming-thinking)
+                           (null dsh-emacs--streaming-assistant)))))))
+
+;; Final reasoning corrections replace or remove both live and folded blocks.
+(dolist (final '("corrected reasoning" ""))
+  (dolist (answer '("reply" ""))
+    (dolist (limit '(nil 8))
+      (with-temp-buffer
+        (dsh-emacs-mode)
+        (let ((dsh-emacs-stream-markdown-limit limit)
+              (dsh-emacs-thinking-expand-by-default t)
+              (dsh-emacs-thinking-preview-max 0)
+              (final-answer (if (string-empty-p answer) "" "finished reply"))
+              (event '((data . ((turn . 1) (step . 1))))))
+          (dsh-emacs-render--start-thinking-stream event "obsolete reasoning")
+          (dsh-emacs-render--start-assistant-stream event answer)
+          (dsh-emacs-render-assistant-message
+           `((data . ((turn . 1) (step . 1)
+                      (message . ((content . [((type . "reasoning") (text . ,final))
+                                              ((type . "text") (text . ,final-answer))])))))))
+          (dotimes (_ 5)
+            (when dsh-emacs--markdown-pending
+              (dsh-emacs-render--run-markdown (current-buffer))))
+          (let ((text (buffer-string)))
+            (dsh-test-assert "thinking-final-corrects-or-removes-old-content"
+                             (not (string-match-p "obsolete reasoning" text))
+                             (= (how-many "Think" (point-min) (point-max))
+                                (if (string-empty-p final) 0 1))
+                             (or (string-empty-p final) (string-match-p final text))
+                             (null dsh-emacs--streaming-thinking))
+            (when (and (not (string-empty-p final))
+                       (not (string-empty-p answer)))
+              (dsh-test-assert "thinking-correction-stays-above-answer"
+                               (and (string-match final text)
+                                    (string-match final-answer text)
+                                    (< (string-match final text) (string-match final-answer text)))))))))))
+
 ;; Regression: unchanged interleaved blocks keep their order at finalization.
-(dolist (types '(("text" "reasoning" "text" "reasoning" "text")
+(dolist (types '(("reasoning" "reasoning" "text")
+                 ("text" "text" "reasoning" "text")
+                 ("text" "reasoning" "text" "reasoning" "text")
                  ("reasoning" "text" "reasoning" "text" "reasoning")))
   (dolist (limit '(nil 8))
     (with-temp-buffer
       (dsh-emacs-mode)
       (let ((dsh-emacs-stream-markdown-limit limit)
             (dsh-emacs-thinking-expand-by-default t)
+            (dsh-emacs-thinking-preview-max 0)
             (seq 0)
             content)
         (dolist (type types)
@@ -2872,11 +2967,13 @@ symbol or an ordered list."
         (let ((text (buffer-substring-no-properties (point-min) (point-max)))
               (previous 0))
           (dsh-test-assert "stream-final-keeps-one-think-per-block"
-            (= (cl-count ?✶ text) (cl-count "reasoning" types :test #'equal)))
+                           (= (cl-count ?✶ text) (cl-count "reasoning" types :test #'equal)))
           (cl-loop for type in types for index from 1
                    for pos = (string-match (format "%s-%d" type index) text)
                    do (dsh-test-assert "stream-final-keeps-block-order"
-                        pos (> pos previous))
+                                       pos (> pos previous)
+                                       (= (how-many (format "%s-%d" type index)
+                                                    (point-min) (point-max)) 1))
                    do (setq previous (or pos previous))))))))
 
 ;; A step can carry several protocol blocks.  Each owns its own transcript
@@ -2966,7 +3063,7 @@ symbol or an ordered list."
     (dsh-emacs-render--flush-thinking)
     (dsh-emacs-render-event
      (json-read-from-string
-      "{\"type\":\"assistant/message\",\"seq\":4,\"data\":{\"turn\":1,\"step\":1,\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"reasoning\",\"text\":\"think A\\nthink B\\n\"},{\"type\":\"text\",\"text\":\"text one.\"}]}}}"))
+      "{\"type\":\"assistant/message\",\"seq\":4,\"data\":{\"turn\":1,\"step\":1,\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"reasoning\",\"text\":\"think A\\n\"},{\"type\":\"reasoning\",\"text\":\"think B\\n\"},{\"type\":\"text\",\"text\":\"text one.\"}]}}}"))
     (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
            (a (string-match "think A" text))
            (b (string-match "think B" text)))
@@ -3095,6 +3192,49 @@ symbol or an ordered list."
       (null dsh-emacs--streaming-assistant)
       (string-match-p "Attempt (no committed reply)" text)
       (= 2 (length (split-string text "live partial" nil))))))
+
+;; Failed attempts own all their blocks, including folded/live reasoning.
+(dolist (types '(("reasoning") ("reasoning" "text" "reasoning" "text")))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (let ((dsh-emacs-thinking-expand-by-default t)
+          (dsh-emacs-thinking-preview-max 0)
+          records)
+      (cl-loop for type in types for index from 0
+               for body = (format "failed-%s-%d" type index)
+               do (push `((type . ,(concat type "-chunks"))
+                          (index . ,index) (texts . [,body])) records)
+               do (dsh-emacs-render-event
+                   `((type . "assistant/chunk")
+                     (data . ((turn . 1) (step . 1)
+                              (chunk . ((type . ,(concat type "-delta"))
+                                        (index . ,index) (text . ,body))))))))
+      (goto-char (point-max))
+      (insert "keep draft")
+      (dsh-emacs-render-event
+       `((type . "assistant/attempt") (seq . 5)
+         (data . ((turn . 1) (step . 1)
+                  (stream . ,(vconcat (nreverse records)))))))
+      (dsh-test-assert "attempt-clears-all-live-blocks"
+                       (null dsh-emacs--streaming-assistant)
+                       (null dsh-emacs--streaming-thinking)
+                       (null dsh-emacs--streamed-step)
+                       (= (how-many "Think" (point-min) (point-max)) 0)
+                       (string-suffix-p "keep draft" (buffer-string)))
+      (cl-loop for type in types for index from 0
+               do (dsh-test-assert "attempt-owns-each-failed-block-once"
+                                   (= (how-many (format "failed-%s-%d" type index)
+                                                (point-min) (point-max)) 1)))
+      ;; A retry may reuse turn/step and block index zero without any deltas.
+      (dsh-emacs-render-event
+       '((type . "assistant/chunk")
+         (data . ((turn . 1) (step . 1)
+                  (chunk . ((type . "block-end") (index . 0)
+                            (block . ((type . "reasoning")
+                                      (text . "retry-only")))))))))
+      (dsh-test-assert "attempt-retry-starts-fresh"
+                       (= (how-many "retry-only" (point-min) (point-max)) 1)
+                       (equal (plist-get dsh-emacs--streaming-thinking :all) '("retry-only"))))))
 
 ;; session/end-seed: the restore boundary, marked when inherited.
 (with-temp-buffer
@@ -19148,15 +19288,15 @@ candidates as the UI would via `all-completions', not by destructuring."
         (dsh-emacs-events--follow-item
          (current-buffer)
          '((type . "assistant-stream")
-           (frame . ((type . "chunk") (attemptId . "a1") (revision . 1)
-                     (index . 1) (time . 5)
+           (frame . ((type . "chunk") (attemptId . "a1") (revision . 2)
+                     (index . 0) (time . 5)
                      (chunk . ((type . "text-delta") (index . 1)
                                (text . "live-")))))))
         (dsh-emacs-events--follow-item
          (current-buffer)
          '((type . "assistant-stream")
-           (frame . ((type . "chunk") (attemptId . "a1") (revision . 1)
-                     (index . 2) (time . 6)
+           (frame . ((type . "chunk") (attemptId . "a1") (revision . 3)
+                     (index . 1) (time . 6)
                      (chunk . ((type . "text-delta") (index . 1)
                                (text . "reply")))))))
         ;; Flush what the burst timer still owes so the assertion does not
@@ -19170,9 +19310,8 @@ candidates as the UI would via `all-completions', not by destructuring."
     (when (buffer-live-p buf) (kill-buffer buf))))
 
 ;; --- Test 119b: assistant-stream frames with an old revision are dropped ---
-;; A reconnect bumps `revision' and replays the accumulated attempt in the
-;; opening snapshot; accepting an older generation would interleave two
-;; revisions into one live body.
+;; Each emitted frame increments `revision'; a reconnect snapshot already
+;; contains every frame through its baseline revision.
 (let ((buf (generate-new-buffer " *dsh-stream-revision*")))
   (unwind-protect
       (with-current-buffer buf
@@ -19180,18 +19319,24 @@ candidates as the UI would via `all-completions', not by destructuring."
         (setq-local dsh-emacs--buffer-session "sess-frame")
         (dsh-emacs-events--assistant-stream-frame
          (current-buffer)
-         '((type . "start") (revision . 2) (turn . 1) (step . 1)))
+         '((type . "start") (revision . 2) (attemptId . "a1")
+           (turn . 1) (step . 1)))
         (dsh-emacs-events--assistant-stream-frame
          (current-buffer)
-         '((type . "chunk") (revision . 2)
+         '((type . "chunk") (revision . 3) (attemptId . "a1") (index . 0)
            (chunk . ((type . "text-delta") (text . "new-gen")))))
         (dsh-emacs-events--assistant-stream-frame
          (current-buffer)
-         '((type . "chunk") (revision . 1)
+         '((type . "chunk") (revision . 3) (attemptId . "a1") (index . 0)
+           (chunk . ((type . "text-delta") (text . "new-gen")))))
+        (dsh-emacs-events--assistant-stream-frame
+         (current-buffer)
+         '((type . "chunk") (revision . 1) (attemptId . "a1") (index . 0)
            (chunk . ((type . "text-delta") (text . "stale-gen")))))
         (dsh-emacs-render--flush-stream (current-buffer) t)
         (dsh-test-assert "follow-assistant-stream-drops-stale-revision"
-          (= 2 dsh-emacs--assistant-stream-revision)
+          (= 3 dsh-emacs--assistant-stream-revision)
+          (= (how-many "new-gen" (point-min) (point-max)) 1)
           (string-match-p "new-gen" (buffer-string))
           (not (string-match-p "stale-gen" (buffer-string)))))
     (when (buffer-live-p buf) (kill-buffer buf))))
@@ -19206,27 +19351,46 @@ candidates as the UI would via `all-completions', not by destructuring."
       (with-current-buffer buf
         (dsh-emacs-mode)
         (setq-local dsh-emacs--buffer-session "sess-frame")
+        ;; The disconnected socket already displayed a prefix. Re-baselining
+        ;; replaces that prefix, including a Think block folded above it.
+        (dsh-emacs-render-event
+         '((type . "assistant/chunk")
+           (data . ((turn . 2) (step . 1)
+                    (chunk . ((type . "reasoning-delta") (index . 0)
+                              (text . "baseline reasoning")))))))
+        (dsh-emacs-render-event
+         '((type . "assistant/chunk")
+           (data . ((turn . 2) (step . 1)
+                    (chunk . ((type . "text-delta") (index . 1)
+                              (text . "half-")))))))
         (dsh-emacs-events--follow-snapshot
          (current-buffer)
          '((type . "snapshot")
            (cursor . 42)
            (records . [])
-           (assistantStream . ((revision . 3)
+           (assistantStream . ((revision . 4)
                                (activeAttempt . ((attemptId . "a1")
                                                  (startedAfterSeq . 40)
                                                  (turn . 2) (step . 1)
                                                  (nextIndex . 3)
-                                                 (stream . [((type . "text-delta")
-                                                             (text . "half-"))
-                                                            ((type . "text-delta")
-                                                             (text . "done"))])))))))
+                                                 (stream . [((type . "reasoning-chunks")
+                                                             (time0 . 1) (dt . [])
+                                                             (index . 0)
+                                                             (texts . ["baseline reasoning"]))
+                                                            ((type . "text-chunks")
+                                                             (time0 . 2) (dt . [1])
+                                                             (index . 1)
+                                                             (texts . ["half-" "done"]))])))))))
         (dsh-emacs-render--flush-stream (current-buffer) t)
         (dsh-test-assert "follow-snapshot-seeds-active-assistant-stream"
-          (= dsh-emacs--assistant-stream-revision 3)
-          (equal dsh-emacs--assistant-stream-position '(2 . 1))
+          (= dsh-emacs--assistant-stream-revision 4)
+          (equal (plist-get dsh-emacs--assistant-stream-attempt :position)
+                 '(2 . 1))
           (string-match-p "half-done" (buffer-string))
+          (= (how-many "half-" (point-min) (point-max)) 1)
+          (= (how-many "Think" (point-min) (point-max)) 1)
           (= dsh-emacs--anchor-seq 42)
-          ;; A frame from before the reconnect generation is stale.
+          ;; Frames already included in the baseline are stale.
           (progn
             (dsh-emacs-events--assistant-stream-frame
              (current-buffer)
@@ -19234,6 +19398,186 @@ candidates as the UI would via `all-completions', not by destructuring."
                (chunk . ((type . "text-delta") (text . "stale")))))
             (not (string-match-p "stale" (buffer-string))))))
     (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; --- Review regression: stream restart, missing frames and empty cleanup ---
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (setq-local dsh-emacs--anchor-seq 7)
+  (dolist (frame '(((type . "start") (revision . 1) (attemptId . "old")
+                   (turn . 1) (step . 1))
+                  ((type . "chunk") (revision . 2) (attemptId . "old")
+                   (index . 0)
+                   (chunk . ((type . "text-delta") (index . 0)
+                             (text . "old-prefix"))))
+                  ((type . "start") (revision . 1) (attemptId . "new")
+                   (turn . 2) (step . 1))
+                  ;; A replayed start at the watermark it already set is a
+                  ;; duplicate, not another lifecycle reset.
+                  ((type . "start") (revision . 1) (attemptId . "new")
+                   (turn . 2) (step . 1))
+                  ((type . "chunk") (revision . 2) (attemptId . "new")
+                   (index . 0)
+                   (chunk . ((type . "text-delta") (index . 0)
+                             (text . "new-prefix"))))
+                  ((type . "chunk") (revision . 3) (attemptId . "new")
+                   (index . 1)
+                   (chunk . ((type . "text-delta") (index . 0)
+                             (text . "-tail"))))))
+    (dsh-emacs-events--assistant-stream-frame (current-buffer) frame))
+  (dsh-emacs-render--flush-stream (current-buffer) t)
+  (dsh-test-assert "follow-counter-reset-replaces-old-attempt"
+    (string-match-p "new-prefix-tail" (buffer-string))
+    (not (string-match-p "old-prefix" (buffer-string)))
+    (= dsh-emacs--anchor-seq 7)))
+
+;; Attempt ids restart with each Agent lifecycle, so a genuine reset can
+;; arrive while the old attempt is still open under the same id.  The
+;; revision watermark must drive the reset, or the new attempt merges into
+;; the old live body.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (setq-local dsh-emacs--buffer-session "reset-session")
+  (dolist (frame '(((type . "start") (revision . 1) (attemptId . "sess:1")
+                    (turn . 1) (step . 1))
+                   ((type . "chunk") (revision . 2) (attemptId . "sess:1")
+                    (index . 0)
+                    (chunk . ((type . "text-delta") (index . 0)
+                              (text . "old-attempt"))))
+                   ;; No end frame: the old attempt is still open.
+                   ((type . "start") (revision . 1) (attemptId . "sess:1")
+                    (turn . 2) (step . 1))
+                   ((type . "chunk") (revision . 2) (attemptId . "sess:1")
+                    (index . 0)
+                    (chunk . ((type . "text-delta") (index . 0)
+                              (text . "new-attempt"))))))
+    (dsh-emacs-events--assistant-stream-frame (current-buffer) frame))
+  (dsh-emacs-render--flush-stream (current-buffer) t)
+  (dsh-test-assert "follow-counter-reset-reuses-attempt-id"
+    (string-match-p "new-attempt" (buffer-string))
+    (not (string-match-p "old-attempt" (buffer-string)))
+    (equal (plist-get dsh-emacs--assistant-stream-attempt :position)
+           '(2 . 1))
+    (= dsh-emacs--assistant-stream-revision 2)))
+
+(dolist (bad-frame
+         '(((type . "chunk") (revision . 4) (attemptId . "a") (index . 2)
+            (chunk . ((type . "text-delta") (index . 0) (text . "C"))))
+           ((type . "end") (revision . 4) (attemptId . "a") (index . 2)
+            (outcome . ((kind . "abandoned"))))
+           ((type . "chunk") (revision . 3) (attemptId . "a") (index . 2)
+            (chunk . ((type . "text-delta") (index . 0) (text . "C"))))
+           ((type . "chunk") (revision . 4) (attemptId . "a") (index . 1)
+            (chunk . ((type . "text-delta") (index . 0) (text . "C"))))
+           ((type . "chunk") (revision . 3) (attemptId . "other") (index . 1)
+            (chunk . ((type . "text-delta") (index . 0) (text . "C"))))
+           ((type . "start") (revision . 3) (attemptId . "other")
+            (turn . 2) (step . 1))))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (setq-local dsh-emacs--buffer-session "gap-session")
+    (setq-local dsh-emacs--anchor-seq 7)
+    (let ((proc (start-process "dsh-gap" nil "/bin/cat"))
+          sent)
+      (unwind-protect
+          (progn
+            (setq-local dsh-emacs--event-process proc)
+            (process-put proc 'dsh-emacs-chat-buffer (current-buffer))
+            (process-put proc 'dsh-emacs-follow-session "gap-session")
+            (process-put proc 'dsh-emacs-follow-stream-id "old-follow")
+            (cl-letf (((symbol-function 'dsh-emacs-events--frame)
+                       (lambda (_opcode payload) payload))
+                      ((symbol-function 'process-send-string)
+                       (lambda (_proc payload)
+                         (push (json-read-from-string payload) sent))))
+              (dsh-emacs-events--assistant-stream-frame
+               (current-buffer)
+               '((type . "start") (revision . 1) (attemptId . "a")
+                 (turn . 1) (step . 1)))
+              (dsh-emacs-events--assistant-stream-frame
+               (current-buffer)
+               '((type . "chunk") (revision . 2) (attemptId . "a") (index . 0)
+                 (chunk . ((type . "text-delta") (index . 0) (text . "A")))))
+              (dsh-emacs-events--assistant-stream-frame
+               (current-buffer) bad-frame)
+              (dsh-test-assert
+                  (format "follow-gap-reopens-stream-%S" bad-frame)
+                (= (length sent) 2)
+                (equal (alist-get 'type (car sent)) "open")
+                (equal (alist-get 'endpoint (car sent)) "session/follow")
+                (equal (alist-get 'type (cadr sent)) "cancel")
+                (equal (alist-get 'streamId (cadr sent)) "old-follow")
+                (not (equal (process-get proc 'dsh-emacs-follow-stream-id)
+                            "old-follow")))
+              ;; Retired stream frames cannot corrupt the new baseline or
+              ;; schedule yet another recovery (including its end frame).
+              (dsh-emacs-events--dispatch-follow
+               proc '((streamId . "old-follow") (type . "end")))
+              (dsh-emacs-events--dispatch-follow
+               proc '((streamId . "old-follow") (type . "item")
+                      (value . ((type . "assistant-stream")
+                                (frame . ((type . "chunk") (revision . 5)
+                                          (attemptId . "a") (index . 3)
+                                          (chunk . ((type . "text-delta")
+                                                    (index . 0)
+                                                    (text . "STALE")))))))))
+              (dsh-emacs-events--follow-snapshot
+               (current-buffer)
+               '((type . "snapshot") (cursor . 7) (records . [])
+                 (assistantStream .
+                  ((revision . 4)
+                   (activeAttempt .
+                    ((attemptId . "a") (turn . 1) (step . 1) (nextIndex . 3)
+                     (stream . [((type . "text-chunks") (index . 0)
+                                 (time0 . 1) (dt . [1 1])
+                                 (texts . ["A" "B" "C"]))])))))))
+              (dsh-emacs-events--assistant-stream-frame
+               (current-buffer)
+               '((type . "chunk") (revision . 5) (attemptId . "a") (index . 3)
+                 (chunk . ((type . "text-delta") (index . 0) (text . "D")))))
+              (dsh-emacs-render--flush-stream (current-buffer) t)
+              (dsh-test-assert
+                  (format "follow-gap-baseline-restores-complete-body-%S"
+                          bad-frame)
+                (= (length sent) 2)
+                (null dsh-emacs--event-reconnect-timer)
+                (= (how-many "ABCD" (point-min) (point-max)) 1)
+                (not (string-match-p "STALE" (buffer-string)))
+                (= dsh-emacs--anchor-seq 7))))
+        (setq dsh-emacs--event-process nil)
+        (when (process-live-p proc) (delete-process proc))))))
+
+;; Without a session the reopen would be a no-op, so the live stream id must
+;; not be retired either.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let ((proc (start-process "dsh-no-session" nil "/bin/cat"))
+        sent)
+    (unwind-protect
+        (progn
+          (setq-local dsh-emacs--event-process proc)
+          (process-put proc 'dsh-emacs-follow-stream-id "keep-me")
+          (cl-letf (((symbol-function 'process-send-string)
+                     (lambda (_proc payload) (push payload sent))))
+            (dsh-emacs-events--follow-rebaseline))
+          (dsh-test-assert "follow-rebaseline-needs-a-session"
+            (null sent)
+            (equal (process-get proc 'dsh-emacs-follow-stream-id)
+                   "keep-me")))
+      (setq dsh-emacs--event-process nil)
+      (when (process-live-p proc) (delete-process proc)))))
+
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (setq-local dsh-emacs--streamed-step
+              (list :key '(1 . 1)
+                    :text-regions (list (list :start (copy-marker (point-min))
+                                              :end (copy-marker (point-min))))
+                    :thinking-blocks '(("gone" . "gone"))))
+  (let ((before (buffer-string)))
+    (dsh-test-assert "discard-empty-tracking-does-not-claim-visible-removal"
+      (not (dsh-emacs-render--discard-stream))
+      (equal before (buffer-string))
+      (null dsh-emacs--streamed-step))))
 
 ;; --- Test 119d: the follow open request declares assistantStream ---
 ;; Without the opt-in the host never sends the process-local frames, and a

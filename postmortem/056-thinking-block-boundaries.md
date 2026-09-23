@@ -1,5 +1,8 @@
 # 056 — One transcript region per protocol block
 
+_Block identity and final reconciliation are extended by
+[060](060-stream-settlement.md)._
+
 Implementation commit: `fix: isolate streamed thinking blocks`.
 
 Status: Complete.

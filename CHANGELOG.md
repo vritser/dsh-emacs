@@ -130,6 +130,29 @@ minor) and stay undated until the release is cut.
   retired queued waterfalls; a plain reconnect, which mints a generation as a
   matter of course, stays quiet.
 
+- **Finished replies no longer gain a duplicate Think row**: a delayed
+  block-end notification recognizes reasoning that already streamed and
+  folded above the answer. Blocks delivered without deltas are also tracked,
+  so the final message does not display them twice.
+  (rationale: postmortem/060)
+
+- **Streamed blocks stay separate through finalization and retry**:
+  consecutive Think or text blocks keep their own boundaries; corrected or
+  removed reasoning replaces its old content in place. Failed attempts move
+  all their streamed content into the attempt card, leaving no stale Think
+  or partial body to mix into the retry. (rationale: postmortem/060)
+
+- **Reconnect restores the complete in-progress reply once**: compressed
+  snapshot records now rebuild the active stream after retiring its old
+  partial output. Repeated frames at the snapshot's revision are ignored.
+  (rationale: postmortem/060)
+
+- **Live replies recover from restarted counters and missing frames**:
+  a new Agent lifecycle can stream on the existing connection; an attempt
+  mismatch or frame gap requests a fresh snapshot before continuing, so
+  missing text does not silently leave a truncated live reply.
+  (rationale: postmortem/060)
+
 - **A session-list refresh no longer scrolls the list**: a repaint (event,
   auto-refresh, `g`) now puts every window's scroll position back — keyed to
   the row that was at its top — instead of re-centering the current row,

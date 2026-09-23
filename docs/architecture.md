@@ -435,6 +435,17 @@ starting a reasoning block closes the live text body, and a per-step record
 has not been shown, so a reasoning body is never inside the text stream's
 Markdown region and the final repair cannot delete it
 (see [postmortem/056](../postmortem/056-thinking-block-boundaries.md)).
+The step record also tracks block indices that supplied content: a delayed
+`block-end` cannot append an already folded Think block after the answer.
+An unseen block's final content uses the same stream/commit path as deltas,
+so the authoritative message recognizes it too.
+Distinct block indices separate consecutive blocks of the same kind.
+Folded Think fragments retain their identities until settlement: corrected
+reasoning replaces them at their original position, and failed attempts move
+all live/folded blocks into the attempt card. Text reconciliation completes
+before an earlier Think fragment is replaced, preserving text-region bounds.
+`dsh-emacs-render--discard-stream` owns that transient cleanup for both failed
+attempts and reconnect snapshots (see [060](../postmortem/060-stream-settlement.md)).
 The step record joins committed blocks with the same newline separators as
 the final content, removing the joining separator before rendering the next
 body. Closed text blocks retain their stream states until reconciliation;
@@ -582,6 +593,15 @@ or an alternate parser. See [036](../postmortem/036-bounded-stream-markdown.md).
   render once as the catch-up.  Without the gate a reconnect repainted the
   whole transcript a second time (doubled user messages and assistant replies,
   interleaved layout, only fixed by reopening the session).
+- **Live assistant continuity**: protocol structs decode the frame, reconnect
+  baseline and compact stream records. Events keeps the active attempt id,
+  turn/step and next frame index together; duplicate revisions are ignored,
+  while a revision-1 `start` after a higher watermark resets the lifecycle
+  counter (attempt ids restart per lifecycle, so they cannot identify the
+  reset). Revision or frame-index gaps and unexpected attempts cancel and
+  reopen only the logical follow stream. Its fresh snapshot replaces transient
+  output, and retired stream ids cannot feed queued frames into that
+  replacement.
 - **Stream health watchdog**: while a turn runs, three seconds without
   business events triggers a WebSocket ping. A matching pong clears the
   probe; only a probe unanswered for more than three seconds kills the

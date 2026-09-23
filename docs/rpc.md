@@ -373,12 +373,23 @@ frames that follow:
 ```json
 { "type": "assistant-stream", "frame": { "type": "start", "attemptId": "…", "revision": 1,
   "startedAfterSeq": 12, "turn": 2, "step": 1 } }
-{ "type": "assistant-stream", "frame": { "type": "chunk", "attemptId": "…", "revision": 1, … } }
+{ "type": "assistant-stream", "frame": { "type": "chunk", "attemptId": "…", "revision": 2,
+  "index": 0, "time": 123, "chunk": { "type": "text-delta", "index": 0, "text": "Hi" } } }
 ```
 
 Key semantics: these frames **are not persistent session events** (they carry no
-`seq`), `revision` increments on each opening, and `nextIndex` must be dense with
-no gaps; after a restart/reconnect, frames from an old revision are void.
+`seq`). The host increments `revision` for every frame; a reconnect baseline
+already includes frames through its revision, so equal or older revisions
+must be ignored. A new attached Agent lifecycle may reset the counter on the
+same connection: a `start` with revision 1 after a higher revision replaces
+the old transient attempt — the revision is the discriminator, because
+`attemptId` is `<sessionId>:<counter>` and the counter restarts with each
+lifecycle, so it can repeat. The frame's `index` advances densely within an
+attempt; `nextIndex` identifies the next frame after the baseline. This frame
+counter is separate from the content block's `chunk.index`.
+The baseline's compact `text-chunks`, `reasoning-chunks`, and `chunk` records
+must be expanded before rendering. Its active prefix replaces previously
+displayed transient blocks; it does not append onto the disconnected stream.
 **Explicit opt-in is required**: these frames appear only if the `session/follow`
 request carries `assistantStream: true`; otherwise a whole turn appears at once
 when `assistant/message` lands.
@@ -390,8 +401,11 @@ body text by turn/step must remember that pair itself.
 
 How dsh-emacs consumes it (`dsh-emacs-events.el`): it repacks each `chunk` into a
 `{type:"assistant/chunk", data:{turn, step, chunk}}` event and sends it down the
-ordinary event path to reuse the original delta renderer; it filters
-old-generation frames monotonically by `revision`; the snapshot's
+ordinary event path to reuse the original delta renderer. It rejects duplicate
+revisions, checks revision continuity and validates `attemptId` plus the dense
+frame `index` on chunks and ends. A gap or unexpected attempt cancels the old
+logical follow stream and opens a new one on the same socket; queued frames
+from the retired stream id are ignored. The snapshot's
 `activeAttempt.stream` is replayed once at open time so that a reconnect can
 continue the same live body text; `end.outcome.kind == "committed"` is closed out
 by the subsequent persistent `assistant/message` (which replaces the body) or

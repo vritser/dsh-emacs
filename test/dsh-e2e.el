@@ -143,6 +143,33 @@
              `((request . ((sessionId . ,dsh-e2e--session-id)))))
             (dsh-e2e--pass "cancel-session")
 
+            ;; Exercise the gap-recovery transport, including the old
+            ;; stream's end frame racing the new opening snapshot.
+            (let ((process dsh-emacs--event-process)
+                  (old (process-get dsh-emacs--event-process
+                                    'dsh-emacs-follow-stream-id))
+                  (snapshot-handler
+                   (symbol-function 'dsh-emacs-events--follow-snapshot))
+                  recovered)
+              (cl-letf (((symbol-function 'dsh-emacs-events--follow-snapshot)
+                         (lambda (chat value)
+                           (funcall snapshot-handler chat value)
+                           (when (eq chat dsh-e2e--chat)
+                             (setq recovered t)))))
+                (dsh-emacs-events--follow-rebaseline)
+                (dsh-e2e--check
+                 "follow-rebaseline-snapshot"
+                 (dsh-e2e--wait-until (lambda () recovered) 10)
+                 "replacement session/follow did not deliver a snapshot")
+                (dsh-e2e--check
+                 "follow-rebaseline-keeps-socket"
+                 (and (eq process dsh-emacs--event-process)
+                      (process-live-p process)
+                      dsh-emacs--event-ready
+                      (not (equal old (process-get process
+                                                   'dsh-emacs-follow-stream-id)))
+                      (null dsh-emacs--event-reconnect-timer)))))
+
             (let ((dsh-emacs-modeline-format-spec
                    '(:separator " " :segments (tokens))))
               (dsh-emacs-modeline-set-usage

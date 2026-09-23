@@ -65,10 +65,20 @@
   "JSON array VALUE as a list of its object elements.
 A non-object element — a string, number, or null where the wire promised an
 object — is dropped here, at the boundary: the `--from-alist' constructors
-unpack their fields with `assq', which signals on anything but a list, so a
-malformed element must decline rather than break the caller."
+unpack their fields by key, which expects an object, so a malformed element
+must decline rather than break the caller."
   (delq nil (mapcar (lambda (item) (and (consp item) item))
                     (dsh-protocol--list value))))
+
+(defun dsh-protocol--field (key alist)
+  "Return KEY's value from wire ALIST, accepting string and symbol keys.
+`json-read' normally produces symbol-keyed alists while fixtures and renderer
+call sites use JSON field names, so a `--from-alist' constructor must accept
+both.  A non-list ALIST (a number, symbol, or string where the wire promised
+an object) yields nil rather than signalling."
+  (when (listp alist)
+    (cdr (or (assoc key alist)
+             (assoc (if (stringp key) (intern key) (symbol-name key)) alist)))))
 
 (defun dsh-protocol--boolean (value)
   "Return wire VALUE as a strict boolean, mapping JSON `false' to nil.
@@ -646,6 +656,69 @@ canonical `@[label](dsh-session:...)' prompt text the client inserts."
     (setf (dsh-protocol-goal-rounds-started goal)
           (alist-get 'roundsStarted value))
     goal))
+
+;; Process-local assistant presentation frames and reconnect state.
+(cl-defstruct (dsh-protocol-assistant-frame
+               (:constructor dsh-protocol-assistant-frame--from-alist
+                             (alist &aux
+                              (type (dsh-protocol--field 'type alist))
+                              (revision (dsh-protocol--field 'revision alist))
+                              (attempt-id (dsh-protocol--field
+                                           'attemptId alist))
+                              (turn (dsh-protocol--field 'turn alist))
+                              (step (dsh-protocol--field 'step alist))
+                              (index (dsh-protocol--field 'index alist))
+                              (chunk (dsh-protocol--field 'chunk alist))
+                              (outcome-kind
+                               (dsh-protocol--field
+                                'kind
+                                (dsh-protocol--field 'outcome alist))))))
+  type revision attempt-id turn step index chunk outcome-kind)
+
+;; One compact stream record: a packed delta run (`text-chunks' /
+;; `reasoning-chunks' / `tool-call-chunks') or one raw `chunk'.
+(cl-defstruct (dsh-protocol-assistant-record
+               (:constructor dsh-protocol-assistant-record--from-alist
+                             (alist &aux
+                              (type (dsh-protocol--field 'type alist))
+                              (index (dsh-protocol--field 'index alist))
+                              (texts (dsh-protocol--list
+                                      (dsh-protocol--field 'texts alist)))
+                              (name (dsh-protocol--field 'name alist))
+                              (args (dsh-protocol--list
+                                     (dsh-protocol--field 'args alist)))
+                              (chunk (dsh-protocol--field 'chunk alist)))))
+  type index texts name args chunk)
+
+(defun dsh-protocol--assistant-records (value)
+  "Compact stream VALUE (a JSON record array) as record structs.
+Non-object elements are dropped here, at the boundary."
+  (mapcar #'dsh-protocol-assistant-record--from-alist
+          (dsh-protocol--objects value)))
+
+(cl-defstruct (dsh-protocol-assistant-baseline
+               (:constructor dsh-protocol-assistant-baseline--from-alist
+                             (alist &aux
+                              (revision (dsh-protocol--field 'revision alist))
+                              (attempt (dsh-protocol--field
+                                        'activeAttempt alist))
+                              (attempt-id (dsh-protocol--field
+                                           'attemptId attempt))
+                              (turn (dsh-protocol--field 'turn attempt))
+                              (step (dsh-protocol--field 'step attempt))
+                              (next-index (dsh-protocol--field
+                                           'nextIndex attempt))
+                              (stream (dsh-protocol--assistant-records
+                                       (dsh-protocol--field
+                                        'stream attempt))))))
+  revision attempt-id turn step next-index stream)
+
+(defun dsh-protocol-assistant-baseline--from-snapshot (value)
+  "VALUE (a `session/follow' snapshot) as an assistant baseline struct.
+An absent `assistantStream' field yields the empty baseline: nil revision,
+no active attempt and no records."
+  (dsh-protocol-assistant-baseline--from-alist
+   (dsh-protocol--field 'assistantStream value)))
 
 (defun dsh-protocol--struct (struct-alist-pred constructor value)
   "Return VALUE as a struct via CONSTRUCTOR if needed.
