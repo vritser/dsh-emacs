@@ -1294,20 +1294,23 @@ removes that newline (see `dsh-emacs--composer-kill-region' and
     (dsh-emacs--input-end)))
 
 (defun dsh-emacs--composer-kill-region (orig start end &rest args)
-  "`kill-region' advice: never kill across the composer's structural newline.
-A forward kill that reaches the input's end — `C-k'/`kill-line', a trailing
-`kill-word'/`M-d', a kill-sentence, or a selected region extended past the
-input — would remove the structural newline the mode-line separator owns and
-strand the cursor below the input line.  The kill region is clipped at the
-input boundary: a region wholly at/after it deletes nothing, one crossing it
-keeps only the editable part.  Regions fully inside the input and kills in
-non-chat buffers run unchanged.  `kill-line' keeps its normal Emacs semantics
-here (kills from point to the end of the input, never the whole input or the
-separator)."
-  (if-let* ((boundary (dsh-emacs--composer-boundary)))
-      (cond ((<= end boundary) (apply orig start end args))
-            ((< start boundary) (apply orig start boundary args))
-            (t nil))
+  "`kill-region' advice: clip kills touching the composer to editable input.
+Backward word kills can cross the read-only prompt when a draft starts with
+punctuation such as `~/'; forward kills can cross the structural separator
+newline.  Clamp both endpoints without changing their direction, so only
+draft text reaches the kill ring.  If word motion has already moved point
+past a boundary, bring it back into the input as well.  Empty clipped kills
+do nothing.  Kills wholly above the input and in non-chat buffers retain
+their standard behavior."
+  (if-let* ((boundary (dsh-emacs--composer-boundary))
+            (input-start (marker-position dsh-emacs--input-marker))
+            ((>= (max start end) input-start)))
+      (let ((clipped-start (max input-start (min start boundary)))
+            (clipped-end (max input-start (min end boundary))))
+        (when (<= (min start end) (point) (max start end))
+          (goto-char (max input-start (min (point) boundary))))
+        (unless (= clipped-start clipped-end)
+          (apply orig clipped-start clipped-end args)))
     (apply orig start end args)))
 
 (defun dsh-emacs--composer-delete-forward (orig &optional arg)
@@ -1324,12 +1327,12 @@ line.  Deletions are capped at the input boundary."
           (t (funcall orig effective)))))
 
 (defvar dsh-emacs--composer-delete-guard-installed nil
-  "Non-nil once the composer forward-delete guards have been added once.")
+  "Non-nil once the composer deletion guards have been added once.")
 
 (defun dsh-emacs--composer-delete-guard-install ()
-  "Install the composer forward-delete boundary guards (global, idempotent).
+  "Install the composer deletion boundary guards (global, idempotent).
 Advises the deletion commands (`kill-region', which `C-k'/`kill-line' and
-`kill-word'/region kills route through, and `delete-forward-char'/`C-d')
+word/region kills route through, and `delete-forward-char'/`C-d')
 rather than the `delete-region' primitive, because a native-compiled caller
 can bypass advice on the primitive while the interactive command symbols are
 always reached through advice."
@@ -2423,10 +2426,9 @@ metadata preserves nearest-first ordering for display and cycling."
   (add-hook 'pre-command-hook #'dsh-emacs--route-typing-to-input nil t)
   ;; Scroll to the input area immediately when typing
   (add-hook 'post-command-hook #'dsh-emacs--reveal-input-when-typing nil t)
-  ;; Forward deletes (`C-k'/kill-line, `M-d'/kill-word, kill-region, `C-d')
-  ;; must never cross the input area's trailing structural newline; `C-k'
-  ;; keeps standard semantics (only deletes after point) and the guard holds
-  ;; the separator line in place.
+  ;; Word/region kills stay inside the editable input, protecting the prompt
+  ;; on backward kills and the structural newline on forward kills.  `C-d'
+  ;; also stops at the trailing boundary; `C-k' keeps standard line semantics.
   (dsh-emacs--composer-delete-guard-install)
   (setq dsh-emacs--tool-calls (make-hash-table :test 'equal))
   (setq dsh-emacs--activity-groups (make-hash-table :test 'equal))

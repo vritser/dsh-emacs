@@ -18104,6 +18104,72 @@ candidates as the UI would via `all-completions', not by destructuring."
                     "hello \n")
            (eq (char-before (point-max)) ?\n)))))
 
+;; Backward word kills must stop at the editable start, including drafts
+;; consisting only of punctuation and counts that would reach the transcript.
+(dolist (example '(("~/" 1 "" "~/")
+                   ("../" 1 "" "../")
+                   ("   " 1 "" "   ")
+                   ("~/docs" 1 "~/" "docs")
+                   ("~/docs" 2 "" "~/docs")
+                   ("~/" 5 "" "~/")
+                   ("alpha beta" 1 "alpha " "beta")
+                   ("" 1 "" "previous kill")))
+  (pcase-let ((`(,draft ,count ,expected ,killed) example))
+    (with-temp-buffer
+      (dsh-emacs-mode)
+      (dsh-emacs-modeline-setup)
+      (goto-char dsh-emacs--input-marker)
+      (insert draft)
+      (let ((header (buffer-substring (point-min) dsh-emacs--input-marker))
+            (kill-ring '("previous kill"))
+            (last-command nil)
+            failure)
+        (condition-case err
+            (backward-kill-word count)
+          (error (setq failure err)))
+        (dsh-test-assert
+         (format "backward-word-kill-input-boundary-%S-%s" draft count)
+         (null failure)
+         (equal (dsh-emacs--get-input) expected)
+         (equal (car kill-ring) killed)
+         (equal-including-properties
+          header (buffer-substring (point-min) dsh-emacs--input-marker))
+         (eq (char-before (point-max)) ?\n)
+         (= (point) (dsh-emacs--input-end)))))))
+
+;; Crossing both boundaries must preserve the transcript and separator for
+;; either region direction; the kill ring receives only the editable draft.
+(dolist (backward '(nil t))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (dsh-emacs-modeline-setup)
+    (goto-char dsh-emacs--input-marker)
+    (insert "draft")
+    (let ((header (buffer-substring (point-min) dsh-emacs--input-marker))
+          (start (- dsh-emacs--input-marker 2))
+          (end (point-max))
+          (kill-ring nil)
+          (last-command nil))
+      (goto-char (if backward start end))
+      (kill-region (if backward end start) (if backward start end))
+      (dsh-test-assert
+       (format "composer-kill-clips-both-boundaries-%s" backward)
+       (equal (dsh-emacs--get-input) "")
+       (equal (car kill-ring) "draft")
+       (equal-including-properties
+        header (buffer-substring (point-min) dsh-emacs--input-marker))
+       (eq (char-before (point-max)) ?\n)
+       (= (point) dsh-emacs--input-marker)))))
+
+(with-temp-buffer
+  (insert "hello world")
+  (let ((kill-ring nil)
+        (last-command nil))
+    (backward-kill-word 1)
+    (dsh-test-assert "backward-word-kill-non-chat-unchanged"
+      (equal (buffer-string) "hello ")
+      (equal (car kill-ring) "world"))))
+
 ;; --- composer file reference: stays editable, but with link style and jumping
 (with-temp-buffer
   (insert "@src/a.ts")

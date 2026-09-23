@@ -99,6 +99,12 @@ order, above the editable **Input Area**. The input geometry (the `❯ ` prompt,
 that keeps streamed transcript above them. The queue module supplies the
 visible next item directly from its mirror; Composer keeps no second queue.
 
+Word and region kills are clipped to both editable input boundaries while
+preserving their direction. Backward word motion over punctuation such as
+`~/` can reach the read-only prompt before `kill-region` runs; the guard
+clamps the deletion and cursor back to the input, so only draft text enters
+the kill ring. Forward kills also preserve the structural separator newline.
+
 The Goal Row shows the session's current goal as one read-only line (a leading
 dartboard goal SVG icon mirroring dsh web — the `◎ ` text is a fallback when
 Emacs lacks SVG support — followed by objective + phase, and trailing

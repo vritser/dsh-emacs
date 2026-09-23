@@ -139,6 +139,11 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Backward word deletion clears punctuation at the input start**:
+  `M-<backspace>` / `M-DEL` now removes drafts such as `~/` and `../`
+  instead of failing on the read-only prompt. Word and region kills stop at
+  both input boundaries, keeping the prompt, transcript and separator intact.
+
 - **Re-opening the session list no longer resets your folded groups**:
   `M-x dsh-emacs` / `C-c C-l` skipped the list's major mode when the buffer
   was already in it, which used to run `kill-all-local-variables` and wipe
