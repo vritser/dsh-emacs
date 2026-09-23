@@ -10,8 +10,6 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
-
-
 - **Opening the session list lands on the session you are in**: `M-x
   dsh-emacs` (and `C-c C-l`) now puts the cursor and `hl-line` on the current
   session's row instead of the first row, scrolling it into view — a folded
@@ -110,6 +108,21 @@ minor) and stay undated until the release is cut.
   the job rows keep their headers.
 
 ### Fixed
+
+- **A session-list refresh no longer scrolls the list**: a repaint (event,
+  auto-refresh, `g`) now puts every window's scroll position back — keyed to
+  the row that was at its top — instead of re-centering the current row,
+  which read as the page "re-flowing".  Opening the list still moves to the
+  current session, but scrolls only when that row is genuinely off screen.
+  (rationale: postmortem/058)
+
+- **Every window on the session list keeps its own row**: when the same
+  `*dsh-sessions*` buffer is shown in two windows, a refresh (events,
+  auto-refresh, `g`) no longer drops the window that is not current back to
+  the top of the list — each window's row is captured before the redraw and
+  put back after it, including a window parked on a workspace header.  A row
+  that is gone (its group collapsed) falls back to the top row.
+  (rationale: postmortem/058)
 
 - **Streamed replies protect their trailing blank lines**: the separators
   after text, code blocks and tables can no longer be edited while a reply

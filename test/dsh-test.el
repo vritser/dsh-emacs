@@ -39,6 +39,16 @@ FAIL instead of silently vanishing from the summary.  Empty CONDITIONS
       (dsh-test-pass name)
     (dsh-test-fail name "assertion failed (dsh-test-assert)")))
 
+(defun dsh-test--goto-marker (marker)
+  "Move the buffer point and the selected window's point onto MARKER's line.
+A real GUI moves both together; tests that only `goto-char' would leave the
+window's own point behind, which the session list now preserves per window."
+  (goto-char (point-min))
+  (search-forward marker)
+  (beginning-of-line)
+  (when (eq (window-buffer (selected-window)) (current-buffer))
+    (set-window-point (selected-window) (point))))
+
 (defun dsh-test--faces-at (pos)
   "Return the `face' property at POS as a list (nil when unset).
 Lets face assertions read uniformly whether the property holds one face
@@ -6714,9 +6724,7 @@ Lets a test drive a malformed content value through the result path."
               (dsh-emacs--workspaces workspaces)
               (dsh-emacs--archived-sessions nil))
           (dsh-emacs-session--render)
-          (goto-char (point-min))
-          (search-forward "WS A")
-          (beginning-of-line)
+          (dsh-test--goto-marker "WS A")
           (dsh-emacs-session-toggle-workspace)
           (dsh-test-assert "workspace-fold-keeps-header-focused"
             (equal (dsh-emacs-workspace-id-at-point) "w1"))
@@ -6731,9 +6739,7 @@ Lets a test drive a malformed content value through the result path."
             (dsh-test-assert "workspace-fold-survives-render"
               (and (string-match-p "▸ WS A  (1)" refreshed)
                    (not (string-match-p "Alpha" refreshed)))))
-          (goto-char (point-min))
-          (search-forward "WS A")
-          (beginning-of-line)
+          (dsh-test--goto-marker "WS A")
           (dsh-emacs-open-session-at-point)
           (dsh-test-assert "workspace-ret-expands"
             (string-match-p "Alpha"
@@ -6793,11 +6799,13 @@ Lets a test drive a malformed content value through the result path."
               (dsh-emacs--workspaces workspaces)
               (dsh-emacs--archived-sessions nil))
           (dsh-emacs-session--render)
-          (dsh-test-assert "session-row-finder-absent-session"
-            (null (dsh-emacs-session--find-session-row "nope")))
-          (dsh-test-assert "session-row-finder-picks-row"
-            (equal "other" (progn (dsh-emacs-session--find-session-row "other")
-                                  (dsh-emacs-session-id-at-point))))
+          (dsh-test-assert "session-row-pos-absent-session"
+            (null (dsh-emacs-session--row-pos 'dsh-emacs-session-id "nope")))
+          (dsh-test-assert "session-row-pos-picks-row"
+            (equal "other"
+                   (get-text-property
+                    (dsh-emacs-session--row-pos 'dsh-emacs-session-id "other")
+                    'dsh-emacs-session-id)))
           (dsh-emacs-session--render)
           (dsh-test-assert "session-render-parks-on-newest"
             (equal "other" (dsh-emacs-session-id-at-point)))
@@ -6858,6 +6866,120 @@ Lets a test drive a malformed content value through the result path."
               ;; Only the target's group unfolds; WS B keeps its fold.
               (not (string-match-p "B1" text))
               (null dsh-emacs-session--auto-jump-session)))))
+    (kill-buffer buf)))
+
+;; --- Test 51e: each window showing the list keeps its own row ---
+;; A render erases the buffer, which clamps every window's point to the
+;; start; the row each window was on has to be captured and put back, not
+;; just the current buffer's point.
+(let* ((sessions (dsh-emacs-test--session-items
+                  (list (list (cons 'sessionId "s1") (cons 'updatedAt 300)
+                              (cons 'cwd "/tmp/ws-a")
+                              (cons 'projections
+                                    (list (cons 'values
+                                                (list (cons 'title "One"))))))
+                        (list (cons 'sessionId "s2") (cons 'updatedAt 200)
+                              (cons 'cwd "/tmp/ws-a")
+                              (cons 'projections
+                                    (list (cons 'values
+                                                (list (cons 'title "Two"))))))
+                        (list (cons 'sessionId "s3") (cons 'updatedAt 100)
+                              (cons 'cwd "/tmp/ws-a")
+                              (cons 'projections
+                                    (list (cons 'values
+                                                (list (cons 'title
+                                                            "Three")))))))))
+       (workspaces (list (dsh-protocol-workspace--from-alist
+                          (list (cons 'workspaceId "w1")
+                                (cons 'title "WS A")
+                                (cons 'sessionIds ["s1" "s2" "s3"])))))
+       (buf (generate-new-buffer " *dsh-window-rows*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (let ((dsh-emacs--sessions sessions)
+              (dsh-emacs--workspaces workspaces)
+              (dsh-emacs--archived-sessions nil))
+          (dsh-emacs-session--render)
+          ;; Show the list in a window: `set-window-point' is a no-op on a
+          ;; window that displays some other buffer.
+          (set-window-buffer (selected-window) (current-buffer))
+          (dsh-emacs-session--render)
+          ;; the selected window's own point, as the focused window's would be
+          (set-window-point (selected-window)
+                            (dsh-emacs-session--row-pos 'dsh-emacs-session-id
+                                                        "s3"))
+          (dsh-emacs-session--render)
+          (dsh-test-assert "window-row-survives-render"
+            (equal "s3"
+                   (get-text-property (window-point (selected-window))
+                                      'dsh-emacs-session-id)))
+          ;; a window parked on a group header comes back to that header
+          (set-window-point (selected-window)
+                            (or (dsh-emacs-session--row-pos
+                                 'dsh-emacs-workspace-group-id "w1")
+                                (point-min)))
+          (dsh-emacs-session--render)
+          (dsh-test-assert "window-header-row-survives-render"
+            (equal "w1"
+                   (get-text-property (window-point (selected-window))
+                                      'dsh-emacs-workspace-group-id)))
+          ;; a row that is gone (collapsed group) leaves the window at the top
+          (set-window-point (selected-window)
+                            (dsh-emacs-session--row-pos 'dsh-emacs-session-id
+                                                        "s3"))
+          (setq dsh-emacs-session--workspace-fold-overrides '(("w1" . t)))
+          (dsh-emacs-session--render)
+          (dsh-test-assert "window-row-gone-falls-back-to-top"
+            (equal "w1"
+                   (get-text-property (window-point (selected-window))
+                                      'dsh-emacs-workspace-group-id)))))
+    (kill-buffer buf)))
+
+;; --- Test 51f: a refresh keeps the scroll position (no visible re-flow) ---
+;; The window point may sit outside the viewport; the viewport itself must
+;; come back exactly where it was, or every background refresh scrolls the
+;; list under the user.
+(let* ((sessions (dsh-emacs-test--session-items
+                  (cl-loop for i from 1 to 60
+                           collect (list (cons 'sessionId (format "s%02d" i))
+                                         (cons 'updatedAt (+ 1000 i))
+                                         (cons 'cwd "/tmp/ws-a")
+                                         (cons 'projections
+                                               (list (cons 'values
+                                                           (list (cons 'title
+                                                                       (format "T%02d"
+                                                                               i))))))))))
+       (workspaces (list (dsh-protocol-workspace--from-alist
+                          (list (cons 'workspaceId "w1")
+                                (cons 'title "WS A")
+                                (cons 'sessionIds
+                                        (vconcat (cl-loop for i from 1 to 60
+                                                          collect (format "s%02d" i))))))))
+       (buf (generate-new-buffer " *dsh-scroll-keep*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (let ((dsh-emacs--sessions sessions)
+              (dsh-emacs--workspaces workspaces)
+              (dsh-emacs--archived-sessions nil))
+          (dsh-emacs-session-mode)
+          (set-window-buffer (selected-window) (current-buffer))
+          (dsh-emacs-session--render)
+          (let ((p10 (dsh-emacs-session--row-pos 'dsh-emacs-session-id "s10"))
+                (p45 (dsh-emacs-session--row-pos 'dsh-emacs-session-id "s45")))
+            ;; FORCE: the window is not redisplayed in batch, so an unforced
+            ;; `set-window-start' would not read back.
+            (set-window-point (selected-window) p10)
+            (set-window-start (selected-window) p45 t)
+            (let ((before-start (window-start (selected-window)))
+                  (before-row
+                   (get-text-property (window-start (selected-window))
+                                      'dsh-emacs-row-id)))
+              (dsh-emacs-session--render)
+              (dsh-test-assert "refresh-keeps-scroll-position"
+                (equal before-start (window-start (selected-window)))
+                (equal before-row
+                       (get-text-property (window-start (selected-window))
+                                          'dsh-emacs-row-id)))))))
     (kill-buffer buf)))
 
 (let* ((sessions (dsh-emacs-test--session-items
