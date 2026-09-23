@@ -15114,6 +15114,144 @@ input-area draft (which carries no such property) is not counted."
                    '("zulu" "zebra")))))
     (kill-buffer "*Completions*")))
 
+;; --- Test 100c: local file path completion ---
+;; A token that carries a separator completes against the chat buffer's
+;; default-directory (the session workspace) through the stock file-name
+;; completer; a bare name stays with word completion.
+(let* ((root (file-name-as-directory (make-temp-file "dsh-path-capf-" t)))
+       (sub (file-name-as-directory (expand-file-name "sub" root))))
+  (unwind-protect
+      (progn
+        (make-directory sub t)
+        (with-temp-file (expand-file-name "sub/report.md" root)
+          (insert "x"))
+        (with-temp-file (expand-file-name "sub/notes.txt" root)
+          (insert "x"))
+        ;; Use the real completion path, including suffixes and abbreviated
+        ;; directory components under the standard partial-completion style.
+        (dolist (example '(("sub/report.md," 6 "sub/report.md,")
+                           ("sub/re.md," 6 "sub/report.md,")
+                           ("./s/re" 6 "./sub/report.md")
+                           ("./su/report.md" 4 "./sub/report.md")))
+          (pcase-let ((`(,draft ,offset ,expected) example))
+            (with-temp-buffer
+              (dsh-emacs-mode)
+              (setq default-directory root)
+              (goto-char (point-max))
+              (setq-local dsh-emacs--input-marker (point-marker))
+              (insert draft)
+              (goto-char (+ dsh-emacs--input-marker offset))
+              (let ((completion-styles '(basic partial-completion))
+                    (completion-category-defaults nil)
+                    (completion-category-overrides nil))
+                (completion-at-point))
+              (dsh-test-assert
+               (format "path-capf-region-and-style-%s" draft)
+               (equal (buffer-substring-no-properties
+                       dsh-emacs--input-marker (point-max))
+                      expected)))))
+        (with-temp-buffer
+          (dsh-emacs-mode)
+          (setq default-directory root)
+          (goto-char (point-max))
+          (setq-local dsh-emacs--input-marker (point-marker))
+          (insert "please see sub/rep")
+          (goto-char (point-max))
+          (let ((completion-styles '(basic)))
+            (completion-at-point))
+          (dsh-test-assert "path-capf-completes-relative-path"
+            (equal (buffer-substring-no-properties dsh-emacs--input-marker
+                                                   (point-max))
+                   "please see sub/report.md"))
+          ;; A directory prefix claims the token and keeps its candidates for
+          ;; the next level.
+          (delete-region dsh-emacs--input-marker (point-max))
+          (goto-char (point-max))
+          (insert "sub/")
+          (let ((res (dsh-emacs-path-completion-at-point)))
+            (dsh-test-assert "path-capf-directory-drill-down"
+              (and res
+                   (= (nth 0 res) (marker-position dsh-emacs--input-marker))
+                   (= (nth 1 res) (point))
+                   (eq (nth 2 res) #'completion-file-name-table)
+                   (member "report.md"
+                           (all-completions "sub/" (nth 2 res))))))
+          ;; The separator is the signal: a bare name is a word, not a path,
+          ;; and a lone tilde is not a path token either.
+          (delete-region dsh-emacs--input-marker (point-max))
+          (goto-char (point-max))
+          (insert "report")
+          (dsh-test-assert "path-capf-requires-a-separator"
+            (null (dsh-emacs-path-completion-at-point)))
+          (delete-region dsh-emacs--input-marker (point-max))
+          (goto-char (point-max))
+          (insert "~")
+          (dsh-test-assert "path-capf-lone-tilde-is-not-a-path"
+            (null (dsh-emacs-path-completion-at-point)))
+          ;; An @ token belongs to the reference source even when its own
+          ;; catalog is empty (there is no session here).
+          (delete-region dsh-emacs--input-marker (point-max))
+          (goto-char (point-max))
+          (insert "@sub/rep")
+          (dsh-test-assert "path-capf-declines-reference-token"
+            (null (dsh-emacs-path-completion-at-point)))
+          ;; Prose with a slash is not a path unless such a directory exists.
+          (delete-region dsh-emacs--input-marker (point-max))
+          (goto-char (point-max))
+          (insert "and/or")
+          (dsh-test-assert "path-capf-declines-non-directory-slash"
+            (null (dsh-emacs-path-completion-at-point)))
+          ;; Absolute paths complete too, and the token boundary keeps
+          ;; trailing punctuation out of the region.
+          (delete-region dsh-emacs--input-marker (point-max))
+          (goto-char (point-max))
+          (insert (concat root "sub/re"))
+          (let ((completion-styles '(basic)))
+            (completion-at-point))
+          (dsh-test-assert "path-capf-completes-absolute-path"
+            (equal (buffer-substring-no-properties dsh-emacs--input-marker
+                                                   (point-max))
+                   (concat root "sub/report.md")))
+          (delete-region dsh-emacs--input-marker (point-max))
+          (goto-char (point-max))
+          (insert "sub/report.md,")
+          (goto-char (1- (point-max)))
+          (let ((res (dsh-emacs-path-completion-at-point)))
+            (dsh-test-assert "path-capf-region-stops-at-punctuation"
+              (and res
+                   (= (nth 1 res) (point))
+                   (equal (buffer-substring-no-properties (nth 0 res)
+                                                          (nth 1 res))
+                          "sub/report.md")
+                   (eq (char-after (point)) ?,))))))
+    (delete-directory root t)))
+
+;; A matching local path must not take over a command prefix, even when
+;; commands/list returns an empty catalog or fails.  The file table supplies
+;; a deterministic match without depending on directories under system root.
+(dolist (rpc-ok '(t nil))
+  (dolist (draft '("/" "/ren"))
+    (with-temp-buffer
+      (dsh-emacs-mode)
+      (goto-char (point-max))
+      (setq-local dsh-emacs--input-marker (point-marker)
+                  dsh-emacs--buffer-session "path-capf-empty-catalog")
+      (insert draft)
+      (let ((dsh-emacs--command-catalogs nil)
+            (completion-styles '(basic)))
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-request)
+                   (lambda (_method _params) (cons rpc-ok [])))
+                  ((symbol-function 'completion-file-name-table)
+                   (lambda (string pred action)
+                     (complete-with-action action '("/rendered/")
+                                           string pred))))
+          (completion-at-point)))
+      (dsh-test-assert
+       (format "path-capf-reserves-command-%s-%s" rpc-ok draft)
+       (equal (buffer-substring-no-properties
+               dsh-emacs--input-marker (point-max))
+              draft)))))
+
 ;; Mode wiring: commands and references own their tokens, a path token
 ;; completes locally, and word completion is the last fallback.
 (with-temp-buffer
@@ -15122,6 +15260,7 @@ input-area draft (which carries no such property) is not counted."
     (equal completion-at-point-functions
            '(dsh-emacs-command-completion-at-point
              dsh-emacs-reference-completion-at-point
+             dsh-emacs-path-completion-at-point
              dsh-emacs-word-completion-at-point))))
 
 ;; Cooperative "/" auto-trigger: dsh-emacs-mode adds "/" to the buffer-local

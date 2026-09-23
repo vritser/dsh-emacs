@@ -2192,14 +2192,73 @@ that just ran."
           buffer-undo-list (dsh-emacs--input-undo-history))))
 
 ;;; ---------------------------------------------------------------------------
-;;; Input word completion
+;;; Input completion: local paths and words
 ;;;
-;;; The third completion source in the chat input.  Slash commands and @
-;;; references are served by their own CAPFs (dsh-emacs-command.el /
-;;; dsh-emacs-reference.el), and this source declines their tokens even when
-;;; their catalogs are empty.  Ordinary words from the draft before point and
-;;; the transcript above it can be completed instead of retyped.
+;;; Two sources beyond the token owners.  Slash commands and @ references are
+;;; served by their own CAPFs (dsh-emacs-command.el / dsh-emacs-reference.el);
+;;; a path-like token completes against the local filesystem, and anything
+;;; else completes as a word from the draft above point and the transcript
+;;; above it instead of being retyped.
 ;;; ---------------------------------------------------------------------------
+
+(defconst dsh-emacs--path-completion-chars "[:alnum:]_.~/+-"
+  "Characters that make up a path token in the chat input.
+The set stops at whitespace, quotes and punctuation, so completing
+`see docs/rpc.md,' inside the input leaves the comma alone instead of
+treating it as part of the file name.  The hyphen is last on purpose:
+inside a `skip-chars' set a hyphen in the middle starts a range, which
+would silently drop `.' and `-' from the token.")
+
+(defun dsh-emacs--path-completion-start ()
+  "Return the start of the path token before point in the input area, or nil.
+A token counts as a path when it contains a slash — the separator the user
+types to mean \"this is a path\" — so `~/…', `./src/' and absolute paths
+qualify while a bare name (and a lone `~') stays with word completion.
+Slash-command prefixes at the start of the input and @ reference tokens
+belong to their own completion sources."
+  (when-let* ((marker (and (boundp 'dsh-emacs--input-marker)
+                           dsh-emacs--input-marker))
+              ((markerp marker))
+              ((eq (marker-buffer marker) (current-buffer)))
+              (input-start (marker-position marker))
+              ((>= (point) input-start)))
+    (let* ((start (save-excursion
+                    (skip-chars-backward dsh-emacs--path-completion-chars)
+                    (point)))
+           (token (and (>= start input-start) (< start (point))
+                       (buffer-substring-no-properties start (point)))))
+      (when (and token
+                 (string-match-p "/" token)
+                 (not (and (= start input-start)
+                           (dsh-emacs-command--completion-prefix-p token)))
+                 (not (dsh-emacs-reference--at-token input-start (point))))
+        start))))
+
+(defun dsh-emacs-path-completion-at-point ()
+  "`completion-at-point-functions' entry: complete a local file path.
+`docs/rp', `./src/', `~/…' and absolute paths complete through the stock
+file-name completer against the chat buffer's `default-directory' — the
+session workspace — so the rows and drill-down match `find-file'.  The
+region includes the path suffix after point, and matching follows the
+active completion styles, including abbreviated directory components.
+Returns nil outside the input area, for an empty or non-path token, for a
+slash-command prefix or @ reference, and when no path matches, so a word
+token falls through to `dsh-emacs-word-completion-at-point'.
+
+Completion reads the LOCAL filesystem, like the `!' shell lines and
+`dsh-emacs-attach-file'; with a dsh server on another host, use an @
+reference instead, which the server resolves in the agent's working
+directory."
+  (when-let* ((start (dsh-emacs--path-completion-start))
+              (end (save-excursion
+                     (skip-chars-forward dsh-emacs--path-completion-chars)
+                     (point)))
+              (token (buffer-substring-no-properties start end))
+              ((completion-try-completion
+                token #'completion-file-name-table nil (- (point) start))))
+    ;; Matching is already style-aware above.  `:exclusive no' makes stock
+    ;; CAPF dispatch repeat a prefix-only test and reject directory shorthand.
+    (list start end #'completion-file-name-table)))
 
 (defconst dsh-emacs--word-completion-chars "[:alnum:]_-"
   "Characters that make up one completion word in the chat input.
@@ -2300,11 +2359,13 @@ metadata preserves nearest-first ordering for display and cycling."
   (setq-local comment-end "")
   ;; Complete slash commands when the input starts with "/"; complete
   ;; file/session references while an "@" token is in progress (see
-  ;; dsh-emacs-command.el / dsh-emacs-reference.el); otherwise complete an
-  ;; ordinary word from the draft and the transcript above the input.
+  ;; dsh-emacs-command.el / dsh-emacs-reference.el); complete a local file
+  ;; path when the token carries a separator; otherwise complete an ordinary
+  ;; word from the draft and the transcript above the input.
   (setq-local completion-at-point-functions
               '(dsh-emacs-command-completion-at-point
                 dsh-emacs-reference-completion-at-point
+                dsh-emacs-path-completion-at-point
                 dsh-emacs-word-completion-at-point))
   ;; Cooperative slash / @ auto-trigger (see `dsh-emacs-command-auto-trigger-setup'
   ;; and `dsh-emacs-reference-auto-trigger-setup'): dsh-emacs never enables a

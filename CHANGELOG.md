@@ -125,6 +125,18 @@ minor) and stay undated until the release is cut.
   Slash commands and `@` references keep their own completion even when
   their catalogs are empty.  (rationale: postmortem/061)
 
+- **`TAB` completes local file paths in the chat input**: a token carrying a
+  separator (`docs/rp`, `./src/`, `~/…`, an absolute path) completes through
+  the stock file-name completer against the chat buffer's working directory
+  — the session workspace — with `find-file`'s directory drill-down and the
+  active completion styles, preserving any suffix after the cursor.  A
+  leading slash-command prefix stays with command completion even when its
+  catalog is empty; a bare name still completes as a word, and an `@`
+  reference still completes from the host's workspace list (use one for a
+  path with spaces, or when the dsh server runs on another host).  This
+  reads the machine Emacs runs on, like `!` shell lines.
+  (rationale: postmortem/062)
+
 ### Fixed
 
 - **Re-opening the session list no longer resets your folded groups**:

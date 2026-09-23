@@ -89,6 +89,18 @@ can provide them with auto completion enabled; stock completion,
 vertico and icomplete require `TAB`. See
 [Slash commands](docs/slash-commands.md#three-ways-to-run-a-command).
 
+**`TAB`** completes a **local file path** once the token carries a separator:
+`docs/rp`, `./src/`, `~/…` and `/abs/…` complete through the stock file-name
+completer against the chat buffer's working directory — the session workspace
+— with the same directory drill-down as `find-file`, the path suffix after
+the cursor preserved, and the active completion styles (abbreviated
+directories work with `partial-completion`). A leading `/name` is reserved
+for slash commands even when their catalog is empty; type the next `/` or put
+the path after prose to complete an absolute path. Completion reads the
+machine Emacs runs on, like `!` shell lines — with a dsh server on another
+host, use an `@` reference instead. A path with spaces is not handled in
+plain text (the token ends at the space); quote it as an `@` reference.
+
 **`TAB`** also completes an ordinary word from what is already in the buffer:
 the draft above point and, within `dsh-emacs-word-completion-limit`
 characters, the transcript above it — so a term from an earlier message or

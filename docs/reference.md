@@ -6,6 +6,15 @@ source session — dsh web's cross-session reference feature, mirrored in
 dsh-emacs. Typing `@` after the `❯ ` prompt opens a **combined menu**: file
 and directory candidates first, then session candidates.
 
+A path typed **without** `@` completes locally instead — on the machine Emacs
+runs on, relative to the chat buffer's working directory — through the stock
+file-name completer (see the completion note in the README). The two do not
+mix: `@` rows are the workspace candidates the host ranks, while a plain path
+is the local file system. Plain path completion includes the suffix after
+the cursor and uses the active filename completion styles. A leading
+`/name` remains a slash-command prefix; continue with another `/` or put the
+absolute path after prose to disambiguate it.
+
 dsh-emacs only builds the menu (the composer side). Both endpoints are the
 same typert Remotes the web client uses — `fileReferences/list` and
 `sessionReferenceResolver/candidates` — and **snapshot preparation lives on
