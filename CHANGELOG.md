@@ -124,6 +124,12 @@ minor) and stay undated until the release is cut.
   one silently orphaned the live stream and forced a reconnect on every
   open.  Re-opening now keeps the buffer's state and its connection.
 
+- **A reconnect no longer announces that it dropped nothing**: the `$events`
+  generation banner (`new $events generation — retiring N queued
+  question(s) and M approval(s)`) now appears only when a reconnect actually
+  retired queued waterfalls; a plain reconnect, which mints a generation as a
+  matter of course, stays quiet.
+
 - **A session-list refresh no longer scrolls the list**: a repaint (event,
   auto-refresh, `g`) now puts every window's scroll position back — keyed to
   the row that was at its top — instead of re-centering the current row,

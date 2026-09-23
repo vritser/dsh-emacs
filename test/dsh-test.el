@@ -11273,6 +11273,37 @@ Lets a test drive a malformed content value through the result path."
     (null dsh-emacs--approval-queue))
   (setq dsh-emacs-events--client-id nil))
 
+;; --- Test 78j2: a new generation is only reported when it dropped work ---
+;; A reconnect mints a new generation as a matter of course; announcing
+;; "retiring 0 queued question(s) and 0 approval(s)" on every one of them is
+;; echo-area noise, while a generation that actually dropped queued
+;; waterfalls still has to say so.
+(let ((dsh-emacs--question-queue nil)
+      (dsh-emacs--approval-queue nil)
+      (messages nil))
+  (setq dsh-emacs-events--client-id "gen-old")
+  (cl-letf (((symbol-function 'message)
+             (lambda (fmt &rest args)
+               (push (apply #'format fmt args) messages))))
+    (dsh-emacs-events--host-item
+     'process '((type . "ready") (clientId . "gen-quiet")))
+    (dsh-test-assert "events-generation-quiet-with-nothing-pending"
+      (null messages)
+      (equal "gen-quiet" dsh-emacs-events--client-id))
+    (setq dsh-emacs--question-queue
+          (list (list (get-buffer-create " *t-gen-q2*") "e-3" "s" '((id . "q"))))
+          dsh-emacs--approval-queue
+          (list (list (get-buffer-create " *t-gen-a2*") "e-4" "s" "bash" "r" nil)))
+    (dsh-emacs-events--host-item
+     'process '((type . "ready") (clientId . "gen-loud")))
+    (dsh-test-assert "events-generation-reports-retired-work"
+      (= 1 (length messages))
+      (string-match-p "retiring 1 queued question" (car messages))
+      (string-match-p "1 approval" (car messages))
+      (null dsh-emacs--question-queue)
+      (null dsh-emacs--approval-queue)))
+  (setq dsh-emacs-events--client-id nil))
+
 ;; --- Test 78k: $events cancel -> retire matching pending waterfalls by eventId ---
 ;; A host cancellation (session end / withdraw) sends cancel(eventId); only frames of
 ;; the same eventId retire, other pending frames are kept.

@@ -4638,10 +4638,18 @@ minibuffer, close it and let its drain retire without sending an outcome."
 Each `$events' reconnect hands out a NEW client-id; answering the old
 generation's still-queued frames with it would be a no-op, so the pending
 frames are dropped (a waterfall currently being prompted cannot be
-aborted from here — its stale answer is likewise a no-op)."
-  (message "dsh: new $events generation — retiring %d queued question(s) and %d approval(s)"
-           (length dsh-emacs--question-queue)
-           (length dsh-emacs--approval-queue))
+aborted from here — its stale answer is likewise a no-op).
+
+Silent when nothing was pending: a reconnect mints a new generation as a
+matter of course, and \"retiring 0 queued question(s) and 0 approval(s)\"
+on every one of them is echo-area noise.  The message stays for a
+generation that actually dropped queued work, which the user needs to
+know about."
+  (let ((questions (length dsh-emacs--question-queue))
+        (approvals (length dsh-emacs--approval-queue)))
+    (when (or (> questions 0) (> approvals 0))
+      (message "dsh: new $events generation — retiring %d queued question(s) and %d approval(s)"
+               questions approvals)))
   (setq dsh-emacs--question-queue nil
         dsh-emacs--approval-queue nil))
 
