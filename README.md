@@ -89,6 +89,15 @@ can provide them with auto completion enabled; stock completion,
 vertico and icomplete require `TAB`. See
 [Slash commands](docs/slash-commands.md#three-ways-to-run-a-command).
 
+**`TAB`** also completes an ordinary word from what is already in the buffer:
+the draft above point and, within `dsh-emacs-word-completion-limit`
+characters, the transcript above it — so a term from an earlier message or
+tool result completes instead of being retyped. Words are runs of letters,
+digits, `_` and `-`, so identifier-like terms such as `dsh-emacs-mode`
+complete whole. Candidates appear nearest-first, and completion inside a
+word includes the existing suffix. Slash commands and `@` references keep
+their own completion even when their catalogs are empty.
+
 The composer shows the current goal and the next pending message above `❯`.
 Hover over the preview for its full text, or use `C-c C-q` to manage pending
 messages. Goal shortcuts and inline controls are described in

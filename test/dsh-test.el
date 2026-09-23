@@ -14877,6 +14877,253 @@ input-area draft (which carries no such property) is not counted."
           #'completion-at-point)
   (dsh-test-pass "chat-mode-tab-bound-to-completion-at-point"))
 
+;; --- Test 100b: input word completion (draft + transcript) ---
+;; A word already written above the input completes: the transcript is a
+;; source, the region is the word before point, and the frontend still
+;; filters by the typed prefix.
+(let ((buf (generate-new-buffer " *dsh-word-capf*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (goto-char (point-max))
+        (insert "earlier: discard-stream rendered the dsh-emacs-mode output\n")
+        (setq-local dsh-emacs--input-marker (point-marker))
+        (insert "please dis")
+        (goto-char (point-max))
+        (let* ((res (dsh-emacs-word-completion-at-point))
+               (cands (all-completions "dis" (nth 2 res))))
+          (dsh-test-assert "word-capf-region-and-transcript-word"
+            (= (nth 0 res) (- (point) 3))
+            (= (nth 1 res) (point))
+            (member "discard-stream" cands)
+            ;; prefix filtering: "dsh-emacs-mode" does not start with "dis"
+            (not (member "dsh-emacs-mode" cands))
+            (eq (plist-get (nthcdr 3 res) :exclusive) 'no)))
+        ;; Point right after a non-word character has no token to complete.
+        (insert " ")
+        (dsh-test-assert "word-capf-empty-token-nil"
+          (null (dsh-emacs-word-completion-at-point))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; A word earlier in the same draft is a source too.
+(let ((buf (generate-new-buffer " *dsh-word-draft*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (goto-char (point-max))
+        (setq-local dsh-emacs--input-marker (point-marker))
+        (insert "omega beta omeg")
+        (goto-char (point-max))
+        (dsh-test-assert "word-capf-draft-word"
+          (equal (all-completions
+                  "omeg" (nth 2 (dsh-emacs-word-completion-at-point)))
+                 '("omega"))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; The nearest occurrence wins and duplicates collapse.
+(let ((buf (generate-new-buffer " *dsh-word-nearest*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (goto-char (point-max))
+        (insert "zulu zebra and zebra again\n")
+        (setq-local dsh-emacs--input-marker (point-marker))
+        (insert "z")
+        (goto-char (point-max))
+        (dsh-test-assert "word-capf-nearest-first-deduped"
+          (equal (all-completions
+                  "z" (nth 2 (dsh-emacs-word-completion-at-point)))
+                 '("zebra" "zulu"))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; Identifier words: a hyphen or underscore joins one candidate.
+(let ((buf (generate-new-buffer " *dsh-word-chars*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (goto-char (point-max))
+        (insert "snake_case read-only\n")
+        (setq-local dsh-emacs--input-marker (point-marker))
+        (insert "read-o")
+        (goto-char (point-max))
+        (dsh-test-assert "word-capf-hyphen-token"
+          (equal (all-completions
+                  "read-o" (nth 2 (dsh-emacs-word-completion-at-point)))
+                 '("read-only")))
+        (delete-region dsh-emacs--input-marker (point-max))
+        (goto-char (point-max))
+        (insert "snake_c")
+        (dsh-test-assert "word-capf-underscore-token"
+          (equal (all-completions
+                  "snake_c" (nth 2 (dsh-emacs-word-completion-at-point)))
+                 '("snake_case"))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; Case follows `completion-ignore-case', the option the front-end filters
+;; the returned candidates with, so the two never disagree.
+(let ((buf (generate-new-buffer " *dsh-word-case*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (goto-char (point-max))
+        (insert "Streamed\n")
+        (setq-local dsh-emacs--input-marker (point-marker))
+        (insert "stre")
+        (goto-char (point-max))
+        (let ((completion-ignore-case nil))
+          (dsh-test-assert "word-capf-case-sensitive-by-default"
+            (null (dsh-emacs-word-completion-at-point))))
+        (let ((completion-ignore-case t))
+          (dsh-test-assert "word-capf-ignore-case-option"
+            (equal (all-completions
+                    "stre" (nth 2 (dsh-emacs-word-completion-at-point)))
+                   '("Streamed"))))
+        (delete-region dsh-emacs--input-marker (point-max))
+        (goto-char (point-max))
+        (insert "Stre")
+        (let ((completion-ignore-case nil))
+          (dsh-test-assert "word-capf-uppercase-prefix-matches"
+            (equal (all-completions
+                    "Stre" (nth 2 (dsh-emacs-word-completion-at-point)))
+                   '("Streamed")))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; `dsh-emacs-word-completion-limit' bounds the backward search; nil scans the
+;; whole buffer.
+(let ((buf (generate-new-buffer " *dsh-word-limit*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (goto-char (point-max))
+        (insert "needle " (make-string 40 ?x) "\n")
+        (setq-local dsh-emacs--input-marker (point-marker))
+        (insert "nee")
+        (goto-char (point-max))
+        (let ((dsh-emacs-word-completion-limit 8))
+          (dsh-test-assert "word-capf-limit-hides-old-word"
+            (null (dsh-emacs-word-completion-at-point))))
+        (let ((dsh-emacs-word-completion-limit nil))
+          (dsh-test-assert "word-capf-limit-nil-scans-buffer"
+            (equal (all-completions
+                    "nee" (nth 2 (dsh-emacs-word-completion-at-point)))
+                   '("needle")))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; No matching word, point in the transcript, and an empty input area all
+;; decline (the last one even when the transcript word abuts the marker).
+(let ((buf (generate-new-buffer " *dsh-word-none*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (goto-char (point-max))
+        (insert "alpha")
+        (setq-local dsh-emacs--input-marker (point-marker))
+        (insert "zzzq")
+        (goto-char (point-max))
+        (dsh-test-assert "word-capf-no-match-nil"
+          (null (dsh-emacs-word-completion-at-point)))
+        (goto-char (point-min))
+        (dsh-test-assert "word-capf-transcript-nil"
+          (null (dsh-emacs-word-completion-at-point)))
+        (delete-region dsh-emacs--input-marker (point-max))
+        (goto-char dsh-emacs--input-marker)
+        (dsh-test-assert "word-capf-empty-input-nil"
+          (null (dsh-emacs-word-completion-at-point))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
+;; Completing inside a word replaces its suffix as part of the same region.
+(dolist (draft '("rendered" "rened"))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (goto-char (point-max))
+    (insert "rendered\n")
+    (setq-local dsh-emacs--input-marker (point-marker))
+    (insert draft)
+    (goto-char (+ dsh-emacs--input-marker 3))
+    (let ((completion-styles '(basic)))
+      (completion-at-point))
+    (dsh-test-assert
+     (format "word-capf-mid-word-%s" draft)
+     (equal (buffer-substring-no-properties dsh-emacs--input-marker (point-max))
+            "rendered"))))
+
+;; Empty command/reference results must not fall through to transcript words.
+(dolist (draft '("/ren" "@ren" "please @src/ren" "please @\"my files/ren"))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (goto-char (point-max))
+    (insert "rendered\n")
+    (setq-local dsh-emacs--input-marker (point-marker)
+                dsh-emacs--buffer-session "word-capf-empty-catalog")
+    (insert draft)
+    (let ((dsh-emacs--command-catalogs nil))
+      (cl-letf (((symbol-function 'dsh-emacs--rpc-request)
+                 (lambda (_method _params) (cons t []))))
+        (completion-at-point)))
+    (dsh-test-assert
+     (format "word-capf-reserves-token-%s" draft)
+     (null (dsh-emacs-word-completion-at-point))
+     (equal (buffer-substring-no-properties dsh-emacs--input-marker (point-max))
+            draft))))
+
+;; Command arguments, non-command slash text and embedded @ stay ordinary.
+(dolist (example '(("/goal ren" . "/goal rendered")
+                   ("/Ren" . "/Rendered")
+                   ("/foo.ren" . "/foo.rendered")
+                   ("user@ren" . "user@rendered")))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (goto-char (point-max))
+    (insert "rendered Rendered\n")
+    (setq-local dsh-emacs--input-marker (point-marker))
+    (insert (car example))
+    (let ((completion-styles '(basic))
+          (completion-ignore-case nil))
+      (completion-at-point))
+    (dsh-test-assert
+     (format "word-capf-ordinary-token-%s" (car example))
+     (equal (buffer-substring-no-properties dsh-emacs--input-marker (point-max))
+            (cdr example)))))
+
+;; The actual stock completion display must preserve nearest-first ordering.
+(save-window-excursion
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (goto-char (point-max))
+    (insert "zebra zulu\n")
+    (setq-local dsh-emacs--input-marker (point-marker))
+    (insert "z")
+    (let ((completion-styles '(basic))
+          (completion-auto-help t)
+          (completion-cycle-threshold nil))
+      (completion-at-point))
+    (dsh-test-assert
+     "word-capf-stock-display-nearest-first"
+     (with-current-buffer "*Completions*"
+       (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+         (and (string-match "zulu" text)
+              (string-match "zebra" text)
+              (< (string-match "zulu" text) (string-match "zebra" text))))))
+    (let* ((table (nth 2 (dsh-emacs-word-completion-at-point)))
+           (metadata (completion-metadata "z" table nil))
+           (sort-fn (completion-metadata-get metadata 'cycle-sort-function)))
+      (dsh-test-assert
+       "word-capf-cycle-nearest-first"
+       (and sort-fn
+            (equal (funcall sort-fn (all-completions "z" table))
+                   '("zulu" "zebra")))))
+    (kill-buffer "*Completions*")))
+
+;; Mode wiring: commands and references own their tokens, a path token
+;; completes locally, and word completion is the last fallback.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-test-assert "chat-mode-input-completion-sources"
+    (equal completion-at-point-functions
+           '(dsh-emacs-command-completion-at-point
+             dsh-emacs-reference-completion-at-point
+             dsh-emacs-word-completion-at-point))))
+
 ;; Cooperative "/" auto-trigger: dsh-emacs-mode adds "/" to the buffer-local
 ;; `corfu-auto-trigger' only when the user already enabled corfu-auto, letting
 ;; corfu's own engine pop the list.  dsh-emacs never enables corfu-auto itself

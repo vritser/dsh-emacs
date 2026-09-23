@@ -114,6 +114,17 @@ minor) and stay undated until the release is cut.
   curated `dsh-emacs-tool-titles` entry still wins, so `Present files` and
   the job rows keep their headers.
 
+- **`TAB` completes ordinary words in the chat input**: a word already
+  written in the buffer — the draft above point and, within
+  `dsh-emacs-word-completion-limit` characters, the transcript above it —
+  now completes instead of being retyped, so a term from an earlier message
+  or a tool result is one keystroke away.  Words are runs of letters, digits,
+  `_` and `-` (identifier-like terms complete whole), and matching follows
+  `completion-ignore-case`.  Candidates appear nearest-first, and completing
+  inside a word includes its existing suffix instead of duplicating it.
+  Slash commands and `@` references keep their own completion even when
+  their catalogs are empty.  (rationale: postmortem/061)
+
 ### Fixed
 
 - **Re-opening the session list no longer resets your folded groups**:

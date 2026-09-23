@@ -61,6 +61,10 @@
 ;; `dsh-emacs--completion-table-with-metadata'.  The declaration only keeps
 ;; byte-compile on Emacs <=30 from warning about an unknown function.
 (declare-function completion-table-with-metadata "minibuffer" (table metadata))
+(declare-function dsh-emacs-command--completion-prefix-p "dsh-emacs-command"
+                  (text))
+(declare-function dsh-emacs-reference--at-token "dsh-emacs-reference"
+                  (start end))
 
 ;; Protocol layer: typed access to dsh response fields (dsh-emacs-protocol.el)
 (require 'crm)
@@ -221,6 +225,17 @@ open).  Every prompt is recorded in both scopes regardless; the option
 only picks which list the keys browse, so toggling it never loses
 recorded prompts."
   :type 'boolean
+  :group 'dsh-emacs)
+
+(defcustom dsh-emacs-word-completion-limit 100000
+  "How many characters above the input word completion searches.
+Input word completion offers words already present in the chat buffer —
+the draft before point plus the transcript above it — so a term from an
+earlier message or tool result completes without retyping.  Only this
+many characters of buffer text directly above the input are scanned, so
+a long transcript does not slow down every keystroke; nil searches the
+whole buffer."
+  :type '(choice (const :tag "Whole buffer" nil) integer)
   :group 'dsh-emacs)
 
 (defcustom dsh-emacs-busy-enter-behavior 'queue
@@ -2176,6 +2191,95 @@ that just ran."
     (setq dsh-emacs--undo-stale nil
           buffer-undo-list (dsh-emacs--input-undo-history))))
 
+;;; ---------------------------------------------------------------------------
+;;; Input word completion
+;;;
+;;; The third completion source in the chat input.  Slash commands and @
+;;; references are served by their own CAPFs (dsh-emacs-command.el /
+;;; dsh-emacs-reference.el), and this source declines their tokens even when
+;;; their catalogs are empty.  Ordinary words from the draft before point and
+;;; the transcript above it can be completed instead of retyped.
+;;; ---------------------------------------------------------------------------
+
+(defconst dsh-emacs--word-completion-chars "[:alnum:]_-"
+  "Characters that make up one completion word in the chat input.
+Hyphens join identifier-like words (`dsh-emacs-mode', `read-only'), so a
+word is completed whole rather than one segment at a time.")
+
+(defun dsh-emacs--word-completion-start ()
+  "Return the start of the word before point in the input area, or nil.
+A word must lie entirely inside the editable input (after
+`dsh-emacs--input-marker') and be non-empty (point right after a
+non-word character yields nil, so TAB does nothing there).
+Slash-command prefixes and @ reference tokens belong to their own CAPFs."
+  (when-let* ((marker (and (boundp 'dsh-emacs--input-marker)
+                           dsh-emacs--input-marker))
+              ((markerp marker))
+              ((eq (marker-buffer marker) (current-buffer)))
+              (input-start (marker-position marker))
+              ((>= (point) input-start)))
+    (let ((start (save-excursion
+                   (skip-chars-backward dsh-emacs--word-completion-chars)
+                   (point))))
+      ;; An empty token would make the candidate regexp match the empty
+      ;; string at every position, so point right after a non-word
+      ;; character must yield nil.
+      (when (and (>= start input-start) (< start (point))
+                 (not (and (= start (1+ input-start))
+                           (dsh-emacs-command--completion-prefix-p
+                            (buffer-substring-no-properties
+                             input-start (point)))))
+                 (not (dsh-emacs-reference--at-token input-start (point))))
+        start))))
+
+(defun dsh-emacs--word-completion-candidates (prefix start)
+  "Return buffer words starting with PREFIX, nearest to START first.
+Searches backward from START over at most
+`dsh-emacs-word-completion-limit' characters, so a term the user has just
+seen wins over an older duplicate, and de-duplicates the result.  Matching
+follows `completion-ignore-case', the same option the completion front-end
+filters the returned candidates with."
+  (let* ((limit dsh-emacs-word-completion-limit)
+         (from (if limit (max (point-min) (- start limit)) (point-min)))
+         (case-fold-search completion-ignore-case)
+         (regexp (concat "\\(?:\\`\\|[^" dsh-emacs--word-completion-chars
+                         "]\\)\\(" (regexp-quote prefix)
+                         "[" dsh-emacs--word-completion-chars "]*\\)"))
+         (seen (make-hash-table :test #'equal))
+         (words nil))
+    (save-excursion
+      (goto-char start)
+      (while (re-search-backward regexp from t)
+        (let ((word (match-string-no-properties 1)))
+          (unless (gethash word seen)
+            (puthash word t seen)
+            (push word words)))
+        (goto-char (match-beginning 1))))
+    ;; Backward scanning pushes the nearest occurrence first, so reverse to
+    ;; return nearest-first.
+    (nreverse words)))
+
+(defun dsh-emacs-word-completion-at-point ()
+  "`completion-at-point-functions' entry: complete a word from the buffer.
+Offers words already present in this chat buffer — the draft before point
+and, within `dsh-emacs-word-completion-limit' characters, the transcript
+above it — so a term that appeared in an earlier message or tool result
+completes without retyping.  Returns nil outside the input area, for an
+empty word, for a slash command or @ reference, or when nothing matches.
+The completion region includes any word suffix after point.  Completion
+metadata preserves nearest-first ordering for display and cycling."
+  (when-let* ((start (dsh-emacs--word-completion-start))
+              (prefix (buffer-substring-no-properties start (point)))
+              (candidates (dsh-emacs--word-completion-candidates prefix start)))
+    (list start
+          (save-excursion
+            (skip-chars-forward dsh-emacs--word-completion-chars)
+            (point))
+          (dsh-emacs--completion-table-with-metadata
+           candidates '((display-sort-function . identity)
+                        (cycle-sort-function . identity)))
+          :exclusive 'no)))
+
 (define-derived-mode dsh-emacs-mode fundamental-mode "DSH"
   "DeepSeek Harness chat mode.
 \\{dsh-emacs-mode-map}"
@@ -2196,10 +2300,12 @@ that just ran."
   (setq-local comment-end "")
   ;; Complete slash commands when the input starts with "/"; complete
   ;; file/session references while an "@" token is in progress (see
-  ;; dsh-emacs-command.el / dsh-emacs-reference.el).
+  ;; dsh-emacs-command.el / dsh-emacs-reference.el); otherwise complete an
+  ;; ordinary word from the draft and the transcript above the input.
   (setq-local completion-at-point-functions
               '(dsh-emacs-command-completion-at-point
-                dsh-emacs-reference-completion-at-point))
+                dsh-emacs-reference-completion-at-point
+                dsh-emacs-word-completion-at-point))
   ;; Cooperative slash / @ auto-trigger (see `dsh-emacs-command-auto-trigger-setup'
   ;; and `dsh-emacs-reference-auto-trigger-setup'): dsh-emacs never enables a
   ;; completion front-end's auto mode itself — it only contributes "/" and "@"

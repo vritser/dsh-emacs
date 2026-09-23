@@ -350,6 +350,12 @@ the line to `commands/execute'.  Requires a running server."
                                     name)))))))))
           (quit nil))))))
 
+(defun dsh-emacs-command--completion-prefix-p (text)
+  "Return non-nil when TEXT is a bare slash-command completion prefix.
+This grammar owns the token even when the command catalog is empty."
+  (let ((case-fold-search nil))
+    (string-match-p "\\`/[a-z0-9_-]*\\'" text)))
+
 (defun dsh-emacs-command-completion-at-point ()
   "`completion-at-point-functions' entry for slash commands.
 
@@ -371,9 +377,8 @@ rows that overflow the popup width."
          (marker (and (boundp 'dsh-emacs--input-marker)
                       dsh-emacs--input-marker)))
     (when (and marker (>= pos marker))
-      (let ((case-fold-search nil)
-            (line-text (buffer-substring marker pos)))
-        (when (string-match-p "\\`/\\([a-z0-9_-]*\\)\\'" line-text)
+      (let ((line-text (buffer-substring marker pos)))
+        (when (dsh-emacs-command--completion-prefix-p line-text)
           (let* ((session-id (dsh-emacs--active-session-id))
                  (items (or (dsh-emacs-command-catalog session-id)
                             (and session-id

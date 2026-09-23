@@ -41,6 +41,7 @@ The most commonly used options, straight in your config:
 (setq dsh-emacs-model-group-format #(" %s " 0 4 (face vertico-group-title))) ; provider group-header format inside the model picker (nil = hide group titles)
 (setq dsh-emacs-input-history-length 50)           ; prompts kept for M-p / M-n recall
 (setq dsh-emacs-input-history-cross-session nil)   ; M-p / M-n recall only the current session's prompts (nil, default); t = recall prompts from every session
+(setq dsh-emacs-word-completion-limit 100000)      ; how many characters above the input TAB searches when completing an ordinary word from the draft/transcript (nil = whole buffer)
 (setq dsh-emacs-busy-enter-behavior 'queue)          ; what C-c C-c does while a turn runs: `queue` lines input up as the next turn (default), `steer` wakes the running agent before its next step, `stop` interrupts like before; `C-u C-c C-c` explicitly sends a nonempty message with steer mode regardless of this setting or the local busy indicator, an empty input interrupts a running turn, and `C-c C-b` interrupts explicitly (C-c C-q manages the queue)
 (setq dsh-emacs-question-skip-key "C-c C-s") ; key that skips the current ask question inside the reader (nil = no shortcut; empty input also skips)
 (setq dsh-emacs-ui-label-separator "·")            ; separator between Think/Tool title and its right-side summary ("" = plain gap)
