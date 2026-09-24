@@ -24,6 +24,12 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **A catalog refresh no longer loses to an older request**: a `commands/list`
+  response already in flight when `M-x dsh-emacs-command-catalog-refresh` (or a
+  reopen) invalidated the cache could land afterwards and write the stale
+  catalog back, so the `/` completion and the slash menu kept showing the
+  pre-refresh list.  Only the response of the session's current fetch may now
+  write the cache or clear the in-flight flag.
 - **The pending-input queue works against dsh 0.1.7 servers**: dsh 0.1.7
   removed the `session/queue` control frames (and the baseline's `queues`
   record) that carried the pending inbox, so the mode-line `[Qn Sm]`

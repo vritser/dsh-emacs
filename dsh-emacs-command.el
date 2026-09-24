@@ -119,6 +119,17 @@ host.  Reset per session reload; entries stay until the session closes.")
 Guards the completion warm-up so repeated TAB presses do not stack
 requests; drained by the fetch callback.")
 
+(defvar dsh-emacs--command-fetch-generation 0
+  "Monotonic counter stamping each `commands/list' fetch.
+Only the response whose stamp is still its session's current one may
+write the cache or clear the in-flight flag, so a fetch superseded by
+`dsh-emacs-command-catalog-invalidate' cannot repopulate a cache that
+was just dropped.")
+
+(defvar dsh-emacs--command-fetch-stamps nil
+  "Alist of (SESSION-ID . STAMP) naming each session's current fetch.
+A session absent from this list has no admissible response in flight.")
+
 ;; ---------------------------------------------------------------------------
 ;; Parse and execute
 ;; ---------------------------------------------------------------------------
@@ -204,35 +215,48 @@ SESSION-ID (default: the active session), or nil when not yet fetched."
   "Drop the cached catalog (and any in-flight fetch flag) of SESSION-ID.
 A later `dsh-emacs-command-catalog' / completion trigger re-fetches from
 the server.  Used by the manual refresh command and by pre-fetch after a
-server restart."
+server restart.  A response still in flight for SESSION-ID is
+superseded: it can no longer repopulate the dropped cache nor clear a
+newer fetch's flag."
   (setq dsh-emacs--command-catalogs
         (assoc-delete-all session-id dsh-emacs--command-catalogs)
         dsh-emacs--command-fetch-inflight
-        (delete session-id dsh-emacs--command-fetch-inflight)))
+        (delete session-id dsh-emacs--command-fetch-inflight)
+        dsh-emacs--command-fetch-stamps
+        (assoc-delete-all session-id dsh-emacs--command-fetch-stamps)))
 
 (defun dsh-emacs-command-catalog-fetch (session-id &optional callback)
   "Fetch the `commands/list' catalog of SESSION-ID asynchronously.
 Caches the result; CALLBACK (optional) receives the item list (nil on
 failure — the error is already reported).  A fetch already in flight
-for SESSION-ID is not duplicated."
+for SESSION-ID is not duplicated, and a response whose fetch
+`dsh-emacs-command-catalog-invalidate' superseded is dropped instead of
+overwriting the newer catalog."
   (unless (member session-id dsh-emacs--command-fetch-inflight)
     (setq dsh-emacs--command-fetch-inflight
           (cons session-id dsh-emacs--command-fetch-inflight))
-    (dsh-emacs--rpc-async
-     "commands/list"
-     `((agentId . ,session-id))
-     (lambda (ok value)
-       (setq dsh-emacs--command-fetch-inflight
-             (delete session-id dsh-emacs--command-fetch-inflight))
-       (let ((items (and ok
-                         (mapcar #'dsh-protocol-command--from-alist
-                                 (dsh-protocol--list value)))))
-         (when items
-           (dsh-emacs-command--cache-catalog session-id items))
-         (when (functionp callback)
-           (condition-case nil
-               (funcall callback items)
-             (quit nil))))))))
+    (let ((stamp (setq dsh-emacs--command-fetch-generation
+                       (1+ dsh-emacs--command-fetch-generation))))
+      (setq dsh-emacs--command-fetch-stamps
+            (cons (cons session-id stamp)
+                  (assoc-delete-all session-id dsh-emacs--command-fetch-stamps)))
+      (dsh-emacs--rpc-async
+       "commands/list"
+       `((agentId . ,session-id))
+       (lambda (ok value)
+         (when (equal stamp
+                      (cdr (assoc session-id dsh-emacs--command-fetch-stamps)))
+           (setq dsh-emacs--command-fetch-inflight
+                 (delete session-id dsh-emacs--command-fetch-inflight))
+           (let ((items (and ok
+                             (mapcar #'dsh-protocol-command--from-alist
+                                     (dsh-protocol--list value)))))
+             (when items
+               (dsh-emacs-command--cache-catalog session-id items))
+             (when (functionp callback)
+               (condition-case nil
+                   (funcall callback items)
+                 (quit nil))))))))))
 
 (defun dsh-emacs-command-catalog-sync (session-id)
   "Fetch and cache the `commands/list' catalog of SESSION-ID synchronously.

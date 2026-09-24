@@ -14005,6 +14005,35 @@ received, RESULT is FN's return value."
     (setq dsh-emacs--command-catalogs old
           dsh-emacs--command-fetch-inflight old-inflight)))
 
+;; A response from a fetch that a refresh superseded must not repopulate the
+;; cache: the older request can land after the newer one (manual refresh, or
+;; a refresh racing the open-session prefetch)
+(let ((sid "sess-cmd-stale")
+      (old-catalogs dsh-emacs--command-catalogs)
+      (old-inflight dsh-emacs--command-fetch-inflight)
+      (old-stamps dsh-emacs--command-fetch-stamps)
+      (callbacks nil))
+  (unwind-protect
+      (progn
+        ;; fetch A starts; its callback is captured, not run
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_m _p cb) (push cb callbacks))))
+          (dsh-emacs-command-catalog-fetch sid))
+        ;; a refresh invalidates and starts fetch B (also captured)
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_m _p cb) (push cb callbacks))))
+          (dsh-emacs-command-catalog-refresh sid))
+        ;; B answers first, then the superseded A
+        (funcall (nth 0 callbacks) t [((name . "new") (description . "N"))])
+        (funcall (nth 1 callbacks) t [((name . "old") (description . "O"))])
+        (let ((items (dsh-emacs-command-catalog sid)))
+          (dsh-test-assert "command-catalog-drops-superseded-response"
+            (consp items)
+            (string= "new" (dsh-protocol-command-name (car items))))))
+    (setq dsh-emacs--command-catalogs old-catalogs
+          dsh-emacs--command-fetch-inflight old-inflight
+          dsh-emacs--command-fetch-stamps old-stamps)))
+
 ;; --- Test 98: command/run + command/done rendering ---
 (let ((buf (generate-new-buffer " *dsh-cmd-render*")))
   (unwind-protect
