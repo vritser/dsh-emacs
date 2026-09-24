@@ -16,18 +16,22 @@
 ;;   └── Composer
 ;;       ├── Goal Row          -- optional goal, phase and actions
 ;;       ├── Next Message      -- optional pending-message preview
+;;       ├── Attachments       -- optional staged-image row
 ;;       └── Input Area        -- editing/geometry owned by dsh-emacs.el
 ;;
 ;; Goal data comes from the goal projection; its actions carry a CAS ref.
 ;; Queue data stays in dsh-emacs-queue.el, which determines which pending
-;; message is visible and when burst updates repaint.  Composer only reads it.
-;; Both rows fold line breaks and fit the narrowest viewing window.  Neither
-;; row is transcript or editable input, and neither is included when sending.
+;; message is visible and when burst updates repaint.  Staged attachments stay
+;; in dsh-emacs.el (the paste command and the submit path own them).  Composer
+;; only reads both mirrors.  All rows fold line breaks and fit the narrowest
+;; viewing window.  No row is transcript or editable input, and none is
+;; included when sending.
 ;;
 ;; The top marker (insertion type t) is the transcript insertion seam.  The
 ;; end marker (insertion type nil) stops before the prompt.  They delimit the
-;; complete chrome region, whether it contains zero, one or two rows.  Repaints
-;; replace only that region and preserve the draft and its cursor position.
+;; complete chrome region, whether it contains zero, one or three rows.
+;; Repaints replace only that region and preserve the draft and its cursor
+;; position.
 
 ;;; Code:
 
@@ -40,6 +44,8 @@
 ;; dsh-emacs.el; this module only reads the shared variable.
 (declare-function dsh-emacs-render--input-insert-point "dsh-emacs-render" ())
 (declare-function dsh-emacs-queue-next-item "dsh-emacs-queue" ())
+(declare-function dsh-emacs-pending-attachments "dsh-emacs" ())
+(declare-function dsh-emacs-clear-attachments "dsh-emacs" ())
 (defvar dsh-emacs--input-marker)
 (defvar-local dsh-emacs--composer-goal-pending nil
   "Identity token of this buffer's in-flight `goals.*' mutation, or nil.")
@@ -270,12 +276,16 @@ Colored via `currentColor' mapped to the action face's foreground."
                    (dsh-emacs-composer--phase-text goal))))
     (if (string-empty-p phase) "" (format "  ·  %s" phase))))
 
-(defun dsh-emacs-composer--sig (goal next)
-  "Return the content and layout inputs of GOAL and NEXT's cached rows."
+(defun dsh-emacs-composer--sig (goal next attachments)
+  "Return the content and layout inputs of GOAL, NEXT and ATTACHMENTS.
+Only each staged attachment's name is presentation state: the image bytes
+never enter the signature."
   (list (and goal (list (dsh-protocol-goal-objective goal)
                         (dsh-protocol-goal-phase goal)
                         (dsh-protocol-goal-blocked-reason goal)))
         (and next (list (dsh-protocol-queue-item-text next)))
+        (mapcar (lambda (attachment) (cdr (assq 'name attachment)))
+                attachments)
         dsh-emacs-composer-goal-actions
         (dsh-emacs-composer--pending-text)
         (dsh-emacs-composer--row-width)
@@ -440,6 +450,72 @@ Callers add the chrome tag and read-only over the whole span."
      'face 'dsh-emacs-input-prompt-face
      'help-echo (concat text "\nC-c C-q to manage pending messages"))))
 
+(defconst dsh-emacs-composer--attachment-icon-svg-template
+  "<svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"> <path d=\"M13 2.5V5C13 7.35702 13 8.53553 13.7322 9.26777C14.4645 10 15.643 10 18 10H22\" stroke=\"__C__\" stroke-width=\"1.5\"/> <path d=\"M8.5 18.5L8.5 13.5M8.5 13.5L6.5 15.375M8.5 13.5L10.5 15.375\" stroke=\"__C__\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/> <path d=\"M2.75 10C2.75 9.58579 2.41421 9.25 2 9.25C1.58579 9.25 1.25 9.58579 1.25 10H2.75ZM21.25 14C21.25 14.4142 21.5858 14.75 22 14.75C22.4142 14.75 22.75 14.4142 22.75 14H21.25ZM15.3929 4.05365L14.8912 4.61112L15.3929 4.05365ZM19.3517 7.61654L18.85 8.17402L19.3517 7.61654ZM21.654 10.1541L20.9689 10.4592V10.4592L21.654 10.1541ZM3.17157 20.8284L3.7019 20.2981H3.7019L3.17157 20.8284ZM20.8284 20.8284L20.2981 20.2981L20.2981 20.2981L20.8284 20.8284ZM1.35509 5.92658C1.31455 6.33881 1.61585 6.70585 2.02807 6.7464C2.4403 6.78695 2.80734 6.48564 2.84789 6.07342L1.35509 5.92658ZM22.6449 18.0734C22.6855 17.6612 22.3841 17.2941 21.9719 17.2536C21.5597 17.2131 21.1927 17.5144 21.1521 17.9266L22.6449 18.0734ZM14 21.25H10V22.75H14V21.25ZM2.75 14V10H1.25V14H2.75ZM21.25 13.5629V14H22.75V13.5629H21.25ZM14.8912 4.61112L18.85 8.17402L19.8534 7.05907L15.8947 3.49618L14.8912 4.61112ZM22.75 13.5629C22.75 11.8745 22.7651 10.8055 22.3391 9.84897L20.9689 10.4592C21.2349 11.0565 21.25 11.742 21.25 13.5629H22.75ZM18.85 8.17402C20.2034 9.3921 20.7029 9.86199 20.9689 10.4592L22.3391 9.84897C21.9131 8.89241 21.1084 8.18853 19.8534 7.05907L18.85 8.17402ZM10.0298 2.75C11.6116 2.75 12.2085 2.76158 12.7405 2.96573L13.2779 1.5653C12.4261 1.23842 11.498 1.25 10.0298 1.25V2.75ZM15.8947 3.49618C14.8087 2.51878 14.1297 1.89214 13.2779 1.5653L12.7405 2.96573C13.2727 3.16993 13.7215 3.55836 14.8912 4.61112L15.8947 3.49618ZM10 21.25C8.09318 21.25 6.73851 21.2484 5.71085 21.1102C4.70476 20.975 4.12511 20.7213 3.7019 20.2981L2.64124 21.3588C3.38961 22.1071 4.33855 22.4392 5.51098 22.5969C6.66182 22.7516 8.13558 22.75 10 22.75V21.25ZM1.25 14C1.25 15.8644 1.24841 17.3382 1.40313 18.489C1.56076 19.6614 1.89288 20.6104 2.64124 21.3588L3.7019 20.2981C3.27869 19.8749 3.02502 19.2952 2.88976 18.2892C2.75159 17.2615 2.75 15.9068 2.75 14H1.25ZM14 22.75C15.8644 22.75 17.3382 22.7516 18.489 22.5969C19.6614 22.4392 20.6104 22.1071 21.3588 21.3588L20.2981 20.2981C19.8749 20.7213 19.2952 20.975 18.2892 21.1102C17.2615 21.2484 15.9068 21.25 14 21.25V22.75ZM10.0298 1.25C8.15538 1.25 6.67442 1.24842 5.51887 1.40307C4.34232 1.56054 3.39019 1.8923 2.64124 2.64124L3.7019 3.7019C4.12453 3.27928 4.70596 3.02525 5.71785 2.88982C6.75075 2.75158 8.11311 2.75 10.0298 2.75V1.25ZM2.84789 6.07342C2.96931 4.83905 3.23045 4.17335 3.7019 3.7019L2.64124 2.64124C1.80633 3.47616 1.48944 4.56072 1.35509 5.92658L2.84789 6.07342ZM21.1521 17.9266C21.0307 19.1609 20.7695 19.8266 20.2981 20.2981L21.3588 21.3588C22.1937 20.5238 22.5106 19.4393 22.6449 18.0734L21.1521 17.9266Z\" fill=\"__C__\"/> </svg>"
+  "SVG template of the Attachments row leading icon (SVG Repo `file-send',
+www.svgrepo.com), with a \"__C__\" color placeholder, so the tint comes
+from a literal color instead of relying on SVG `currentColor' support.
+`dsh-emacs-composer--attachment-icon' substitutes the attachment face's
+foreground.  Graphical Emacs renders it via `create-image'; terminal
+Emacs falls back to the \"\u25a4\" glyph.")
+
+(defun dsh-emacs-composer--attachment-icon ()
+  "Return the leading icon of the staged-attachments row.
+Graphical Emacs renders the SVG Repo `file-send' icon tinted from
+`dsh-emacs-composer-attachment-face'; terminal Emacs falls back to the
+\"▤\" glyph.  Sized like the transcript's tool icons (a 16px canvas at
+one line height); callers add the separating space before the name."
+  (if (image-type-available-p 'svg)
+      (propertize
+       "  " 'display
+       (create-image
+        (replace-regexp-in-string
+         "__C__"
+         (let ((fg (face-foreground 'dsh-emacs-composer-attachment-face nil t)))
+           (if (and fg (not (equal fg "unspecified"))) fg "gray50"))
+         dsh-emacs-composer--attachment-icon-svg-template t t)
+        'svg t :ascent 'center :height 1.0))
+    (propertize "▤ " 'face 'dsh-emacs-composer-attachment-face)))
+
+(defun dsh-emacs-composer--attachments-text (attachments)
+  "Return the single-line file-name summary for ATTACHMENTS."
+  (let ((names (delq nil (mapcar (lambda (attachment)
+                                   (cdr (assq 'name attachment)))
+                                 attachments))))
+    (cond ((null names) (format "%d image%s" (length attachments)
+                                (if (= 1 (length attachments)) "" "s")))
+          ((= 1 (length names)) (car names))
+          (t (format "%d images: %s" (length names)
+                     (mapconcat #'identity names ", "))))))
+
+(defun dsh-emacs-composer--attachment-remove-cell ()
+  "Return the clickable remove cell of the staged-attachments row."
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'dsh-emacs-clear-attachments)
+    (define-key map [mouse-1] #'dsh-emacs-clear-attachments)
+    (propertize " ✕"
+                'face 'dsh-emacs-composer-attachment-face
+                'keymap map
+                'mouse-face 'highlight
+                'help-echo "Discard staged attachments · C-c C-d")))
+
+(defun dsh-emacs-composer--render-attachments-row (attachments)
+  "Return the single-line staged-attachments row for ATTACHMENTS.
+Leads with the clip icon and lists the staged image names, with a
+trailing clickable remove cell (`dsh-emacs-clear-attachments'; C-c C-d
+does the same).  Fitted to the viewing windows like the other rows."
+  (let* ((count (length attachments))
+         (names (propertize (dsh-emacs-composer--attachments-text attachments)
+                            'face 'dsh-emacs-composer-attachment-body-face))
+         (body (propertize (concat (dsh-emacs-composer--attachment-icon)
+                                   " " names)
+                           'help-echo
+                           (format "%d staged image%s\nC-c C-c sends · C-c C-d discards"
+                                   count (if (= 1 count) "" "s"))))
+         (row (concat body (dsh-emacs-composer--attachment-remove-cell))))
+    (truncate-string-to-width row (dsh-emacs-composer--row-width)
+                              nil nil "…")))
+
 (defun dsh-emacs-composer--region ()
   "Return (BEG . END) of the live Composer chrome, or nil.
 A buffer rebuild can collapse its markers; only a nonempty, tagged region
@@ -484,9 +560,11 @@ Repeated renders preserve the region when content and width are unchanged."
     (let* ((goal (and (dsh-emacs-composer--visible-p dsh-emacs--composer-goal)
                       dsh-emacs--composer-goal))
            (next (dsh-emacs-queue-next-item))
-           (sig (dsh-emacs-composer--sig goal next)))
+           (attachments (dsh-emacs-pending-attachments))
+           (sig (dsh-emacs-composer--sig goal next attachments)))
       (unless (and (equal sig dsh-emacs--composer-sig)
-                   (or (not (or goal next)) (dsh-emacs-composer--region)))
+                   (or (not (or goal next attachments))
+                       (dsh-emacs-composer--region)))
         (let ((text (concat
                      (when goal
                        (propertize
@@ -495,7 +573,13 @@ Repeated renders preserve the region when content and width are unchanged."
                      (when next
                        (propertize
                         (concat (dsh-emacs-composer--render-next-row next) "\n")
-                        'dsh-emacs-composer-next-row t))))
+                        'dsh-emacs-composer-next-row t))
+                     (when attachments
+                       (propertize
+                        (concat (dsh-emacs-composer--render-attachments-row
+                                 attachments)
+                                "\n")
+                        'dsh-emacs-composer-attachments-row t))))
               (inhibit-read-only t)
               (buffer-undo-list t))
           (save-excursion
@@ -527,7 +611,7 @@ never sent to the model."
    (dsh-emacs-composer-goal-from-projection value)))
 
 (defun dsh-emacs-composer-refresh ()
-  "Re-render this buffer's Goal and Next Message rows.
+  "Re-render this buffer's Goal, Next Message and Attachments rows.
 Forces a repaint even when their content is unchanged, for example after
 changing `dsh-emacs-composer-goal-actions'."
   (when (and (markerp dsh-emacs--input-marker)

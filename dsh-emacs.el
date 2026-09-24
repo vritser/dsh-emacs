@@ -57,6 +57,9 @@
 (defvar use-system-tooltips)
 (defvar x-max-tooltip-size)
 (declare-function icomplete-force-complete-and-exit "icomplete" ())
+;; Emacs 29+ `yank-media'; the forward declaration keeps byte-compile on the
+;; 27.1 baseline honest about a variable defined only in that package.
+(defvar yank-media-preferred-types)
 ;; Emacs 31-only; the 27.1 baseline falls back to
 ;; `dsh-emacs--completion-table-with-metadata'.  The declaration only keeps
 ;; byte-compile on Emacs <=30 from warning about an unknown function.
@@ -328,6 +331,12 @@ NOT resolve their target from this variable alone — they read
 
 (defvar-local dsh-emacs--pending-user-messages nil
   "Text of messages the user sent but that are not yet rendered in the transcript.")
+
+(defvar-local dsh-emacs--pending-attachments nil
+  "Images staged for this buffer's next prompt, in paste order.
+Each element is a wire-ready attachment alist (see
+`dsh-emacs--submit-prompt').  The Composer renders them as one read-only
+row; `C-c C-c' consumes them, `C-c C-d' discards them.")
 
 (defvar-local dsh-emacs--pending-user-echoes nil
   "Optimistic transcript echoes awaiting their submit's acceptance.
@@ -2034,6 +2043,11 @@ repaints)."
     (define-key map (kbd "C-c C-w") #'dsh-emacs-copy-dwim)
     (define-key map (kbd "C-c C-f") #'dsh-emacs-modeline-toggle)
     (define-key map (kbd "C-c C-a") #'dsh-emacs-attach-file)
+    (define-key map (kbd "C-c C-v") #'dsh-emacs-attach-clipboard-image)
+    (define-key map (kbd "C-c C-d") #'dsh-emacs-clear-attachments)
+    ;; `s-v' pastes the clipboard image when there is one, else text;
+    ;; stock Emacs maps the key to `yank' globally.
+    (define-key map (kbd "s-v") #'dsh-emacs-paste)
     (define-key map (kbd "C-c C-m") #'dsh-emacs-select-model)
     (define-key map (kbd "C-c C-g") dsh-emacs-goal-map)
     (define-key map (kbd "C-c C-!") #'dsh-emacs-shell-process-kill)
@@ -2433,6 +2447,7 @@ metadata preserves nearest-first ordering for display and cycling."
   (setq dsh-emacs--tool-calls (make-hash-table :test 'equal))
   (setq dsh-emacs--activity-groups (make-hash-table :test 'equal))
   (setq dsh-emacs--pending-user-messages nil
+        dsh-emacs--pending-attachments nil
         dsh-emacs--event-ready nil)
   (dsh-emacs-events--watchdog-stop)
   (dsh-emacs-events--health-stop)
@@ -2448,7 +2463,18 @@ metadata preserves nearest-first ordering for display and cycling."
   (dsh-emacs--setup-input-area)
   ;; Reset Composer chrome with the buffer; the next projection or snapshot
   ;; rebuilds the Goal Row and its top marker.
-  (dsh-emacs-composer-reset))
+  (dsh-emacs-composer-reset)
+  ;; Clipboard images may also arrive through stock `yank-media' (Emacs 29+),
+  ;; which dispatches by media type to a buffer-local handler.  The handler is
+  ;; registered per chat buffer, so it can never stage an image from an
+  ;; unrelated mode's `yank-media'.
+  (when (fboundp 'yank-media-handler)
+    (yank-media-handler "image/.*" #'dsh-emacs--yank-media-handler)
+    ;; A macOS pasteboard exposes TIFF only, which the stock preferred-types
+    ;; list omits; prefer it in chat buffers so a plain `M-x yank-media' does
+    ;; not stop at "no preferred MIME type to yank".
+    (setq-local yank-media-preferred-types
+                (append yank-media-preferred-types '(image/tiff)))))
 
 (defun dsh-emacs--setup-input-area ()
   "Set up the input area (a read-only transcript plus a writable input box).
@@ -2557,25 +2583,54 @@ lit), the input is delivered per
 interrupt behavior).  With `queue'/`steer' and an EMPTY input the turn is
 interrupted, so stopping stays one key away.  Success feedback arrives via the
 `session/queue' stream; `\\[dsh-emacs-interrupt-turn]'
-(`C-c C-b') interrupts regardless of the behavior."
+(`C-c C-b') interrupts regardless of the behavior.
+
+Staged clipboard images (`C-c C-v') ride this send: they are consumed at
+submit time, an empty caption falls back to the image name, and a `!'
+line carrying attachments is ordinary caption text (the images reach the
+model, as `dsh-emacs--submit-prompt' documents).  A prompt carrying
+attachments is never recorded for `M-p' recall — replaying it as text
+would drop the images."
   (interactive)
-  (let ((input (dsh-emacs--get-input)))
-    (if-let* ((command (dsh-emacs-shell-parse input)))
+  (let* ((input (dsh-emacs--get-input))
+         (attachments (dsh-emacs-pending-attachments)))
+    (if-let* ((command (and (null attachments)
+                            (dsh-emacs-shell-parse input))))
         (dsh-emacs-shell-submit input command)
       (dsh-emacs-server-ensure)
-      (let ((busy (dsh-emacs--busy-p))
-            (steer-p (consp current-prefix-arg))
-            (empty-p (string-empty-p (string-trim input))))
-        (cond
-         ((and steer-p (not empty-p))
-          (dsh-emacs--submit-prompt input nil 'steer))
-         (busy
-          (if (or empty-p (eq dsh-emacs-busy-enter-behavior 'stop))
-              (dsh-emacs-interrupt-turn)
-            (dsh-emacs--submit-prompt
-             input nil dsh-emacs-busy-enter-behavior)))
-         (empty-p (message "Please enter a message"))
-         (t (dsh-emacs--submit-prompt input)))))))
+      (let* ((busy (dsh-emacs--busy-p))
+             (steer-p (consp current-prefix-arg))
+             (blank-p (string-empty-p (string-trim input)))
+             (empty-p (and blank-p (null attachments)))
+             (text (if (and attachments blank-p)
+                       (dsh-emacs--attachments-summary attachments)
+                     input)))
+        ;; Clear the staged set BEFORE submitting: a failure callback — even
+        ;; one invoked synchronously, before the submit returns — must see an
+        ;; empty staging area so `dsh-emacs--restore-draft' can put this
+        ;; submit's own text and images back.  An error thrown synchronously
+        ;; instead of delivered to the callback restores the exact pre-submit
+        ;; state here: no other command can have run in between, so this is
+        ;; unconditional and uses the text the user actually had, not the
+        ;; synthesized caption.
+        (cl-labels ((submit (mode)
+                      (dsh-emacs--consume-pending-attachments)
+                      (condition-case err
+                          (dsh-emacs--submit-prompt text attachments mode)
+                        ((error quit)
+                         (dsh-emacs--replace-input input)
+                         (when attachments
+                           (setq dsh-emacs--pending-attachments attachments)
+                           (dsh-emacs-composer-refresh))
+                         (signal (car err) (cdr err))))))
+          (cond
+           ((and steer-p (not empty-p)) (submit 'steer))
+           (busy
+            (if (or empty-p (eq dsh-emacs-busy-enter-behavior 'stop))
+                (dsh-emacs-interrupt-turn)
+              (submit dsh-emacs-busy-enter-behavior)))
+           (empty-p (message "Please enter a message"))
+           (t (submit nil))))))))
 
 (defun dsh-emacs--input-end ()
   "Return the end of editable input, before the mode-line separator newline."
@@ -2697,17 +2752,30 @@ Only messages the user wrote are recorded: the host injects its own
 model-facing `user/message' copies (workspace instructions, runtime-context
 snapshots, goal and subagent notices) into the same surface, and recalling
 one through `M-p' would paste a system-reminder wall of text back into the
-input; see `dsh-emacs-render--user-authored-p'."
+input; see `dsh-emacs-render--user-authored-p'.  Only prompts whose content
+is entirely text are recorded: a message carrying an image (or file) part
+cannot be replayed as text — the images would be lost — and the paste
+path's synthesized caption (`shot.png') must not come back as a prompt
+either.  This mirrors the submit paths, which never record an
+attachment-bearing prompt."
   (when (and events session-id)
     (let ((own (gethash session-id dsh-emacs--input-history-by-session))
           (missing nil))
       (dolist (entry (dsh-emacs--sequence-list events))
         (let* ((ev (and entry (dsh-emacs--alist-state entry "event")))
-               (data (and ev (dsh-emacs--alist-state ev "data"))))
+               (data (and ev (dsh-emacs--alist-state ev "data")))
+               (blocks (and data
+                            (append (dsh-emacs--alist-state data "content")
+                                    nil))))
           (when (and data
                      (string= (dsh-emacs--alist-state ev "type")
                               "user/message")
-                     (dsh-emacs-render--user-authored-p ev))
+                     (dsh-emacs-render--user-authored-p ev)
+                     ;; Text-only, or it is not recallable.
+                     (cl-every (lambda (block)
+                                 (equal (dsh-emacs--alist-state block "type")
+                                        "text"))
+                               blocks))
             (let ((text (mapconcat
                          #'identity
                          (delq nil
@@ -2716,8 +2784,7 @@ input; see `dsh-emacs-render--user-authored-p'."
                                   (and (equal (dsh-emacs--alist-state block "type")
                                               "text")
                                        (dsh-emacs--alist-state block "text")))
-                                (append (dsh-emacs--alist-state data "content")
-                                        nil)))
+                                blocks))
                          "\n")))
               (when (and (not (string-empty-p text))
                          (not (member text own))
@@ -2754,7 +2821,8 @@ admission miss falls back to sending the line as an ordinary message
 of wire-ready attachment alists
 \((mediaType . M) (data . B64) (name . N)); they are appended to the
 `content' array of `session/prompt' as `{type: \"image\"}' parts so
-the model sees them immediately."
+the model sees them immediately.  A prompt carrying attachments is not
+recorded for `M-p' recall: every submit path skips it."
   (let ((command (and (null attachments) (dsh-emacs-shell-parse message))))
     (cond
      ;; A `!' line with no attachments is a local action;
@@ -2773,7 +2841,8 @@ the model sees them immediately."
         ;; the web UI): whether the host admits the command is decided
         ;; by the `commands.execute' response, and the result is
         ;; rendered from the command/run + command/done session events.
-        (dsh-emacs--push-input-history message)
+        (unless attachments
+          (dsh-emacs--push-input-history message))
         (setq dsh-emacs--input-history-pos nil
               dsh-emacs--input-history-pending nil)
         (when (buffer-live-p input-buffer)
@@ -2792,13 +2861,11 @@ the model sees them immediately."
                (cond
                 ((null ok)
                  ;; Transport failure (HTTP/parse error): clear the optimistic
-                 ;; row and restore the original text.
+                 ;; row and restore the original text and staged images.
                  (when (buffer-live-p input-buffer)
                    (with-current-buffer input-buffer
                      (dsh-emacs-render-command-cleanup-optimistic)
-                     (when (string-empty-p
-                            (or (dsh-emacs--get-input) ""))
-                       (dsh-emacs--replace-input message))))
+                     (dsh-emacs--restore-draft message attachments)))
                  (message "Command failed to run: %S"
                           (or err "transport error")))
                 ((null execution)
@@ -2837,7 +2904,8 @@ the `session/queue' frame the host pushes on the splice.  IMAGES is the
 same wire-ready attachment list `dsh-emacs--submit-prompt' takes; the
 host admits images by the session's current model at claim time.  Slash
 lines are NOT routed to `commands.execute' here — busy input is queued
-as literal text, the same semantics as dsh web's busyEnter.
+as literal text, the same semantics as dsh web's busyEnter.  A prompt
+carrying attachments is not recorded for `M-p' recall.
 With nothing already pending in the mirror, the submit arms
 `dsh-emacs-queue--mark-submit-suppress': the splice+claim transient of
 this own message gets no `queued:' / `running:' echo (nothing to order
@@ -2856,7 +2924,8 @@ against); genuinely parked items keep their feedback."
                                 (clientTimeZone . ,(dsh-emacs--client-time-zone)))))))
     ;; Same web-style feel as the immediate path: the draft leaves the
     ;; input area and lands in history right away, before the RPC settles.
-    (dsh-emacs--push-input-history message)
+    (unless attachments
+      (dsh-emacs--push-input-history message))
     (setq dsh-emacs--input-history-pos nil
           dsh-emacs--input-history-pending nil)
     (when (buffer-live-p input-buffer)
@@ -2893,9 +2962,8 @@ against); genuinely parked items keep their feedback."
                               ;; (same restore as the command path).
                               (when (buffer-live-p input-buffer)
                                 (with-current-buffer input-buffer
-                                  (when (string-empty-p
-                                         (or (dsh-emacs--get-input) ""))
-                                    (dsh-emacs--replace-input message)))))))))
+                                  (dsh-emacs--restore-draft
+                                   message attachments))))))))
 
 (defun dsh-emacs--submit-plain (message &optional attachments skip-history)
   "Submit MESSAGE (a plain string) to the current session.
@@ -2917,8 +2985,8 @@ silently, without the `queued:' / `running:' flashes.
 The draft leaves the input area at submit time — the same web-style feel
 as the command and deferred paths — so a second submit keypress during
 the RPC round-trip reads an empty input instead of sending the message
-twice; on a transport failure the draft is restored when the input is
-still empty (a newer draft typed meanwhile is left alone)."
+twice; on a transport failure the draft is restored only when both the
+input and staged images are empty (a newer draft is left alone)."
   (let* ((session-id (dsh-emacs--active-session-id))
          (chat-buffer (and (boundp 'dsh-emacs--buffer-session)
                            dsh-emacs--buffer-session
@@ -2976,7 +3044,7 @@ still empty (a newer draft typed meanwhile is left alone)."
                           (lambda (ok value)
                             (if ok
                                 (progn
-                                  (unless skip-history
+                                  (unless (or skip-history attachments)
                                     (dsh-emacs--push-input-history message))
                                   (setq dsh-emacs--input-history-pos nil
                                         dsh-emacs--input-history-pending nil)
@@ -3044,15 +3112,14 @@ still empty (a newer draft typed meanwhile is left alone)."
                               ;; The input was cleared on submit: on a
                               ;; transport failure put the draft back into
                               ;; the input area.  Restore only when the input
-                              ;; is still empty — a newer draft typed during
-                              ;; the RPC round trip is not overwritten
+                              ;; and staged images are still empty — a newer
+                              ;; draft composed during the RPC is left alone
                               ;; (matching the failure restore in
                               ;; `dsh-emacs--submit-deferred').
                               (when (buffer-live-p input-buffer)
                                 (with-current-buffer input-buffer
-                                  (when (string-empty-p
-                                         (or (dsh-emacs--get-input) ""))
-                                    (dsh-emacs--replace-input message)))))))))
+                                  (dsh-emacs--restore-draft
+                                   message attachments))))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;;  Attachments / model selection / input history
@@ -3070,13 +3137,261 @@ one continuous base64 run."
                    (file-name-nondirectory file))))
          (supported (and media (member media dsh-emacs-attach-media-types))))
     (when (and supported (file-readable-p file))
-      (let ((bytes (with-temp-buffer
-                     (set-buffer-multibyte nil)
-                     (insert-file-contents-literally file)
-                     (buffer-string))))
+      (let ((bytes (dsh-emacs--binary-file-string file)))
         (list (cons 'mediaType media)
               (cons 'data (base64-encode-string bytes t))
               (cons 'name (file-name-nondirectory file)))))))
+
+;;; Clipboard images
+;;
+;; `C-c C-v' stages the system clipboard's image for the next prompt.  The
+;; selection surface differs per platform: X11/pgtk publish image MIME targets
+;; that `gui-get-selection' returns as-is, while macOS exposes TIFF only — a
+;; media type the dsh host does not accept — so those bytes are converted with
+;; the system `sips' tool before they leave this machine.
+
+(defun dsh-emacs--binary-file-string (file)
+  "Return FILE's bytes as a unibyte string, without coding conversion."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally file)
+    (buffer-string)))
+
+(defun dsh-emacs--write-binary-file (file bytes)
+  "Write the unibyte string BYTES to FILE without coding conversion."
+  (let ((coding-system-for-write 'binary))
+    (with-temp-buffer
+      (set-buffer-multibyte nil)
+      (insert bytes)
+      (write-region (point-min) (point-max) file nil 'silent))))
+
+(defun dsh-emacs--bytes-prefix-p (prefix bytes)
+  "Non-nil when unibyte BYTES start with the unibyte string PREFIX."
+  (and (>= (length bytes) (length prefix))
+       (string= prefix (substring bytes 0 (length prefix)))))
+
+(defun dsh-emacs--image-bytes-match-p (media-type bytes)
+  "Non-nil when unibyte BYTES carry MEDIA-TYPE's magic number.
+Guards against a selection that advertises a flavor but returns
+something else, which `create-image' and the host would both reject."
+  (pcase media-type
+    ("image/png" (dsh-emacs--bytes-prefix-p
+                  (unibyte-string 137 80 78 71 13 10 26 10) bytes))
+    ("image/jpeg" (dsh-emacs--bytes-prefix-p
+                   (unibyte-string 255 216 255) bytes))
+    ("image/gif" (dsh-emacs--bytes-prefix-p
+                  (unibyte-string 71 73 70 56) bytes))
+    ("image/webp" (and (>= (length bytes) 12)
+                       (dsh-emacs--bytes-prefix-p
+                        (unibyte-string 82 73 70 70) bytes)
+                       (dsh-emacs--bytes-prefix-p
+                        (unibyte-string 87 69 66 80)
+                        (substring bytes 8))))
+    ("image/tiff" (or (dsh-emacs--bytes-prefix-p
+                       (unibyte-string 73 73 42 0) bytes)
+                      (dsh-emacs--bytes-prefix-p
+                       (unibyte-string 77 77 0 42) bytes)))
+    (_ nil)))
+
+(defun dsh-emacs--selection-bytes (media-type)
+  "Return the clipboard's MEDIA-TYPE bytes (unibyte), or nil.
+MEDIA-TYPE is a MIME string such as \"image/png\".  A selection API
+error, a non-string result and an empty flavor all mean \"the
+clipboard carries no such type\"."
+  (let ((data (condition-case nil
+                  (gui-get-selection 'CLIPBOARD (intern media-type))
+                (error nil))))
+    (and (stringp data) (not (string-empty-p data)) data)))
+
+(defun dsh-emacs--tiff-bytes-to-png (tiff)
+  "Convert unibyte TIFF bytes to PNG bytes with macOS `sips', or nil.
+`create-image' can display TIFF, but the dsh host accepts only the
+media types in `dsh-emacs-attach-media-types'; `sips' is the system
+image converter, so no extra dependency is needed.  Returns nil when
+TIFF is malformed, `sips' is unavailable, or the conversion fails."
+  (when-let* ((sips (executable-find "sips"))
+              ((dsh-emacs--image-bytes-match-p "image/tiff" tiff)))
+    (let ((dir (make-temp-file "dsh-clipboard-" t)))
+      (unwind-protect
+          (let ((tiff-file (expand-file-name "clip.tiff" dir))
+                (png-file (expand-file-name "clip.png" dir)))
+            (dsh-emacs--write-binary-file tiff-file tiff)
+            (when (and (zerop (call-process sips nil nil nil
+                                            "-s" "format" "png"
+                                            tiff-file "--out" png-file))
+                       (file-readable-p png-file))
+              (let ((png (dsh-emacs--binary-file-string png-file)))
+                (and (dsh-emacs--image-bytes-match-p "image/png" png)
+                     png))))
+        (delete-directory dir t)))))
+
+(defun dsh-emacs--clipboard-image ()
+  "Return (MEDIA-TYPE . BYTES) for the clipboard's image, or nil.
+Accepted media types are tried directly first (X11/pgtk expose them);
+macOS exposes only TIFF on the pasteboard, so that flavor is converted
+to PNG only when PNG is accepted.  BYTES is the encoded image data
+as a unibyte string."
+  (or (cl-loop for media in dsh-emacs-attach-media-types
+               for bytes = (dsh-emacs--selection-bytes media)
+               when (and bytes (dsh-emacs--image-bytes-match-p media bytes))
+               return (cons media bytes))
+      (when-let* (((member "image/png" dsh-emacs-attach-media-types))
+                  (tiff (dsh-emacs--selection-bytes "image/tiff"))
+                  (png (dsh-emacs--tiff-bytes-to-png tiff)))
+        (cons "image/png" png))))
+
+(defun dsh-emacs--clipboard-image-present-p ()
+  "Non-nil when the clipboard advertises any image flavor at all.
+A cheap TARGETS probe that reads no image bytes; it only sharpens the
+error wording, distinguishing \"nothing to paste\" from \"the image's
+type is not accepted\"."
+  (let ((targets (condition-case nil
+                     (gui-get-selection 'CLIPBOARD 'TARGETS)
+                   (error nil))))
+    (and (sequencep targets)
+         (cl-some (lambda (target)
+                    (and (symbolp target)
+                         (string-prefix-p "image/" (symbol-name target))))
+                  (append targets nil)))))
+
+(defun dsh-emacs--clipboard-image-name (media-type)
+  "Return a display name for a pasted MEDIA-TYPE clipboard image."
+  (format-time-string
+   (concat "pasted-%Y%m%d-%H%M%S."
+           (pcase media-type
+             ("image/png" "png")
+             ("image/jpeg" "jpg")
+             ("image/webp" "webp")
+             ("image/gif" "gif")
+             (_ "img")))))
+
+;;; Staged attachments (Composer row)
+
+(defun dsh-emacs-pending-attachments ()
+  "Return this buffer's staged (not yet sent) image attachments.
+Each element is a wire-ready alist, as `dsh-emacs--submit-prompt'
+takes.  The Composer renders them from this list, so it is the single
+source of truth for the row, never a copy."
+  dsh-emacs--pending-attachments)
+
+(defun dsh-emacs--attachments-summary (attachments)
+  "Return a short human summary of ATTACHMENTS (names, or an image count)."
+  (let ((names (delq nil (mapcar (lambda (attachment)
+                                   (cdr (assq 'name attachment)))
+                                 attachments))))
+    (cond ((null names) (format "%d image(s)" (length attachments)))
+          ((= 1 (length names)) (car names))
+          (t (format "%d images" (length names))))))
+
+(defun dsh-emacs--stage-attachments (attachments)
+  "Append ATTACHMENTS to this buffer's staged set and repaint the row."
+  (when attachments
+    (setq dsh-emacs--pending-attachments
+          (append dsh-emacs--pending-attachments attachments))
+    (dsh-emacs-composer-refresh)
+    (message "%s staged · C-c C-c sends · C-c C-d discards"
+             (dsh-emacs--attachments-summary attachments))))
+
+(defun dsh-emacs--consume-pending-attachments ()
+  "Drop the staged attachments this buffer just submitted."
+  (when dsh-emacs--pending-attachments
+    (setq dsh-emacs--pending-attachments nil)
+    (dsh-emacs-composer-refresh)))
+
+(defun dsh-emacs--restore-draft (text attachments)
+  "Restore TEXT and ATTACHMENTS together after a failed submit.
+Leave a newer draft alone if either its text or staged images is nonempty."
+  (when (and (string-empty-p (or (dsh-emacs--get-input) ""))
+             (null dsh-emacs--pending-attachments))
+    (dsh-emacs--replace-input text)
+    (when attachments
+      (setq dsh-emacs--pending-attachments attachments)
+      (dsh-emacs-composer-refresh))))
+
+(defun dsh-emacs--ensure-chat-buffer ()
+  "Signal a `user-error' unless the current buffer is a chat buffer."
+  (unless (and dsh-emacs--input-marker
+               (marker-buffer dsh-emacs--input-marker))
+    (user-error "Not in a dsh chat buffer")))
+
+(defun dsh-emacs--stage-clipboard-image (image)
+  "Stage clipboard IMAGE (a (MEDIA-TYPE . BYTES) pair) as an attachment."
+  (dsh-emacs--stage-attachments
+   (list (list (cons 'mediaType (car image))
+               (cons 'data (base64-encode-string (cdr image) t))
+               (cons 'name (dsh-emacs--clipboard-image-name (car image)))))))
+
+;;;###autoload
+(defun dsh-emacs-attach-clipboard-image ()
+  "Stage the system clipboard's image for the next message (C-c C-v).
+The image joins the pending attachments shown above the input; the
+next `C-c C-c' sends it with the typed caption (the image name when
+the caption is empty), and `C-c C-d' discards it.  Only the media
+types in `dsh-emacs-attach-media-types' are accepted; a macOS TIFF
+pasteboard image is converted to PNG when PNG is accepted.  Plain
+`yank' is unaffected."
+  (interactive)
+  (dsh-emacs--ensure-chat-buffer)
+  (let ((image (dsh-emacs--clipboard-image)))
+    (unless image
+      (user-error "%s"
+                  (if (dsh-emacs--clipboard-image-present-p)
+                      "Clipboard image type is not in dsh-emacs-attach-media-types"
+                    "No image in the clipboard")))
+    (dsh-emacs--stage-clipboard-image image)))
+
+;;;###autoload
+(defun dsh-emacs-paste ()
+  "Paste into the chat input: the clipboard image if there is one, else text.
+Bound to `s-v' in chat buffers, where stock Emacs maps the key
+to `yank'.  A clipboard carrying an image stages it exactly like `C-c C-v';
+otherwise this yanks text like `yank'.  The image wins when the clipboard
+carries both flavors, matching what a chat paste gesture means; `C-y' stays
+a plain text yank, so a clipboard holding an image and text (a copied
+picture and its URL, say) can still paste the text."
+  (interactive)
+  (dsh-emacs--ensure-chat-buffer)
+  (if-let* ((image (dsh-emacs--clipboard-image)))
+      (dsh-emacs--stage-clipboard-image image)
+    (call-interactively #'yank)))
+
+(defun dsh-emacs--yank-media-handler (media-type data)
+  "`yank-media' handler: stage clipboard DATA as a pending attachment.
+MEDIA-TYPE is the selection's MIME symbol and DATA its bytes.  Types
+the host accepts are taken as-is; TIFF is converted to PNG through
+`dsh-emacs--tiff-bytes-to-png'; anything else is refused."
+  (dsh-emacs--ensure-chat-buffer)
+  (let* ((media (symbol-name media-type))
+         (converted (cond
+                     ((not (stringp data)) nil)
+                     ;; Only host-accepted types pass through as-is; a TIFF
+                     ;; selection ALSO matches its own magic number, and must
+                     ;; take the conversion branch instead.
+                     ((and (member media dsh-emacs-attach-media-types)
+                           (dsh-emacs--image-bytes-match-p media data))
+                      (cons media data))
+                     ((and (member "image/png" dsh-emacs-attach-media-types)
+                           (member media '("image/tiff" "image/tif")))
+                      (when-let* ((png (dsh-emacs--tiff-bytes-to-png data)))
+                        (cons "image/png" png))))))
+    (unless converted
+      (user-error "Unsupported clipboard media type: %s" media))
+    (dsh-emacs--stage-attachments
+     (list (list (cons 'mediaType (car converted))
+                 (cons 'data (base64-encode-string (cdr converted) t))
+                 (cons 'name (dsh-emacs--clipboard-image-name
+                              (car converted))))))))
+
+;;;###autoload
+(defun dsh-emacs-clear-attachments ()
+  "Discard this buffer's staged image attachments (C-c C-d)."
+  (interactive)
+  (dsh-emacs--ensure-chat-buffer)
+  (if (null dsh-emacs--pending-attachments)
+      (message "No staged attachments")
+    (setq dsh-emacs--pending-attachments nil)
+    (dsh-emacs-composer-refresh)
+    (message "Attachments discarded")))
 
 ;;;###autoload
 (defun dsh-emacs-attach-file (&optional file caption)
@@ -3111,9 +3426,7 @@ Only the media types in `dsh-emacs-attach-media-types' are sent."
         (if (null attachments)
             (message "No supported image files among the dropped files")
           (dsh-emacs--submit-prompt
-           (if (= 1 (length attachments))
-               (file-name-nondirectory (car paths))
-             (format "%d images" (length attachments)))
+           (dsh-emacs--attachments-summary attachments)
            attachments))))))
 
 (defun dsh-emacs--model-candidates (value)

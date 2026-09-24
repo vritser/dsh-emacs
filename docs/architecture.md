@@ -91,13 +91,16 @@ region-scoped face contract is [decision record
 ## Composer (`dsh-emacs-composer.el`)
 
 The bottom of a chat buffer is a **Composer**: a persistent, non-transcript UI
-region with optional read-only **Goal Row** and **Next Message** rows, in that
-order, above the editable **Input Area**. The input geometry (the `❯ ` prompt,
+region with optional read-only **Goal Row**, **Next Message** and
+**Attachments** rows, in that order, above the editable **Input Area**. The
+input geometry (the `❯ ` prompt,
 `dsh-emacs--input-marker` /
 `dsh-emacs--input-end`, cursor clamps, delete guards) is owned by
-`dsh-emacs.el`; `dsh-emacs-composer.el` owns both chrome rows and the seam
+`dsh-emacs.el`; `dsh-emacs-composer.el` owns all three chrome rows and the seam
 that keeps streamed transcript above them. The queue module supplies the
 visible next item directly from its mirror; Composer keeps no second queue.
+Staged images stay in `dsh-emacs.el` (the paste command and the submit path own
+them); Composer only reads them, exactly as it reads the queue mirror.
 
 Word and region kills are clipped to both editable input boundaries while
 preserving their direction. Backward word motion over punctuation such as
@@ -140,6 +143,29 @@ a text fallback, folding line breaks and truncating to the window width. Hover
 for the full text and use `C-c C-q` to manage the queue. Either row may appear
 independently; clearing a goal leaves pending input visible, and clearing the
 queue leaves the goal.
+
+The Attachments row appears while `dsh-emacs--pending-attachments` is non-nil:
+the SVG Repo `file-send' icon (tinted from the attachment face; a text glyph
+when Emacs lacks SVG), the staged images' names and a trailing clickable `✕`
+(`dsh-emacs-clear-attachments`, also on `C-c C-d`).  Staging is owned by
+`dsh-emacs.el`: `C-c C-v` (`dsh-emacs-attach-clipboard-image`) reads the system
+clipboard, `s-v` (`dsh-emacs-paste`) does the same but falls back to
+`yank` when the clipboard holds no image, and
+`dsh-emacs--yank-media-handler` (registered per chat buffer for
+Emacs 29+ `yank-media`) feeds the same state.  Accepted media types are the
+`dsh-emacs-attach-media-types` MIME flavors, each validated against its magic
+number; a macOS pasteboard exposes TIFF only, so those bytes are converted to
+PNG through the system `sips` tool only when PNG is accepted.  `C-c C-c`
+clears the staged set before submitting (so a failure callback, even a
+synchronous one, finds it empty) and appends the images to `session/prompt` as
+`{type:'image'}` content parts, with the image name as the caption when the
+input is empty.  A failed submit puts text and images back together only while
+neither has been replaced; a submit that throws synchronously instead restores
+the exact pre-submit draft.  A prompt carrying attachments is never recorded
+for `M-p` recall — neither at submit time nor by the history backfill — since a
+text-only replay would drop the images, which is also why the synthesized
+caption cannot resurface as a prompt.  The row's signature carries only image
+names, never the bytes.
 
 Geometry: `dsh-emacs--composer-top-marker` and
 `dsh-emacs--composer-end-marker` delimit the complete read-only chrome region,

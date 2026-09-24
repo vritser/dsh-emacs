@@ -536,6 +536,18 @@ Muted like dsh web's `label-tertiary'."
   "Goal Row inline action glyphs (pause/resume/edit/clear buttons)."
   :group 'dsh-emacs-faces)
 
+(defface dsh-emacs-composer-attachment-face
+  `((((background light)) :foreground ,dsh-emacs-color-accent)
+    (((background dark))  :foreground ,dsh-emacs-color-accent-dark)
+    (t :inherit shadow))
+  "Composer attachment row leading glyph and its remove action."
+  :group 'dsh-emacs-faces)
+
+(defface dsh-emacs-composer-attachment-body-face
+  '((t :inherit shadow))
+  "Composer attachment row file-name text."
+  :group 'dsh-emacs-faces)
+
 ;;; ---------------------------------------------------------------------------
 ;;;  mode-line / token / cost
 ;;; ---------------------------------------------------------------------------

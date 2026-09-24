@@ -62,7 +62,10 @@ for list management and navigation.
 | `C-c C-q` | Manage the pending queue |
 | `C-c C-g` | Open the goal-action prefix |
 | `C-c C-m` | Switch model / reasoning effort |
-| `C-c C-a` | Attach an image |
+| `C-c C-a` | Attach an image file and send it now |
+| `C-c C-v` | Paste the clipboard image into the next message |
+| `C-c C-d` | Discard staged images |
+| `s-v` | Paste a clipboard image, else yank text |
 | `C-c C-s` / `C-c M-s` | Switch session in this workspace / across all |
 | `C-c C-r` | Refresh |
 | `C-c C-o` | Load older messages above the current transcript |
@@ -168,6 +171,23 @@ Shell output is not sent to the model or saved in server history; refreshing
 the transcript removes it. With attachments, a leading `!` is caption text
 sent to the model. See [Shell commands](docs/shell-commands.md) for multiline
 scripts, shell selection and process handling.
+
+### Images
+
+`C-c C-v` pastes the system clipboard's image into the next message: it joins
+a staged-attachments row above the input, you type a caption (or leave the
+input empty to use the image name), and `C-c C-c` sends text and image
+together. `C-c C-d` discards the staged images; the trailing `✕` on the row
+does the same. `s-v` does the same as `C-c C-v` whenever the clipboard holds
+an image, and falls back to ordinary text yank otherwise; `C-y` always stays a
+plain text yank, so a clipboard carrying both an image and text can still paste
+the text. Where the pasteboard exposes TIFF rather than PNG (macOS), the image
+is converted with the system `sips` tool before upload, provided PNG is in
+`dsh-emacs-attach-media-types`. A rejected send restores its caption and images
+only while both the input and staged images are empty. Emacs 29+ users can
+also run `M-x yank-media`. `C-c C-a` remains the one-shot form: it picks an
+image file and sends it immediately. Only the media types in
+`dsh-emacs-attach-media-types` are accepted.
 
 ### Models & presets
 

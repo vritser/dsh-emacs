@@ -46,7 +46,7 @@ The most commonly used options, straight in your config:
 (setq dsh-emacs-question-skip-key "C-c C-s") ; key that skips the current ask question inside the reader (nil = no shortcut; empty input also skips)
 (setq dsh-emacs-ui-label-separator "·")            ; separator between Think/Tool title and its right-side summary ("" = plain gap)
 (setq dsh-emacs-tool-titles '(("pwsh" . "PowerShell"))) ; tool name -> display title overrides (icons stay per variant; unnamed tools get a humanized name, e.g. grep -> "Grep")
-(setq dsh-emacs-attach-media-types '("image/png" "image/jpeg" "image/webp" "image/gif")) ; accepted upload types
+(setq dsh-emacs-attach-media-types '("image/png" "image/jpeg" "image/webp" "image/gif")) ; accepted upload types (`C-c C-a' file attach, `C-c C-v' clipboard paste, `M-x yank-media')
 (setq dsh-emacs-session-auto-refresh-interval nil) ; seconds between automatic session-list refreshes (nil = off)
 (setq dsh-emacs-workspaces-collapsed-by-default nil) ; workspace and Ungrouped groups start expanded (t = collapsed); TAB/RET overrides a group in the current list buffer
 (setq dsh-emacs-composer-goal-actions t)             ; show pause/resume/edit/clear buttons on the Goal Row (nil = hide them; C-c C-g keys still work; C-c C-g a / dsh-emacs-goal-actions-toggle toggles the current buffer)

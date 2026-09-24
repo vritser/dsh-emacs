@@ -10,6 +10,24 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Paste a clipboard image into the next message**: `C-c C-v` reads the
+  system clipboard's image (a screenshot, a copied picture) and stages it in a
+  new Composer row above the input; type a caption — or leave the input empty
+  to use the image name — and `C-c C-c` sends text and image together.
+  `C-c C-d` (or the row's `✕`) discards the staged images, and a rejected send
+  restores the text and images together only while the draft is still empty.
+  A prompt carrying images is not kept for `M-p' recall — a text-only replay
+  would drop them — so the automatic image-name caption never comes back as a
+  prompt either.  `s-v` does the same whenever the clipboard
+  holds an image, and falls back to an ordinary text yank otherwise; `C-y`
+  always stays a text yank.  Accepted types are
+  `dsh-emacs-attach-media-types`; where the pasteboard exposes TIFF rather
+  than PNG (macOS), the image is converted with the system `sips` tool first,
+  provided PNG is allowed by that option.
+  Emacs 29+ users can also run `M-x yank-media`.  `C-c C-a` stays the
+  one-shot "attach a file and send it now" command.
+  (rationale: postmortem/063)
+
 - **Opening the session list lands on the session you are in**: `M-x
   dsh-emacs` (and `C-c C-l`) now puts the cursor and `hl-line` on the current
   session's row instead of the first row, scrolling it into view — a folded

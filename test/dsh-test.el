@@ -55,6 +55,17 @@ Lets face assertions read uniformly whether the property holds one face
 symbol or an ordered list."
   (ensure-list (get-text-property pos 'face)))
 
+(defun dsh-test--has-text-property-p (prop)
+  "Non-nil when some character in the current buffer carries PROP."
+  (let ((pos (point-min))
+        (found nil))
+    (while (and (not found) (< pos (point-max)))
+      (setq found (get-text-property pos prop))
+      (unless found
+        (setq pos (or (next-single-property-change pos prop)
+                      (point-max)))))
+    found))
+
 ;; Follow checks must stop after one screen plus slack, even in long history.
 (with-temp-buffer
   (insert (make-string 20000 ?\n) "tail")
@@ -6589,6 +6600,431 @@ Lets a test drive a malformed content value through the result path."
             (dsh-test-pass "image-optimistic-echo-inline"))))
     (kill-buffer buf)))
 
+;; --- Test 48e: clipboard paste stages an attachment and a Composer row,
+;; and the next send consumes both ---
+(let* ((png-b64 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+       (png-bytes (base64-decode-string png-b64))
+       (calls nil)
+       (buf (generate-new-buffer " *dsh-paste*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-modeline-setup)
+        (setq dsh-emacs--buffer-session "sess-paste")
+        (cl-letf (((symbol-function 'gui-get-selection)
+                   (lambda (_sel type &rest _)
+                     (and (eq type 'image/png) png-bytes))))
+          (dsh-emacs-attach-clipboard-image))
+        (let* ((staged (dsh-emacs-pending-attachments))
+               (attachment (car staged))
+               (name (cdr (assq 'name attachment))))
+          (dsh-test-assert "paste-stages-one-attachment"
+            (= 1 (length staged))
+            (equal "image/png" (cdr (assq 'mediaType attachment)))
+            (equal png-b64 (cdr (assq 'data attachment)))
+            (string-match-p "\\`pasted-.*\\.png\\'" name))
+          (dsh-test-assert "paste-renders-composer-row"
+            (string-match-p
+             (regexp-quote name)
+             (buffer-substring-no-properties (point-min) (point-max)))
+            (dsh-test--has-text-property-p
+             'dsh-emacs-composer-attachments-row))
+          ;; The leading icon must be the SVG clip (or the text fallback),
+          ;; never a glyphless emoji box.
+          (dsh-test-assert "attachment-icon-avoids-glyphless-emoji"
+            (not (string-match-p
+                  "🖼" (buffer-substring-no-properties (point-min) (point-max)))))
+          (when (image-type-available-p 'svg)
+            (dsh-test-assert "attachment-icon-renders-as-image"
+              (cl-some (lambda (pos)
+                         (eq 'image (car-safe (get-text-property pos 'display))))
+                       (number-sequence (point-min) (point-max)))))
+          ;; The caption rides along and the staging area empties.
+          (goto-char dsh-emacs--input-marker)
+          (insert "look at this")
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (method params _cb)
+                       (push (list method params) calls)))
+                    ((symbol-function 'dsh-emacs--busy-p) (lambda () nil)))
+            (dsh-emacs-send-or-stop))
+          (let* ((call (car calls))
+                 (req (cdr (assq 'request (cadr call))))
+                 (content (cdr (assq 'content req)))
+                 (img (and (> (length content) 1) (aref content 1))))
+            (dsh-test-assert "paste-send-includes-image"
+              (equal "session/prompt" (car call))
+              (equal "look at this" (cdr (assq 'text (aref content 0))))
+              (equal "image" (cdr (assq 'type img)))
+              (equal png-b64 (cdr (assq 'data img)))
+              (equal name (cdr (assq 'name img))))
+            (dsh-test-assert "paste-send-consumes-staging"
+              (null (dsh-emacs-pending-attachments))
+              (not (dsh-test--has-text-property-p
+                    'dsh-emacs-composer-attachments-row))))))
+    (kill-buffer buf)))
+
+;; --- Test 48f: a `!' line carrying a staged image goes to the model, not
+;; the local shell ---
+(let* ((png-b64 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+       (calls nil)
+       (shell nil)
+       (buf (generate-new-buffer " *dsh-paste-shell*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-modeline-setup)
+        (setq dsh-emacs--buffer-session "sess-paste-shell")
+        (setq dsh-emacs--pending-attachments
+              (list (list (cons 'mediaType "image/png")
+                          (cons 'data png-b64)
+                          (cons 'name "pasted.png"))))
+        (dsh-emacs-composer-refresh)
+        (goto-char dsh-emacs--input-marker)
+        (insert "!echo hi")
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method params _cb)
+                     (push (list method params) calls)))
+                  ((symbol-function 'dsh-emacs-shell-submit)
+                   (lambda (&rest _) (setq shell t)))
+                  ((symbol-function 'dsh-emacs--busy-p) (lambda () nil)))
+          (dsh-emacs-send-or-stop))
+        (dsh-test-assert "paste-shell-line-goes-to-model"
+          (equal "session/prompt" (car (car calls)))
+          (null shell)))
+    (kill-buffer buf)))
+
+;; --- Test 48g: an empty caption falls back to the staged image's name ---
+(let* ((png-b64 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+       (calls nil)
+       (buf (generate-new-buffer " *dsh-paste-caption*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-modeline-setup)
+        (setq dsh-emacs--buffer-session "sess-paste-caption")
+        (setq dsh-emacs--pending-attachments
+              (list (list (cons 'mediaType "image/png")
+                          (cons 'data png-b64)
+                          (cons 'name "pasted.png"))))
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method params _cb)
+                     (push (list method params) calls)))
+                  ((symbol-function 'dsh-emacs--busy-p) (lambda () nil)))
+          (dsh-emacs-send-or-stop))
+        (let* ((req (cdr (assq 'request (cadr (car calls)))))
+               (content (cdr (assq 'content req))))
+          (dsh-test-assert "paste-empty-caption-uses-name"
+            (equal "pasted.png" (cdr (assq 'text (aref content 0)))))))
+    (kill-buffer buf)))
+
+;; --- Test 48h: C-c C-d discards staged attachments and the row ---
+(let* ((png-b64 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+       (buf (generate-new-buffer " *dsh-paste-clear*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-modeline-setup)
+        (setq dsh-emacs--pending-attachments
+              (list (list (cons 'mediaType "image/png")
+                          (cons 'data png-b64)
+                          (cons 'name "pasted.png"))))
+        (dsh-emacs-composer-refresh)
+        (dsh-emacs-clear-attachments)
+        (dsh-test-assert "clear-attachments-discards-staged"
+          (null (dsh-emacs-pending-attachments))
+          (not (dsh-test--has-text-property-p
+                'dsh-emacs-composer-attachments-row))))
+    (kill-buffer buf)))
+
+;; --- Test 48i: yank-media handler stages accepted types, refuses others ---
+(let* ((png-b64 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+       (buf (generate-new-buffer " *dsh-paste-yank*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-modeline-setup)
+        (dsh-emacs--yank-media-handler
+         'image/png (base64-decode-string png-b64))
+        (dsh-test-assert "yank-media-handler-stages"
+          (equal "image/png"
+                 (cdr (assq 'mediaType
+                            (car (dsh-emacs-pending-attachments))))))
+        (dsh-test-assert "yank-media-handler-refuses-unsupported"
+          (equal "Unsupported clipboard media type: image/bmp"
+                 (condition-case e
+                     (progn (dsh-emacs--yank-media-handler 'image/bmp "x") nil)
+                   (user-error (error-message-string e)))))
+        ;; A TIFF selection matches its own magic number, but the host does
+        ;; not accept TIFF: it must be converted, never staged as-is.
+        (cl-letf (((symbol-function 'executable-find) (lambda (_) "/usr/bin/sips"))
+                  ((symbol-function 'call-process)
+                   (lambda (_p _i _d _disp &rest args)
+                     (dsh-emacs--write-binary-file
+                      (cadr (member "--out" args))
+                      (base64-decode-string png-b64))
+                     0)))
+          (setq dsh-emacs--pending-attachments nil)
+          (dsh-emacs--yank-media-handler
+           'image/tiff (concat (unibyte-string 73 73 42 0) "rest"))
+          (dsh-test-assert "yank-media-handler-converts-tiff"
+            (equal "image/png"
+                   (cdr (assq 'mediaType
+                              (car (dsh-emacs-pending-attachments)))))))
+        (when (fboundp 'yank-media-handler)
+          (dsh-test-assert "yank-media-prefers-tiff-in-chat"
+            (memq 'image/tiff yank-media-preferred-types))))
+    (kill-buffer buf)))
+
+;; --- Test 48j: clipboard reading (magic bytes, direct MIME targets,
+;; macOS TIFF -> PNG fallback) ---
+(let* ((png-b64 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+       (png-bytes (base64-decode-string png-b64))
+       (tiff-bytes (concat (unibyte-string 73 73 42 0) "rest")))
+  (dsh-test-assert "image-bytes-match-magic"
+    (dsh-emacs--image-bytes-match-p "image/png" png-bytes)
+    (not (dsh-emacs--image-bytes-match-p "image/jpeg" png-bytes))
+    (dsh-emacs--image-bytes-match-p "image/tiff" tiff-bytes)
+    (not (dsh-emacs--image-bytes-match-p "image/tiff" (unibyte-string 1 2 3 4)))
+    (dsh-emacs--image-bytes-match-p
+     "image/webp"
+     (concat (unibyte-string 82 73 70 70 0 0 0 0 87 69 66 80) "x"))
+    ;; A truncated "RIFF" flavor must decline, not signal out of range.
+    (null (dsh-emacs--image-bytes-match-p
+           "image/webp" (unibyte-string 82 73 70 70))))
+  ;; A direct PNG flavor wins over the macOS TIFF flavor.
+  (cl-letf (((symbol-function 'gui-get-selection)
+             (lambda (_sel type &rest _)
+               (cond ((eq type 'image/png) png-bytes)
+                     ((eq type 'image/tiff) tiff-bytes)))))
+    (dsh-test-assert "clipboard-prefers-png"
+      (equal (cons "image/png" png-bytes) (dsh-emacs--clipboard-image))))
+  ;; TIFF-only pasteboard (macOS) converts through `sips'.
+  (cl-letf (((symbol-function 'gui-get-selection)
+             (lambda (_sel type &rest _)
+               (and (eq type 'image/tiff) tiff-bytes)))
+            ((symbol-function 'executable-find) (lambda (_) "/usr/bin/sips"))
+            ((symbol-function 'call-process)
+             (lambda (_prog _infile _dest _display &rest args)
+               (dsh-emacs--write-binary-file
+                (cadr (member "--out" args)) png-bytes)
+               0)))
+    (dsh-test-assert "clipboard-tiff-converts-to-png"
+      (equal (cons "image/png" png-bytes) (dsh-emacs--clipboard-image))))
+  (cl-letf (((symbol-function 'gui-get-selection) (lambda (&rest _) "")))
+    (dsh-test-assert "clipboard-no-image"
+      (null (dsh-emacs--clipboard-image)))))
+
+;; --- Test 48k: `s-v` pastes the clipboard image when there is
+;; one, and yanks text otherwise ---
+(let* ((png-b64 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+       (png-bytes (base64-decode-string png-b64))
+       (yanked nil)
+       (buf (generate-new-buffer " *dsh-paste-key*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-modeline-setup)
+        (setq dsh-emacs--buffer-session "sess-paste-key")
+        (dsh-test-assert "s-v-bound-in-chat"
+          (eq #'dsh-emacs-paste (key-binding (kbd "s-v"))))
+        ;; An image on the clipboard is staged, never yanked as text.
+        (cl-letf (((symbol-function 'gui-get-selection)
+                   (lambda (_sel type &rest _)
+                     (and (eq type 'image/png) png-bytes)))
+                  ((symbol-function 'yank)
+                   (lambda () (interactive) (setq yanked t))))
+          (dsh-emacs-paste))
+        (dsh-test-assert "s-v-pastes-image"
+          (= 1 (length (dsh-emacs-pending-attachments)))
+          (null yanked))
+        ;; A text-only clipboard falls back to the stock yank.
+        (setq dsh-emacs--pending-attachments nil
+              yanked nil)
+        (cl-letf (((symbol-function 'gui-get-selection) (lambda (&rest _) ""))
+                  ((symbol-function 'yank)
+                   (lambda () (interactive) (setq yanked t))))
+          (dsh-emacs-paste))
+        (dsh-test-assert "s-v-yanks-text-without-image"
+          (null (dsh-emacs-pending-attachments))
+          yanked))
+    (kill-buffer buf)))
+
+;; --- Test 48l: the paste error says which problem it is ---
+(let ((buf (generate-new-buffer " *dsh-paste-msg*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-modeline-setup)
+        (setq dsh-emacs--buffer-session "sess-paste-msg")
+        ;; An image flavor is on the clipboard but none is accepted.
+        (cl-letf (((symbol-function 'gui-get-selection)
+                   (lambda (_sel type &rest _)
+                     (and (eq type 'TARGETS) [TARGETS image/bmp]))))
+          (dsh-test-assert "paste-errors-unaccepted-type"
+            (equal "Clipboard image type is not in dsh-emacs-attach-media-types"
+                   (condition-case e
+                       (progn (dsh-emacs-attach-clipboard-image) nil)
+                     (user-error (error-message-string e))))))
+        ;; Nothing image-shaped on the clipboard at all.
+        (cl-letf (((symbol-function 'gui-get-selection)
+                   (lambda (_sel type &rest _)
+                     (and (eq type 'TARGETS) [TARGETS STRING]))))
+          (dsh-test-assert "paste-errors-no-image"
+            (equal "No image in the clipboard"
+                   (condition-case e
+                       (progn (dsh-emacs-attach-clipboard-image) nil)
+                     (user-error (error-message-string e)))))))
+    (kill-buffer buf)))
+
+;; --- Test 48m: an attachment-bearing prompt never enters the M-p recall
+;; list (neither its synthesized caption nor a typed one); text-only does ---
+(let* ((png-b64 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+       (attachment (list (cons 'mediaType "image/png")
+                         (cons 'data png-b64)
+                         (cons 'name "shot.png")))
+       (history nil)
+       (buf (generate-new-buffer " *dsh-paste-history*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-modeline-setup)
+        (setq dsh-emacs--buffer-session "sess-paste-history")
+        (cl-letf (((symbol-function 'dsh-emacs--push-input-history)
+                   (lambda (text) (push text history)))
+                  ((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_method _params cb) (funcall cb t nil)))
+                  ((symbol-function 'dsh-emacs--busy-p) (lambda () nil))
+                  ((symbol-function 'dsh-emacs-server-ensure) #'ignore)
+                  ((symbol-function 'dsh-emacs-events--watchdog-start) #'ignore)
+                  ((symbol-function 'dsh-emacs-render--follow-stream) #'ignore)
+                  ((symbol-function 'dsh-emacs--ml-busy-set) #'ignore)
+                  ((symbol-function 'dsh-emacs--render-user-message-optimistic)
+                   (lambda (&rest _) nil)))
+          ;; Empty input with a staged image: the wire caption is the image
+          ;; name, but M-p must not offer it back.
+          (setq dsh-emacs--pending-attachments (list attachment))
+          (dsh-emacs-send-or-stop)
+          (dsh-test-assert "paste-synth-caption-not-in-history"
+            (null history))
+          ;; A typed caption still rides an image, which M-p cannot replay:
+          ;; it is not recorded either.
+          (setq dsh-emacs--pending-attachments (list attachment)
+                history nil)
+          (dsh-emacs--replace-input "look at this")
+          (dsh-emacs-send-or-stop)
+          (dsh-test-assert "paste-typed-caption-not-in-history"
+            (null history))
+          ;; Plain text with no attachments is recorded as usual.
+          (setq dsh-emacs--pending-attachments nil
+                history nil)
+          (dsh-emacs--replace-input "just words")
+          (dsh-emacs-send-or-stop)
+          (dsh-test-assert "text-prompt-recorded-in-history"
+            (equal '("just words") history))))
+    (kill-buffer buf)))
+
+;; --- Test 48n: a failure callback invoked synchronously (before the submit
+;; returns) still restores the whole draft, text and images together ---
+(dolist (path '(plain deferred command))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (dsh-emacs-modeline-setup)
+    (setq dsh-emacs--buffer-session "sync-fail")
+    (let* ((image (list (cons 'mediaType "image/png")
+                        (cons 'data "b2xk") (cons 'name "shot.png")))
+           (caption (if (eq path 'command) "/test" "look at this")))
+      (setq dsh-emacs--pending-attachments (list image))
+      (dsh-emacs--replace-input caption)
+      (cl-letf (((symbol-function 'dsh-emacs-server-ensure) #'ignore)
+                ((symbol-function 'dsh-emacs--busy-p) (lambda () nil))
+                ((symbol-function 'dsh-emacs--render-user-message-optimistic)
+                 (lambda (&rest _) nil))
+                ;; The failure lands inside the submit call, before
+                ;; `dsh-emacs-send-or-stop' regains control.
+                ((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (_method _params cb) (funcall cb nil "rejected"))))
+        (let ((current-prefix-arg (and (eq path 'deferred) '(4))))
+          (dsh-emacs-send-or-stop)))
+      (dsh-test-assert (format "sync-failure-restores-draft-%s" path)
+        (equal (dsh-emacs--get-input) caption)
+        (equal (dsh-emacs-pending-attachments) (list image))))))
+
+;; A submit that throws instead of reaching its callback must restore the
+;; consumed draft and let the error surface.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (setq dsh-emacs--buffer-session "sync-signal")
+  (let ((image (list (cons 'mediaType "image/png")
+                     (cons 'data "b2xk") (cons 'name "shot.png"))))
+    (setq dsh-emacs--pending-attachments (list image))
+    (dsh-emacs--replace-input "look at this")
+    (cl-letf (((symbol-function 'dsh-emacs-server-ensure) #'ignore)
+              ((symbol-function 'dsh-emacs--busy-p) (lambda () nil))
+              ((symbol-function 'dsh-emacs--submit-prompt)
+               (lambda (&rest _) (error "submit blew up"))))
+      (dsh-test-assert "sync-signal-restores-draft"
+        (equal "submit blew up"
+               (condition-case e (progn (dsh-emacs-send-or-stop) nil)
+                 (error (error-message-string e))))
+        (equal "look at this" (dsh-emacs--get-input))
+        (equal (list image) (dsh-emacs-pending-attachments))))))
+
+;; Failed submissions restore text and images as one draft, never mixing an
+;; old caption/image with a new draft composed while the RPC was in flight.
+(dolist (path '(plain deferred command))
+  (dolist (new-draft '(empty text image))
+    (with-temp-buffer
+      (dsh-emacs-mode)
+      (setq dsh-emacs--buffer-session "restore-test")
+      (let* ((old-image '((mediaType . "image/png") (data . "b2xk")
+                         (name . "old.png")))
+             (new-image '((mediaType . "image/png") (data . "bmV3")
+                         (name . "new.png")))
+             (caption (if (eq path 'command) "/test" "old caption"))
+             callback)
+        (setq dsh-emacs--pending-attachments (list old-image))
+        (dsh-emacs--replace-input caption)
+        (cl-letf (((symbol-function 'dsh-emacs-server-ensure) #'ignore)
+                  ((symbol-function 'dsh-emacs--busy-p) (lambda () nil))
+                  ((symbol-function 'dsh-emacs--render-user-message-optimistic)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_method _params cb) (setq callback cb))))
+          (let ((current-prefix-arg (and (eq path 'deferred) '(4))))
+            (dsh-emacs-send-or-stop))
+          (pcase new-draft
+            ('text (dsh-emacs--replace-input "new caption"))
+            ('image (dsh-emacs--stage-attachments (list new-image))))
+          (funcall callback nil "rejected")
+          (dsh-test-assert (format "failed-%s-preserves-%s-draft" path new-draft)
+            (equal (dsh-emacs--get-input)
+                   (pcase new-draft ('empty caption) ('text "new caption")
+                          ('image "")))
+            (equal (dsh-emacs-pending-attachments)
+                   (pcase new-draft ('empty (list old-image)) ('text nil)
+                          ('image (list new-image))))))))))
+
+;; TIFF conversion must obey the acceptance list in both paste entry points.
+(dolist (allowed '(nil ("image/jpeg")))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (let ((dsh-emacs-attach-media-types allowed)
+          (conversions 0))
+      (cl-letf (((symbol-function 'dsh-emacs--selection-bytes)
+                 (lambda (media) (and (equal media "image/tiff") "tiff")))
+                ((symbol-function 'dsh-emacs--tiff-bytes-to-png)
+                 (lambda (_) (setq conversions (1+ conversions)) "png")))
+        (dsh-test-assert (format "clipboard-tiff-obeys-types-%S" allowed)
+          (null (dsh-emacs--clipboard-image)))
+        (dsh-test-assert (format "yank-tiff-obeys-types-%S" allowed)
+          (condition-case nil
+              (progn (dsh-emacs--yank-media-handler 'image/tiff "tiff") nil)
+            (user-error t)))
+        (dsh-test-assert (format "disallowed-png-never-converted-%S" allowed)
+          (= conversions 0)
+          (null (dsh-emacs-pending-attachments)))))))
+
 ;; --- Test 49: code block copy ---
 (let ((buf (generate-new-buffer " *dsh-copy-block*")))
   (unwind-protect
@@ -7423,6 +7859,42 @@ Lets a test drive a malformed content value through the result path."
         (dsh-test-assert "seed-recallable-via-M-p"
           (string= "newer" (dsh-emacs--get-input))))
     (remhash "sess-seed" dsh-emacs--input-history-by-session)
+    (setq dsh-emacs-input-history-cross-session old-opt)
+    (setq dsh-emacs--input-history old-hist)
+    (kill-buffer buf)))
+
+;; --- Test 52d-2: recall backfill records text-only prompts only: a message
+;; carrying an image — including the paste path's synthesized caption — is
+;; not replayable as text, so it never enters M-p ---
+(let ((old-hist dsh-emacs--input-history)
+      (old-opt dsh-emacs-input-history-cross-session)
+      (buf (generate-new-buffer " *dsh-seed-image*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session "sess-seed-image")
+        (setq dsh-emacs-input-history-cross-session nil)
+        (dsh-emacs--seed-input-history
+         '((("event" . ((type . "user/message") (seq . 1)
+                        (data . ((content .
+                                  [((type . "text") (text . "words"))]))))))
+           (("event" . ((type . "user/message") (seq . 2)
+                        (data . ((content .
+                                  [((type . "text") (text . "shot.png"))
+                                   ((type . "image")
+                                    (mediaType . "image/png")
+                                    (name . "shot.png"))]))))))
+           (("event" . ((type . "user/message") (seq . 3)
+                        (data . ((content .
+                                  [((type . "image")
+                                    (mediaType . "image/png")
+                                    (name . "bare.png"))])))))))
+         "sess-seed-image")
+        (dsh-test-assert "seed-skips-attachment-prompts"
+          (equal '("words")
+                 (gethash "sess-seed-image"
+                          dsh-emacs--input-history-by-session))))
+    (remhash "sess-seed-image" dsh-emacs--input-history-by-session)
     (setq dsh-emacs-input-history-cross-session old-opt)
     (setq dsh-emacs--input-history old-hist)
     (kill-buffer buf)))
@@ -16859,7 +17331,7 @@ candidates as the UI would via `all-completions', not by destructuring."
                   ((symbol-function 'dsh-emacs-interrupt-turn)
                    (lambda (&rest _) (setq interrupted t)))
                   ((symbol-function 'dsh-emacs--submit-prompt)
-                   (lambda (message &optional images mode)
+                   (lambda (message &optional _images mode)
                      (setq submitted (list message mode)))))
           ;; busy + queue + text → deferred submit (mode queue)
           (with-current-buffer buf
