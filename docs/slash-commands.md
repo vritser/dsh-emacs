@@ -43,13 +43,36 @@ server version; dsh-emacs reads it live from `commands.list`):
   trip). If the transport fails the line is restored into the input (only while
   it is still empty) so you can retry. The outcome renders when the
   `command/done` event arrives.
-- **Menu**: `M-x dsh-emacs-command` — reads the live catalog
-  (`commands.list`, cached per session), shows command + description in
-  `completing-read`, and prompts for the argument when the command declares an
-  input hint.
+- **Menu**: `M-x dsh-emacs-command` — reads the live catalogs
+  (`commands.list` and `skills.list`, cached per session), shows both in one
+  `completing-read` (commands first, then skills; user-only skills marked), and
+  prompts for the argument when a picked command declares an input hint. A
+  picked **skill** instead inserts its `/name ` gesture at point, ready for
+  arguments, because the host expands the gesture from the prompt text rather
+  than executing it; with a prefix argument (`C-u`) the picked skill's
+  `SKILL.md` opens instead.
 - **Completion**: `TAB` in the input area completes the `/name` token over the
-  cached catalog (a bare `/` lists everything). Candidates already include a
-  trailing space, so `TAB` directly after `/goal` lets you type its arguments.
+  cached catalog (a bare `/` lists everything). Accepting a complete name adds
+  a trailing space, so `TAB` directly after `/goal` lets you type its arguments.
+  Ambiguous matches keep the token editable until a full name is chosen.
+  The token is the one ending at point — at the start of the message or after
+  any whitespace, the boundary the host's gesture grammar uses — so
+  `please /rev` + `TAB` becomes `please /review `. A token in the middle of a
+  message is claimed only when a command or skill really matches it, so prose
+  and paths (`see /usr/…`) keep path and word completion; a `/name` at the
+  input start stays with command completion even when the catalog is empty.
+  The catalog is handed to the front-end whole and matching is Emacs's: this
+  source's completion category defaults to ordinary prefix matching plus the
+  built-in `flex` style, registered in `completion-category-defaults` (the
+  same place `@` references get their `flex`).  So a word inside a long name
+  completes — `/probe` → `/dsh-emacs-skill-probe` — while an ambiguous prefix
+  (`/p`) still just lists.  Your own `completion-styles` apply after those
+  defaults, and setting `completion-category-overrides` for
+  `dsh-emacs-command` replaces them outright.
+  The same list carries the session's **skills** (see [Skills](skills.md)):
+  a skill name is not in the command registry, so `commands.execute` declines
+  it and the line falls back to an ordinary prompt, where the host's skill tool
+  expands the `/name` gesture.
   `TAB` is bound to `completion-at-point` in chat buffers. dsh-emacs is only a
   completion *backend* — it registers `completion-at-point-functions` and never
   drives a popup itself. When `dsh-emacs-slash-auto-complete` is on (default),

@@ -780,6 +780,15 @@ drilling can continue.  STATUS is ignored."
            start (point) (plist-get props :path))
           (dsh-emacs-reference--reset-fetch))))))
 
+;; The `@' category's styles are registered the standard way for a package:
+;; defaults go in `completion-category-defaults' at load time, so
+;; `completion-category-overrides' stays the user's knob and a user override
+;; for this category wins.  Flex matches across the whole path regardless of
+;; the user's global `completion-styles', so typing a mid-path word narrows to
+;; files like @src/…/button.tsx.
+(add-to-list 'completion-category-defaults
+             '(dsh-emacs-reference (styles flex)))
+
 (defun dsh-emacs-reference-completion-at-point ()
   "`completion-at-point-functions' entry for @ file/session references.
 Completes the active `@path' / `@\"path' token in the editable input
@@ -837,10 +846,11 @@ nil outside the input area or when the token is not an @ reference."
                                 '((category . dsh-emacs-reference)
                                   ;; Match @ references flexibly across the whole
                                   ;; path regardless of the user's global
-                                  ;; completion-styles: chat buffers map this
-                                  ;; category to the built-in `flex' style (see
-                                  ;; `dsh-emacs-mode'), so typing a mid-path word
-                                  ;; narrows to files like @src/…/button.tsx.
+                                  ;; completion-styles: this category's default
+                                  ;; is the built-in `flex' style (registered
+                                  ;; above, see `completion-category-defaults'),
+                                  ;; so typing a mid-path word narrows to files
+                                  ;; like @src/…/button.tsx.
                                   (display-sort-function . identity)
                                   (cycle-sort-function . identity))))
                         (props (list :affixation-function

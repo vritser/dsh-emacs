@@ -56,6 +56,8 @@ The most commonly used options, straight in your config:
 (setq dsh-emacs-reference-fetch-delay 0.15)         ; idle debounce before a typed @ token re-fetches its candidates
 (setq dsh-emacs-reference-max-files nil)            ; file/directory candidates shown in the "@" popup (nil = all host results)
 (setq dsh-emacs-reference-max-sessions nil)         ; session candidates shown in the "@" popup (nil = all host results)
+(setq dsh-emacs-skill-prefetch t)                   ; open-session pre-fetch of the `skills.list' catalog that shares the "/" menu with slash commands (see docs/skills.md)
+(setq dsh-emacs-skill-prefetch-delay 0.5)           ; delay before the skill pre-fetch runs
 (setq dsh-emacs-modeline-enabled t)                  ; whether the mode-line stats are enabled
 (setq dsh-emacs-modeline-show-step nil)              ; show the running turn's step badge next to the spinner (nil = hide it)
 (setq dsh-emacs-shell-require-confirm nil)          ; ask y-or-n-p before running a `!` line (nil = run immediately, like M-!)

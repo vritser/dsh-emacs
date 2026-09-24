@@ -43,6 +43,15 @@
                   (string &optional references))
 (declare-function dsh-emacs-reference-file-link "dsh-emacs-reference" (path))
 
+;; Defined in dsh-emacs-command.el, loaded by dsh-emacs.el.  Chips the
+;; catalog-confirmed `/name' gestures of a user message, and re-chips one from
+;; the host's `skill-invocation' evidence (see
+;; `dsh-emacs-render--insert-user-block').
+(declare-function dsh-emacs-command-fontify-gestures "dsh-emacs-command"
+                  (string))
+(declare-function dsh-emacs-command-decorate-skill-gesture "dsh-emacs-command"
+                  (beg end name))
+
 ;; Defined in dsh-emacs-modeline.el, which loads via dsh-emacs.el after this
 ;; module.  Called at runtime from turn/end handling and event dispatch.
 (declare-function dsh-emacs--ml-busy-set "dsh-emacs-modeline" (flag))
@@ -1874,45 +1883,86 @@ transcript hides the rest, and `M-p' recall must not offer it back."
   "Insert EVENT's user block and return its (START . END) text region, or nil.
 EVENT is a `user/message' wire event (or an optimistic look-alike carrying
 just `data.content'); a host-injected copy (see
-`dsh-emacs-render--user-authored-p') renders nothing.  REFERENCES
+`dsh-emacs-render--user-authored-p') renders nothing — but a
+`skill-invocation' copy is evidence that the user message it follows carried
+a real skill gesture, so it re-chips that gesture instead (a replayed
+transcript can render before the skill catalog is fetched).  REFERENCES
 behaves as in `dsh-emacs-render-user-message'.  Split out of that renderer so
 the optimistic echo path can capture the inserted region and roll it back
 when its submit is rejected, while the canonical render keeps returning the
 event seq."
   (let* ((data (dsh-emacs-render--event-data event))
          (content (dsh-emacs-render--aget "content" data))
-         (text (dsh-emacs-reference-fontify
-                (dsh-emacs-render--text-from-content content)
-                references))
+         (text (dsh-emacs-command-fontify-gestures
+                (dsh-emacs-reference-fontify
+                 (dsh-emacs-render--text-from-content content)
+                 references)))
          (images (dsh-emacs-render--image-blocks content))
          (insert-point (dsh-emacs-render--input-insert-point))
          (block-id (dsh-emacs-render--make-block-id event))
          (specs nil))
-    (when (dsh-emacs-render--user-authored-p event)
-      ;; Placeholder lines follow the body: one per image, with a unique id
-      ;; that lets the async fill-in locate it.
-      (let ((index 0))
-        (dolist (block images)
-          (setq index (1+ index)
-                specs (append specs
-                              (list (cons (format "%s-img-%d" block-id index)
-                                          block))))))
-      (when specs
-        (setq text (concat text
-                           (and (not (string-empty-p text)) "\n")
-                           (mapconcat (lambda (spec)
-                                        (dsh-emacs-render--image-placeholder
-                                         (car spec) (cdr spec)))
-                                      specs "\n"))))
-      (prog1
-          (dsh-emacs-render--insert-chat-message
-           (concat (propertize "❯ " 'face 'dsh-emacs-input-prompt-face)
-                   text)
-           'dsh-emacs-user-block-face insert-point
-           (format "%s-%s" (dsh-emacs-render--make-namespace) block-id)
-           'user)
-        (dolist (spec specs)
-          (dsh-emacs-render--show-attachment (car spec) (cdr spec)))))))
+    (prog1
+        (when (dsh-emacs-render--user-authored-p event)
+          ;; Placeholder lines follow the body: one per image, with a unique id
+          ;; that lets the async fill-in locate it.
+          (let ((index 0))
+            (dolist (block images)
+              (setq index (1+ index)
+                    specs (append specs
+                                  (list (cons (format "%s-img-%d" block-id index)
+                                              block))))))
+          (when specs
+            (setq text (concat text
+                               (and (not (string-empty-p text)) "\n")
+                               (mapconcat (lambda (spec)
+                                            (dsh-emacs-render--image-placeholder
+                                             (car spec) (cdr spec)))
+                                          specs "\n"))))
+          (prog1
+              (dsh-emacs-render--insert-chat-message
+               (concat (propertize "❯ " 'face 'dsh-emacs-input-prompt-face)
+                       text)
+               'dsh-emacs-user-block-face insert-point
+               (format "%s-%s" (dsh-emacs-render--make-namespace) block-id)
+               'user)
+            (dolist (spec specs)
+              (dsh-emacs-render--show-attachment (car spec) (cdr spec)))))
+      ;; The injected copy itself is never rendered, but its source is the
+      ;; host's evidence that NAME's `/name' gesture in the message above was
+      ;; a skill: chip it even when the skill catalog is not fetched yet.
+      (when-let* ((name (dsh-emacs-render--skill-invocation-name event)))
+        (dsh-emacs-render--decorate-last-user-gesture name)))))
+
+(defun dsh-emacs-render--skill-invocation-name (event)
+  "Return the skill name EVENT injects, or nil when it is not an injection.
+The host appends one hidden `user/message' per `/name' gesture it expanded
+for a step, carrying `data.source = {kind: \"skill-invocation\", name: …}'
+\(see dsh-tool-skill); the transcript reads it as evidence, never as text."
+  (let ((source (dsh-emacs-render--aget
+                 "source" (dsh-emacs-render--event-data event))))
+    (when (equal (dsh-emacs-render--aget "kind" source) "skill-invocation")
+      (dsh-emacs-render--aget "name" source))))
+
+(defun dsh-emacs-render--last-user-message-region ()
+  "Return (BEG . END) of the user message before the insertion point, or nil.
+During a history prepend, search above the page's advancing insertion marker;
+otherwise search above the composer."
+  (let* ((anchor (or (dsh-emacs-render--input-insert-point) (point-max)))
+         (end (previous-single-property-change anchor
+                                               'dsh-emacs-user-message)))
+    (when (and end (get-text-property (1- end) 'dsh-emacs-user-message))
+      (cons (previous-single-property-change end 'dsh-emacs-user-message)
+            end))))
+
+(defun dsh-emacs-render--decorate-last-user-gesture (name)
+  "Chip the `/NAME' gesture of the user message before the insertion point.
+The injected copy NAME came from is not rendered, so the decoration lands on
+the message the host scanned (see
+`dsh-emacs-command-decorate-skill-gesture').  Nil when no user message is
+before the insertion point — an isolated fixture, or a transcript whose block
+was already rewritten."
+  (when-let* ((region (dsh-emacs-render--last-user-message-region)))
+    (dsh-emacs-command-decorate-skill-gesture (car region) (cdr region) name)))
 
 (defun dsh-emacs-render-user-message (event &optional references)
   "Render a `user/message' event with a prompt and the user block face.

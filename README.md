@@ -76,7 +76,7 @@ for list management and navigation.
 | `C-c C-!` | Stop the tracked local shell process |
 | `M-p` / `M-n` | Previous / next input |
 | `C-/` / `C-_` / `C-x u` | Undo input editing; redo with `C-g C-/`, or `undo-redo` on Emacs 28+ (the transcript is never undone) |
-| `TAB` | Complete a slash command |
+| `TAB` | Complete a slash command or skill |
 
 **Sending during a running turn:** by default, `C-c C-c` queues a non-empty
 message for the next turn. `C-u C-c C-c` steers the running turn instead;
@@ -91,20 +91,27 @@ into a directory and `@session-title` mentions another session. See
 Type **`/`**, then press **`TAB`** to complete a slash command. Automatic
 popups depend on your completion front-end and its settings: corfu/company
 can provide them with auto completion enabled; stock completion,
-vertico and icomplete require `TAB`. See
-[Slash commands](docs/slash-commands.md#three-ways-to-run-a-command).
+vertico and icomplete require `TAB`. The same list carries the session's
+skills (host instruction bundles), with user-only ones marked. The token
+completes wherever the host accepts a gesture — at the start of the message
+or after a space — so `please /rev` + `TAB` becomes `please /review `; a
+name no command or skill matches is left to path/word completion. See
+[Slash commands](docs/slash-commands.md#three-ways-to-run-a-command) and
+[Skills](docs/skills.md).
 
 **`TAB`** completes a **local file path** once the token carries a separator:
 `docs/rp`, `./src/`, `~/…` and `/abs/…` complete through the stock file-name
 completer against the chat buffer's working directory — the session workspace
 — with the same directory drill-down as `find-file`, the path suffix after
 the cursor preserved, and the active completion styles (abbreviated
-directories work with `partial-completion`). A leading `/name` is reserved
-for slash commands even when their catalog is empty; type the next `/` or put
-the path after prose to complete an absolute path. Completion reads the
-machine Emacs runs on, like `!` shell lines — with a dsh server on another
-host, use an `@` reference instead. A path with spaces is not handled in
-plain text (the token ends at the space); quote it as an `@` reference.
+directories work with `partial-completion`). A `/name` at the start of the
+input is reserved for slash commands even when their catalog is empty; in the
+middle of a message a `/name` only goes to command completion when a command
+or skill actually matches it, so `see /usr` still completes as a path.
+Completion reads the machine Emacs runs on, like `!` shell lines — with a dsh
+server on another host, use an `@` reference instead. A path with spaces is
+not handled in plain text (the token ends at the space); quote it as an `@`
+reference.
 
 **`TAB`** also completes an ordinary word from what is already in the buffer:
 the draft above point and, within `dsh-emacs-word-completion-limit`
@@ -174,6 +181,16 @@ the transcript removes it. With attachments, a leading `!` is caption text
 sent to the model. See [Shell commands](docs/shell-commands.md) for multiline
 scripts, shell selection and process handling.
 
+### Skills
+
+dsh skills are host-side instruction bundles (`SKILL.md` plus resources) for a
+session's working directory and preset. dsh-emacs lists them in the `/`
+completion (user-only ones marked) and in `M-x dsh-emacs-command`, the same
+menu that runs slash commands: picking a skill inserts `/name ` at the cursor,
+or with `C-u`, opens the picked skill's `SKILL.md`. The host expands a `/name`
+gesture found in your prompt, so a skill is invoked like ordinary text
+(`/review check the parser`). See [Skills](docs/skills.md).
+
 ### Images
 
 `C-c C-v` pastes the system clipboard's image into the next message: it joins
@@ -239,6 +256,7 @@ measurements and remaining limits.
 - [Customization](docs/customization.md) — configuration examples and options
 - [@ references](docs/reference.md) — file, directory and session mentions
 - [Slash commands](docs/slash-commands.md) — catalog, completion and execution
+- [Skills](docs/skills.md) — host skill catalog and `/name` gestures
 - [Shell commands](docs/shell-commands.md) — local `!command` execution
 - [Model picker](docs/model-picker.md) — models, providers and reasoning effort
 - [Mode line](docs/modeline.md) — status, context usage and pending queue

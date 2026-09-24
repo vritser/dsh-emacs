@@ -38,6 +38,31 @@ builds on agent-shell, the mode-line stats on pi-mono):
 | `dsh-emacs-user-block-face` | User message body (no background by default) |
 | `dsh-emacs-assistant-body-face` | Assistant message body (no background) |
 
+### Slash gestures in user messages
+
+A `/name` token a user sent is **accented** when one of the session's catalogs
+confirms it: a host command is drawn as a blue bordered chip
+(`dsh-emacs-slash-command-face`), a skill as plain violet text with **no
+border** (`dsh-emacs-slash-skill-face`) — a skill is a prompt gesture, not
+something the host executes, so the box is reserved for commands and the two
+kinds stay distinguishable. Either way the catalog description rides the
+`help-echo` tooltip, and the token text itself is never changed. Skill names
+may start with a digit, so `/3d-review` is accented too when confirmed.
+
+Classification is catalog-confirmed, never shape-alone: `/usr/bin`, `5/8`,
+`http://…`, `/name,` and unknown names stay plain text, the same rule dsh web's
+user-text projection applies. Reading the catalogs never fetches, so a message
+rendered before its catalog landed stays plain — until the host's hidden
+`skill-invocation` copy for that gesture arrives, which is authoritative
+evidence and accents it retroactively (this is what styles replayed history
+reliably, whichever of the snapshot and the prefetch wins the race). If a
+command and skill share a name, that evidence replaces the initial command
+styling with the skill face and tooltip. Repeated evidence preserves an
+existing skill tooltip, even after the catalog is invalidated.
+
+Colors come from `dsh-emacs-color-slash-command` / `-slash-command-dark` and
+`dsh-emacs-color-slash-skill` / `-slash-skill-dark`.
+
 ## Tool calls (dsh web style)
 
 | Face | Description |

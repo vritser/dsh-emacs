@@ -92,6 +92,7 @@
 (require 'dsh-emacs-jobs)
 (require 'dsh-emacs-server)
 (require 'dsh-emacs-command)
+(require 'dsh-emacs-skill)
 (require 'dsh-emacs-reference)
 (require 'dsh-emacs-shell)
 (require 'dsh-emacs-session)
@@ -1411,6 +1412,10 @@ realtime)."
       ;; fresh buffers start at anchor 0 and the snapshot seeds the whole
       ;; window.  No separate history fetch precedes the connect.
       (dsh-emacs-command-catalog-prefetch session-id)
+      ;; Pre-warm the skill catalog (`skills/list') too: the same "/" popup
+      ;; lists commands and skills, so its first trigger should not block on
+      ;; two synchronous round trips (see dsh-emacs-skill.el).
+      (dsh-emacs-skill-prefetch session-id)
       ;; Pre-warm the @ reference candidate cache (files + session roster) so
       ;; the first "@" popup reads warm cache.  Buffer-local cache, so it must
       ;; run in the chat buffer (see dsh-emacs-reference.el).
@@ -2376,11 +2381,14 @@ metadata preserves nearest-first ordering for display and cycling."
   (buffer-enable-undo)
   (setq-local comment-start "// ")
   (setq-local comment-end "")
-  ;; Complete slash commands when the input starts with "/"; complete
-  ;; file/session references while an "@" token is in progress (see
-  ;; dsh-emacs-command.el / dsh-emacs-reference.el); complete a local file
-  ;; path when the token carries a separator; otherwise complete an ordinary
-  ;; word from the draft and the transcript above the input.
+  ;; Complete a slash command or skill when a "/name" token ends at point —
+  ;; at the input start or after any whitespace, the boundary the host's
+  ;; gesture grammar uses (mid-message it is catalog-confirmed, so prose like
+  ;; "see /usr" falls through to path completion); complete file/session
+  ;; references while an "@" token is in progress (see dsh-emacs-command.el /
+  ;; dsh-emacs-reference.el); complete a local file path when the token
+  ;; carries a separator; otherwise complete an ordinary word from the draft
+  ;; and the transcript above the input.
   (setq-local completion-at-point-functions
               '(dsh-emacs-command-completion-at-point
                 dsh-emacs-reference-completion-at-point
@@ -2402,14 +2410,11 @@ metadata preserves nearest-first ordering for display and cycling."
   ;; complete on TAB).  No-op without an active @ token or corfu-auto.
   (add-hook 'post-command-hook #'dsh-emacs-reference--auto-complete nil t)
 
-  ;; @ references match flexibly across the whole path, independent of the
-  ;; user's global completion-styles: chat buffers map the @ completion
-  ;; category (dsh-emacs-reference.el) to the built-in `flex' style.  Scoped to
-  ;; that category via buffer-local overrides, so slash and every other
-  ;; completion keep the user's own styles.
-  (setq-local completion-category-overrides
-              (cons '(dsh-emacs-reference (styles flex))
-                    completion-category-overrides))
+  ;; The `/` and `@` completion categories register their default styles in
+  ;; `completion-category-defaults' at load time (see dsh-emacs-command.el /
+  ;; dsh-emacs-reference.el), the way a package is meant to; nothing is set
+  ;; buffer-locally here, so `completion-category-overrides' stays the user's
+  ;; knob and a user override for either category wins.
   ;; imenu: index by user message, so M-x imenu jumps to any past input
   (setq-local imenu-create-index-function #'dsh-emacs-imenu-create-user-index)
 

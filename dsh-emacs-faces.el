@@ -247,6 +247,66 @@ underlined in the accent color.  RET or mouse-1 opens it (see
   :group 'dsh-emacs-faces)
 
 ;;; ---------------------------------------------------------------------------
+;;; Slash gestures in user messages
+;;; ---------------------------------------------------------------------------
+;; A sent `/name' line is a host command, a skill gesture, or plain text.  The
+;; two actionable kinds are accented in the transcript so it shows what the
+;; host will act on: a command carries the box, a skill only the color (no
+;; border — a skill is a prompt gesture, not something the host executes); the
+;; tooltip carries the catalog description.  Classification is
+;; catalog-confirmed (never shape-alone), so a path like `/usr/bin' or a
+;; fraction like `5/8' is never accented — see
+;; `dsh-emacs-command-fontify-gestures'.
+
+(defcustom dsh-emacs-color-slash-command "#1d4ed8"
+  "Accent of a slash-command gesture chip in a user message (blue).
+Kept off the teal the ❯ prompt and the @ reference chips already use, so a
+`/name' command reads as its own kind of token."
+  :type 'string
+  :group 'dsh-emacs-faces)
+
+(defcustom dsh-emacs-color-slash-command-dark "#7aa2f7"
+  "Slash-command gesture chip accent for dark themes."
+  :type 'string
+  :group 'dsh-emacs-faces)
+
+(defcustom dsh-emacs-color-slash-skill "#7c3aed"
+  "Accent of a skill gesture chip in a user message (violet).
+Skills are instruction bundles the host expands, so they share the violet
+family of the tool accents while staying distinguishable from them."
+  :type 'string
+  :group 'dsh-emacs-faces)
+
+(defcustom dsh-emacs-color-slash-skill-dark "#c4b5fd"
+  "Skill gesture chip accent for dark themes."
+  :type 'string
+  :group 'dsh-emacs-faces)
+
+(defface dsh-emacs-slash-command-face
+  `((((background light))
+     :foreground ,dsh-emacs-color-slash-command
+     :box (:line-width 1 :color ,dsh-emacs-color-slash-command))
+    (((background dark))
+     :foreground ,dsh-emacs-color-slash-command-dark
+     :box (:line-width 1 :color ,dsh-emacs-color-slash-command-dark))
+    (t :box (:line-width 1)))
+  "A `/name' token in a user message that names a host slash command.
+Boxed in the command accent; the `help-echo' tooltip carries the command's
+description.  See `dsh-emacs-command-fontify-gestures'."
+  :group 'dsh-emacs-faces)
+
+(defface dsh-emacs-slash-skill-face
+  `((((background light)) :foreground ,dsh-emacs-color-slash-skill)
+    (((background dark))  :foreground ,dsh-emacs-color-slash-skill-dark)
+    (t :inherit shadow))
+  "A `/name' token in a user message that names a skill.
+Colored in the skill accent, with no border: the box is what marks a host
+slash command, so the two kinds stay distinguishable.  The host expands the
+gesture from the prompt text rather than running it (see dsh-emacs-skill.el),
+and the `help-echo' tooltip carries the skill's description."
+  :group 'dsh-emacs-faces)
+
+;;; ---------------------------------------------------------------------------
 ;;; Tool cards (pending / success / error states)
 ;;; ---------------------------------------------------------------------------
 

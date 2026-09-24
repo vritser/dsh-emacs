@@ -16,7 +16,8 @@ dsh-emacs/
 ├── dsh-emacs-queue.el        # Pending-input queue mirror (queue/steer)
 ├── dsh-emacs-jobs.el         # Background jobs: job/list + job/follow streams, stop
 ├── dsh-emacs-server.el       # Server bootstrap: probe / auto-start / install / browser-session auth
-├── dsh-emacs-command.el      # Host slash commands (commands/list + commands/execute)
+├── dsh-emacs-command.el      # Slash surface: commands/list + commands/execute, "/" completion and menu
+├── dsh-emacs-skill.el        # Skill catalog (skills/list) and /name gestures
 ├── dsh-emacs-shell.el        # Client-side `!command` shell commands (local execution)
 ├── dsh-emacs-reference.el    # @ reference completion, chips and navigation
 ├── dsh-emacs-composer.el     # Composer chrome: Goal and Next Message rows above the input
@@ -286,6 +287,10 @@ when the server protocol changes you sync exactly one file. Covered payloads:
   `authorable` flag, so the web-consistent built-in labels key on the id alone
 - `goal` session projection (§9) → `dsh-protocol-goal` (id, revision,
   objective, phase, blocked-reason, max-goal-rounds, rounds-started)
+- `commands/list` → `dsh-protocol-command` (name, description, input) and
+  `skills/list` → `dsh-protocol-skill-list` (skills) → `dsh-protocol-skill`
+  (name, description, when-to-use, model-invocable, path) — the two catalogs
+  the `/` completion merges
 - `user-questions/request` items → `dsh-protocol-question` (id, text, header,
   detail, multi-select, options) → `dsh-protocol-question-option` (label,
   description). The `ask_user_question` tool's own arguments are the same
@@ -352,6 +357,7 @@ is the `client-request` envelope with `payload = {args: {...}}`:
 | `workspace/create` / `rename` / `delete` / `insertBefore` / `archiveSession` / `unarchiveSession` | Mutate a workspace or a session's workspace membership (archive has no delete; unarchive is its dsh 0.1.6 inverse) |
 | `agentPresets/list` | List agent presets |
 | `commands/list` / `commands/execute` | List / run slash commands |
+| `skills/list` | List the session's user-invocable skills (the `/` completion's second catalog; invocation is a `/name` gesture in a prompt, rpc.md §4.2) |
 | `$events/result` | Answer a `$events` waterfall (approval/question), args `{clientId, eventId, outcome}` |
 
 Real-time state — the transcript, the session list, queue/steer mirrors,

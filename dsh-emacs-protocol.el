@@ -41,6 +41,9 @@
 ;;                        └─ dsh-protocol-command-input (hint attachments)
 ;;   commands.execute → dsh-protocol-command-execution (command-id
 ;;                        result kind text)
+;;   skills.list      → dsh-protocol-skill-list (skills)
+;;                        └─ dsh-protocol-skill (name description when-to-use
+;;                             model-invocable path)
 ;;   inbox projection → dsh-protocol-queue-item (id placement text kind)
 ;;   permissionPresets/catalog → dsh-protocol-permission-catalog (options)
 ;;                        └─ dsh-protocol-permission-option (value name
@@ -457,6 +460,52 @@ placeholder, ATTACHMENTS whether the command accepts composed attachments
   result
   kind
   text)
+
+;; ---------------------------------------------------------------------------
+;; skills.list
+;; ---------------------------------------------------------------------------
+;; The `skills' namespace has this one endpoint: a cold read of the
+;; user-invocable skills of one Session composition (cwd + agent preset).  It
+;; takes `{request: {sessionId}}' — unlike `commands.list', whose session rides
+;; the `agentId' scope lookup.  There is no invocation Remote: a `/name'
+;; gesture in a user prompt is what the host's skill tool expands (see
+;; dsh-emacs-skill.el).
+
+(cl-defstruct (dsh-protocol-skill
+               (:constructor dsh-protocol-skill--from-alist
+                             (alist
+                              &aux
+                              (name (cdr (assq 'name alist)))
+                              (description (cdr (assq 'description alist)))
+                              (when-to-use (cdr (assq 'whenToUse alist)))
+                              (model-invocable
+                               (dsh-protocol--boolean
+                                (cdr (assq 'modelInvocable alist))))
+                              (path (cdr (assq 'path alist))))))
+  "One `skills.list' entry: a skill the user may invoke as `/NAME'.
+DESCRIPTION is the one-line summary; WHEN-TO-USE the optional model-facing
+hint.  MODEL-INVOCABLE says the model may also load the skill through the
+`skill' tool — when nil the skill is user-only.  PATH is the absolute
+`SKILL.md' path when the mounted provider supplies one (dsh 0.1.6+), so it
+is nil for providers that manage their own resources."
+  name
+  description
+  when-to-use
+  model-invocable
+  path)
+
+(cl-defstruct (dsh-protocol-skill-list
+               (:constructor dsh-protocol-skill-list--from-alist
+                             (alist
+                              &aux
+                              (skills (mapcar
+                                       #'dsh-protocol-skill--from-alist
+                                       (dsh-protocol--objects
+                                        (dsh-protocol--field 'skills
+                                                             alist)))))))
+  "The `skills.list' response value: the session's user-invocable skills, in
+the host's order."
+  skills)
 
 ;; ---------------------------------------------------------------------------
 ;; permissionPresets/catalog

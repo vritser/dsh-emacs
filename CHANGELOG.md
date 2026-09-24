@@ -6,7 +6,7 @@ All notable changes to this project are documented here. Format follows
 sections carry the planned next version (pre-1.0: `fix` → patch, features →
 minor) and stay undated until the release is cut.
 
-## 0.5.1 - Unreleased
+## 0.6.0 - Unreleased
 
 ### Added
 
@@ -21,15 +21,70 @@ minor) and stay undated until the release is cut.
   own `job/list` and `job/follow` streams over the chat connection.  A stop is
   recorded as `cancelled by the user`, and the owning agent still receives its
   completion notice.  (rationale: postmortem/065)
+- **Host skills are discoverable and invocable**: the `/` completion and the
+  `M-x dsh-emacs-command` slash menu now list the session's skills beside its
+  slash commands (a user-only skill, one the model may not load itself, is
+  marked `user-only`).  Picking a skill inserts the `/name ` gesture at the
+  cursor — `C-u` opens the picked skill's `SKILL.md` instead, while commands in
+  the same menu still run.  Invocation has no RPC of its own: the host expands a
+  `/name` gesture found in the prompt text, so the gesture is sent like
+  ordinary input.  The catalog is read from `skills.list`, prefetched per
+  session (`dsh-emacs-skill-prefetch`, `dsh-emacs-skill-prefetch-delay`) and
+  re-read on demand with `M-x dsh-emacs-skill-catalog-refresh`.
+  (rationale: postmortem/067)
+- **Slash gestures are accented in the transcript**: a `/name` token you sent is
+  colored when the session's catalogs confirm it — a host slash command as a
+  blue bordered chip, a skill as violet text with no border (dsh web
+  distinguishes the same two) — with the description on hover, so the
+  transcript shows what the host will act on.  Classification is
+  catalog-confirmed, not shape-alone: `/usr/bin`, `5/8`, `http://…` and unknown
+  names stay plain.  A replayed message that rendered before its catalog was
+  fetched is accented retroactively from the host's own skill-invocation
+  evidence.  (rationale: postmortem/068)
+- **`/name` completion works mid-sentence**: the `/` completion and the slash
+  menu now handle the token the host's gesture grammar accepts anywhere — at
+  the start of the message or after whitespace — so `please /rev` + `TAB`
+  becomes `please /review `, and picking a skill from `M-x dsh-emacs-command`
+  replaces the token being typed instead of appending to it.  Mid-sentence the
+  token goes to command completion only when a command or skill actually
+  matches it, so prose and paths (`see /usr/…`) keep path and word completion;
+  at the input start a `/name` stays with command completion even when the
+  catalog is empty.  (rationale: postmortem/069)
+- **The `/` list matches a word inside a long name**: the `/` completion
+  category defaults to prefix matching plus the built-in `flex` style
+  (registered in `completion-category-defaults`, the same place `@`
+  references get theirs), so `/probe` finds `dsh-emacs-skill-probe`.  Prefix
+  matching runs first, so an ambiguous prefix (`/p`) or a bare `/` still lists
+  its candidates instead of completing; your own `completion-styles` apply
+  after those defaults, `completion-category-overrides` replaces them, and
+  every other completion in the buffer is untouched.  (rationale:
+  postmortem/069)
 
 ### Fixed
+
+- **Confirmed skill invocations use skill styling**: host evidence now replaces
+  a same-named command's border and tooltip with the skill presentation,
+  including when the skill catalog has not loaded yet.
+- **Digit-leading skill names are accented**: gestures such as `/3d-review`
+  now receive skill styling from both the cached catalog and host evidence.
+- **Ambiguous skill completion keeps the gesture editable**: matching a shared
+  word such as `/review` in `code-review` and `design-review` no longer inserts
+  a space into the unfinished name. A separator is added after a complete
+  candidate is accepted.
+- **Older history styles the skill gesture in its own message**: a replayed
+  skill invocation now decorates the preceding message in the loaded page,
+  instead of a newer message beside the composer.
+- **Skill completion keeps the newest catalog**: a synchronous lookup now
+  supersedes pending prefetch responses, so a late reply cannot restore stale
+  skill suggestions. Refreshes started during the lookup also take priority.
 
 - **A catalog refresh no longer loses to an older request**: a `commands/list`
   response already in flight when `M-x dsh-emacs-command-catalog-refresh` (or a
   reopen) invalidated the cache could land afterwards and write the stale
   catalog back, so the `/` completion and the slash menu kept showing the
   pre-refresh list.  Only the response of the session's current fetch may now
-  write the cache or clear the in-flight flag.
+  write the cache or clear the in-flight flag; the same guard covers the new
+  `skills/list` catalog.
 - **The pending-input queue works against dsh 0.1.7 servers**: dsh 0.1.7
   removed the `session/queue` control frames (and the baseline's `queues`
   record) that carried the pending inbox, so the mode-line `[Qn Sm]`

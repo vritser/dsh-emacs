@@ -66,6 +66,12 @@ symbol or an ordered list."
                       (point-max)))))
     found))
 
+(defun dsh-test-completion-items (coll)
+  "Return COLL's completion strings (text properties stripped).
+COLL is a completion table (possibly metadata-wrapped), so extract
+candidates as the UI would via `all-completions', not by destructuring."
+  (mapcar #'substring-no-properties (all-completions "" coll)))
+
 ;; Follow checks must stop after one screen plus slack, even in long history.
 (with-temp-buffer
   (insert (make-string 20000 ?\n) "tail")
@@ -486,6 +492,9 @@ symbol or an ordered list."
 
 (when (featurep 'dsh-emacs-command)
   (dsh-test-pass "dsh-emacs-command loaded"))
+
+(when (featurep 'dsh-emacs-skill)
+  (dsh-test-pass "dsh-emacs-skill loaded"))
 
 (when (featurep 'dsh-emacs-reference)
   (dsh-test-pass "dsh-emacs-reference loaded"))
@@ -14034,6 +14043,248 @@ received, RESULT is FN's return value."
           dsh-emacs--command-fetch-inflight old-inflight
           dsh-emacs--command-fetch-stamps old-stamps)))
 
+;; --- Test 97b: skill catalog (skills/list) ---
+(let* ((skill (dsh-protocol-skill--from-alist
+               '((name . "review")
+                 (description . "Review a diff")
+                 (whenToUse . "before committing")
+                 (modelInvocable . t)
+                 (path . "/tmp/skills/review/SKILL.md")))))
+  (dsh-test-assert "skill-from-alist-full"
+    (string= "review" (dsh-protocol-skill-name skill))
+    (string= "Review a diff" (dsh-protocol-skill-description skill))
+    (string= "before committing" (dsh-protocol-skill-when-to-use skill))
+    (dsh-protocol-skill-model-invocable skill)
+    (string= "/tmp/skills/review/SKILL.md" (dsh-protocol-skill-path skill))))
+
+(let ((skill (dsh-protocol-skill--from-alist
+              '((name . "notes") (description . "Private notes")
+                (modelInvocable . :json-false)))))
+  (dsh-test-assert "skill-from-alist-user-only"
+    (null (dsh-protocol-skill-model-invocable skill))
+    (null (dsh-protocol-skill-when-to-use skill))
+    (null (dsh-protocol-skill-path skill))))
+
+;; The value is an envelope object ({skills: [...]}) whose array arrives as a
+;; vector; a non-object element is dropped at the protocol boundary
+(let* ((value (dsh-protocol-skill-list--from-alist
+               '((skills . [((name . "a")) "junk" ((name . "b"))]))))
+       (skills (dsh-protocol-skill-list-skills value)))
+  (dsh-test-assert "skill-list-envelope-normalizes-array"
+    (= 2 (length skills))
+    (string= "a" (dsh-protocol-skill-name (car skills)))
+    (string= "b" (dsh-protocol-skill-name (cadr skills)))))
+
+;; A value that is not the promised envelope object declines at the protocol
+;; boundary instead of signalling out of the constructor (an old server that
+;; answers 404-style empty arrays must not break the "/" completion)
+(dsh-test-assert "skill-list-malformed-value-declines"
+  (null (dsh-protocol-skill-list-skills
+         (dsh-protocol-skill-list--from-alist []))))
+
+(let ((sid "sess-skill")
+      (calls 0)
+      (seen nil)
+      (old dsh-emacs--skill-catalogs))
+  (unwind-protect
+      (cl-letf (((symbol-function 'dsh-emacs--rpc-request)
+                 (lambda (method params)
+                   (setq calls (1+ calls))
+                   (push (cons method params) seen)
+                   (cons t '((skills . [((name . "review")
+                                         (description . "R")
+                                         (modelInvocable . t))]))))))
+        (let ((items (dsh-emacs-skill-catalog-sync sid))
+              (again (dsh-emacs-skill-catalog-sync sid)))
+          (dsh-test-assert "skill-catalog-sync-caches"
+            (= calls 1)
+            (= 1 (length items))
+            (string= "review" (dsh-protocol-skill-name (car items)))
+            (equal again items)
+            ;; skills/list takes the session in a request object, unlike
+            ;; commands/list's agentId scope lookup
+            (equal '((request (sessionId . "sess-skill")))
+                   (cdr (assoc "skills/list" seen))))))
+    (setq dsh-emacs--skill-catalogs old)))
+
+;; An empty catalog is a real answer: cache it so TAB does not re-fetch a
+;; session that has no skills
+(let ((sid "sess-skill-empty")
+      (calls 0)
+      (old dsh-emacs--skill-catalogs))
+  (unwind-protect
+      (cl-letf (((symbol-function 'dsh-emacs--rpc-request)
+                 (lambda (_m _p)
+                   (setq calls (1+ calls))
+                   (cons t '((skills . []))))))
+        (let ((first (dsh-emacs-skill-catalog-sync sid))
+              (second (dsh-emacs-skill-catalog-sync sid)))
+          (dsh-test-assert "skill-catalog-caches-empty"
+            (null first)
+            (null second)
+            (= calls 1))))
+    (setq dsh-emacs--skill-catalogs old)))
+
+(let ((sid "sess-skill-async")
+      (fetched 'none)
+      (old dsh-emacs--skill-catalogs))
+  (unwind-protect
+      (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (_m _p cb)
+                   (funcall cb t '((skills . [((name . "audit"))]))))))
+        (dsh-emacs-skill-catalog-fetch
+         sid (lambda (items) (setq fetched items)))
+        (dsh-test-assert "skill-catalog-fetch-async"
+          (consp fetched)
+          (string= "audit" (dsh-protocol-skill-name (car fetched)))
+          (equal fetched (dsh-emacs-skill-catalog sid))))
+    (setq dsh-emacs--skill-catalogs old)))
+
+;; Several fetches for one session leave exactly one cache entry (string keys
+;; need assoc-delete-all, same as the command catalog)
+(let ((sid "sess-skill-dedup")
+      (old dsh-emacs--skill-catalogs))
+  (unwind-protect
+      (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (_m _p cb)
+                   (funcall cb t '((skills . [((name . "a"))]))))))
+        (dsh-emacs-skill-catalog-fetch sid)
+        (dsh-emacs-skill-catalog-fetch sid)
+        (let ((entries (cl-remove-if-not
+                        (lambda (e) (string= sid (car e)))
+                        dsh-emacs--skill-catalogs)))
+          (dsh-test-assert "skill-catalog-single-entry-per-session"
+            (= 1 (length entries)))))
+    (setq dsh-emacs--skill-catalogs old)))
+
+(let ((sid "sess-skill-prefetch")
+      (old dsh-emacs--skill-catalogs)
+      (old-pref dsh-emacs-skill-prefetch)
+      (old-delay dsh-emacs-skill-prefetch-delay)
+      (timers nil))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs-skill-prefetch t
+              dsh-emacs-skill-prefetch-delay 0.05)
+        (let ((timer (dsh-emacs-skill-prefetch sid)))
+          (when timer (push timer timers))
+          (dsh-test-assert "skill-prefetch-schedules-timer" (timerp timer)))
+        (dsh-emacs-skill--cache-catalog
+         sid (list (dsh-protocol-skill--from-alist '((name . "x")))))
+        (let ((before (length timer-list)))
+          (dsh-emacs-skill-prefetch sid)
+          (dsh-test-assert "skill-prefetch-skips-when-cached"
+            (= (length timer-list) before))))
+    (mapc #'cancel-timer timers)
+    (setq dsh-emacs--skill-catalogs old
+          dsh-emacs-skill-prefetch old-pref
+          dsh-emacs-skill-prefetch-delay old-delay)))
+
+(let ((sid "sess-skill-refresh")
+      (calls 0)
+      (old dsh-emacs--skill-catalogs))
+  (unwind-protect
+      (progn
+        (dsh-emacs-skill--cache-catalog
+         sid (list (dsh-protocol-skill--from-alist '((name . "old")))))
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_m _p cb)
+                     (setq calls (1+ calls))
+                     (funcall cb t '((skills . [((name . "new"))]))))))
+          (dsh-emacs-skill-catalog-refresh sid)
+          (let ((items (dsh-emacs-skill-catalog sid)))
+            (dsh-test-assert "skill-catalog-refresh-replaces-cache"
+              (= calls 1)
+              (string= "new" (dsh-protocol-skill-name (car items)))))))
+    (setq dsh-emacs--skill-catalogs old)))
+
+;; A response from a fetch that a refresh superseded must not repopulate the
+;; cache: the older request can land after the newer one (this is the race the
+;; prefetch timer and the manual refresh run into)
+(let ((sid "sess-skill-stale")
+      (old-catalogs dsh-emacs--skill-catalogs)
+      (old-inflight dsh-emacs--skill-fetch-inflight)
+      (old-stamps dsh-emacs--skill-fetch-stamps)
+      (callbacks nil))
+  (unwind-protect
+      (progn
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_m _p cb) (push cb callbacks))))
+          (dsh-emacs-skill-catalog-fetch sid))
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_m _p cb) (push cb callbacks))))
+          (dsh-emacs-skill-catalog-refresh sid))
+        (funcall (nth 0 callbacks) t '((skills . [((name . "fresh"))])))
+        (funcall (nth 1 callbacks) t '((skills . [((name . "stale"))])))
+        (let ((items (dsh-emacs-skill-catalog sid)))
+          (dsh-test-assert "skill-catalog-drops-superseded-response"
+            (consp items)
+            (string= "fresh" (dsh-protocol-skill-name (car items))))))
+    (setq dsh-emacs--skill-catalogs old-catalogs
+          dsh-emacs--skill-fetch-inflight old-inflight
+          dsh-emacs--skill-fetch-stamps old-stamps)))
+
+;; Synchronous completion supersedes prefetch too, including replies delivered
+;; while the blocking RPC pumps process output, not just after it returns.
+(dolist (timing '(during after))
+  (let ((dsh-emacs--skill-catalogs nil)
+        (dsh-emacs--skill-fetch-inflight nil)
+        (dsh-emacs--skill-fetch-stamps nil)
+        callback
+        (old-callback-ran nil))
+    (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+               (lambda (_method _params cb) (setq callback cb)))
+              ((symbol-function 'dsh-emacs--rpc-request)
+               (lambda (&rest _)
+                 (when (eq timing 'during)
+                   (funcall callback t '((skills . [((name . "old"))]))))
+                 (cons t '((skills . [((name . "new"))]))))))
+      (dsh-emacs-skill-catalog-fetch
+       "sync-race" (lambda (_) (setq old-callback-ran t)))
+      (dsh-emacs-skill-catalog-sync "sync-race")
+      (when (eq timing 'after)
+        (funcall callback t '((skills . [((name . "old"))]))))
+      (dsh-test-assert (format "skill-sync-supersedes-prefetch-%s" timing)
+        (equal '("new") (mapcar #'dsh-protocol-skill-name
+                               (dsh-emacs-skill-catalog "sync-race")))
+        (not old-callback-ran)
+        (not (member "sync-race" dsh-emacs--skill-fetch-inflight))))))
+
+;; A refresh started during a synchronous wait owns the cache and inflight
+;; marker; completion must not overwrite it when its older RPC returns.
+(let ((dsh-emacs--skill-catalogs nil)
+      (dsh-emacs--skill-fetch-inflight nil)
+      (dsh-emacs--skill-fetch-stamps nil)
+      callback)
+  (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+             (lambda (_method _params cb) (setq callback cb)))
+            ((symbol-function 'dsh-emacs--rpc-request)
+             (lambda (&rest _)
+               (dsh-emacs-skill-catalog-refresh "newer-refresh")
+               (cons t '((skills . [((name . "old"))]))))))
+    (dsh-emacs-skill-catalog-sync "newer-refresh")
+    (dsh-test-assert "skill-sync-preserves-newer-refresh-inflight"
+      (null (dsh-emacs-skill-catalog "newer-refresh"))
+      (member "newer-refresh" dsh-emacs--skill-fetch-inflight))
+    (funcall callback t '((skills . [((name . "new"))]))))
+  (dsh-test-assert "skill-sync-allows-newer-refresh-result"
+    (equal '("new") (mapcar #'dsh-protocol-skill-name
+                           (dsh-emacs-skill-catalog "newer-refresh")))))
+
+;; Aborted synchronous requests must not leave a permanent in-flight guard.
+(dolist (failure '(error quit))
+  (let ((dsh-emacs--skill-catalogs nil)
+        (dsh-emacs--skill-fetch-inflight nil)
+        (dsh-emacs--skill-fetch-stamps nil))
+    (cl-letf (((symbol-function 'dsh-emacs--rpc-request)
+               (lambda (&rest _) (signal failure '("test abort")))))
+      (condition-case nil
+          (dsh-emacs-skill-catalog-sync "sync-abort")
+        ((error quit) nil)))
+    (dsh-test-assert (format "skill-sync-cleans-up-%s" failure)
+      (not (member "sync-abort" dsh-emacs--skill-fetch-inflight))
+      (not (assoc "sync-abort" dsh-emacs--skill-fetch-stamps)))))
+
 ;; --- Test 98: command/run + command/done rendering ---
 (let ((buf (generate-new-buffer " *dsh-cmd-render*")))
   (unwind-protect
@@ -15258,9 +15509,361 @@ input-area draft (which carries no such property) is not counted."
                  (null read-called))
         (dsh-test-pass "command-menu-bare-no-args")))))
 
-;; --- Test 100: input area /name completion ---
+;; --- Test 99b: one slash menu lists commands and skills ---
+;; A skill pick inserts the /name gesture (the host expands it from the prompt
+;; text); the command and skill catalogs share the candidate list, commands
+;; first, with user-only skills marked.
+(let ((buf (generate-new-buffer " *dsh-slash-menu*"))
+      (old-commands dsh-emacs--command-catalogs)
+      (old-skills dsh-emacs--skill-catalogs)
+      (rows nil)
+      (dsh-emacs--current-session "sess-slash-menu"))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-command--cache-catalog
+         "sess-slash-menu"
+         (list (dsh-protocol-command--from-alist
+                '((name . "compact") (description . "Compact history")))))
+        (dsh-emacs-skill--cache-catalog
+         "sess-slash-menu"
+         (list (dsh-protocol-skill--from-alist
+                '((name . "review") (description . "Review a diff")
+                  (modelInvocable . t)))
+               (dsh-protocol-skill--from-alist
+                '((name . "notes") (description . "Private notes")
+                  (modelInvocable . :json-false)))))
+        (goto-char dsh-emacs--input-marker)
+        (insert "/rev")
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_prompt collection &rest _)
+                     (setq rows (mapcar (lambda (c)
+                                          (get-text-property 0 'display (car c)))
+                                        collection))
+                     "/review")))
+          (dsh-emacs-command)
+          (dsh-test-assert "slash-menu-lists-commands-and-skills"
+            (equal '("/compact — Compact history"
+                     "/review — Review a diff"
+                     "/notes — user-only · Private notes")
+                   rows)
+            (string= "/review "
+                     (buffer-substring-no-properties
+                      dsh-emacs--input-marker (point-max)))
+            ;; the cursor sits after the inserted space, ready for arguments
+            (= (point) (point-max)))))
+    (setq dsh-emacs--command-catalogs old-commands
+          dsh-emacs--skill-catalogs old-skills)
+    (kill-buffer buf)))
+
+;; A command pick still runs through commands/execute, with the prefix
+;; argument ignored (it only means "open the file" for a skill)
+(let ((buf (generate-new-buffer " *dsh-slash-menu-cmd*"))
+      (old-commands dsh-emacs--command-catalogs)
+      (old-skills dsh-emacs--skill-catalogs)
+      (calls nil)
+      (dsh-emacs--current-session "sess-slash-menu-cmd"))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-command--cache-catalog
+         "sess-slash-menu-cmd"
+         (list (dsh-protocol-command--from-alist
+                '((name . "compact") (description . "Compact history")))))
+        (dsh-emacs-skill--cache-catalog "sess-slash-menu-cmd" nil)
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (&rest _) "/compact"))
+                  ((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method params cb)
+                     (push (list method params) calls)
+                     (funcall cb t '((commandId . "c1")
+                                     (result . ((kind . "success")
+                                                (text . "t"))))))))
+          (dsh-emacs-command t)
+          (dsh-test-assert "slash-menu-prefix-ignored-for-command"
+            (string= "commands/execute" (car (car calls)))
+            (string= "/compact" (cdr (assq 'line (cadr (car calls))))))))
+    (setq dsh-emacs--command-catalogs old-commands
+          dsh-emacs--skill-catalogs old-skills)
+    (kill-buffer buf)))
+
+;; With a prefix argument a picked skill opens its SKILL.md instead of
+;; inserting the gesture
+(let ((buf (generate-new-buffer " *dsh-slash-menu-open*"))
+      (old-commands dsh-emacs--command-catalogs)
+      (old-skills dsh-emacs--skill-catalogs)
+      (opened nil)
+      (dsh-emacs--current-session "sess-slash-menu-open"))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-command--cache-catalog "sess-slash-menu-open" nil)
+        (dsh-emacs-skill--cache-catalog
+         "sess-slash-menu-open"
+         (list (dsh-protocol-skill--from-alist
+                '((name . "review") (description . "R")
+                  (modelInvocable . t)
+                  (path . "/tmp/skills/review/SKILL.md")))))
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (&rest _) "/review"))
+                  ((symbol-function 'find-file)
+                   (lambda (path &rest _) (setq opened path))))
+          (dsh-emacs-command t)
+          (dsh-test-assert "slash-menu-prefix-opens-skill-file"
+            (equal "/tmp/skills/review/SKILL.md" opened))))
+    (setq dsh-emacs--command-catalogs old-commands
+          dsh-emacs--skill-catalogs old-skills)
+    (kill-buffer buf)))
+
+;; A provider that ships no file must say so instead of opening nothing
+(dsh-test-assert "skill-open-without-path-signals"
+  (condition-case nil
+      (progn (dsh-emacs-skill-open
+              (dsh-protocol-skill--from-alist '((name . "no-file"))))
+             nil)
+    (user-error t)))
+
+;; The gesture insert belongs to a chat buffer
+(dsh-test-assert "slash-gesture-insert-needs-chat-buffer"
+  (condition-case nil
+      (with-temp-buffer (dsh-emacs-command--insert-gesture "review") nil)
+    (user-error t)))
+
+;; The host only recognizes the gesture at the start of the message or after
+;; whitespace (`(^|\s)/name'), so a gesture inserted right after a word needs a
+;; leading space to be invocable — otherwise the prompt looks right and the
+;; skill silently never fires
+(let ((buf (generate-new-buffer " *dsh-gesture-boundary*")))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (goto-char dsh-emacs--input-marker)
+        (insert "seed the")
+        (dsh-emacs-command--insert-gesture "review")
+        (dsh-test-assert "slash-gesture-adds-word-boundary"
+          (string= "seed the /review "
+                   (buffer-substring-no-properties
+                    dsh-emacs--input-marker (point-max))))
+        ;; at the input start the message itself begins with the gesture, so
+        ;; no leading space is added
+        (delete-region dsh-emacs--input-marker (point-max))
+        (dsh-emacs-command--insert-gesture "review")
+        (dsh-test-assert "slash-gesture-no-space-at-input-start"
+          (string= "/review "
+                   (buffer-substring-no-properties
+                    dsh-emacs--input-marker (point-max))))
+        ;; The token being typed is what the insert replaces, wherever it is:
+        ;; a mid-sentence `/rev' becomes `/review ', it is not appended to
+        (delete-region dsh-emacs--input-marker (point-max))
+        (goto-char dsh-emacs--input-marker)
+        (insert "seed the /rev")
+        (dsh-emacs-command--insert-gesture "review")
+        (dsh-test-assert "slash-gesture-replaces-mid-sentence-token"
+          (string= "seed the /review "
+                   (buffer-substring-no-properties
+                    dsh-emacs--input-marker (point-max)))))
+    (kill-buffer buf)))
+
+;; --- Test 99c: /name gestures are chipped in the transcript ---
+;; A slash token is chipped only when a cached catalog confirms it: the chip
+;; says command (blue) vs skill (violet) and the tooltip carries the
+;; description.  Paths, fractions, unknown names and punctuation-suffixed
+;; prose stay plain — the host's own gesture scan would not match them either.
+(let ((old-commands dsh-emacs--command-catalogs)
+      (old-skills dsh-emacs--skill-catalogs)
+      (sid "sess-gesture"))
+  (unwind-protect
+      (progn
+        (dsh-emacs-command--cache-catalog
+         sid (list (dsh-protocol-command--from-alist
+                    '((name . "goal") (description . "goal ops")))))
+        (dsh-emacs-skill--cache-catalog
+         sid (list (dsh-protocol-skill--from-alist
+                    '((name . "review") (description . "Review it")
+                      (modelInvocable . t)))
+                   (dsh-protocol-skill--from-alist
+                    '((name . "notes") (description . "Private")
+                      (modelInvocable . :json-false)))))
+        (let* ((dsh-emacs--buffer-session sid)
+               (dsh-emacs--current-session sid)
+               (out (dsh-emacs-command-fontify-gestures
+                     "please /review and /goal and /notes but not /usr/bin, 5/8, /nope or /goal,"))
+               (skill-pos (string-match "/review" out))
+               (command-pos (string-match "/goal" out))
+               (user-only-pos (string-match "/notes" out)))
+          (dsh-test-assert "slash-gesture-chips-catalog-confirmed"
+            (eq 'dsh-emacs-slash-skill-face
+                (get-text-property skill-pos 'face out))
+            (eq 'dsh-emacs-slash-command-face
+                (get-text-property command-pos 'face out))
+            (string= "Skill /review — Review it"
+                     (get-text-property skill-pos 'help-echo out))
+            (string= "Slash command /goal — goal ops"
+                     (get-text-property command-pos 'help-echo out))
+            ;; a user-only skill keeps the label the menus use
+            (string= "Skill /notes — user-only · Private"
+                     (get-text-property user-only-pos 'help-echo out))
+            ;; the property names the bare command/skill name
+            (string= "review"
+                     (get-text-property skill-pos
+                                        'dsh-emacs-slash-gesture out)))
+          (dsh-test-assert "slash-gesture-leaves-non-gestures-plain"
+            (null (get-text-property (string-match "/usr/bin" out)
+                                     'dsh-emacs-slash-gesture out))
+            (null (get-text-property (string-match "5/8" out)
+                                     'dsh-emacs-slash-gesture out))
+            (null (get-text-property (string-match "/nope" out)
+                                     'dsh-emacs-slash-gesture out))
+            (null (get-text-property (1+ (string-match "/goal," out))
+                                     'dsh-emacs-slash-gesture out))))
+        ;; A render path must never fetch: an unknown session stays plain
+        ;; instead of blocking on the network.
+        (let ((dsh-emacs--buffer-session "sess-gesture-cold")
+              (dsh-emacs--current-session "sess-gesture-cold")
+              (calls nil))
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-request)
+                     (lambda (&rest _) (push 'sync calls) (cons nil nil)))
+                    ((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (&rest _) (push 'async calls))))
+            (let ((out (dsh-emacs-command-fontify-gestures "try /review now")))
+              (dsh-test-assert "slash-gesture-render-never-fetches"
+                (null calls)
+                (null (get-text-property (string-match "/review" out)
+                                         'dsh-emacs-slash-gesture out)))))))
+    (setq dsh-emacs--command-catalogs old-commands
+          dsh-emacs--skill-catalogs old-skills)))
+
+;; The renderer chips the gesture of a user message, and the hidden
+;; `skill-invocation' copy the host appends for a scanned gesture chips it
+;; retroactively — the case that matters when a replayed transcript renders
+;; before the skill catalog is fetched.  A richer catalog tooltip already on
+;; the token survives the evidence pass.
+(let ((buf (generate-new-buffer " *dsh-gesture-render*"))
+      (old-commands dsh-emacs--command-catalogs)
+      (old-skills dsh-emacs--skill-catalogs))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-modeline-setup)
+        (setq-local dsh-emacs--buffer-session "sess-gesture-render")
+        (dsh-emacs-skill--cache-catalog
+         "sess-gesture-render"
+         (list (dsh-protocol-skill--from-alist
+                '((name . "probe") (description . "Probe it")
+                  (modelInvocable . t)))))
+        (dsh-emacs-render-event
+         '((type . "user/message") (seq . 1)
+           (data . ((content . [((type . "text")
+                                 (text . "run /probe and /cold-skill now"))])))))
+        (let ((probe-pos (save-excursion
+                           (goto-char (point-min))
+                           (search-forward "/probe" nil t)
+                           (- (point) 6)))
+              (cold-pos (save-excursion
+                          (goto-char (point-min))
+                          (search-forward "/cold-skill" nil t)
+                          (- (point) 11))))
+          (dsh-test-assert "render-chips-catalog-confirmed-gesture"
+            (memq 'dsh-emacs-slash-skill-face (dsh-test--faces-at probe-pos))
+            (string= "Skill /probe — Probe it"
+                     (get-text-property probe-pos 'help-echo)))
+          ;; unknown to every cache at render time: plain until told otherwise
+          (dsh-test-assert "render-leaves-unconfirmed-gesture-plain"
+            (null (memq 'dsh-emacs-slash-skill-face (dsh-test--faces-at cold-pos))))
+          ;; the host's injection is hidden, and chips the scanned gesture
+          (dsh-emacs-render-event
+           '((type . "user/message") (seq . 2)
+             (data . ((content . [((type . "text") (text . "<skill_instructions…"))])
+                      (source . ((kind . "skill-invocation")
+                                 (name . "cold-skill")))))))
+          (dsh-test-assert "skill-invocation-hidden-and-chips-retroactively"
+            (memq 'dsh-emacs-slash-skill-face (dsh-test--faces-at cold-pos))
+            (string= "Skill /cold-skill"
+                     (get-text-property cold-pos 'help-echo))
+            (null (string-match-p "skill_instructions"
+                                  (buffer-substring-no-properties
+                                   (point-min) dsh-emacs--input-marker))))
+          ;; an evidence pass over an already-chipped token keeps the richer
+          ;; catalog tooltip
+          (dsh-emacs-render-event
+           '((type . "user/message") (seq . 3)
+             (data . ((content . [((type . "text") (text . "<skill_instructions…"))])
+                      (source . ((kind . "skill-invocation")
+                                 (name . "probe")))))))
+          (dsh-test-assert "skill-invocation-keeps-catalog-tooltip"
+            (string= "Skill /probe — Probe it"
+                     (get-text-property probe-pos 'help-echo)))))
+    (setq dsh-emacs--command-catalogs old-commands
+          dsh-emacs--skill-catalogs old-skills)
+    (kill-buffer buf)))
+
+;; Host skill evidence wins over a same-named command, with or without a
+;; cached skill catalog.  Digit-leading names follow both render paths too.
+(dolist (name '("plan" "3d-review"))
+  (dolist (cached '(nil t))
+    (let ((dsh-emacs--command-catalogs nil)
+          (dsh-emacs--skill-catalogs nil)
+          (sid "sess-gesture-evidence"))
+      (with-temp-buffer
+        (dsh-emacs-mode)
+        (setq-local dsh-emacs--buffer-session sid)
+        (dsh-emacs-command--cache-catalog
+         sid (mapcar #'dsh-protocol-command--from-alist
+                     '(((name . "plan") (description . "Plan command"))
+                       ((name . "goal") (description . "Goal command")))))
+        (when cached
+          (dsh-emacs-skill--cache-catalog
+           sid (list (dsh-protocol-skill--from-alist
+                      `((name . ,name) (description . "Review skill")
+                        (modelInvocable . t))))))
+        (dsh-emacs-render-event
+         `((type . "user/message") (seq . 1)
+           (data . ((content . [((type . "text")
+                                 (text . ,(format "please /%s and /goal" name)))])))))
+        (goto-char (point-min))
+        (search-forward (concat "/" name))
+        (let* ((start (match-beginning 0))
+               (end (point))
+               (text (buffer-string))
+               (help (if cached
+                         (format "Skill /%s — Review skill" name)
+                       (format "Skill /%s" name))))
+          (when (and cached (equal name "3d-review"))
+            (dsh-test-assert "digit-leading-skill-styled-from-catalog"
+              (memq 'dsh-emacs-slash-skill-face (dsh-test--faces-at start))
+              (equal help (get-text-property start 'help-echo))))
+          (dotimes (repeat 2)
+            (dsh-emacs-render-event
+             `((type . "user/message") (seq . ,(+ repeat 2))
+               (data . ((content . [((type . "text")
+                                     (text . "hidden skill instructions"))])
+                        (source . ((kind . "skill-invocation")
+                                   (name . ,name)))))))
+            (dsh-test-assert
+             (format "skill-evidence-%s-cached-%s-repeat-%d" name cached repeat)
+             (cl-loop for pos from start below end
+                      always (and
+                              (equal (dsh-test--faces-at pos)
+                                     '(dsh-emacs-slash-skill-face
+                                       dsh-emacs-user-block-face))
+                              (equal name (get-text-property
+                                           pos 'dsh-emacs-slash-gesture))
+                              (equal help (get-text-property pos 'help-echo))))
+             (equal text (buffer-string))
+             (save-excursion
+               (goto-char end)
+               (search-forward "/goal")
+               (equal (dsh-test--faces-at (match-beginning 0))
+                      '(dsh-emacs-slash-command-face
+                        dsh-emacs-user-block-face))))
+            ;; A repeated injection must keep the tooltip even if the
+            ;; catalog has since been invalidated.
+            (setq dsh-emacs--skill-catalogs nil)))))))
+
+;; --- Test 100: input area /name completion (commands + skills) ---
 (let ((buf (generate-new-buffer " *dsh-capf*"))
-      (old dsh-emacs--command-catalogs))
+      (old dsh-emacs--command-catalogs)
+      (old-skills dsh-emacs--skill-catalogs))
   (unwind-protect
       (with-current-buffer buf
         (dsh-emacs-mode)
@@ -15270,26 +15873,42 @@ input-area draft (which carries no such property) is not counted."
                 '((name . "goal") (description . "d")))
                (dsh-protocol-command--from-alist
                 '((name . "compact") (description . "d")))))
+        (dsh-emacs-skill--cache-catalog
+         "sess-cap"
+         (list (dsh-protocol-skill--from-alist
+                '((name . "review") (description . "Review a diff")
+                  (modelInvocable . t)))
+               (dsh-protocol-skill--from-alist
+                '((name . "notes") (description . "Private notes")
+                  (modelInvocable . :json-false)))))
         (setq dsh-emacs--current-session "sess-cap")
-        ;; A bare "/" also returns the whole directory (web's trigger behavior)
+        ;; A bare "/" also returns the whole directory (web's trigger behavior);
+        ;; the skill catalog rides the same list, user-only skills marked
         (goto-char dsh-emacs--input-marker)
         (insert "/")
         (let* ((comp (dsh-emacs-command-completion-at-point))
-               (cands (nth 2 comp)))
+               (cands (dsh-test-completion-items (nth 2 comp)))
+               (ann (plist-get (nthcdr 3 comp) :annotation-function)))
           (when (and comp
-                     (member "/goal " cands)
-                     (member "/compact " cands))
-            (dsh-test-pass "command-capf-bare-slash-lists-all")))
+                     (member "/goal" cands)
+                     (member "/compact" cands)
+                     (member "/review" cands)
+                     (member "/notes" cands))
+            (dsh-test-pass "command-capf-bare-slash-lists-commands-and-skills"))
+          (when (and (functionp ann)
+                     (string= "Review a diff" (funcall ann "/review"))
+                     (string= "user-only · Private notes" (funcall ann "/notes")))
+            (dsh-test-pass "command-capf-marks-user-only-skill")))
         ;; After clearing, the "/go" prefix still returns all candidates
         ;; (filtering is left to the completion framework)
         (delete-region dsh-emacs--input-marker (point-max))
         (goto-char dsh-emacs--input-marker)
         (insert "/go")
         (let* ((comp (dsh-emacs-command-completion-at-point))
-               (cands (nth 2 comp)))
+               (cands (dsh-test-completion-items (nth 2 comp))))
           (when (and comp
-                     (member "/goal " cands)
-                     (member "/compact " cands))
+                     (member "/goal" cands)
+                     (member "/compact" cands))
             (dsh-test-pass "command-capf-completes-prefix")))
         (goto-char dsh-emacs--input-marker)
         (insert "/goal ")
@@ -15298,14 +15917,235 @@ input-area draft (which carries no such property) is not counted."
         (goto-char (point-min))
         (when (null (dsh-emacs-command-completion-at-point))
           (dsh-test-pass "command-capf-off-in-transcript")))
-    (setq dsh-emacs--command-catalogs old)
+    (setq dsh-emacs--command-catalogs old
+          dsh-emacs--skill-catalogs old-skills)
     (kill-buffer buf)))
+
+;; --- Test 100b: the /name token completes mid-sentence too ---
+;; The host's gesture grammar accepts `/name' after any whitespace, not only at
+;; the start of the message, so completion follows it: the slash token ending at
+;; point completes in place.  Mid-sentence the source is catalog-confirmed — a
+;; name no catalog has (`see /usr') is prose or a path and stays out of the way
+;; of path and word completion.
+(let ((buf (generate-new-buffer " *dsh-capf-mid*"))
+      (old dsh-emacs--command-catalogs)
+      (old-skills dsh-emacs--skill-catalogs))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-command--cache-catalog
+         "sess-mid"
+         (list (dsh-protocol-command--from-alist
+                '((name . "goal") (description . "Set and track goals.")))))
+        (dsh-emacs-skill--cache-catalog
+         "sess-mid"
+         (list (dsh-protocol-skill--from-alist
+                '((name . "review") (description . "Review a diff")
+                  (modelInvocable . t)))))
+        (setq dsh-emacs--current-session "sess-mid")
+        (goto-char dsh-emacs--input-marker)
+        (insert "please /rev")
+        (let* ((comp (dsh-emacs-command-completion-at-point))
+               (cands (dsh-test-completion-items (nth 2 comp))))
+          (dsh-test-assert "command-capf-completes-mid-sentence-token"
+            (and comp
+                 (= (nth 0 comp)
+                    (+ (marker-position dsh-emacs--input-marker) 7))
+                 (= (nth 1 comp) (point-max))
+                 (equal '("/goal" "/review") cands))))
+        (dsh-test-assert "command-capf-mid-sentence-completion-replaces-token"
+          (progn
+            (let ((completion-styles '(basic)))
+              (completion-at-point))
+            (equal "please /review "
+                   (buffer-substring-no-properties
+                    dsh-emacs--input-marker (point-max)))))
+        ;; catalog-confirmed: `/usr' is not a command or skill here, so this
+        ;; source declines and path/word completion keep their chance at it
+        (delete-region dsh-emacs--input-marker (point-max))
+        (goto-char dsh-emacs--input-marker)
+        (insert "see /usr")
+        (dsh-test-assert "command-capf-declines-unknown-mid-sentence-token"
+          (null (dsh-emacs-command-completion-at-point)))
+        ;; a slash inside a word is not a token (same boundary as the host)
+        (delete-region dsh-emacs--input-marker (point-max))
+        (goto-char dsh-emacs--input-marker)
+        (insert "and/or")
+        (dsh-test-assert "command-capf-declines-slash-inside-a-word"
+          (null (dsh-emacs-command-completion-at-point))))
+    (setq dsh-emacs--command-catalogs old
+          dsh-emacs--skill-catalogs old-skills)
+    (kill-buffer buf)))
+
+;; --- Test 100c: the "/" catalog matches with the flex style by category ---
+;; A chat buffer maps the `dsh-emacs-command' completion category to the
+;; built-in `flex' style, the way `@' references do, so a word inside a long
+;; skill name completes even though the user's own `completion-styles' are only
+;; `basic'.  The category rides the candidate table, and the capf's claim gate
+;; reads that same table — which is what lets a mid-sentence `/probe' claim the
+;; token under flex while `basic' alone cannot.
+(let ((buf (generate-new-buffer " *dsh-capf-flex*"))
+      (old dsh-emacs--command-catalogs)
+      (old-skills dsh-emacs--skill-catalogs))
+  (unwind-protect
+      (with-current-buffer buf
+        (dsh-emacs-mode)
+        (dsh-emacs-command--cache-catalog
+         "sess-flex"
+         (list (dsh-protocol-command--from-alist
+                '((name . "goal") (description . "Set and track goals.")))
+               (dsh-protocol-command--from-alist
+                '((name . "plan") (description . "Plan it.")))
+               (dsh-protocol-command--from-alist
+                '((name . "permission") (description . "Set a preset.")))))
+        (dsh-emacs-skill--cache-catalog
+         "sess-flex"
+         (list (dsh-protocol-skill--from-alist
+                '((name . "dsh-emacs-skill-probe") (description . "Probe it")
+                  (modelInvocable . t)))
+               (dsh-protocol-skill--from-alist
+                '((name . "review") (description . "Review a diff")
+                  (modelInvocable . t)))))
+        (setq dsh-emacs--current-session "sess-flex")
+        (goto-char dsh-emacs--input-marker)
+        (insert "/probe")
+        (let ((completion-styles '(basic)))
+          (completion-at-point))
+        (dsh-test-assert "command-capf-flex-matches-inside-a-name"
+          (equal "/dsh-emacs-skill-probe "
+                 (buffer-substring-no-properties
+                  dsh-emacs--input-marker (point-max))))
+        ;; mid-sentence the token is claimed only when the catalogs complete
+        ;; it: `/probe' is not a prefix of any name, so this passes only when
+        ;; the gate matches under the table's own category
+        (delete-region dsh-emacs--input-marker (point-max))
+        (goto-char dsh-emacs--input-marker)
+        (insert "please /probe")
+        (let ((comp (dsh-emacs-command-completion-at-point)))
+          (dsh-test-assert "command-capf-flex-claims-mid-sentence-token"
+            (and comp
+                 (= (nth 0 comp)
+                    (+ (marker-position dsh-emacs--input-marker) 7)))))
+        ;; a name no catalog matches is still declined, flex or not
+        (delete-region dsh-emacs--input-marker (point-max))
+        (goto-char dsh-emacs--input-marker)
+        (insert "see /usr")
+        (dsh-test-assert "command-capf-flex-still-declines-unknown-token"
+          (null (dsh-emacs-command-completion-at-point)))
+        ;; flex sits after prefix matching: with flex first, flex's PCM merge
+        ;; treats an ambiguous or bare pattern as finished and TAB inserts
+        ;; "pattern + space" instead of listing — assert both stay untouched
+        (delete-region dsh-emacs--input-marker (point-max))
+        (goto-char dsh-emacs--input-marker)
+        (insert "please /")
+        (let ((completion-styles '(basic)))
+          (completion-at-point))
+        (dsh-test-assert "command-capf-bare-slash-lists-without-inserting"
+          (equal "please /"
+                 (buffer-substring-no-properties
+                  dsh-emacs--input-marker (point-max))))
+        (delete-region dsh-emacs--input-marker (point-max))
+        (goto-char dsh-emacs--input-marker)
+        (insert "please /p")
+        (let ((completion-styles '(basic)))
+          (completion-at-point))
+        (dsh-test-assert "command-capf-ambiguous-prefix-lists-without-inserting"
+          (equal "please /p"
+                 (buffer-substring-no-properties
+                  dsh-emacs--input-marker (point-max))))
+        ;; The styles above are package defaults, not a buffer-local override,
+        ;; so the user's own `completion-category-overrides' wins (the standard
+        ;; knob): with `basic' only, no prefix matches `/probe' and flex is out
+        (delete-region dsh-emacs--input-marker (point-max))
+        (goto-char dsh-emacs--input-marker)
+        (insert "/probe")
+        (let ((completion-category-overrides
+               '((dsh-emacs-command (styles basic))))
+              (completion-styles '(basic)))
+          (completion-at-point))
+        (dsh-test-assert "command-capf-user-style-override-wins"
+          (equal "/probe"
+                 (buffer-substring-no-properties
+                  dsh-emacs--input-marker (point-max)))))
+    (setq dsh-emacs--command-catalogs old
+          dsh-emacs--skill-catalogs old-skills)
+    (kill-buffer buf)))
+
+;; An ambiguous infix must stay a token until a complete name is chosen.
+;; A shared trailing space in the candidates used to make flex insert
+;; `/review ' even though neither catalog contains a skill called `review'.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (setq-local dsh-emacs--buffer-session "sess-flex-ambiguous")
+  (let ((dsh-emacs--command-catalogs nil)
+        (dsh-emacs--skill-catalogs nil)
+        (completion-styles '(basic)))
+    (dsh-emacs-command--cache-catalog
+     "sess-flex-ambiguous"
+     (list (dsh-protocol-command--from-alist '((name . "goal")))))
+    (dsh-emacs-skill--cache-catalog
+     "sess-flex-ambiguous"
+     (mapcar #'dsh-protocol-skill--from-alist
+             '(((name . "code-review")) ((name . "design-review")))))
+    (goto-char dsh-emacs--input-marker)
+    (insert "please /review")
+    (completion-at-point)
+    (dsh-test-assert "command-capf-ambiguous-infix-keeps-token"
+      (equal "please /review"
+             (buffer-substring-no-properties
+              dsh-emacs--input-marker (point-max))))
+    ;; Narrowing to one real name still leaves the cursor ready for arguments.
+    (delete-region dsh-emacs--input-marker (point-max))
+    (goto-char dsh-emacs--input-marker)
+    (insert "please /code")
+    (completion-at-point)
+    (dsh-test-assert "command-capf-unique-name-adds-separator"
+      (equal "please /code-review "
+             (buffer-substring-no-properties
+              dsh-emacs--input-marker (point-max)))
+      (= (point) (point-max)))
+    ;; Completing in front of existing arguments consumes their separator.
+    (delete-region dsh-emacs--input-marker (point-max))
+    (goto-char dsh-emacs--input-marker)
+    (insert "please /code check this")
+    (backward-char (length " check this"))
+    (completion-at-point)
+    (dsh-test-assert "command-capf-reuses-existing-separator"
+      (equal "please /code-review check this"
+             (buffer-substring-no-properties
+              dsh-emacs--input-marker (point-max)))
+      (looking-at-p "check this"))
+    ;; An exact match may still grow; accepting it explicitly finishes it.
+    (delete-region dsh-emacs--input-marker (point-max))
+    (goto-char dsh-emacs--input-marker)
+    (insert "/goal")
+    (let* ((capf (dsh-emacs-command-completion-at-point))
+           (finish (plist-get (nthcdr 3 capf) :exit-function)))
+      (funcall finish "/goal" 'exact)
+      (dsh-test-assert "command-capf-exact-match-keeps-token-editable"
+        (equal "/goal" (buffer-substring-no-properties
+                         dsh-emacs--input-marker (point-max))))
+      (funcall finish "/goal" 'finished)
+      (dsh-test-assert "command-capf-accepted-command-adds-separator"
+        (equal "/goal " (buffer-substring-no-properties
+                          dsh-emacs--input-marker (point-max)))))))
+
+;; Both token sources register their styles as package defaults at load time
+;; (the way `eglot-capf' / `ecomplete' do), not as buffer-local overrides.
+(dsh-test-assert "completion-categories-registered-as-defaults"
+  (and (equal '(basic flex)
+              (cdr (assq 'styles (cdr (assq 'dsh-emacs-command
+                                            completion-category-defaults)))))
+       (equal '(flex)
+              (cdr (assq 'styles (cdr (assq 'dsh-emacs-reference
+                                            completion-category-defaults)))))))
 
 ;; Candidates are plain strings, descriptions go through standard metadata
 ;; (annotation-function / company-kind): the corfu popup lays out at real
 ;; width (same style as other modes), no display property to pad the width
 (let ((buf (generate-new-buffer " *dsh-capf-meta*"))
-      (old dsh-emacs--command-catalogs))
+      (old dsh-emacs--command-catalogs)
+      (old-skills dsh-emacs--skill-catalogs))
   (unwind-protect
       (with-current-buffer buf
         (dsh-emacs-mode)
@@ -15317,54 +16157,73 @@ input-area draft (which carries no such property) is not counted."
                 '((name . "compact") (description . "Condense context.")))
                (dsh-protocol-command--from-alist
                 '((name . "export") (description . "Export this session.")))))
+        ;; fetched-but-empty skills: the capf must not fall back to a sync fetch
+        (dsh-emacs-skill--cache-catalog "sess-cap-meta" nil)
         (setq dsh-emacs--current-session "sess-cap-meta")
         (goto-char dsh-emacs--input-marker)
         (insert "/")
         (let* ((comp (dsh-emacs-command-completion-at-point))
-               (cands (nth 2 comp))
+               (cands (dsh-test-completion-items (nth 2 comp)))
+               (raw (all-completions "" (nth 2 comp)))
                (meta (nthcdr 3 comp))
                (ann (plist-get meta :annotation-function)))
           (when (and comp
                      (= 3 (length cands))
                      (cl-every (lambda (c) (null (text-properties-at 0 c)))
-                               cands)
+                               raw)
                      (functionp ann)
-                     (string= "Set and track goals." (funcall ann "/goal "))
-                     (string= "Condense context." (funcall ann "/compact "))
+                     (string= "Set and track goals." (funcall ann "/goal"))
+                     (string= "Condense context." (funcall ann "/compact"))
                      ;; `:company-kind' is a "candidate → kind symbol" function
                      ;; (nerd-icons-corfu's kindfunc convention, a bare symbol gets
                      ;; funcalled)
                      (let ((kindf (plist-get meta :company-kind)))
                        (and (functionp kindf)
-                            (eq 'command (funcall kindf "/goal ")))))
+                            (eq 'command (funcall kindf "/goal")))))
             (dsh-test-pass "command-capf-metadata-annotation-kind"))))
-    (setq dsh-emacs--command-catalogs old)
+    (setq dsh-emacs--command-catalogs old
+          dsh-emacs--skill-catalogs old-skills)
     (kill-buffer buf)))
 
-;; When the directory is not cached, the first trigger also fills it
-;; synchronously (otherwise "/" pops an empty list)
+;; When a catalog has not been fetched, the first trigger also fills it
+;; synchronously (otherwise "/" pops an empty list) — both catalogs, each with
+;; its own wire shape
 (let ((buf (generate-new-buffer " *dsh-capf-sync*"))
       (old dsh-emacs--command-catalogs)
-      (rpc-calls 0))
+      (old-skills dsh-emacs--skill-catalogs)
+      (rpc-calls nil))
   (unwind-protect
       (with-current-buffer buf
         (dsh-emacs-mode)
         (setq dsh-emacs--current-session "sess-sync")
         (cl-letf (((symbol-function 'dsh-emacs--rpc-request)
-                   (lambda (_m _p)
-                     (setq rpc-calls (1+ rpc-calls))
-                     (cons t [((name . "compact") (description . "c"))
-                              ((name . "goal") (description . "g"))]))))
+                   (lambda (method params)
+                     (push (cons method params) rpc-calls)
+                     (if (string= "skills/list" method)
+                         (cons t '((skills . [((name . "review")
+                                               (description . "R")
+                                               (modelInvocable . t))])))
+                       (cons t [((name . "compact") (description . "c"))
+                                ((name . "goal") (description . "g"))])))))
           (goto-char dsh-emacs--input-marker)
           (insert "/")
           (let* ((comp (dsh-emacs-command-completion-at-point))
-                 (cands (nth 2 comp)))
+                 (cands (dsh-test-completion-items (nth 2 comp))))
             (when (and comp
-                       (= rpc-calls 1)
-                       (member "/goal " cands)
-                       (member "/compact " cands))
+                       (= 2 (length rpc-calls))
+                       (member "/goal" cands)
+                       (member "/compact" cands)
+                       (member "/review" cands)
+                       ;; each catalog keeps its own wire shape: skills/list
+                       ;; wraps the session in a request object, commands/list
+                       ;; carries it as the agentId scope lookup
+                       (equal '((request (sessionId . "sess-sync")))
+                              (cdr (assoc "skills/list" rpc-calls)))
+                       (equal '((agentId . "sess-sync"))
+                              (cdr (assoc "commands/list" rpc-calls))))
               (dsh-test-pass "command-capf-sync-fetches-uncached-catalog")))))
-    (setq dsh-emacs--command-catalogs old)
+    (setq dsh-emacs--command-catalogs old
+          dsh-emacs--skill-catalogs old-skills)
     (kill-buffer buf)))
 
 ;; TAB in a chat buffer must land on completion-at-point (the keyboard
@@ -16048,11 +16907,6 @@ input-area draft (which carries no such property) is not counted."
     (dsh-test-pass "workspace-sessions-unknown-returns-nil")))
 ;; --- Test 105: dsh-emacs-switch-workspace-session excludes the current
 ;; session ---
-(defun dsh-test-completion-items (coll)
-  "Return COLL's completion strings (text properties stripped).
-COLL is a completion table (possibly metadata-wrapped), so extract
-candidates as the UI would via `all-completions', not by destructuring."
-  (mapcar #'substring-no-properties (all-completions "" coll)))
 (let* ((w1 (dsh-protocol-workspace--from-alist
            (list (cons 'workspaceId "w1")
                  (cons 'title "WS")
@@ -21149,6 +22003,38 @@ messages (e.g. `command/done')."
   (list (cons "type" "event")
         (cons "event" (list (cons "type" type) (cons "seq" seq)
                             (cons "data" data)))))
+
+;; Skill evidence in an older page belongs to that page's preceding message,
+;; even when the newest message contains the same uncached gesture.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (setq-local dsh-emacs--buffer-session "sess-history-gesture")
+  (let ((dsh-emacs--command-catalogs nil)
+        (dsh-emacs--skill-catalogs nil))
+    (dsh-emacs-render-event
+     (dsh-test--history-event "user/message" 10 "recent /audit"))
+    (setq dsh-emacs--history-earliest-seq 10)
+    (dsh-emacs--load-older-history-page
+     (current-buffer)
+     `((records . ,(vector
+                    (dsh-test--history-fixture
+                     "user/message" 1 "older /audit")
+                    (dsh-test--history-event-record
+                     "user/message" 2
+                     '((content . [((type . "text") (text . "instructions"))])
+                       (source . ((kind . "skill-invocation")
+                                  (name . "audit")))))))
+       (hasMore . :json-false)))
+    (let ((older (+ 6 (dsh-test--history-text-pos "older /audit")))
+          (recent (+ 7 (dsh-test--history-text-pos "recent /audit"))))
+      (dsh-test-assert "history-skill-evidence-decorates-prepended-message"
+        (equal "audit" (get-text-property older 'dsh-emacs-slash-gesture))
+        (memq 'dsh-emacs-slash-skill-face (dsh-test--faces-at older))
+        (equal "Skill /audit" (get-text-property older 'help-echo)))
+      (dsh-test-assert "history-skill-evidence-leaves-newer-message-alone"
+        (null (get-text-property recent 'dsh-emacs-slash-gesture))
+        (not (memq 'dsh-emacs-slash-skill-face (dsh-test--faces-at recent)))
+        (null (get-text-property recent 'help-echo))))))
 
 ;; 100: prepend inserts the earlier page above the old content and does not move
 ;; the anchor.
