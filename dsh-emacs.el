@@ -89,6 +89,7 @@
 (require 'dsh-emacs-events)
 (require 'dsh-emacs-modeline)
 (require 'dsh-emacs-queue)
+(require 'dsh-emacs-jobs)
 (require 'dsh-emacs-server)
 (require 'dsh-emacs-command)
 (require 'dsh-emacs-reference)
@@ -2035,6 +2036,7 @@ repaints)."
     (define-key map (kbd "C-c C-c") #'dsh-emacs-send-or-stop)
     (define-key map (kbd "C-c C-b") #'dsh-emacs-interrupt-turn)
     (define-key map (kbd "C-c C-q") #'dsh-emacs-list-queue)
+    (define-key map (kbd "C-c C-j") #'dsh-emacs-list-jobs)
     (define-key map (kbd "C-c C-r") #'dsh-emacs-refresh)
     (define-key map (kbd "C-c C-o") #'dsh-emacs-load-older-history)
     (define-key map (kbd "C-c C-l") #'dsh-emacs-list-sessions-display)
@@ -2422,6 +2424,9 @@ metadata preserves nearest-first ordering for display and cycling."
   (add-hook 'change-major-mode-hook #'dsh-emacs-render--cancel-markdown nil t)
   (add-hook 'kill-buffer-hook #'dsh-emacs-events-disconnect nil t)
   (add-hook 'change-major-mode-hook #'dsh-emacs-events-disconnect nil t)
+  ;; A job output buffer follows this chat's socket; closing the chat closes
+  ;; it too, so no window is left showing a stream nobody serves.
+  (add-hook 'kill-buffer-hook #'dsh-emacs-jobs--chat-closed nil t)
   (add-hook 'kill-buffer-hook #'dsh-emacs--chat-buffer-untrack nil t)
   ;; Chat buffers are never "modified": the session transcript
   ;; is not written to disk, so closing must not prompt to save

@@ -8,6 +8,20 @@ minor) and stay undated until the release is cut.
 
 ## 0.5.1 - Unreleased
 
+### Added
+
+- **Background jobs are visible and controllable**: while a session can see
+  running work — a bash command the model left in the background, a subagent
+  delegation, a workflow — the mode line shows `[J2]`, and `C-c C-j` opens the
+  roster as a picker: `RET` shows a job's retained output in a read-only
+  buffer, `k` stops it (two presses within 3s; see
+  `dsh-emacs-jobs-kill-arm-seconds`), `r` re-subscribes.  dsh 0.1.7 removed
+  the `session/control` `jobs` record this state used to ride in, so the client
+  previously showed nothing at all; it now subscribes to the `job` namespace's
+  own `job/list` and `job/follow` streams over the chat connection.  A stop is
+  recorded as `cancelled by the user`, and the owning agent still receives its
+  completion notice.  (rationale: postmortem/065)
+
 ### Fixed
 
 - **The pending-input queue works against dsh 0.1.7 servers**: dsh 0.1.7

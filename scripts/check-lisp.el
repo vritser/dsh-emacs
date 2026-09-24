@@ -39,7 +39,8 @@
   '("dsh-emacs.el" "dsh-emacs-protocol.el" "dsh-emacs-session.el"
     "dsh-emacs-markdown.el" "dsh-emacs-render.el" "dsh-emacs-events.el"
     "dsh-emacs-ui.el" "dsh-emacs-faces.el" "dsh-emacs-tokens.el"
-    "dsh-emacs-modeline.el" "dsh-emacs-queue.el" "dsh-emacs-server.el"
+    "dsh-emacs-modeline.el" "dsh-emacs-queue.el" "dsh-emacs-jobs.el"
+    "dsh-emacs-server.el"
     "dsh-emacs-command.el" "dsh-emacs-reference.el" "dsh-emacs-composer.el"
     "dsh-emacs-shell.el"
     "test/dsh-test.el" "test/dsh-e2e.el" "test/check-lisp-test.el")

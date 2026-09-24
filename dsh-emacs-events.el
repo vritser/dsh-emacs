@@ -425,11 +425,13 @@ like the follow snapshot's reseed is anchor-gated."
 (defun dsh-emacs-events--dispatch-json (process json)
   "Route one decoded WebSocket text message from PROCESS.
 A process flagged `dsh-emacs-host-stream' (the core connection) routes to
-`dsh-emacs-events--host-dispatch'.  A chat process's `/api/remote.mux'
-messages all carry a top-level `streamId' — its `session/follow' frames
-go to `dsh-emacs-events--dispatch-follow'.  Anything else (a chat socket
-message without a streamId) is not a frame the migrated protocol sends
-and is dropped."
+`dsh-emacs-events--host-dispatch'.  Otherwise the message belongs to one of
+the chat connection's logical `/api/remote.mux' streams: `session/follow'
+(see `dsh-emacs-events--dispatch-follow') or any stream a feature module
+opened through `dsh-emacs-events-open-stream' (e.g. the `job' namespace
+streams), each routed by its own `streamId' to the handler registered for
+it.  A message without a `streamId' is not a frame the protocol sends and
+is dropped."
   (condition-case err
       (if (and (processp process)
                (process-get process 'dsh-emacs-host-stream))
@@ -439,8 +441,85 @@ and is dropped."
                (stream-id (and (listp message)
                                (dsh-emacs-render--aget "streamId" message))))
           (when stream-id
-            (dsh-emacs-events--dispatch-follow process message))))
+            (dsh-emacs-events--dispatch-stream process message stream-id))))
     (error (message "dsh event decode error: %S" err))))
+
+(defun dsh-emacs-events--dispatch-stream (process message stream-id)
+  "Route one chat-socket stream MESSAGE for STREAM-ID on PROCESS.
+The message is either this connection's `session/follow' stream or a
+stream opened through `dsh-emacs-events-open-stream'; both share the
+`item'/`error'/`end' envelope, so the routing decision is only *which*
+handler owns STREAM-ID."
+  (if (equal stream-id (process-get process 'dsh-emacs-follow-stream-id))
+      (dsh-emacs-events--dispatch-follow process message)
+    (let* ((entry (assoc stream-id
+                         (process-get process 'dsh-emacs-stream-handlers)))
+           (handler (cddr entry)))
+      (when (functionp handler)
+        (pcase (dsh-emacs-render--aget "type" message)
+          ("item" (funcall handler
+                           (dsh-emacs-render--aget "value" message)))
+          ("error"
+           (message "dsh %s stream error: %S" (car entry)
+                    (dsh-emacs-render--aget "error" message)))
+          ("end" (dsh-emacs-events-close-stream process stream-id)))))))
+
+(defun dsh-emacs-events-open-stream (process endpoint args name handler)
+  "Open a logical Remote stream ENDPOINT on PROCESS and route it to HANDLER.
+ARGS is the content of the wire `args' object (an alist, or nil).  NAME
+labels the stream in error messages.  HANDLER is called with each `item'
+frame's `value'; on the server's `end' (or on
+`dsh-emacs-events-close-stream') it is called once with nil so the owner
+can retire its state, and the registration is dropped.
+
+Returns the fresh stream id, or nil when PROCESS is not live — a caller
+must treat nil as \"could not subscribe\" rather than assume frames will
+arrive.  The stream is cancelled automatically when the socket drops,
+because the registration lives on the process."
+  (when (process-live-p process)
+    (let ((stream-id (dsh-emacs-events--stream-id)))
+      (process-put process 'dsh-emacs-stream-handlers
+                   (cons (cons stream-id (cons name handler))
+                         (process-get process 'dsh-emacs-stream-handlers)))
+      (process-send-string
+       process
+       (dsh-emacs-events--frame
+        1 (dsh-emacs-events--open-message stream-id endpoint args)))
+      stream-id)))
+
+(defun dsh-emacs-events-close-stream (process stream-id)
+  "Cancel STREAM-ID on PROCESS and retire its handler.
+Sends the `cancel' uplink (so the host stops producing frames) and calls
+the handler once with nil, which is the same signal a server `end' gives.
+Safe on an unknown STREAM-ID or a dead PROCESS."
+  (when (and (processp process) (process-live-p process))
+    (process-send-string
+     process
+     (dsh-emacs-events--frame 1 (dsh-emacs-events--cancel-message stream-id))))
+  (when (processp process)
+    (let* ((handlers (process-get process 'dsh-emacs-stream-handlers))
+           (entry (assoc stream-id handlers))
+           (handler (cddr entry)))
+      (when entry
+        ;; `assq-delete-all' is not reliable here (observed leaving the entry
+        ;; in place on Emacs 30), so filter explicitly by the same `equal'
+        ;; the lookup above used.
+        (process-put process 'dsh-emacs-stream-handlers
+                     (cl-remove-if (lambda (e) (equal (car e) stream-id))
+                                   handlers))
+        (when (functionp handler) (funcall handler nil))))))
+
+(defun dsh-emacs-events--close-streams (process)
+  "Retire every custom stream registered on PROCESS.
+Called from the socket teardown path: the server drops all logical
+streams with the connection, so each handler is told once (nil) to drop
+whatever it mirrored."
+  (when (processp process)
+    (let ((handlers (process-get process 'dsh-emacs-stream-handlers)))
+      (process-put process 'dsh-emacs-stream-handlers nil)
+      (dolist (entry handlers)
+        (let ((handler (cddr entry)))
+          (when (functionp handler) (funcall handler nil)))))))
 
 (defun dsh-emacs-events--follow-open (process)
   "Send the `session/follow' open frame for PROCESS's chat stream.
@@ -836,7 +915,12 @@ No repeating timer is needed: a quiet socket stays normally readable."
                             (dsh-emacs-events--health-stop)))
                         ;; 0.1.2: open the chat's `session/follow' logical
                         ;; stream once the socket upgrade completed.
-                        (dsh-emacs-events--follow-open process)))
+                        (dsh-emacs-events--follow-open process)
+                        ;; Feature streams (the `job' namespace roster)
+                        ;; are per-connection too: re-open them on the
+                        ;; replacement socket after a reconnect.
+                        (when (fboundp 'dsh-emacs-jobs-reopen)
+                          (dsh-emacs-jobs-reopen chat))))
                     (dsh-emacs-events--consume-frames process))
                 (delete-process process)))))))))
 
@@ -866,6 +950,9 @@ never stack parallel reconnect timers."
         (with-current-buffer chat
           (setq dsh-emacs--event-process nil
                 dsh-emacs--event-ready nil)
+          ;; The connection carried every logical stream; tell each feature
+          ;; handler its stream is gone so no mirror outlives it.
+          (dsh-emacs-events--close-streams process)
           (dsh-emacs-events--health-stop)
           (dsh-emacs-events--watchdog-stop)
           (dsh-emacs-events--schedule-reconnect))))))
@@ -1072,6 +1159,7 @@ reconnect is re-armed and another connect scheduled."
           ;; reconnect for an intentional session switch or buffer teardown.
           (setq dsh-emacs--event-process nil
                 dsh-emacs--event-ready nil)
+          (dsh-emacs-events--close-streams process)
           (when (process-live-p process)
             (delete-process process)))
         ;; Tearing down the stream: stop the mode-line running spinner so it

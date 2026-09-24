@@ -14,6 +14,7 @@ dsh-emacs/
 ├── dsh-emacs-events.el       # Event stream: native WebSocket + reconnect
 ├── dsh-emacs-modeline.el     # Mode-line stats
 ├── dsh-emacs-queue.el        # Pending-input queue mirror (queue/steer)
+├── dsh-emacs-jobs.el         # Background jobs: job/list + job/follow streams, stop
 ├── dsh-emacs-server.el       # Server bootstrap: probe / auto-start / install / browser-session auth
 ├── dsh-emacs-command.el      # Host slash commands (commands/list + commands/execute)
 ├── dsh-emacs-shell.el        # Client-side `!command` shell commands (local execution)
@@ -440,6 +441,51 @@ its preview, and its mode-line count.
 This is the queue-frame complement of the anchor-gated replay dedup
 (rationale: postmortem/004): transcript frames are idempotent by seq,
 queue frames by submit context.
+
+## Background jobs (`job` namespace streams, `dsh-emacs-jobs.el`)
+
+Background work the model starts — a bash command it left running, a
+subagent delegation, a workflow — is owned by a session and mirrored by
+`dsh-emacs-jobs.el` from the **`job` Remote namespace**, not from the
+core control plane.  dsh 0.1.6 and earlier carried a whole-host `jobs`
+record on `session/control`; 0.1.7 deleted it and moved the state behind
+this namespace's own streams, so the client must subscribe to see the
+roster at all (rationale: postmortem/065).
+
+Two logical streams, both on the **chat buffer's** `/api/remote.mux`
+socket:
+
+- `job/list` — one per followed session.  The host sends the complete
+  visible set (`rows`) per frame, so the mirror is replaced wholesale and
+  a reconnect's first frame is already the truth; a frame that drops a
+  job removes it here too.  The stream is (re)opened at handshake
+  completion alongside `session/follow`, so it lives exactly as long as
+  the chat's socket.
+- `job/follow` — one per job whose output is being viewed.  An `opened`
+  anchor carries the job's projection and the offset the first batch
+  continues from, `output` batches carry absolute offsets and a `next`
+  resume offset, and a terminal `status` frame ends the stream normally.
+  The output buffer is read-only and appended as batches arrive, so the
+  host's screen is not re-emulated client-side.
+
+Because the chat socket now multiplexes more than the follow stream,
+`dsh-emacs-events--dispatch-stream` routes by `streamId`:
+`dsh-emacs-events-open-stream` registers a handler on the process and
+`dsh-emacs-events-close-stream` (also called by the socket teardown, via
+`dsh-emacs-events--close-streams`) retires it, invoking the handler once
+with nil so no mirror outlives its stream.  A teardown keeps the last
+roster rather than blanking it — a reconnect re-reads the whole set, so
+clearing would only flash the mode line empty.
+
+The wire views are normalized in `dsh-emacs-protocol.el`
+(`dsh-protocol-job` with symbol `status`, `dsh-protocol-job-list`,
+`dsh-protocol-job-frame`/`-chunk`), and the namespace's CLI surface is
+Emacs-native: the mode line carries `[Jn]` while jobs are live (settled
+jobs are history, not an indicator), and `C-c C-j` opens the roster as a
+minibuffer menu whose single keys show output (`RET`), stop a job (`k`,
+two presses within `dsh-emacs-jobs-kill-arm-seconds`) and re-subscribe
+(`r`).  A kill is a human action: the host records `cancelled by the
+user` and the owning agent still receives its completion notice.
 
 ## Event rendering flow
 

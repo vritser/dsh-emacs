@@ -118,14 +118,15 @@ and the Session format version (**still V3**) are unchanged. Every 0.1.6 change:
 client needed no code change, and two additions have since been adopted as
 features: `workspace/unarchiveSession` backs `dsh-emacs-unarchive-session`
 (postmortem/049) and `tool/result.error.reason` is shown on failed tool rows.
-The remaining new surfaces are unused or ignored: `terminal` and
-`permissionPresets` are never called; the widened roster / descriptor /
-`SkillEntry` values are read through `assq`-style alist parsing that ignores
-unknown fields; the narrowed `permissions` projection is not consumed; the new
-`$events` emit falls through the client's `_ → nil` handler; and the new
-`image/offload` event is dropped by `dsh-emacs-render-event`'s default branch
-(unknown optional fields on rendered events are ignored). The sections below
-record 0.1.6 so the reference stays current.
+The remaining new surfaces are unused or ignored: `terminal` is never called;
+the widened roster / descriptor / `SkillEntry` values are read through
+`assq`-style alist parsing that ignores unknown fields; the narrowed
+`permissions` projection is not consumed; the new `$events` emit falls through
+the client's `_ → nil` handler; and the new `image/offload` event is dropped by
+`dsh-emacs-render-event`'s default branch (unknown optional fields on rendered
+events are ignored). The sections below record 0.1.6 so the reference stays
+current. (`permissionPresets/catalog` has since been adopted — it backs the
+permission-preset picker — so the "never called" reading no longer holds;
 
 ### 0.4 0.1.7 Deltas (verified by source comparison)
 

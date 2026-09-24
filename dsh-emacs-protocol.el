@@ -731,6 +731,147 @@ no active attempt and no records."
   (dsh-protocol-assistant-baseline--from-alist
    (dsh-protocol--field 'assistantStream value)))
 
+;; ---------------------------------------------------------------------------
+;; Background jobs (the `job' namespace streams, 0.1.7+)
+;; ---------------------------------------------------------------------------
+
+;; `job/list' frames carry the whole roster per frame (`{type:"rows", jobs:[…]}');
+;; `job/follow' frames carry one job's projection plus its output chunks
+;; (`opened' / `output' / `status').  dsh 0.1.6 and earlier carried the same
+;; jobs through the `session/control' `jobs' record, which 0.1.7 deleted; the
+;; roster is now only available from this namespace.
+
+(cl-defstruct (dsh-protocol-job
+               (:constructor dsh-protocol-job--from-alist
+                             (alist
+                              &aux
+                              (id (dsh-protocol--field 'id alist))
+                              (kind (dsh-protocol--field 'kind alist))
+                              (label (dsh-protocol--field 'label alist))
+                              (owner (dsh-protocol--field 'owner alist))
+                              (status (dsh-protocol--job-status
+                                       (dsh-protocol--field 'status alist)))
+                              (progress (dsh-protocol--field 'progress alist))
+                              (detail (dsh-protocol--field 'detail alist))
+                              (started-at (dsh-protocol--field 'startedAt alist))
+                              (finished-at (dsh-protocol--field 'finishedAt alist))
+                              (output (dsh-protocol--job-output
+                                       (dsh-protocol--field 'output alist))))))
+  "One background job (`job/list' `JobView').
+STATUS is a symbol — `running', `stopping', `completed', `killed' or
+`failed'.  PROGRESS is the producer's live line and DETAIL the terminal
+reason (`exit code: 3', a recorded kill reason); both may be nil.
+OUTPUT is the normalized `(TOTAL EARLIEST SPILL-PATHS)' tuple — the next
+chunk's offset, the oldest retained byte (> 0 exactly when retention
+dropped the head) and the spill files the job's sources keep (see
+`dsh-protocol-job-output-spill-paths')."
+  id
+  kind
+  label
+  owner
+  status
+  progress
+  detail
+  started-at
+  finished-at
+  output)
+
+(defun dsh-protocol--job-status (value)
+  "Normalize the wire job STATUS string to a symbol.
+The wire carries one of the closed set `running' / `stopping' /
+`completed' / `killed' / `failed'; an unrecognized or absent value
+becomes nil so callers can treat it as \"unknown\" rather than crash."
+  (when (stringp value)
+    (let ((sym (intern value)))
+      (and (memq sym '(running stopping completed killed failed)) sym))))
+
+(defun dsh-protocol--job-output (value)
+  "Normalize a job's wire `output' object to `(TOTAL EARLIEST SPILL-PATHS)'.
+TOTAL is the offset the next chunk starts at, EARLIEST the oldest retained
+byte (> 0 exactly when retention dropped the head), SPILL-PATHS the spill
+files the job's sources keep (nil when none)."
+  (let* ((v (and (listp value) value))
+         (spill (dsh-protocol--list (dsh-protocol--field 'spillPaths v))))
+    (list (dsh-protocol--field 'total v)
+          (dsh-protocol--field 'earliest v)
+          spill)))
+
+(defun dsh-protocol-job-output-total (job)
+  "Retained-output high-water offset of JOB, or nil."
+  (nth 0 (dsh-protocol-job-output job)))
+
+(defun dsh-protocol-job-output-earliest (job)
+  "Oldest retained offset of JOB, or nil."
+  (nth 1 (dsh-protocol-job-output job)))
+
+(defun dsh-protocol-job-output-spill-paths (job)
+  "Spill files JOB's output sources currently keep, or nil."
+  (nth 2 (dsh-protocol-job-output job)))
+
+(cl-defstruct (dsh-protocol-job-list
+               (:constructor dsh-protocol-job-list--from-alist
+                             (alist
+                              &aux
+                              (type (dsh-protocol--field 'type alist))
+                              (jobs (mapcar #'dsh-protocol-job--from-alist
+                                            (dsh-protocol--objects
+                                             (dsh-protocol--field 'jobs alist)))))))
+  "One `job/list' frame: the complete roster the session can see.
+JOBS replaces the previous roster wholesale, so a reconnect's first frame
+is already the truth."
+  type
+  jobs)
+
+(cl-defstruct (dsh-protocol-job-chunk
+               (:constructor dsh-protocol-job-chunk--from-alist
+                             (alist
+                              &aux
+                              (at (dsh-protocol--field 'at alist))
+                              (text (dsh-protocol--field 'text alist))
+                              (channel (dsh-protocol--job-channel
+                                        (dsh-protocol--field 'channel alist)))
+                              (gap-before
+                               (dsh-protocol--field 'gapBefore alist)))))
+  "One output chunk of a job: absolute offset AT, TEXT, stream CHANNEL.
+GAP-BEFORE non-nil marks bytes lost immediately before this chunk."
+  at
+  text
+  channel
+  gap-before)
+
+(defun dsh-protocol--job-channel (value)
+  "Normalize the wire chunk CHANNEL to a symbol, or nil."
+  (when (stringp value)
+    (let ((sym (intern value)))
+      (and (memq sym '(stdout stderr log)) sym))))
+
+(cl-defstruct (dsh-protocol-job-frame
+               (:constructor dsh-protocol-job-frame--from-alist
+                             (alist
+                              &aux
+                              (type (dsh-protocol--field 'type alist))
+                              (job (let ((j (dsh-protocol--field 'job alist)))
+                                     (and (listp j)
+                                          (dsh-protocol-job--from-alist j))))
+                              (from (dsh-protocol--field 'from alist))
+                              (next (dsh-protocol--field 'next alist))
+                              (lossy (dsh-protocol--field 'lossy alist))
+                              (chunks
+                               (mapcar #'dsh-protocol-job-chunk--from-alist
+                                       (dsh-protocol--objects
+                                        (dsh-protocol--field 'chunks alist)))))))
+  "One `job/follow' frame.
+TYPE is `opened' (JOB projection + FROM, the offset the first `output'
+frame continues from), `output' (CHUNKS + NEXT resume offset, LOSSY when
+bytes between the requested offset and the chunks were already evicted) or
+`status' (the settled JOB, after which the stream closes normally)."
+  type
+  job
+  from
+  next
+  lossy
+  chunks)
+
 (defun dsh-protocol--struct (struct-alist-pred constructor value)
   "Return VALUE as a struct via CONSTRUCTOR if needed.
 STRUCT-ALIST-PRED distinguishes an already-converted struct from a wire

@@ -62,6 +62,7 @@ The most commonly used options, straight in your config:
 (setq dsh-emacs-shell-max-output 50000)             ; cap on a `!` command's captured output shown in the transcript
 (setq dsh-emacs-shell-null-stdin t)                 ; close `!` commands' input pipe immediately (EOF, independent of shell syntax)
 (setq dsh-emacs-shell-timeout nil)                  ; nil = no limit; positive integer seconds only (surviving background children are untracked)
+(setq dsh-emacs-jobs-kill-arm-seconds 3)           ; how long the `k' press in the `C-c C-j' background-job menu stays armed before a second press stops the job (matches dsh web's two-press stop)
 ```
 
 ## Session and workspace controls

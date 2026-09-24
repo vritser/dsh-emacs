@@ -1,5 +1,9 @@
 # 064 — Mirror the pending-input queue from the inbox projection
 
+_Superseded by 065 (Known limitation "background jobs have no client surface"
+only): dsh-emacs-jobs.el now opens `job/list` and `job/follow` and surfaces the
+roster in the mode line and `C-c C-j`._
+
 ## Background
 
 Through dsh 0.1.6 the host published the agent inbox on `session/control` as
@@ -119,6 +123,7 @@ symbol-keyed path is what is exercised.
 - Background jobs still have no client surface.  0.1.6's `jobs` record is gone
   and this client never opens the new `job` namespace streams (`job/list`,
   `job/follow`); a future job UI must consume those.
+  (**Superseded by 065**: `dsh-emacs-jobs.el` consumes all three.)
 - The roster's `modeSelectionEnabled` is parsed but unused — the picker does
   not hide itself when the host disables visible mode selection, exactly as
   before this change.

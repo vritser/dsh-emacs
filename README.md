@@ -61,6 +61,7 @@ for list management and navigation.
 | `C-c C-c` | Send input or interrupt; see below |
 | `C-c C-b` | Interrupt the running turn |
 | `C-c C-q` | Manage the pending queue |
+| `C-c C-j` | Manage background jobs (view output / stop) |
 | `C-c C-g` | Open the goal-action prefix |
 | `C-c C-m` | Switch model / reasoning effort |
 | `C-c C-a` | Attach an image file and send it now |
