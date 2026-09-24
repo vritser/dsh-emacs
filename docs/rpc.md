@@ -1,15 +1,17 @@
-# dsh RPC Protocol Reference (dsh 0.1.6-alpha.1, master baseline)
+# dsh RPC Protocol Reference (dsh 0.1.7-rc.1, master baseline)
 
 This document is the complete reference for the public protocol of the dsh
 (DeepSeek Harness) Web service, for maintaining the existing dsh-emacs
 implementation and for subsequent feature development. The protocol surface is
-verified against the `deepseek-harness` repository at `dsh-v0.1.6-alpha.1`
-(`0a15e36e7f`); master `0d1f50007f` was checked to carry no further Remote
-method change. The previous round's **live probe** ran against
-`dsh-v0.1.5-rc.1` (`aa8262ec09`, the surface of the 0.1.5 npm `latest`); the
-0.1.6 round was established by a full tag-to-tag source / type / persistence
-schema comparison, because every 0.1.6 change is additive to surfaces dsh-emacs
-does not call (§0.3).
+verified against the `deepseek-harness` repository at `dsh-v0.1.7-rc.1`
+(`46a7f68b09`). The 0.1.5 round was a **live probe** against `dsh-v0.1.5-rc.1`
+(`aa8262ec09`, the surface of the 0.1.5 npm `latest`); the 0.1.6 and 0.1.7
+rounds were established by full tag-to-tag source / type / persistence schema
+comparisons (`dsh-v0.1.5-rc.2` → `dsh-v0.1.6-alpha.1` → `dsh-v0.1.7-rc.1`).
+**0.1.6 was additive to every surface dsh-emacs calls; 0.1.7 is not** — it
+removes the `session/control` queue/jobs frames and reshapes
+`agentPresets/list`, so dsh-emacs needed a migration (§0.4), which has landed
+(postmortem/064).
 
 - Protocol model: **unary Remote RPC (HTTP POST) + multiplexed Remote stream (a
   single WebSocket)**. Logical messages are decoupled from the physical channel:
@@ -35,8 +37,9 @@ does not call (§0.3).
 > `/api/present.*`, `/api/session/uploadFileBinary`). The dsh-emacs client **has
 > already migrated to this protocol surface** (`/api/<namespace>/<method>` unary
 > calls + `session/follow`, `session/control`, `workspace/follow`, `$events` on
-> the single `/api/remote.mux`); the next section records the three rounds of
-> upstream changes, 0.1.2, 0.1.5 (both live-verified) and 0.1.6 (source-compared).
+> the single `/api/remote.mux`); the next section records the four rounds of
+> upstream changes, 0.1.2 and 0.1.5 (both live-verified) and 0.1.6 / 0.1.7
+> (source-compared).
 
 ## 0. Migration Cross-Reference (dsh-emacs Perspective)
 
@@ -124,12 +127,72 @@ unknown fields; the narrowed `permissions` projection is not consumed; the new
 (unknown optional fields on rendered events are ignored). The sections below
 record 0.1.6 so the reference stays current.
 
+### 0.4 0.1.7 Deltas (verified by source comparison)
+
+Baseline: `dsh-v0.1.6-alpha.1` (`0a15e36e7f`) → target: `dsh-v0.1.7-rc.1`
+(`46a7f68b09`). Transport, envelope, browser-session authentication, the single
+`/api/remote.mux` carrier, and the exact HTTP route set are unchanged. **This
+round is not additive**: it removes wire surface dsh-emacs consumes.
+
+| 0.1.6 | 0.1.7 |
+|---|---|
+| `session/control` baseline `{queues, jobs, projections}`; delta frames `queue` / `jobs` / `projection` | baseline is **`{projections}` only**; the `queue` and `jobs` frames are **deleted**. Queue state now rides the `inbox` session projection (§6.1, §9); background jobs moved to the new `job` namespace (§4.21) |
+| `agentPresets/list` → `{presets, authorable, modeSelectionEnabled}`; row `{id, trust, isDefault, name?, description?, broken?}`; `agentPresets/read` document carries `trust`; `agentPresets/copy` + `agentPresets/deletePreset` exist | roster is `{presets, modeSelectionEnabled}`; row loses **`trust`** (an undeclared `order?` sort hint now rides it at runtime); the group document loses `trust`; `copy`/`deletePreset` are **deleted**; the owner package is renamed `packages/preset/agent-presets` → `packages/preset/agent-preset-registry` (§4.6) |
+| `settings/canOpenAgentPresetDirectory`, `settings/openAgentPresetDirectory` | both **deleted**; `settings/describe.hasDocument` is now always `true`; the namespace view adds `autoGenerate`; the controller's `Config.nativeOpen` is gone (§4.7) |
+| 21 mounted namespaces | **26**: adds `account`, `job`, `pluginManager`, `pluginRegistryProbe`, `officeToPdf` (§4.21, §4.22, §4.23) |
+| `session.*` | new `session/projections` (cold, non-activating projection read) and `session/workspacePathApplications`; `SessionSummary` adds `agentAvailable`; `SessionProjectionHints` adds `kind: 'cached'\|'sequenced'`; `SessionAddress` subagent `mode` adds `'unknown'`; `session/page` and `session/follow` add `turnWindow`; `openWorkspacePath` adds `application?`; `updateQueue` now resumes a cold Agent first (§4.1) |
+| `workspace.*` | `workspace/follow` baseline adds `pinnedSessionIds` and a `pinned` increment; new `workspace/pinSession` / `unpinSession` / `initializeDefault`; `archiveSession` adds `stopActivity?` and can refuse with `workspace/session-active` (§4.4) |
+| `terminal.*` | new `terminal/retain` (stream); terminals are no longer confined by the Session sandbox (they run with the execution environment's own user permissions) and `environment.cwd` is the session `cwd`, not the resolved workspace root; new `terminal/unavailable`; the "close terminals before changing `sandbox/mode`" guard is gone (§4.20) |
+| `permissionPresets/catalog` → `{options}` | adds `defaultOptions: PresetOption[]` and `defaultPreset: string` (§4.19) |
+| `sessionReferenceResolver/candidates` item `{sessionId, label, cwd?, sameWorkspace, createdAt}` | adds `displayTitle?` (subagent-label-first presentation text); `mention` now prefers `displayTitle` over `label`; `query` also matches it (§4.13) |
+| `workspaceFiles/*` | byte reads collapse to `readBytes` + `baseFile?`; `data` becomes raw bytes carried **out of band** — `null` in the JSON metadata plus a `multipart/form-data` `bytes-<n>` part (0.1.6 sent base64 inside the JSON); new `workspace-file/watch-unsupported`; `changes` becomes per-`path` and reports **current** target metadata after invalidation (§4.16) |
+| mux client messages: `open` / `cancel` | adds **`item`** and **`end`** (uplink half-close) for duplex streams; new error codes `gateway/protocol`, `gateway/uplink-overflow` (§3.1) |
+| `$events` allowlist 20 (18 emit + 2 waterfall) | **23** (21 emit + 2 waterfall): adds `plugin-manager/changed`, `plugin-manager/install-log`, `plugin-manager/install-state` (§6.2) |
+| `KNOWN_SESSION_EVENT_TYPES` 57 | **59**: adds `developer/message` (incremental developer-role message) and `workspace/changes` (a turn produced workspace file changes) (§7) |
+| Session format **V3** | **V4**; `turn/end.reason` adds `{kind:'forked'}` — the synthetic closer a fork seed writes for a turn left open at the cut (§7.1) |
+| projection `stateVersion`: `subagent`/`subagentCatalog` 2, `agentTeam` 3 | 3 / 3 / 4 — fold-version only; the wire view shapes are unchanged |
+| error codes | adds `gateway/protocol`, `gateway/uplink-overflow`, `session/projections-unavailable`, `session/writer-held`, `workspace/session-active`, `terminal/unavailable`, `job/not-found`, `workspace-file/watch-unsupported`; `agent-preset/read-only` is now unreachable (its only throwers were `copy`/`deletePreset`) (§5) |
+
+**Impact on dsh-emacs: two migrations were required, and both have landed**
+(postmortem/064). The 0.1.7 round was prepared as a reference first and then
+implemented in the client; the two surfaces that had to move:
+
+1. **Queue mirror source.** `dsh-emacs-queue.el` used to mirror the host inbox
+   from the `session/control` `queue` frame and the baseline's `queues` record
+   (§6.1 in the 0.1.6 shape). Both are gone. The mirror is now derived from the
+   **`inbox` projection**, which carries exactly the same fold state the host
+   used to map into `SessionQueuedItem[]`: `session/control` delivers it as an
+   ordinary `projection` frame with `key: "inbox"` (and in the generation
+   baseline's `projections[<sessionId>].values.inbox`), so the client derives
+   its items locally — `next-turn` → `queued`, `next-step` with a user source →
+   `steering`, any other `next-step` → `context`, per item
+   `{id, content, source}` (§6.1, §9). A cell whose session has no live chat
+   buffer is dropped rather than applied to whatever buffer is current. The
+   `inbox` projection has existed unchanged since before 0.1.5 and is present in
+   the 0.1.5 baseline too, so this source switch is forward-compatible rather
+   than a version fork.
+2. **`agentPresets/list` display names.** `dsh-emacs--preset-display-name` used
+   to key the web-consistent labels (`Standard mode` …) on
+   `(equal "system" trust)`, and the row no longer carries `trust`. The mapping
+   now keys on the preset id alone — which is what the web's own
+   `presetDisplayText` does — and `dsh-emacs-protocol.el` dropped the roster's
+   removed `authorable` field (plus its already-stale `hasDocument` sibling,
+   which no server version ever sent).
+
+Everything else in the table is additive or unread by the client: the widened
+`session/list` row, the `turnWindow`/`application` options, the workspace pin
+set, the new namespaces, the `permissionPresets` catalog fields, the
+`displayTitle` hint and the two new durable events all fall through the client's
+`assq`-style alist parsing and its `_ → nil` frame/event defaults.
+
 Migration checklist: open only one WS, `/api/remote.mux`; approvals/questions go
-through `$events` waterfall + `$events/result`; queue/jobs/projections go through
-`session/control`; consume the event vocabulary per the V3 table in §7 (in
-particular: no longer wait for `assistant/chunk`, but consume `assistant-stream`
-frames (§3.2.1) or `assistant/message.data.stream`); `commands/execute` now sends
-`submittedAttachments`. **0.1.6 adds no client-side migration step** (§0.3).
+through `$events` waterfall + `$events/result`; **projections (including the
+queue-bearing `inbox`) go through `session/control`**; consume the event
+vocabulary per the §7 table (V4 from 0.1.7 adds two durable events, §7.1) — in
+particular, no longer wait for `assistant/chunk`, but consume `assistant-stream`
+frames (§3.2.1) or `assistant/message.data.stream`; `commands/execute` now sends
+`submittedAttachments`. **0.1.6 adds no client-side migration step** (§0.3);
+**0.1.7 requires the two migrations above** (§0.4).
 
 ---
 
@@ -220,8 +283,14 @@ Failure form:
               "message": "…", "details": { "sessionId": "…" } } } }
 ```
 - `result.value` is omitted entirely for a void business result (not `null`) —
-  that is the case for void Remotes (`credentials/set`, `agentPresets/copy`,
-  etc.).
+  that is the case for void Remotes (`credentials/set`, `terminal/write`,
+  `workspace/delete`, etc.).
+- **Byte-carrying results are `multipart/form-data`** (0.1.7): when a result
+  contains a `Uint8Array`, the host moves the octets out of the JSON into
+  `ConnectionRpcAttachment` parts and writes `null` at their path. The response is
+  then a form with a `metadata` part (the ordinary `server-response` JSON, plus
+  `attachments: [{path, codec:'bytes', part}]`) and one `bytes-<n>` part per
+  byte view. Only unary results do this — stream items are JSON. See §4.16.
 - When the envelope cannot be parsed: if the body has a string `rpcId`, use it;
   otherwise use the sentinel `rpcId = "invalid-request"`, and return
   `gateway/bad-request` (message `invalid client-request message`, details carry
@@ -310,6 +379,8 @@ The client opens one WS (upgrade with cookie). After that, one text message per
 ```json
 { "type": "open", "streamId": "<client random string>", "endpoint": "session/follow",
   "payload": { "args": { "request": { "address": { "kind": "session", "sessionId": "…" } } } } }
+{ "type": "item", "streamId": "<same string>", "value": { … } }   // uplink, duplex streams only (0.1.7)
+{ "type": "end",  "streamId": "<same string>" }                  // uplink half-close (0.1.7)
 { "type": "cancel", "streamId": "<same string>" }
 ```
 
@@ -320,9 +391,17 @@ The server replies per stream:
 { "type": "end", "streamId": "…" }
 ```
 - Value validation: `open` has exactly `type/streamId/endpoint/payload`; `cancel`
-  has exactly `type/streamId`. A duplicate streamId closes that connection with
-  1008; binary messages close with 1003 and text that is not JSON with 1008. An
-  `error` frame terminates that stream (error body as in the §5 error model).
+  and `end` have exactly `type/streamId`; `item` has exactly
+  `type/streamId[/value]` with a lossless-JSON `value` when present. A duplicate
+  streamId closes that connection with 1008; binary messages close with 1003 and
+  text that is not JSON with 1008. An `error` frame terminates that stream (error
+  body as in the §5 error model).
+- **Uplink (new in 0.1.7)**: `item`/`end` carry client→host stream input for a
+  duplex Remote method (one whose parameters include an incoming stream). A
+  unary-shaped stream that never reads an uplink drops unread items; overflowing
+  the carrier's bounded queue is `gateway/uplink-overflow`. None of the streams
+  dsh-emacs opens (`session/follow`, `session/control`, `workspace/follow`,
+  `$events`) takes an uplink, so the client keeps sending only `open`/`cancel`.
 - The host pings every 2s; a client that misses 2 pongs in a row is terminated.
   Close codes: host 1003/1008/1011 (final frame undeliverable), client 1000
   (dispose)/4000 (proactive reconnect)/4002 (invalid frame).
@@ -348,11 +427,14 @@ client, for reference in later changes):
 
 | endpoint | open payload | frame content (item value) |
 |---|---|---|
-| `session/follow` | `{args:{request:{address, maxMessages?, assistantStream?}}}` | Opening snapshot frame `snapshot` (header/cursor/records/hasMore/projections[/assistantStream]), followed by gapless `event` frames and optional `assistant-stream` frames (§7.1). **The client sends `assistantStream: true`**, otherwise it receives no deltas |
-| `session/control` | `{args:{}}` | Exactly one `baseline` per generation, then `queue`/`jobs`/`projection` delta frames (§6.1) |
-| `workspace/follow` | `{args:{}}` | One `baseline` per generation, then `upsert`/`remove`/`order`/`archived` (§4.4) |
+| `session/follow` | `{args:{request:{address, maxMessages?, turnWindow?, assistantStream?}}}` | Opening snapshot frame `snapshot` (header/cursor/records/hasMore/projections[/assistantStream]), followed by gapless `event` frames and optional `assistant-stream` frames (§7.1). **The client sends `assistantStream: true`**, otherwise it receives no deltas |
+| `session/control` | `{args:{}}` | Exactly one `baseline` per generation, then `projection` delta frames (§6.1). **0.1.7**: the `queue`/`jobs` frames are gone; the queue rides the `inbox` projection |
+| `workspace/follow` | `{args:{}}` | One `baseline` per generation, then `upsert`/`remove`/`order`/`archived`/`pinned` (§4.4) |
 | `workspaceFiles/changes` | `{args:{<scope>}}` | Workspace file change stream: `WorkspaceFileWatchFrame` (§4.16) |
 | `terminal/follow` | `{args:{agentId, id, attachmentId}}` | **new in 0.1.6**: one `snapshot` screen frame, then `output` / `state` frames (§4.20) |
+| `terminal/retain` | `{args:{sessionId, id}}` | **new in 0.1.7**: one `retained` acknowledgement, then an open-window lifetime for that terminal without taking screen or input control (§4.20) |
+| `job/list` | `{args:{request:{sessionId}}}` | **new in 0.1.7**: whole-set job-roster frames `{type:'rows', jobs: JobView[]}` — one on open, then one per coalesced lifecycle burst (§4.21) |
+| `job/follow` | `{args:{request:{sessionId?, jobId, from?}}}` | **new in 0.1.7**: `opened` anchor → coalesced `output` batches → terminal `status` (§4.21) |
 | `$events` | `{args:{}}` | `ready` (clientId+host.home) → `emit`/`waterfall`/`cancel` (§3.3) |
 
 Except for `$events`, every stream's payload matches a unary Remote: an outer
@@ -484,11 +566,16 @@ unreachable even if registered:
 `fileReferences` `fileUploads` `goals` `llm` `messageFeedback`
 `permissionPresets` `pluginInventory` `session` `sessionFeedback`
 `sessionReferenceResolver` `settings` `skills` `subagents` `terminal`
-`workspace` `workspaceFiles` (21; of these, `credentials` and `settings` are both
-mounted by settings-controller, and `directoryPicker` is composed by
+`workspace` `workspaceFiles` (21 at 0.1.6; of these, `credentials` and `settings`
+are both mounted by settings-controller, and `directoryPicker` is composed by
 workspace-controller. `permissionPresets` and `terminal` are **new in 0.1.6**;
-with `terminal` that namespace also claims the `terminal/follow` stream
-endpoint).
+with `terminal` that namespace also claims the `terminal/follow` /
+`terminal/retain` stream endpoints).
+
+**0.1.7 adds five** → **26**: `account`, `job`, `pluginManager`,
+`pluginRegistryProbe`, `officeToPdf` (§4.21–§4.23). All five are unused by
+dsh-emacs; `job` matters to any client that wants a background-task surface,
+because the `session/control` `jobs` record it replaces is gone (§0.4).
 
 Implementation anchors (master source):
 - session / skills / fileReferences → `packages/api/session-controller`
@@ -496,7 +583,8 @@ Implementation anchors (master source):
 - workspaceFiles → `packages/api/workspace-files`
 - terminal → `packages/api/terminal-controller` (**new in 0.1.6**)
 - settings / credentials → `packages/api/settings-controller`
-- agentPresets → `packages/preset/agent-presets`
+- agentPresets → `packages/preset/agent-preset-registry` (package renamed in 0.1.7
+  from `packages/preset/agent-presets`)
 - llm → `packages/llm/llm`
 - goals → `packages/goal/goal`
 - commands → `packages/interaction/commands`
@@ -510,6 +598,11 @@ Implementation anchors (master source):
 - fileUploads → `packages/client/file-upload`
 - pluginInventory → `packages/host/plugin-inventory`
 - dynamicCordisRunner → `packages/extensions/cordis-host-runner`
+- account → `packages/api/account-controller` (**new in 0.1.7**)
+- job → `packages/api/job-controller` (**new in 0.1.7**)
+- pluginManager / pluginRegistryProbe → `packages/boot/plugin-manager` and
+  `packages/client/ui-plugin-manager` (**new in 0.1.7**)
+- officeToPdf → `packages/document/office-to-pdf` (**new in 0.1.7**)
 
 The `name` of `@Remote('name')` is the wire method (a bare `@Remote` uses the
 method name); parameter names correspond one-to-one with `args` fields, but lookup
@@ -518,11 +611,12 @@ parameters such as `agent`/`session`/`parentSessionId` are
 instances by the host resolver.
 
 General activation policy:
-`list/search/modelCatalog/canOpenWorkspacePath/page/fork` and `attachment` are
-**cold reads** (no Agent resume); `create/selectModel/rename/prompt` resume
-explicitly; `updateQueue/cancel` require a live Agent; `follow` opens a cold
-session and promotes activation on demand once the snapshot is sent; a subagent
-address (`address.kind:'subagent'`) never activates. Unless stated otherwise,
+`list/search/modelCatalog/canOpenWorkspacePath/workspacePathApplications/page/fork/projections`
+and `attachment` are **cold reads** (no Agent resume);
+`create/selectModel/rename/prompt/updateQueue` resume explicitly; `cancel`
+requires a live Agent; `follow` opens a cold session and promotes activation on
+demand once the snapshot is sent; a subagent address
+(`address.kind:'subagent'`) never activates. Unless stated otherwise,
 these methods all reject subagent sessions (`session/agent-busy`, with `reason`
 suggesting the `subagents` namespace instead).
 
@@ -538,15 +632,21 @@ args     { _request?: { cursor?: string } }  // parameter name `_request` (reser
                                               // methods); cursor reserved & ignored, body may be {}
 value    { items: SessionSummary[] }          // updatedAt descending
 ```
-`SessionSummary = { sessionId, updatedAt, running, blank, parentSessionId?,
-origin?: 'subagent', cwd?, projections?: { asOfSeq, values } }`. Only visible
-sessions are listed (live + persistent sessions with a cwd);
-`projections.values` is a partial hint from the persistent projection cache
+`SessionSummary = { sessionId, updatedAt, running, blank, agentAvailable,
+parentSessionId?, origin?: 'subagent', cwd?, projections?: { kind, asOfSeq,
+values } }`. Only visible sessions are listed (live + persistent sessions with a
+cwd); `projections.values` is a partial hint from the persistent projection cache
 (keys such as title, sessionListMetadata may be here; key table in §9), and a
 missing cell means unknown. `updatedAt = max(createdAt, lastPromptAt)`. Cold rows
 go through a small cold probe (≤16 events / ≤1024 B) to obtain the real
 blank/lastPromptAt; if the probe fails it degrades to visible-but-unknown and
-never fails the whole request.
+never fails the whole request. **0.1.7** adds `agentAvailable` (whether the
+Session currently owns a live Agent — `/api-session/added` is now re-emitted when
+that flips, §6.2) and `projections.kind`: `'sequenced'` when the live registry
+produced the block, so `asOfSeq` is comparable with the connection's baselines and
+frames; `'cached'` when a header-only listing read the persisted cache, so
+`asOfSeq` is that stored record's own watermark and **must not** be compared with
+the connected Session's values.
 
 #### session/search
 ```
@@ -594,14 +694,28 @@ string[], groups: ModelProviderGroup[], failures: ModelCatalogFailure[] }`;
 listed separately in `failures` and do not enter groups. Session-independent (used
 by the settings surface/picker).
 
-#### session.canOpenWorkspacePath / session.openWorkspacePath
+#### session.canOpenWorkspacePath / session.openWorkspacePath / session.workspacePathApplications
 ```
 args     {}                                      → value boolean
-args     { request: { path: string } }           → value { opened: true }
+args     { request: { path, action?: 'reveal', application? } }
+                                                 → value { opened: true }
+args     { request: { path } }                   → value SessionWorkspacePathApplication[]
 ```
-The latter hands the path to the host desktop opener; an empty path is
+The opener hands the path to the host desktop; an empty path is
 `gateway/bad-request`; abort is `gateway/cancelled`; opener failure is
-`gateway/internal`.
+`gateway/internal`. **0.1.7** adds `application?` (a registered application
+identifier from `workspacePathApplications`, ignored for `reveal`; omission keeps
+the operating-system default) and hardens the path first: it must resolve back to
+the same host path through the composed filesystem, otherwise
+`gateway/bad-request` `"Path has no verified Host path"` — a bare
+`openWorkspacePath` no longer passes an arbitrary string to the native opener.
+
+`session/workspacePathApplications` (new in 0.1.7) is a cold, non-activating
+query for the serving desktop's current handlers of that file:
+`SessionWorkspacePathApplication = { id, name, default: boolean, icon: string |
+null }` (`icon` is a PNG/SVG data URL); it returns `[]` when native opening is
+unavailable. Identifiers must be revalidated against the file's current handlers
+before opening, because associations can change between the query and the open.
 
 #### session.rename
 ```
@@ -619,12 +733,18 @@ overwrites). Subagent rejected.
 args     { request: { sessionId, atSeq? } }
 value    { sessionId }                            // child session id
 ```
-Cold-reads the source log. `atSeq` anchoring: the boundary = the first `turn/end`
-≥ atSeq; omitted or out of range falls back to the last completed turn; if there
-is no completed turn at or above that seq → `session/fork-unavailable`. The child
-session inherits the cwd, the latest model target, the `parentSessionId` lineage,
-and the seed prefix (up to the next `turn/start`). The client may increment the
-new session's title to "(n+1)" on its own (pure client behavior).
+Cold-reads the source log and forks an **exact inclusive event prefix**.
+**0.1.7** semantics: `atSeq` is the exact inclusive source event seq the child
+inherits through (it must exist; `atSeq: 0` is valid), and an omitted `atSeq`
+selects the **latest completed-turn prefix** boundary. When the cut leaves a turn
+(or step) open, the seed's tail is closed with synthetic `forked` results plus
+step/turn endings (`turn/end` reason `{kind:'forked'}`, §7.2), followed by the
+tagged `session/end-seed` `{inherited:true}` marker; closed turns are preserved
+unchanged. A boundary that does not exist, or an omitted `atSeq` with no
+completed turn, is `session/fork-unavailable`. The child session inherits the
+cwd, the latest model target, the `parentSessionId` lineage, and the seed prefix.
+The client may increment the new session's title to "(n+1)" on its own (pure
+client behavior).
 
 #### session.prompt
 ```
@@ -676,7 +796,9 @@ args     { request: { sessionId, itemId, action: { kind:'edit', content } |
                       { kind:'remove' } | { kind:'steer' } } }
 value    { accepted: true }
 ```
-Does not resume a cold Agent. edit accepts only text content (non-text →
+Does not resume a cold Agent **at 0.1.6**; **0.1.7 resumes a cold Agent first**
+(the commands layer routes it through the session lookup like `prompt`). edit
+accepts only text content (`content: TextBlock[]`; non-text →
 `session/attachment-invalid`; whitespace text/empty array → `gateway/bad-request`
 `"queue edit content must include non-whitespace text"`, verified);
 an item no longer queued → `session/queue-item-not-found`; `steer` is available
@@ -695,15 +817,24 @@ keeps the pending queue (resumed FIFO after settling). Subagent →
 #### session.page
 ```
 args     { request: { address: SessionAddress, throughSeq: number,
-                      beforeSeq?, maxMessages? } }
+                      beforeSeq?, maxMessages?, turnWindow? } }
 value    { records: SessionHistoryRecord[], hasMore: boolean }
 ```
 Backward pagination aligned to message boundaries (one page = a whole number of
 message records, never truncated mid-message). `address = {kind:'session',
-sessionId} | {kind:'subagent', parentSessionId, childSessionId, mode}`.
+sessionId} | {kind:'subagent', parentSessionId, childSessionId, mode}`; the
+subagent `mode` is `'one-shot' | 'continuable' | 'unknown'` at 0.1.7 (a
+diagnostic-only identity that cannot be matched to a live catalog row reads as
+`'unknown'`).
 `throughSeq` = the inclusive cursor of the follow opening snapshot (-1 = latest);
 an omitted `beforeSeq` = start from the page at `throughSeq`. `maxMessages` is the
-page budget (50 by default). `SessionHistoryRecord = {type:'event', event}`
+page budget (50 by default). **0.1.7** adds `turnWindow = { minMessages,
+minTurns }`: stop at a `turn/start` once both a minimum number of append-origin
+user/assistant messages and a minimum number of crossed Turn starts are reached
+(`minMessages` must not exceed `maxMessages`; the partial Turn at `beforeSeq`
+counts), unless `maxMessages` or history exhaustion wins first — the same option
+is accepted by `session/follow` for its opening snapshot.
+`SessionHistoryRecord = {type:'event', event}`
 (0.1.5 has only this kind; the old `{type:'chunks'}` packing is gone, see §7.1).
 A subagent address is validated against the corresponding restrictions (identity/
 lineage mismatch → `subagent/*` error codes, see §5). Reading history never
@@ -712,7 +843,7 @@ activates the Agent.
 #### session.follow (stream)
 ```
 open     { args: { request: { address: SessionAddress, maxMessages?,
-                               assistantStream?: true } } }
+                               turnWindow?, assistantStream?: true } } }
 frames   first = { type:'snapshot', header: SessionWireHeader, cursor,
                  records: SessionHistoryRecord[], hasMore,
                  projections: { asOfSeq, values },
@@ -722,7 +853,8 @@ frames   first = { type:'snapshot', header: SessionWireHeader, cursor,
 ```
 - `SessionWireHeader = { version, id, createdAt, cwd?, parentSession?, isSeeded,
   origin?: 'subagent', delegationDepth?, agentPreset? }` (0.1.5: `seedLength` has
-  been replaced by `isSeeded: boolean`).
+  been replaced by `isSeeded: boolean`; **0.1.7** bumps the format `version` to
+  **4**, §7.1).
 - The snapshot records = a message-aligned tail of at most maxMessages entries
   (pure `event` records); `cursor` = the seq the snapshot covers up to;
   `projections` is that session's projection baseline (§9).
@@ -737,10 +869,27 @@ frames   first = { type:'snapshot', header: SessionWireHeader, cursor,
 #### session.control (stream)
 ```
 open     { args: {} }
-frames   exactly one baseline per generation, then queue/jobs/projection deltas (see §6.1)
+frames   exactly one baseline per generation, then projection deltas (see §6.1)
 ```
-Host-wide control plane: queues, background jobs, projections. **Replaces** the
-0.1.1-rc.2 mux frames `session/queue`, `session/jobs`, `session/projection`.
+Host-wide control plane. **Replaces** the 0.1.1-rc.2 mux frames `session/queue`,
+`session/jobs`, `session/projection`. At 0.1.6 it carried queues, background jobs
+and projections; **at 0.1.7 it carries projections only** — the queue is now read
+from the `inbox` projection cell it still publishes (§6.1, §9), and background
+jobs moved to the `job` namespace (§4.21).
+
+#### session.projections (new in 0.1.7)
+```
+args     { request: { sessionId } }
+value    SessionProjectionBaseline | null        // { asOfSeq, values } ; null = session not found
+```
+A cold, non-activating read of **all** registered projection cells for one
+Session — the unary counterpart of the `session/control` baseline block and of
+`session/follow`'s snapshot `projections`, for a client that holds no stream.
+An empty `sessionId` is `gateway/bad-request`; when the Session exists but its
+projection registry is unavailable the error is
+`session/projections-unavailable`; a cancelled observation is
+`gateway/cancelled`. A non-existent Session is **not** an error: the value is
+`null`.
 
 ### 4.2 skills.list
 
@@ -780,19 +929,27 @@ the `workspace/follow` stream baseline.
 | `workspace/delete` | `{ request: { workspaceId } }` | `{ deleted: true }` | removes the registration only (directory/files/session logs untouched) |
 | `workspace/insertBefore` | `{ request: { workspaceId, beforeWorkspaceId? } }` | `{ workspaceIds }` (full order) | `workspace/not-found` |
 | `workspace/insertSessionBefore` | `{ request: { workspaceId, sessionId, beforeSessionId? } }` | `{ workspace }` | session/anchor not in that workspace → `workspace/move-invalid`; same position is idempotent |
-| `workspace/archiveSession` | `{ request: { sessionId } }` | `{ archivedSessionIds }` | neither live nor persisted → `session/not-found` |
+| `workspace/archiveSession` | `{ request: { sessionId, stopActivity? } }` | `{ archivedSessionIds }` | neither live nor persisted → `session/not-found`; **0.1.7**: the Session still has running work (its own turn, a subagent descendant, an owned background job, an active schedule) → `workspace/session-active` **unless** `stopActivity: true`, which requests those stops (not awaited) before the durable archive write |
 | `workspace/unarchiveSession` | `{ request: { sessionId } }` | `{ archivedSessionIds }` | **new in 0.1.6**: drops one id from the registry-global archive set; an id that is not archived is a no-op (idempotent), so a lost race resolves cleanly |
+| `workspace/pinSession` | `{ request: { sessionId } }` | `{ pinnedSessionIds }` | **new in 0.1.7**: surfaces a known unarchived Session ahead of unpinned ones; the full set comes back, most recently pinned first |
+| `workspace/unpinSession` | `{ request: { sessionId } }` | `{ pinnedSessionIds }` | **new in 0.1.7**: removes one pin without touching the saved Session order; idempotent |
+| `workspace/initializeDefault` | `{ request: { directoryName, title } }` | `{ workspace } \| undefined` | **new in 0.1.7**, first-use only: initializes or reuses the default Workspace (never renames an existing default) and creates no Session or message; `undefined` when first-use initialization is ineligible; blank/trimmed/host-invalid `directoryName` (separators, colon, NUL, trailing dot) or blank `title` → `gateway/bad-request` |
 
 #### workspace.follow (stream)
 ```
 open     { args: {} }
 frames   first = { type:'baseline', value: { items: WorkspaceView[],
-                                              archivedSessionIds: SessionId[] } }
+                                              archivedSessionIds: SessionId[],
+                                              pinnedSessionIds: SessionId[] } }
          then = upsert { workspace } | remove { workspaceId }
               | order { workspaceIds } | archived { archivedSessionIds }
+              | pinned { pinnedSessionIds }
 ```
 The archive set shares its source with the `workspace/archiveSession` return
-value; the reconnect baseline is the baseline frame.
+value; the pin set shares its source with `pinSession`/`unpinSession`. **0.1.7**
+adds the baseline's `pinnedSessionIds` (registry-global, most recently pinned
+first) and the `pinned` whole-set increment, so a reconnect baseline and a live
+frame carry the same field name. The reconnect baseline is the baseline frame.
 
 ### 4.5 directoryPicker.*
 
@@ -803,7 +960,7 @@ does not match, it rejects rather than approximating:
 
 | Endpoint | args | value | Errors |
 |---|---|---|---|
-| `directoryPicker/pick` | `{}` | `string | null` (cancel=null) | `gateway/cancelled`; requires the native capability |
+| `directoryPicker/pick` | `{}` | `string \| null` (cancel=null) | `gateway/cancelled`; requires the native capability |
 | `directoryPicker/list` | `{ path? }` (default = home) | `DirectoryListing` | `directory-picker/unreadable` etc. |
 | `directoryPicker/createDirectory` | `{ path, name }` (single-segment name) | `string` (absolute path of the new directory) | invalid/missing name → `gateway/bad-request`; `directory-picker/exists`, `directory-picker/create-failed` |
 
@@ -814,10 +971,18 @@ complete-result limit).
 
 ### 4.6 agentPresets.*
 
-`AgentPresetRoster = { presets: AgentPresetRow[], authorable, modeSelectionEnabled }`;
-`AgentPresetRow = { id, trust: 'system'|'user', isDefault, name?, description?,
-broken? }`. A non-empty `broken` = currently unable to assemble a session. id
-grammar `^[a-z0-9][a-z0-9-]*$`.
+`AgentPresetRoster = { presets: AgentPresetRow[], modeSelectionEnabled }`;
+`AgentPresetRow = { id, isDefault, name?, description?, broken? }`. A non-empty
+`broken` = currently unable to assemble a session. id grammar
+`^[a-z0-9][a-z0-9-]*$`; the roster is sorted by `order` (ascending, absent last)
+then id, and a row may additionally carry the undeclared-at-the-type-level
+`order?: number`, which a client may read but must not require.
+
+**0.1.7 removed `trust`** from both the roster row and the read document, and
+**deleted `agentPresets/copy` and `agentPresets/deletePreset`**: the namespace
+has no write path at all, and the roster's `authorable` flag is gone with them. A
+client that used `trust === 'system'` to pick a built-in label must key the label
+on the id alone (which is what the web's own `presetDisplayText` does).
 
 `modeSelectionEnabled` is **new (required) in 0.1.6**: whether visible mode
 selection governs unnamed new sessions. When it is `false` the picker is hidden
@@ -828,29 +993,35 @@ set.
 
 | Endpoint | args | value | Notes |
 |---|---|---|---|
-| `agentPresets/list` | `{}` | `AgentPresetRoster` | full list; authorable = has a writable root |
-| `agentPresets/read` | `{ agentPreset }` | `AgentPresetDocument {agentPreset, trust, content, name?, description?}` | reads the composition text; unknown → `agent-preset/not-found` |
-| `agentPresets/copy` | `{ from, id, name? }` | void | the only write path; composition text is never sent over the wire; target id taken/occupied on disk → `agent-preset/invalid`; no user root / system preset → `agent-preset/read-only` |
-| `agentPresets/deletePreset` | `{ id }` | void | deletes only local authored presets; system trust → `agent-preset/read-only` |
+| `agentPresets/list` | `{}` | `AgentPresetRoster` | full roster incl. activation failures |
+| `agentPresets/read` | `{ agentPreset }` | `AgentPresetDocument {agentPreset, content, name?, description?}` | reads the declared child-plugin list as entry-list YAML (`!!js` conditions included); unknown → `agent-preset/not-found`. **0.1.7 dropped `trust`** and renamed the declaring package |
 | `agentPresets/select` | `{ agentId, agentPreset }` | `string` (the recorded preset id) | **only available for blank sessions** (no turns: turnBoundary has not opened a turn and lastTurn=0); a conversation already started → `agent-preset/locked`; serialized per session |
+
+A blank Session that switches composition records the durable
+`agent-preset/selected` event (`{agentPreset}`, §7.3), and the `agentPreset`
+projection folds it over the creation header, so reconstruction reads the
+projection rather than the header alone.
 
 ### 4.7 settings.*
 
-`SettingsNamespaceView = { ns, schema: <schemastery JSON>, value, base?, user?,
-applies: 'live'|'restart', secrets: SettingsSecretView[], revision: number }`.
+`SettingsNamespaceView = { ns, autoGenerate, schema: <schemastery JSON>, value,
+base?, user?, applies: 'live'|'restart', secrets: SettingsSecretView[],
+revision: number }` (`autoGenerate` is **new in 0.1.7**).
 - All outbound values are redacted: role('secret') fields never cross the wire;
   `SettingsSecretView = { path: string[], set: boolean }`.
 - `revision` is a write CAS: carrying `expectedRevision` while the namespace has
   advanced → `settings/conflict` (details carry expected/actual).
 - Calling with no provider → `gateway/internal` (or the corresponding
   `settings/*` code).
+- **0.1.7**: `hasDocument` is now always `true` (the provider's `prepareDocument`
+  is the sole document seam), and `canOpenAgentPresetDirectory` /
+  `openAgentPresetDirectory` are **deleted** — preset authoring is no longer a
+  settings surface (§4.6).
 
 | Endpoint | args | value |
 |---|---|---|
-| `settings/describe` | `{}` | `{ writable, hasDocument, namespaces: SettingsNamespaceView[] }` |
-| `settings/canOpenAgentPresetDirectory` | `{}` | `boolean` |
+| `settings/describe` | `{}` | `{ writable, hasDocument: true, namespaces: SettingsNamespaceView[] }` |
 | `settings/openSettingsDocument` | `{}` | `{ opened: true }` (materializes the document and hands it to the platform text opener) |
-| `settings/openAgentPresetDirectory` | `{ agentPreset }` | `{ opened: true } | { opened: false, path }` (falls back to showing the path text when there is no opener) |
 | `settings/update` | `{ ns, patch, expectedRevision? }` | `SettingsNamespaceView` |
 | `settings/replace` | `{ ns, section, expectedRevision? }` | `SettingsNamespaceView` (`{}` = reset) |
 | `settings/mutate` | `{ ns, ops: SettingsPathOpView[], expectedRevision? }` | `SettingsNamespaceView` |
@@ -972,10 +1143,16 @@ value = an idempotent no-op (the version does not change).
 args     { agentId, query: string }
 value    SessionReferenceMentionCandidate[]
 ```
-`SessionReferenceCandidate = { sessionId, label, cwd?, sameWorkspace, createdAt }`;
-each candidates entry also carries `mention` (the `@[label](dsh-session:…)` hint
-text). Self is excluded, and its cwd participates in sorting; `query` does a
-case-insensitive substring match against sessionId/cwd/title.
+`SessionReferenceCandidate = { sessionId, label, displayTitle?, cwd?,
+sameWorkspace, createdAt }`; each candidates entry also carries `mention` (the
+`@[label](dsh-session:…)` hint text). Self is excluded, and its cwd participates
+in sorting; `query` does a case-insensitive substring match against
+sessionId/cwd/title/**displayTitle**. **0.1.7** adds `displayTitle?`: the
+subagent-label-first presentation text, read from the same `title` + `subagent`
+projection snapshot in one shot, and `mention` now prefers it over `label` — a
+client that renders the mention verbatim needs no change, one that builds its own
+label should prefer `displayTitle`. Sessions whose projections answer neither
+still fall back to the session id.
 
 ### 4.14 subagents.* (Subagent Control)
 
@@ -1001,12 +1178,16 @@ subagent identity also has the projection keys `subagent` / `subagentTiming`
 args     {}
 value    PluginInventorySnapshot
 ```
-`{ entries: [{ entryId, moduleName, enabled, fiberPhase: 'pending'|'loading'|
-'active'|'failed'|'unloading'|null }], agentPresets?: [{id, trust, name?, isDefault,
-broken?, rows: [{entryId, moduleName, enabled: bool|'conditional', condition?,
-fiberPhase}]}] }` — Loader live state; when an agent-preset roster exists, the
-composition rows of each preset are attached (the host's actual list of running
-model plugins). The other face of plugin dynamic loading/inspection is
+`{ entries: [{ entryId, moduleName, meta?, enabled, fiberPhase: 'pending'|'loading'|
+'active'|'failed'|'unloading'|null }], agentPresets?: [{id, name?, isDefault,
+broken?, rows: [{entryId, moduleName, meta?, enabled: bool|'conditional', condition?,
+fiberPhase}]}], managementAvailable? }` — Loader live state; when an agent-preset
+roster exists, the composition rows of each preset are attached (the host's
+actual list of running model plugins). **0.1.7** drops the group's `trust`, adds
+`meta?` (local package display metadata, present whether or not the entry is
+enabled) on both entry kinds, and adds `managementAvailable?` (the Host exposes
+persistent current-profile management through the new `pluginManager` namespace,
+§4.23). The other face of plugin dynamic loading/inspection is
 `dynamicCordisRunner` (cordis-host-runner: `runHostHalf`, `stopFromPanel`,
 `undefineFromPanel`, `invoke`, `inventory`, `getClientCode`, `resolveRequestRun`,
 `settleUserRun`, `reportRenderFailure`, `reportClientGuardFailure` etc., used by
@@ -1016,28 +1197,33 @@ web panel extensions; dsh-emacs does not need it for now).
 
 Host side `ctx.workspaceFiles`; reads workspace files for the "browser is not on
 the host machine" scenario. Design points: **the read permission of the file
-methods (`read`/`readBytes`/`readAll`/`readRelated`/`stat`/`changes`) inherits
-from the Session's filesystem backend** (it may go outside the workspace as long
-as the backend allows it), while the observation surface of `list` and `changes`
-is locked inside the workspace root.
+methods (`read`/`readBytes`/`stat`/`changes`) inherits from the Session's
+filesystem backend** (it may go outside the workspace as long as the backend
+allows it), while the observation surface of `list` and directory `changes` is
+locked inside the workspace root.
 
 | Endpoint | args | value |
 |---|---|---|
 | `workspaceFiles/read` | `{ workspaceFileScopeId, path, range: {offset?, limit?} }` | `WorkspaceFileText` (line window; `offset` is 1-based, default 1, limit `maxLines`=5000) |
-| `workspaceFiles/readBytes` | `{ workspaceFileScopeId, path, range: {offset?, length?} }` | `WorkspaceFileBytes` (byte window, `data` base64, default limit `maxBytes`=2 MiB) |
-| `workspaceFiles/readAll` | `{ workspaceFileScopeId, path }` | `WorkspaceFileBytes` (whole file, limit `maxFileBytes`=32 MiB) |
-| `workspaceFiles/readRelated` | `{ workspaceFileScopeId, path, relativePath }` | `WorkspaceFileBytes` (resolved relative to `path`; `relativePath` must be relative, otherwise `gateway/bad-request`) |
+| `workspaceFiles/readBytes` | `{ workspaceFileScopeId, path, options: { range?: {offset?, length?}, baseFile? } }` | `WorkspaceFileBytes` (one byte window, or the whole file under `maxFileBytes`=32 MiB when `range` is omitted; default range limit `maxBytes`=2 MiB) |
 | `workspaceFiles/stat` | `{ workspaceFileScopeId, path }` | `WorkspaceFileStat` |
 | `workspaceFiles/list` | `{ workspaceFileScopeId, path }` | `WorkspaceDirectoryListing` (`path` is a workspace-relative path; **listing the root requires an explicit `""`**; a missing field → `gateway/bad-request` `"path is required"`; limit `maxEntries`=2000) |
-| `workspaceFiles/changes` (stream) | `{ workspaceFileScopeId }` | `{kind:'ready'}` → `{kind:'change', change}` (`{absolutePath, version}` or `{absolutePath, absent:true}`) |
+| `workspaceFiles/changes` (stream) | `{ workspaceFileScopeId, path }` | `{kind:'ready'}` → `{kind:'change', change}` (`{absolutePath, version}` or `{absolutePath, absent:true}`) |
 
+- **0.1.7 collapses the byte methods**: `readAll` (whole file) and `readRelated`
+  (resolve relative to a sibling) are **deleted**. `readBytes` now takes a single
+  `options` object: omit `range` for the whole-file read (the old `readAll`), and
+  set `baseFile` to resolve a relative `path` from that file's directory (the old
+  `readRelated`). A `path` that is absolute or carries a URL scheme while
+  `baseFile` is set is `gateway/bad-request`.
 - **Lookup parameter note**: the method's first parameter `workspaceFileScope` is
   called `workspaceFileScopeId` on the wire, and its value is the **sessionId
   string** (the Host resolves `{sessionId, workspaceRoot}` itself from the live
   header / persistent header; cold sessions resolve too). The client never
   supplies the root itself.
 - Two path vocabularies: `read`/`readBytes`/`stat`/`changes` use **absolute paths
-  in the execution world**; `list` uses **workspace-relative paths**.
+  or paths relative to the workspace root** in the execution world; `list` uses
+  **workspace-relative paths**.
 - `WorkspaceFileStat = {absolutePath, version, bytes?}` — `version` is an opaque
   freshness token (do not parse it); together with `changes` it answers "is the
   copy of this file I hold stale?".
@@ -1045,14 +1231,34 @@ is locked inside the workspace root.
   `WorkspaceFileBytes = Stat + {offset, data, eof}`;
   `WorkspaceDirectoryEntry = {name, type:'file'|'directory'|'other', size?}`;
   `WorkspaceDirectoryListing = {path, entries, truncated}`.
+- **`data` is raw bytes out of process, not base64 (0.1.7)**. The value type is
+  `WorkspaceFileBytes<Uint8Array>`; the host's result encoder moves every
+  `Uint8Array` out of the JSON metadata into a **`ConnectionRpcAttachment`** and
+  puts `null` at its path. An HTTP client therefore receives a
+  `multipart/form-data` response whose `metadata` part is the ordinary
+  `server-response` JSON (with `attachments: [{path, codec:'bytes', part}]`) and
+  whose `bytes-<n>` parts carry the octets. Streams never carry attachments — only
+  unary results do. A client that wants bytes must parse the multipart body;
+  reading only the JSON metadata yields `null` for `data`. (Through 0.1.6 `data`
+  was a base64 string inside the JSON.)
+- **0.1.7 `changes` semantics**: the watch is now **per target** (a required
+  `path`, not the whole scope) and its `change` frames report the target's
+  **current** metadata after an invalidation (a fresh `version`, or `absent`), not
+  an observation of some filesystem operation. A file consumer may ignore a
+  version it already holds; a directory consumer must relist on every frame,
+  because a child's metadata can change without the directory version changing.
+  New error: `workspace-file/watch-unsupported` (the provider cannot initialize a
+  watch for that target).
 - Error codes: `workspace-file/not-found`, `workspace-file/outside-workspace`,
   `workspace-file/too-large`, `workspace-file/not-text`,
   `workspace-file/not-regular-file`, `workspace-file/not-directory` (each with
-  `path` in details).
+  `path` in details), plus `workspace-file/watch-unsupported` (0.1.7).
 - **Value for dsh-emacs**: previewing files produced by a session (including
   large-file pagination, binaries, images) no longer requires a local
   same-machine path, and is not subject to `/api/file`'s "absolute path +
-  locally readable" restriction.
+  locally readable" restriction. dsh-emacs does not call this namespace today, so
+  the 0.1.7 byte-encoding change does not affect it; a future binary preview must
+  handle the multipart form above.
 - Measured (0.1.5-rc.1 live service): `workspaceFiles/stat` works directly with a
   workspace-relative path (such as `"README.md"`) and returns `absolutePath` +
   `version` + `bytes`; `list` must carry `path` (`""` = root).
@@ -1105,7 +1311,9 @@ the in-session `feedback/record` event; note that the return value carries its o
 
 ```
 args     {}
-value    { options: [{ value, name, description? }] }
+value    { options: [{ value, name, description? }],
+           defaultOptions: [{ value, name, description? }],   // new in 0.1.7
+           defaultPreset: string }                            // new in 0.1.7
 ```
 
 - The catalog is **process-level** (it changes as plugins contribute live
@@ -1113,6 +1321,12 @@ value    { options: [{ value, name, description? }] }
   the `permissions` projection; that projection now carries only the Session's
   durable current value (§9). A permission control pairs the two: options from
   this Remote, current value from the projection.
+- **0.1.7** adds `defaultOptions` (the configured presets eligible as a
+  future-session default — the same `PresetOption` shape, without the derived
+  `auto` entry) and `defaultPreset` (the effective default when the deployment's
+  `Config.defaultPreset` is omitted). The configured default moved from a
+  settings-namespace section to a volatile Host config field, so this Remote is
+  now its only read path.
 - `option.value` is a configured preset key, or `auto` while the experimental
   Auto-review integration is live. The derived value `custom` is **not** an
   option: it appears only as the projection's `currentValue` when the effective
@@ -1124,12 +1338,12 @@ value    { options: [{ value, name, description? }] }
 - dsh-emacs does not implement a permission control, so it calls neither this
   Remote nor reads the projection.
 
-### 4.20 terminal.* (new in 0.1.6: Session-scoped browser terminals)
+### 4.20 terminal.* (new in 0.1.6: Session-owned user terminals)
 
 `packages/api/terminal-controller`, namespace `terminal`. A Session-owned,
-Host-lifetime interactive shell over the composed subprocess/sandbox providers;
-entirely separate from the Agent's own terminal tool registry. **dsh-emacs does
-not use this namespace** — it is recorded for completeness.
+Host-lifetime interactive shell, entirely separate from the Agent's own terminal
+tool registry. **dsh-emacs does not use this namespace** — it is recorded for
+completeness.
 
 | Endpoint | args | value |
 |---|---|---|
@@ -1137,6 +1351,7 @@ not use this namespace** — it is recorded for completeness.
 | `terminal/shells` | `{ agentId }` | `TerminalShell[] = [{ path, args, name }]` (the configured/system default first) |
 | `terminal/list` | `{ sessionId }` | `WebTerminalInfo[]` (cold-safe: no Agent resume; `[]` when the Session owns none) |
 | `terminal/create` | `{ agentId, request: { id, cols, rows, shellPath? } }` | `WebTerminalInfo` (idempotent for an open `id`; `id`/`attachmentId` match `^[\w-]{1,128}$`) |
+| `terminal/retain` (stream, **new in 0.1.7**) | `{ sessionId, id }` | one `{type:'retained'}` acknowledgement, then an open-window lifetime; no screen and no input control |
 | `terminal/follow` (stream) | `{ agentId, id, attachmentId }` | `snapshot` `{sequence, screen, info}` → `output` `{sequence, data}` / `state` `{info}` |
 | `terminal/write` | `{ agentId, id, attachmentId, data }` | void (raw UTF-8 input, including control characters) |
 | `terminal/resize` | `{ agentId, id, attachmentId, cols, rows }` | void |
@@ -1146,15 +1361,109 @@ not use this namespace** — it is recorded for completeness.
 - `WebTerminalInfo = { id, title, shell, cwd, cols, rows, state:
   'running'|'exited'|'failed', exitCode: number|null, error?, controllerId? }`.
 - `agentId` is the ordinary Agent lookup parameter (a cold session resolves
-  through the Gateway); `sessionId` on `list` is the displayed Session identity
-  and never activates. Every attachment begins with a complete bounded screen
-  (`snapshot`) before ordered output.
+  through the Gateway); `sessionId` on `list`/`retain` is the displayed Session
+  identity and never activates. Every attachment begins with a complete bounded
+  screen (`snapshot`) before ordered output.
+- **0.1.7 semantics change**: terminals are no longer confined by the Session's
+  sandbox mode and no longer consult `sandboxPolicy` — they are **Session-owned
+  user terminals running with the execution environment's own system-user
+  permissions**, and `environment.cwd` is the session header's `cwd` (falling back
+  to the sandbox workspace root) rather than the resolved sandbox workspace root.
+  The 0.1.6 internal guard that made a `sandbox/mode` change fail while the
+  Session owned terminals is removed with the confinement. An idle unattended
+  terminal is still reclaimed after `unattendedTimeoutMs` (default 2 h) without
+  window holds; `terminal/retain` is the hold that keeps a window's terminal
+  alive without showing its screen.
 - Error codes: `terminal/limit-reached` (`{ limit }`, from `create` when the
-  per-Session quota is full) and `terminal/control-unavailable`
+  per-Session quota is full), `terminal/control-unavailable`
   (`{ reason: 'read-only'|'not-running' }`, when write/resize is refused without
-  invalidating the attachment); invalid identities/limits fold into
-  `gateway/*`. Changing a Session's `sandbox/mode` while it owns terminals makes
-  the host reject that change.
+  invalidating the attachment) and — **new in 0.1.7** — `terminal/unavailable`
+  (`{}`, when the identity is missing or has begun process cleanup, including a
+  `follow`/`retain` for a closed terminal); invalid identities/limits fold into
+  `gateway/*`.
+
+### 4.21 job.* (new in 0.1.7: background-job roster and output)
+
+`packages/api/job-controller`, namespace `job`. This is the replacement for the
+`session/control` `jobs` record and `jobs` frames that 0.1.6 carried (§0.4), so it
+is the **only** background-job surface at 0.1.7. dsh-emacs has no
+background-task UI and does not call it.
+
+| Endpoint | args | value |
+|---|---|---|
+| `job/list` (stream) | `{ request: { sessionId } }` | whole-set frames `{type:'rows', jobs: JobView[]}`: one on open, then one after each coalesced lifecycle burst |
+| `job/follow` (stream) | `{ request: { sessionId?, jobId, from? } }` | `opened {job, from}` → coalesced `output {chunks, next, lossy?}` → terminal `status {job}` |
+| `job/kill` | `{ request: { sessionId, jobId } }` | `{ outcome: 'requested' \| 'already-finished' }` |
+
+- The visible set is the addressed session's own jobs plus every unowned job.
+  `sessionId` is a fenced read (`kill` and `follow` reject a job that session
+  cannot see); `job/follow` may omit it for an unowned job, which any caller may
+  observe.
+- `job/list` has no natural end — the carrier closes it. `job/follow` closes
+  normally after the terminal `status`, once the retained ring is drained. Job
+  output reads are non-consuming: the model-facing cursor and notice state never
+  observe them.
+- `from` / `next` are absolute byte offsets into the job's retained output ring;
+  `lossy: true` on an `output` frame means the bytes between the requested offset
+  and the delivered chunks were already evicted.
+- `JobView` / `JobChunk` are the projection and chunk types from
+  `@deepseek-ai/dsh-jobs/view` (`opened`/`status` carry the job projection,
+  including its `output.earliest` / `output.total`).
+- Error: `job/not-found` (`{ sessionId, jobId }`) from `kill` when the session's
+  list no longer carries a killable row — an unknown job and another session's
+  job get the same code. `kill` records `cancelled by the user` as the reason, so
+  the owning agent still receives the completion notice.
+
+### 4.22 account.* (new in 0.1.7: Platform account)
+
+`packages/api/account-controller`, namespace `account`. Mounted only when the
+deployment composes the `deepseekAccount` provider; **no credential payload ever
+crosses it** (that is the separate `credentials` namespace, §4.8).
+
+| Endpoint | args | value |
+|---|---|---|
+| `account/getState` | `{}` | `AccountView` |
+| `account/getProfile` | `{}` | `AccountDetails['profile'] \| null` |
+| `account/getBalance` | `{}` | `AccountDetails['balance'] \| null` |
+| `account/startSignIn` | `{ locale, callbackOrigin, loginSource: 'web'\|'desktop' }` | `AccountView` |
+| `account/cancelSignIn` | `{ attemptId }` | `AccountView` |
+| `account/signOut` | `{}` | `AccountView` |
+| `account/watch` (stream) | `{}` | initial `AccountView` snapshot, then changes |
+
+- `AccountView = { status: 'signed-out'|'credential-stored', links: { usageUrl,
+  topUpUrl }, attempt: SignInAttemptView | null }`; `credential-stored` is not a
+  claim that the server validated the token.
+- `SignInAttemptView = { id, phase: 'initializing'|'waiting-browser'|'exchanging'|
+  'committing'|'succeeded'|'cancelled'|'expired'|'failed', authorizeUrl?,
+  expiresAt?, errorCode? }` with `errorCode` ∈
+  `network`|`protocol`|`expired`|`storage`; `attemptId` is that attempt's `id`.
+- `AccountDetails` settles `profile` and `balance` independently, each
+  `{status:'ready', value}` or `{status:'failed'}`; `getProfile`/`getBalance`
+  return `null` when the account grant is absent or changed. Wallet balances are
+  decimal strings (`{currency: 'CNY'|'USD', balance}`).
+- `signOut` removes the local grant and revokes it through Platform in the
+  background, without deleting API keys.
+
+### 4.23 pluginManager.* / pluginRegistryProbe.* / officeToPdf.* (new in 0.1.7)
+
+Three more namespaces join the client wiring at 0.1.7; **dsh-emacs uses none of
+them**.
+
+- `pluginManager` (`packages/boot/plugin-manager`) — persistent current-profile
+  management: `listVersionExemptions`, `setVersionExemption`, `listPlugins`,
+  `listBundles`, `registries`, `inspect`, `setPluginEnabled`, `setBundleEnabled`,
+  `installBundle`, `waitForInstall`, `cancelInstall`, `removeBundle`. Mutating
+  verbs return a `ChangeResult`; a bundle install is awaited by
+  `waitForInstall(requestId)` and aborted by `cancelInstall(requestId)`. This is
+  also the producer of the three `plugin-manager/*` host events now forwarded on
+  `$events` (§6.2) and the reason `pluginInventory` can report
+  `managementAvailable` (§4.15).
+- `pluginRegistryProbe` (`packages/client/ui-plugin-manager`) — one unary
+  `pluginRegistryProbe/fastest` → `string | null` (the fastest reachable
+  registry).
+- `officeToPdf` (`packages/document/office-to-pdf`) — `officeToPdf/render`
+  (unary, `(workspaceFileScope, path, priority)`) and `officeToPdf/generation`
+  (stream) for converting Office documents to PDF.
 
 ---
 
@@ -1177,6 +1486,7 @@ unary envelope error and the stream error frame).
 | `gateway/arguments-invalid`, `gateway/input-invalid`, `gateway/result-invalid`, `gateway/signature-invalid` | `{ endpoint, field? }` |
 | `gateway/binding-invalid`, `gateway/service-unavailable`, `gateway/method-unavailable`, `gateway/definition-unavailable`, `gateway/invocation-unavailable` | `{ endpoint, field? }` |
 | `gateway/ambiguous-endpoint`, `gateway/context-not-found`, `gateway/context-unavailable`, `gateway/context-failed`, `gateway/lookup-not-found`, `gateway/lookup-unavailable`, `gateway/lookup-failed`, `gateway/provider-mismatch` | `{ endpoint, field? }` |
+| `gateway/protocol`, `gateway/uplink-overflow` | `{ endpoint, field? }` — both **new in 0.1.7**: a carrier/protocol-level mismatch on a duplex stream, and an uplink producer that outran the bounded client→host queue |
 | `gateway/internal` | `{}` (catch-all) |
 
 > The lookup policy (session-controller) resolves an ordinary identity as: reuse
@@ -1192,6 +1502,8 @@ unary envelope error and the stream error frame).
 | `session/not-found` | `{ sessionId }` | every layer resolving sessionId (ordinary session missing; cancel with no live Agent) |
 | `session/conflict` | `{ sessionId, requestedCwd, existingCwd? }` | create with an explicit id that exists and a different cwd |
 | `agent-preset/conflict` | `{ sessionId, requestedPreset, existingPreset? }` | create with an explicit id that exists and a different preset |
+| `session/projections-unavailable` | `{}` | **new in 0.1.7**: `session/projections` on a Session whose projection registry is unavailable |
+| `session/writer-held` | `{ sessionId }` | **new in 0.1.7**: another writer holds the Session, so the command cannot proceed |
 | `session/agent-busy` | `{ reason }` | a subagent session addressed through an ordinary path (including list/search/prompt/cancel/updateQueue/selectModel/rename); other prompt admission failure |
 | `session/model-unavailable` | `{ provider, model }` | selectModel/prompt routing unavailable |
 | `session/invalid-time-zone` | `{ value }` | clientTimeZone not UTC/IANA |
@@ -1200,7 +1512,7 @@ unary envelope error and the stream error frame).
 | `session/queue-item-not-found` | `{ itemId }` | updateQueue item no longer queued |
 | `session/steer-unavailable` | `{ itemId }` | steer not in next-turn or agent not running |
 | `session/title-invalid` | `{ sessionId }` | empty after rename normalization |
-| `session/fork-unavailable` | `{ sessionId }` | no completed turn / no turn/end at or above atSeq |
+| `session/fork-unavailable` | `{ sessionId }` | the exact `atSeq` does not exist in the log, or no completed turn exists when `atSeq` is omitted (**0.1.7** semantics, §4.1) |
 | `subagent/not-found` | `{ parentSessionId, childSessionId }` | subagent unavailable |
 | `subagent/catalog-diagnostic` | `{ parentSessionId, childSessionId, reason: 'corrupt'\|'unsupported'\|'unavailable' }` | subagent identity projection corrupt/unsupported |
 | `subagent/unauthorized` | `{ childSessionId }` | address does not match parent/mode |
@@ -1216,13 +1528,14 @@ unary envelope error and the stream error frame).
 | `workspace/invalid-path` | `{ path }` (create target is not an existing directory) |
 | `workspace/name-conflict` | `{ name }` |
 | `workspace/move-invalid` | `{ workspaceId, sessionId, beforeSessionId? }` |
+| `workspace/session-active` | `{ sessionId, activity: SessionActivity[] }` (**new in 0.1.7**: `archiveSession` refused without a write because the Session still has running work — its turn, a subagent descendant, an owned background job or an active schedule; pass `stopActivity: true` to stop them first) |
 | `directory-picker/unavailable` | `{ capability }` |
 | `directory-picker/unreadable` | `{ path }` |
 | `directory-picker/exists` | `{ path }` |
 | `directory-picker/create-failed` | `{ path }` |
 | `agent-preset/not-found` | `{ agentPreset, available: string[] }` |
 | `agent-preset/invalid` | `{ agentPreset, reason }` |
-| `agent-preset/read-only` | `{ agentPreset, reason }` (system trust / no user root) |
+| `agent-preset/read-only` | `{ agentPreset, reason }` (system trust / no user root). **Unreachable at 0.1.7**: its only throwers were `agentPresets/copy` and `deletePreset`, both deleted (§4.6) |
 | `agent-preset/locked` | `{ sessionId, agentPreset }` (session already has turns) |
 | `llm/model-discovery-rejected` | `{ settingsNs, baseURL? }` |
 | `settings/rejected` | `{ ns }` (schema/storage rejection) |
@@ -1236,6 +1549,9 @@ unary envelope error and the stream error frame).
 | `workspace-file/not-directory` | `{ path, kind: 'file'\|'symlink'\|'other' }` |
 | `terminal/limit-reached` | `{ limit }` (per-Session terminal quota; new in 0.1.6) |
 | `terminal/control-unavailable` | `{ reason: 'read-only'\|'not-running' }` (write/resize refused; new in 0.1.6) |
+| `terminal/unavailable` | `{}` (identity missing or already cleaning up; **new in 0.1.7**, §4.20) |
+| `job/not-found` | `{ sessionId, jobId }` (the session's job list no longer carries a killable row; **new in 0.1.7**, §4.21) |
+| `workspace-file/watch-unsupported` | `{ path }` (the filesystem provider cannot watch that target; **new in 0.1.7**, §4.16) |
 
 > Note that a messageFeedback/* business failure is a **`{ok:false,error}` in the
 > return value** (§4.12), not an envelope error; its internal codes are the legacy
@@ -1247,26 +1563,41 @@ unary envelope error and the stream error frame).
 
 ### 6.1 session.control Frames (host-wide live control plane)
 
+**0.1.7 shape:**
 ```
 baseline   { type:'baseline', value: {
-              queues:      Record<sessionId, SessionQueuedItem[]>,
-              jobs:        Record<sessionId, SessionJob[]>,
               projections: Record<sessionId, SessionProjectionBaseline> } }
-queue      { type:'queue', sessionId, items: SessionQueuedItem[] }        // full agent inbox after splice
-jobs       { type:'jobs',  sessionId, jobs: SessionJob[] }                 // pushed on change; empty pushes []
-projection { type:'projection', sessionId, key, value, seq }               // per-cell watermark; higher-seq-wins
+projection { type:'projection', sessionId, key, value, seq }   // per-cell watermark; higher-seq-wins
 ```
 - Each generation (each open/reconnect) first sends one baseline, then delta
   frames. The client treats the baseline as a snapshot (truncate by `asOfSeq`
   before seeding), then applies deltas.
-- `SessionQueuedItem = { id: MessageId, placement: 'queued'|'steering'|'context',
-  rpcId?: SessionRequestId, message: { id, content: JsonValue[] } }` (see §8); in
-  the baseline a next-turn item → `queued`, a next-step item with a user source →
-  `steering`, any other next-step → `context`. `rpcId` appears only on user-source
-  messages that carry it.
-- `SessionJob = { id, kind, label, status: 'running'|'stopping'|'completed'|
-  'killed'|'failed', detail?, startedAt, finishedAt? }` (the full list is pushed
-  on change).
+- **0.1.7 deleted the baseline's `queues` and `jobs` members and the `queue` /
+  `jobs` delta frames.** Both states are still observable, just elsewhere: the
+  queue is the **`inbox` projection cell** delivered through the very same
+  `projection` frames (and the baseline's `projections` record), and background
+  jobs are the `job` namespace (§4.21).
+- **Deriving queue items from `inbox`** (what the host used to do for
+  `SessionQueuedItem`, now the client's job): the cell value is
+  `{ 'next-turn': UserMessage[], 'next-step': UserMessage[] }` where each
+  `UserMessage` is JSON-safe (`{ id, content: ContentBlock[], source: { kind,
+  rpcId?, … } }`, §9). Map `next-turn` → placement `queued`; a `next-step` entry
+  whose `source.kind` is `user` → `steering`; any other `next-step` entry →
+  `context`. An item's text is its `text` content blocks concatenated; a
+  prompt-RPC identity is `message.source.rpcId` on a user-source message. An item
+  leaves the cell once it becomes a persistent user message (so the mirror
+  retires exactly as before). The `inbox` projection has existed unchanged since
+  before 0.1.5, so this read works against 0.1.5/0.1.6 servers too.
+- **0.1.6 shape (superseded)**: the baseline carried
+  `{ queues, jobs, projections }` and deltas were
+  `queue {sessionId, items}` (the full agent inbox after a splice — the
+  authoritative snapshot), `jobs {sessionId, jobs}` (whole list pushed on change,
+  empty pushed `[]`) and `projection`. `SessionQueuedItem = { id, placement:
+  'queued'|'steering'|'context', rpcId?, message: { id, content } }` and
+  `SessionJob = { id, kind, label, status: 'running'|'stopping'|'completed'|
+  'killed'|'failed', detail?, startedAt, finishedAt? }`; both are gone from the
+  wire at 0.1.7. `Session/list`'s `agentAvailable` is the one surviving
+  list-level hint about live agents (§4.1).
 
 ### 6.2 Host Events (`$events` stream emit-frame allowlist)
 
@@ -1277,7 +1608,7 @@ names pass through, arguments as-is):
 |---|---|---|
 | `agent-preset/selected` | `(sessionId, agentPreset)` | session preset change recorded |
 | `approval/request` | waterfall | approval request (§3.3) |
-| `api-session/added` | `(summary: SessionSummary)` | new session visible (= session/created) |
+| `api-session/added` | `(summary: SessionSummary)` | a session became visible, **or its Agent was created/disposed** (0.1.7 re-emits the current row so a consumer replaces its `running`/`agentAvailable` state) |
 | `api-session/activity` | `(sessionId, updatedAt)` | a user message advances list ordering |
 | `api-session/error` | `(sessionId, message)` | Agent failed outside a turn |
 | `api-session/removed` | `(sessionId)` | session left the host registry |
@@ -1288,19 +1619,23 @@ names pass through, arguments as-is):
 | `llm/adapters-updated` | `()` | adapter registration change |
 | `goal/activation-changed` | `(payload: GoalActivationChanged)` = `{sessionId, goal?: {id, revision, activation: 'armed'\|'disarmed'}}` (`goal` omitted after clear) | in-process goal continuation eligibility change; new in 0.1.5 |
 | `permission-presets/catalog-changed` | `()` | the selectable permission catalog changed; payload-free, re-read `permissionPresets/catalog` (§4.19); new in 0.1.6 |
+| `plugin-manager/changed`, `plugin-manager/install-log`, `plugin-manager/install-state` | plugin manager | current-profile bundle/plugin mutation progress; **new in 0.1.7** (§4.23) |
 | `settings/document-updated` | `(ns, revision)` | settings document change |
 | `user-questions/request` | waterfall | question request (§3.3) |
 
 Count check: `API_REMOTE_FORWARDED_EVENTS` in
-`packages/api/remotes/src/remote-events.ts` has **20 entries** = 18 emit + 2
+`packages/api/remotes/src/remote-events.ts` has **23 entries** = 21 emit + 2
 waterfall (`approval/request`, `user-questions/request`); the table above is the
-complete set, and not one extra event is forwarded.
+complete set, and not one extra event is forwarded. (0.1.6 had 20 = 18 + 2; the
+three `plugin-manager/*` emits are the 0.1.7 additions.)
 
-> Suggested dsh-emacs subscription strategy: `session/control` (baseline + deltas)
-> provides the three things — queue/jobs/projections; `$events` emit frames
-> provide session-level add/remove/change plus command/credential/settings change
-> notifications. Session **content** events come only from `session/follow` (§7)
-> and never via emit.
+> Suggested dsh-emacs subscription strategy: `session/control` (baseline +
+> `projection` deltas) provides the projections — including `inbox`, which *is*
+> the queue since 0.1.7 — while `$events` emit frames provide session-level
+> add/remove/change plus command/credential/settings change notifications.
+> Background jobs, which 0.1.6 published on `session/control`, are the `job`
+> namespace's streams at 0.1.7 (§4.21). Session **content** events come only from
+> `session/follow` (§7) and never via emit.
 
 ---
 
@@ -1314,8 +1649,9 @@ The event envelope used for persistence/transport (the wire shape
 
 - `seq` is monotonically contiguous (within a session); `time` is epoch
   milliseconds; `data` is a JSON value.
-- `surfaceOp` (V3) appears only on the **four kinds** of surface events
-  (`system/message`, `user/message`, `assistant/message`, `tool/result`):
+- `surfaceOp` (V3) appears only on the **surface event kinds**
+  (`system/message`, `developer/message`, `user/message`, `assistant/message`,
+  `tool/result` — `developer/message` joins the set at 0.1.7):
   `'append'` or `{op:'replace', startSeq, endSeq}` (used for compaction
   shadowing, and the event carries `sourceEventSeqs` covering the shadowed
   nodes). The `start`/`end` field names written in the 0.1.2 document are
@@ -1324,11 +1660,15 @@ The event envelope used for persistence/transport (the wire shape
   must-know — on encountering an unknown type it must refuse to reconstruct.
   **Since 0.1.5 this is a hard constraint**: the persistent read path decides by
   `KNOWN_SESSION_EVENT_TYPES` in
-  `packages/core/session/src/known-event-types.ts` (56 at 0.1.5, **57 at 0.1.6**
-  with the added `image/offload`; 0.1.6 also adds the companion
+  `packages/core/session/src/known-event-types.ts` (56 at 0.1.5, 57 at 0.1.6 with
+  the added `image/offload`, **59 at 0.1.7** with `developer/message` and
+  `workspace/changes`; 0.1.6 also adds the companion
   `MESSAGE_PROJECTION_EVENT_TYPES = { image/offload }` — an event in that set
   requires its owning pure interpreter, or the host refuses the read); an event
   outside the set without `ignorable` makes it refuse to interpret the whole log.
+- **Session format version 4 (0.1.7)**: `SESSION_FORMAT_VERSION` moved from 3 to
+  4. The V4 additions are the `developer/message` event and the `forked` turn-end
+  reason (§7.2); the envelope itself is unchanged, and a V3 log still reads.
 - **Record packing removed (0.1.5)**: `SessionHistoryRecord` has only one kind,
   `{type:'event', event}` (`SessionEventEntry`). The 0.1.2 `{type:'chunks', event}`
   (`chunkrow/text-chunks` runs) and the persistent `assistant/chunk` event have
@@ -1358,7 +1698,7 @@ The event envelope used for persistence/transport (the wire shape
   "delegationDepth":0,"agentPreset":"standard"}`; all `records` are
   `{type:'event'}` (observed: `assistant/message`, `tool/call`, `tool/result`,
   `step/start|end`, `turn/end`, `session/end-seed`), with no `chunks` records and
-  no `assistant/chunk`.
+  no `assistant/chunk`. A 0.1.7 host emits `"version":4` for the same shape.
 
 ### 7.2 Core Events (`packages/core/session` + agent-loop etc.)
 
@@ -1369,6 +1709,7 @@ The event envelope used for persistence/transport (the wire shape
 | `step/start` | `{ turn, step }` | opens a step (one model call + tool execution) |
 | `step/end` | `{ turn, step }` | closes a step |
 | `user/message` | `UserMessage` | user-surface message; `source.kind` distinguishes human/rpc/plugin/goal… |
+| `developer/message` | `{ turn, step, message: DeveloperMessage, headerSeq? }` | **new in V4/0.1.7**: an incremental agent-session change (tool additions/removals) admitted at that turn/step; `headerSeq` names the earlier `request/header` defining every tool addition and is required exactly when additions are present. A surface event (carries `surfaceOp`) |
 | `system/message` | `{ turn, step, message: SystemMessage }` | **new in V3**: the rendered system prompt = surface node 0; when the prompt changes, replace the nearest system node or (in-history route) append a new node |
 | `assistant/message` | `{ turn, step, message, stream: AssistantStreamRecord[], usage?, interrupted?: true }` | assembled assistant message; `stream` is the exact stream record of that attempt; usage hangs off this event too |
 | `assistant/attempt` | `{ turn, step, stream: AssistantStreamRecord[] }` | **new in V3**: a failed/retried/cancelled attempt that committed no surface message |
@@ -1380,7 +1721,9 @@ The event envelope used for persistence/transport (the wire shape
 
 `turn/end.reason`: `{kind:'completed'}`, `{kind:'aborted', reason}`,
 `{kind:'blocked'}`, `{kind:'error', error}`, `{kind:'max-tokens'}`,
-`{kind:'interrupted'}`. The aborted `reason` (AgentCancelCause):
+`{kind:'interrupted'}`, and — **new in 0.1.7** — `{kind:'forked'}` (the synthetic
+closer a fork seed writes for a turn left open at the cut; the loop never emits
+it, §4.1). The aborted `reason` (AgentCancelCause):
 `{kind:'user'|'parent'|'disposed'} | {kind:'hook', reason} | {kind:'legacy'}`.
 With `kind:'error'`, `error` may additionally carry `offloadImages?: number`
 (0.1.6, image-offload accounting) — an optional field a renderer can ignore.
@@ -1398,7 +1741,8 @@ additions on existing events; the only new event type is `image/offload`
 | type | data summary | Source package |
 |---|---|---|
 | `model/selection` | `{provider, model, reasoningEffort?}` | dsh-api-session-controller |
-| `agent-preset/selected` | `{agentPreset}` | dsh-agent-presets |
+| `agent-preset/selected` | `{agentPreset}` | dsh-agent-preset-registry |
+| `workspace/changes` | `{ turn }` — the Session recorded workspace file changes during that turn; **new in V4/0.1.7** | dsh-workspace-changes |
 | `goal/change` | `{kind:'goal/change', version:1, operation: 'create'\|'edit'\|'pause'\|'resume'\|'complete'\|'block', goal, roundsStarted, createdAt, updatedAt}` or the clear tombstone `{operation:'clear', cleared, clearedAt}` | dsh-goal |
 | `todo/write` | `{ todos: TodoItem[] }` (whole table last-wins); `TodoItem={content, status:'pending'\|'in_progress'\|'completed'}` | dsh-tool-todo |
 | `plan/mode` | `{active: boolean}` | dsh-plan-mode |
@@ -1453,8 +1797,10 @@ system prompt is rendered (most clients just skip it). A `replace` surfaceOp on
 `assistant/message`/`tool/result`/`system/message` means compaction shadowing — the
 rendering layer must replace old nodes per `sourceEventSeqs` rather than append.
 State such as title and goal/todo is taken from projection keys
-(`title`/`goal`/`todos`/`plan`/…, §9) rather than directly from events. Queue/job
-state comes from `session/control` (§6.1), approvals/questions from the `$events`
+(`title`/`goal`/`todos`/`plan`/…, §9) rather than directly from events. **At
+0.1.7 the queue is the `inbox` projection cell** and background jobs are the
+`job` namespace, both off `session/control` (§6.1, §4.21);
+approvals/questions come from the `$events`
 waterfall (§3.3), and delivered files from `deliverables/presented` (§10.3).
 
 **The coverage dsh-emacs added (`dsh-emacs-render-event` dispatch)**: events
@@ -1489,6 +1835,16 @@ an offloaded image is shown, the client still renders the block from its
 `attachment` ref (the attachment bytes remain durable); image offload changes
 what the *model* sees, not what the transcript holds.
 
+**0.1.7 additions and the dispatcher**: the two new durable events
+(`developer/message`, `workspace/changes`) likewise have no renderer and fall
+through `dsh-emacs-render-event`'s `_ → nil` default; neither is part of the
+conversation surface a transcript needs. `turn/end` with
+`reason.kind === 'forked'` reaches the client only in a fork child's seed prefix,
+where the client already renders seed history without special-casing the closer
+(the turn simply shows as ended). The breaking part of 0.1.7 is **not** in the
+event vocabulary: it is the `session/control` queue source (§0.4, §6.1), which
+the client has since migrated to the `inbox` projection (postmortem/064).
+
 ---
 
 ## 8. queue / steer Semantics (transient inbox + control plane)
@@ -1497,20 +1853,27 @@ what the *model* sees, not what the transcript holds.
   next turn (becoming the only message of its own turn).
 - **steer**: `mode:'steer'` → `agent.steer()`, inserted into the next step of the
   current turn ("interjection"); in an idle driver steer degrades to a new turn.
-- The **authoritative snapshot** is in `session.control`: the baseline's `queues`
-  and the `queue` frames. `placement`: `queued` (next turn, pending send; rendered
-  in the outgoing area), `steering` (already inserted into the current turn; a
-  pending bubble at the tail of the conversation), `context` (injected context such
-  as an approval; invisible until claimed). Once an item becomes a persistent user
-  message it retires from the queue mirror.
+- The **authoritative snapshot** is the `inbox` Session projection: the control
+  baseline's `projections[<sessionId>].values.inbox` and every later
+  `session/control` `projection` frame with `key === "inbox"` (through 0.1.6 it
+  was the control baseline's `queues` record plus `queue` frames, now deleted —
+  §6.1). `placement` is derived from which inbox list the message sits in:
+  `queued` (next turn, pending send; rendered in the outgoing area), `steering`
+  (next-step user input, already inserted into the current turn; a pending bubble
+  at the tail of the conversation), `context` (injected next-step content such as
+  an approval; invisible until claimed). Once an item becomes a persistent user
+  message it retires from the projection, and therefore from the mirror.
 - **`session.updateQueue`**: does `edit` (text only) / `remove` / `steer` on a
   pending item.
   - `steer` takes effect only for a next-turn item while the agent is `running`;
     otherwise `steer-unavailable`.
   - Already claimed → `queue-item-not-found` (an all-queue interjection with an
     empty draft via Cmd+Enter may hit an already-claimed item; silently skip it).
+  - **0.1.7**: the verb resumes a cold Agent first instead of failing without a
+    live one (§4.1).
 - **Request receipt reconciliation**: `session.prompt`'s `requestId` appears on the
-  queue item's `rpcId` and on the final user message source (`user-rpc`); the
+  queue item's `rpcId` — `message.source.rpcId` inside the `inbox` projection —
+  and on the final user message source (`user-rpc`); the
   client uses that to replace the optimistic echo with the persistent message.
 - Web interaction comparison: while the agent is busy, plain Enter = queue,
   `Cmd/Ctrl+Enter` = steer; an empty draft with `Cmd/Ctrl+Enter` = interject all.
@@ -1536,12 +1899,14 @@ follow opening snapshot (aligned by `asOfSeq`) and the control baseline's
 before seeding); `projections.values` on a `session.list` row is a partial cache
 hint over the same key space.
 
-Client-visible keys (18; present when mounted) and value shapes (0.1.5 adds
-`subagentCatalog`; 0.1.6 narrows `permissions`; the table's `subagent` /
+Client-visible keys (18 at 0.1.6; present when mounted) and value shapes (0.1.5
+adds `subagentCatalog`; 0.1.6 narrows `permissions`; 0.1.7 promotes `inbox` from
+a host-internal cell to the client's queue source; the table's `subagent` /
 `subagentTiming` / `subagentCatalog` all come from the subagent package):
 
 | key | value shape |
 |---|---|
+| `inbox` | `{ 'next-turn': UserMessage[], 'next-step': UserMessage[] }` — the pending agent input, **the queue snapshot since 0.1.7** (§6.1, §8). Each `UserMessage` is JSON-safe (`{id, content: ContentBlock[], source: {kind, rpcId?, …}}`); `next-turn` → `queued`, user-source `next-step` → `steering`, other `next-step` → `context`. The cell existed through 0.1.5/0.1.6 as well, but those hosts also republished it as `session/control` queue frames, which 0.1.7 deleted |
 | `title` | `string \| null` (latest `session/title` text, last-wins) |
 | `turnOutline` | `{ turn, seq, prompt, response }[]` (one per completed turn, including a boundary preview) |
 | `sessionStats` | `{ turns, steps, llmMs, toolMs, ttftMs, ttftSteps, decodeMs, decodeTokens }` |
@@ -1584,8 +1949,10 @@ used for host-side folding and do not appear in wire frames.
 
 `stateVersion` is a host-side fold version, not a wire field: 0.1.6 raised
 `contextPressure` and `contextBreakdown` from 4 to 5 (image-offload accounting in
-the fold) without changing either value shape, and a client that sees a cache
-cell from an older version simply re-reads it.
+the fold) without changing either value shape; **0.1.7** raised `subagent` and
+`subagentCatalog` from 2 to 3 and `agentTeam` from 3 to 4 (again with unchanged
+wire view shapes). A client that sees a cache cell from an older version simply
+re-reads it.
 
 > The 0.1.1-rc.2 mux projection frame (`session/projection`) was replaced in 0.1.2
 > by the `projection` delta frames of `session.control`; projection sources =
