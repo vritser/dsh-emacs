@@ -34,14 +34,14 @@
 ;;                                    └─ dsh-protocol-effort (id name
 ;;                                         description)
 ;;   agentPresets/list → dsh-protocol-agent-preset-list (presets
-;;                       authorable has-document)
-;;                        └─ dsh-protocol-agent-preset (id trust
-;;                             is-default name description broken)
+;;                       mode-selection-enabled)
+;;                        └─ dsh-protocol-agent-preset (id is-default name
+;;                             description broken)
 ;;   commands.list    → dsh-protocol-command (name description input)
 ;;                        └─ dsh-protocol-command-input (hint attachments)
 ;;   commands.execute → dsh-protocol-command-execution (command-id
 ;;                        result kind text)
-;;   session/queue    → dsh-protocol-queue-item (id placement text kind)
+;;   inbox projection → dsh-protocol-queue-item (id placement text kind)
 ;;   permissionPresets/catalog → dsh-protocol-permission-catalog (options)
 ;;                        └─ dsh-protocol-permission-option (value name
 ;;                             description)
@@ -370,15 +370,15 @@ selection, GROUPS by provider and unknown FAILURES.  The wire's
                              (alist
                               &aux
                               (id (cdr (assq 'id alist)))
-                              (trust (cdr (assq 'trust alist)))
                               (is-default (dsh-protocol--boolean
                                            (cdr (assq 'isDefault alist))))
                               (name (cdr (assq 'name alist)))
                               (description (cdr (assq 'description alist)))
                               (broken (cdr (assq 'broken alist))))))
-  "One `agentPresets/list' entry."
+  "One `agentPresets/list' entry.
+There is no `trust' field: dsh 0.1.7 dropped it, so a client keys any
+built-in label on ID alone (`dsh-emacs--preset-display-name')."
   id
-  trust
   is-default
   name
   description
@@ -391,15 +391,14 @@ selection, GROUPS by provider and unknown FAILURES.  The wire's
                               (presets (mapcar #'dsh-protocol-agent-preset--from-alist
                                                (dsh-protocol--list
                                                 (cdr (assq 'presets alist)))))
-                              (authorable (dsh-protocol--boolean
-                                           (cdr (assq 'authorable alist))))
-                              (has-document (dsh-protocol--boolean
-                                             (cdr (assq 'hasDocument alist)))))))
-  "The `agentPresets/list' response value: the PRESETS roster plus the
-AUTHORABLE / HAS-DOCUMENT flags the management UI needs."
+                              (mode-selection-enabled
+                               (dsh-protocol--boolean
+                                (cdr (assq 'modeSelectionEnabled alist)))))))
+  "The `agentPresets/list' response value: the PRESETS roster plus whether
+visible mode selection governs unnamed new sessions.  The 0.1.6 `authorable'
+and never-sent `hasDocument' flags are gone."
   presets
-  authorable
-  has-document)
+  mode-selection-enabled)
 
 ;; Convenience entry that normalizes a wire alist into a struct: an
 ;; already-converted struct is returned as-is.  This lets business functions
@@ -537,40 +536,36 @@ in contribution order.  The derived `custom' state is not an option."
   multi-select)
 
 ;; ---------------------------------------------------------------------------
-;; session/queue mux frame items
+;; inbox projection items (the pending-input queue since dsh 0.1.7)
 ;; ---------------------------------------------------------------------------
 
-;; The `session/queue' frame VALUE is `{items: [...]}' — one placement-tagged
-;; inbox entry per item.  Items map through
-;; `dsh-protocol-queue-item--from-alist' directly.
+;; The `inbox' session projection VALUE is
+;; `{"next-turn": [...], "next-step": [...]}' where each entry is a JSON-safe
+;; `UserMessage' alist (`{id, content, source}').  dsh 0.1.7 deleted the
+;; `session/control' queue frames that used to carry the same state, so the
+;; client derives the mirror from this projection; the projection itself has
+;; been published unchanged since before 0.1.5.
 
 (cl-defstruct (dsh-protocol-queue-item
-               (:constructor dsh-protocol-queue-item--from-alist
-                             (alist
+               (:constructor dsh-protocol-queue-item--from-message
+                             (message placement
                               &aux
-                              (id (or (cdr (assq 'id alist))
-                                      (let ((m (cdr (assq 'message alist))))
-                                        (and m (cdr (assq 'id m))))))
-                              (placement
-                               (let ((p (cdr (assq 'placement alist))))
-                                 (and (stringp p) (intern p))))
+                              (id (cdr (assq 'id message)))
                               (text
-                               (let ((m (cdr (assq 'message alist))))
-                                 (mapconcat
-                                  (lambda (block)
-                                    (or (and (equal (cdr (assq 'type block))
-                                                    "text")
-                                             (cdr (assq 'text block)))
-                                        ""))
-                                  (dsh-protocol--list
-                                   (and m (cdr (assq 'content m))))
-                                  "")))
+                               (mapconcat
+                                (lambda (block)
+                                  (or (and (equal (cdr (assq 'type block))
+                                                  "text")
+                                           (cdr (assq 'text block)))
+                                      ""))
+                                (dsh-protocol--list
+                                 (cdr (assq 'content message)))
+                                ""))
                               (kind
-                               (let* ((m (cdr (assq 'message alist)))
-                                      (s (and m (cdr (assq 'source m)))))
+                               (let ((s (cdr (assq 'source message))))
                                  (and s (cdr (assq 'kind s))))))))
-  "One `session/queue' frame item: PLACEMENT is `queued' (next turn),
-`steering' (next step) or `context' (host-injected next-step content);
+  "One pending-inbox item: PLACEMENT is `queued' (next turn), `steering'
+(next-step user input) or `context' (host-injected next-step content);
 TEXT the message's text blocks concatenated, KIND the message's source
 kind (`user' for real user input)."
   id
@@ -578,11 +573,27 @@ kind (`user' for real user input)."
   text
   kind)
 
-(defun dsh-protocol-queue-items-from-alist (value)
-  "Normalize a `session/queue' frame VALUE's items into structs."
-  (mapcar #'dsh-protocol-queue-item--from-alist
-          (dsh-protocol--list (and (listp value)
-                                   (cdr (assq 'items value))))))
+(defun dsh-protocol-queue-items-from-inbox (value)
+  "Normalize an `inbox' projection VALUE into queue item structs.
+VALUE is `((next-turn . [...]) (next-step . [...]))' with one JSON-safe
+`UserMessage' alist per entry.  `next-turn' entries become `queued'
+items; a `next-step' entry with a `user' source becomes `steering', any
+other `context' — the same placement the host applied before 0.1.7, and
+in the same next-turn-then-next-step order."
+  (append
+   (mapcar (lambda (message)
+             (dsh-protocol-queue-item--from-message message 'queued))
+           (dsh-protocol--list (and (listp value)
+                                    (cdr (assq 'next-turn value)))))
+   (mapcar (lambda (message)
+             (dsh-protocol-queue-item--from-message
+              message
+              (let ((source (cdr (assq 'source message))))
+                (if (equal "user" (and source (cdr (assq 'kind source))))
+                    'steering
+                  'context))))
+           (dsh-protocol--list (and (listp value)
+                                    (cdr (assq 'next-step value)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; @ reference candidates (typert remotes used by dsh-emacs-reference.el)

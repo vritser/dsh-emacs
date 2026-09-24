@@ -1118,16 +1118,16 @@ mapping so the Emacs choices read the same as the web's.")
 
 (defun dsh-emacs--preset-display-name (preset)
   "Web-consistent display name of roster row PRESET.
-Mirrors the web's `presetDisplayText': a system preset among the shipped
-built-ins shows its web name (\"Standard mode\" …); anything else shows
-its published `name', falling back to the id.  PRESET is a
-`dsh-protocol-agent-preset' struct or wire alist."
+Mirrors the web's `presetDisplayText': a shipped built-in id shows its web
+name (\"Standard mode\" …); anything else shows its published `name',
+falling back to the id.  PRESET is a `dsh-protocol-agent-preset' struct or
+wire alist.  dsh 0.1.7 dropped the roster row's `trust' field, so the map
+keys on the id alone — which is exactly what the web does."
   (let* ((p (dsh-protocol--struct #'dsh-protocol-agent-preset-p
                                   #'dsh-protocol-agent-preset--from-alist
                                   preset))
          (id (dsh-protocol-agent-preset-id p)))
-    (or (and (equal "system" (dsh-protocol-agent-preset-trust p))
-             (cdr (assoc id dsh-emacs--preset-display-name-mapping)))
+    (or (cdr (assoc id dsh-emacs--preset-display-name-mapping))
         (dsh-protocol-agent-preset-name p)
         id)))
 
@@ -2582,7 +2582,7 @@ lit), the input is delivered per
 `steer' wakes the running agent, `stop' issues `session/cancel' (the old
 interrupt behavior).  With `queue'/`steer' and an EMPTY input the turn is
 interrupted, so stopping stays one key away.  Success feedback arrives via the
-`session/queue' stream; `\\[dsh-emacs-interrupt-turn]'
+`inbox' projection frame; `\\[dsh-emacs-interrupt-turn]'
 (`C-c C-b') interrupts regardless of the behavior.
 
 Staged clipboard images (`C-c C-v') ride this send: they are consumed at
@@ -2900,7 +2900,7 @@ the mode field.  Unlike `dsh-emacs--submit-plain' this renders NO
 optimistic transcript card and does not touch the spinner: the item is
 not part of the conversation until the host claims it (the durable
 `user/message' event renders then), and the queue/steer feedback rides
-the `session/queue' frame the host pushes on the splice.  IMAGES is the
+the `inbox' projection frame the host pushes on the splice.  IMAGES is the
 same wire-ready attachment list `dsh-emacs--submit-prompt' takes; the
 host admits images by the session's current model at claim time.  Slash
 lines are NOT routed to `commands.execute' here — busy input is queued
@@ -2938,7 +2938,7 @@ against); genuinely parked items keep their feedback."
     ;; already covers (see `dsh-emacs-queue--mark-submit-suppress').
     (when (null (dsh-emacs-queue-items))
       (dsh-emacs-queue--mark-submit-suppress))
-    ;; A queued message is real but its host `session/queue' frame is still a
+    ;; A queued message is real but its host `inbox' projection frame is still a
     ;; round trip away; show it in the Next Message row now so the send does
     ;; not feel sticky.  The host's frame or the failure branch clears it.
     (dsh-emacs-queue--optimistic-submit-show message)
@@ -2946,7 +2946,7 @@ against); genuinely parked items keep their feedback."
                           (lambda (ok value)
                             (if ok
                                 ;; Enqueue/steer feedback arrives via the
-                                ;; `session/queue' frame diff — and the
+                                ;; `inbox' projection frame diff — and the
                                 ;; transcript shows the message when the
                                 ;; host claims it (user/message).  Nothing
                                 ;; to render here; the optimistic Next row is

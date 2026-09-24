@@ -279,9 +279,10 @@ when the server protocol changes you sync exactly one file. Covered payloads:
   `model-catalog-entry` → `reasoning` → `effort`, plus
   `dsh-protocol-model-selection` for `current`
 - `session/selectModel` → `dsh-protocol-model-selection-result` (selected)
-- `agentPresets/list` → `dsh-protocol-agent-preset-list` (presets, authorable,
-  has-document) → `dsh-protocol-agent-preset` (id, trust, is-default, name,
-  description, broken)
+- `agentPresets/list` → `dsh-protocol-agent-preset-list` (presets,
+  mode-selection-enabled) → `dsh-protocol-agent-preset` (id, is-default, name,
+  description, broken) — dsh 0.1.7 dropped the row's `trust` and the roster's
+  `authorable` flag, so the web-consistent built-in labels key on the id alone
 - `goal` session projection (§9) → `dsh-protocol-goal` (id, revision,
   objective, phase, blocked-reason, max-goal-rounds, rounds-started)
 - `user-questions/request` items → `dsh-protocol-question` (id, text, header,
@@ -331,7 +332,7 @@ See [decision record 042](../postmortem/042-question-prompts.md).
 `dsh-emacs.el` calls the dsh service's one-shot unary RPC API
 (`POST /api/<namespace>/<method>`, e.g. `/api/session/list`) directly, with
 no server-side changes required.  Endpoint names are the two-segment
-slash form of the dsh 0.1.2 wire protocol (rpc.md §4); the request body
+slash form of the dsh 0.1.7 wire protocol (rpc.md §4); the request body
 is the `client-request` envelope with `payload = {args: {...}}`:
 
 | RPC method | Purpose |
@@ -356,19 +357,31 @@ Real-time state — the transcript, the session list, queue/steer mirrors,
 projections, and the approval/question waterfalls — is NOT polled; it
 arrives over `/api/remote.mux` logical streams (next section).
 
-## Pending-input queue (`session/queue` frames on `session/control`)
+## Pending-input queue (`inbox` projection on `session/control`)
 
 Input sent while a turn runs is delivered through the agent inbox:
 `queue` lands in next-turn (the next turn), `steer` in next-step (before
 the running agent's next step).  The host publishes the authoritative
-snapshot as `session/queue` frames on the core connection's
-`session/control` logical stream — once per connection (the baseline) for
-sessions with pending items, and on every inbox splice thereafter — so
+snapshot as its **`inbox` session projection** on the core connection's
+`session/control` logical stream — every session's cell in the generation
+baseline, and a `projection` frame on every inbox splice thereafter — so
 `dsh-emacs-queue.el` only mirrors frames (no fetch RPC, no local drift).
-The wire item shape (`id`, `placement` = `queued`/`steering`/`context`,
-`message.content`) is normalized to `dsh-protocol-queue-item` in
-`dsh-emacs-protocol.el`.  The mirror drives the mode-line `[Qn Sm]`
-indicator, the echo-area feedback (enqueue / steer / consumption,
+dsh 0.1.7 deleted the dedicated `session/queue` frames that carried the
+same state through 0.1.6, and dropped the baseline's `queues`/`jobs`
+records; the `inbox` projection predates them and is still published, so
+this source works against 0.1.5+ servers.  The wire cell (`next-turn` /
+`next-step` lists of JSON `UserMessage`s) is normalized to
+`dsh-protocol-queue-item` (`id`, `placement` =
+`queued`/`steering`/`context`, `text`, `kind`) by
+`dsh-protocol-queue-items-from-inbox` in `dsh-emacs-protocol.el`; an
+`inbox` cell for a session with no live chat buffer is dropped rather than
+applied to whatever buffer is current.  The baseline's `projections` record
+is keyed by session id, and `json-read` interns JSON object keys as symbols,
+so `dsh-emacs-events--host-control-baseline` normalizes each record key to a
+string before the chat-buffer and projection lookups — the same identity the
+incremental `sessionId` field and `session/list` rows carry.  The mirror
+drives the mode-line
+`[Qn Sm]` indicator, the echo-area feedback (enqueue / steer / consumption,
 diffed against the previous mirror, with locally-deleted ids suppressed),
 the Composer Next Message row, and the `C-c C-q` manager.
 `dsh-emacs-queue-next-item` determines the visible next message from delivery
@@ -390,7 +403,7 @@ The echo feedback is silenced for the client's OWN empty-queue submit:
 the wire accepts only `queue`/`steer` prompt modes, so every send —
 idle, or queued behind a running turn with nothing else pending — is
 appended to the inbox and claimed when the turn starts, two
-`session/queue` frames within milliseconds.  With an empty mirror those
+`inbox` projection frames within milliseconds.  With an empty mirror those
 frames carry no ordering information, so the transient splice/claim
 gets no `queued:` / `running:` echo and no Next Message preview paint
 (the row would otherwise flash as the item is inserted and claimed) — `dsh-emacs-queue--mark-submit-suppress`
@@ -410,7 +423,7 @@ such an item can only be claimed at the turn end and is genuinely
 parked.  The deferred path does not wait for the host's confirming frame
 to do so: `dsh-emacs-queue--optimistic-submit-show' records the
 just-submitted text as a local queue item and repaints, and the host's own
-`session/queue' frame (or the submit-failure branch) retires it.
+`inbox' projection frame (or the submit-failure branch) retires it.
 An IDLE submit is not parked (the host claims it at the turn
 START), so its queue transient stays hidden even after the send path lights
 the optimistic spinner; keying this on the live spinner instead painted
@@ -649,8 +662,10 @@ or an alternate parser. See [036](../postmortem/036-bounded-stream-markdown.md).
   two ~0.35s small blocks, independent of session size.
 - **Core connection (list side)**: the session list keeps a separate
   `/api/remote.mux` connection that opens `session/control` + `workspace/follow`
-  + `$events`.  `session/control` delivers whole-host queue/jobs/projection
-  baselines and increments; `workspace/follow` seeds and then upserts/removes/
+  + `$events`.  `session/control` delivers whole-host projection baselines and
+  increments (since dsh 0.1.7 that record carries the `inbox` cell the queue
+  mirror is derived from; the 0.1.6 `queues`/`jobs` records are gone);
+  `workspace/follow` seeds and then upserts/removes/
   reorders the workspace caches; `$events` carries the session list's live
   changes (`api-session/added|removed|status|activity` emits) and the
   approval/question waterfalls.  This connection is scoped to the list buffer's

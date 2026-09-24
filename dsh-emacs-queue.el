@@ -12,10 +12,14 @@
 ;; Client-side mirror of the dsh agent inbox: input sent while a turn is
 ;; running either queues as the next turn (`session/prompt' mode "queue")
 ;; or steers the running agent before its next step (mode "steer").  The
-;; host publishes the authoritative snapshot as `session/queue' frames on
-;; the core connection's `session/control' logical stream (a baseline once
-;; per connection, then on every inbox splice), so this module only mirrors
-;; frames — there is no fetch RPC and no local bookkeeping that could drift.
+;; host publishes the authoritative snapshot as the `inbox' session
+;; projection on the core connection's `session/control' logical stream
+;; (every session's cell in the generation baseline, then a `projection'
+;; frame on each inbox splice), so this module only mirrors frames — there
+;; is no fetch RPC and no local bookkeeping that could drift.  dsh 0.1.7
+;; deleted the dedicated `session/queue' frames that carried the same state
+;; through 0.1.6; the `inbox' projection predates them and is still
+;; published, so this source works against 0.1.5+ servers.
 
 ;; Emacs-native interaction (no panels, no overlays):
 ;;   - mode line shows `[Q2 S1]' while items are pending (`context'
@@ -58,12 +62,12 @@
 (defvar-local dsh-emacs--queue-items nil
   "Pending inbox items of this chat's session, in delivery order.
 List of `dsh-protocol-queue-item'; replaced wholesale by every
-`session/queue' frame (the host snapshot is authoritative).")
+`inbox' projection frame (the host snapshot is authoritative).")
 
 (defvar-local dsh-emacs--queue-process nil
   "The mux process the current mirror was seeded from.
 A frame from a different process means a fresh connection whose first
-`session/queue' frame is the connect-time snapshot: apply it silently,
+`inbox' projection frame is the connect-time snapshot: apply it silently,
 without enqueue/steer/consumption echoes.")
 
 (defvar-local dsh-emacs--queue-deleted nil
@@ -77,7 +81,7 @@ pruned once the confirming frame arrives.")
 The wire knows only `queue' / `steer' prompt modes, so a message sent
 while the mirror is EMPTY — idle, or queued behind a running turn with
 nothing else pending — STILL passes through the host inbox: the host
-appends it (a `session/queue' frame with the item) and claims it again
+appends it (an `inbox' projection frame with the item) and claims it again
 at the turn start (a frame without it) within milliseconds.  Diffing
 that pair flashes `queued:' then `running:' — the flash on sending a new
 message — though nothing was ever really parked: the submit path renders
@@ -136,7 +140,7 @@ bounds a submit whose item never reaches the mirror.")
 (defvar-local dsh-emacs-queue--optimistic-submit nil
   "Locally submitted message not yet reflected in the host queue mirror.
 A `dsh-protocol-queue-item' shown as the Next Message preview from the
-moment the user queues it until the host's own `session/queue' frame lands,
+moment the user queues it until the host's own `inbox' projection frame lands,
 so the row appears with the keystroke instead of one HTTP round trip later.
 nil when no local queued submit is in flight.")
 
@@ -144,7 +148,7 @@ nil when no local queued submit is in flight.")
   "Preview a just-submitted TEXT as the pending next message.
 Call in the chat buffer on the busy submit path (after
 `dsh-emacs-queue--mark-submit-suppress'): the queued message is real but its
-host `session/queue' frame is still a round trip away, so the local preview
+host `inbox' projection frame is still a round trip away, so the local preview
 keeps the send from feeling sticky.  The host's confirming frame, the submit
 failure branch, or the hygiene timer clears it."
   (when (and text (not (string-empty-p text)))
@@ -309,22 +313,24 @@ current one and no minibuffer session is active."
       ('steering (dsh-emacs-queue--flash "steering: %s" (cdr event)))
       ('queued (dsh-emacs-queue--flash "queued: %s" (cdr event))))))
 
-(defun dsh-emacs-queue-apply (chat process payload)
-  "Apply a `session/queue' frame PAYLOAD for CHAT arriving on PROCESS.
-The first frame of a connection is the connect-time snapshot and seeds
-the mirror silently; later frames diff against the mirror to emit the
-enqueue / steer / consumption feedback.  Payloads for other sessions
-are filtered out by the events dispatcher.
+(defun dsh-emacs-queue-apply (chat process items)
+  "Replace CHAT's pending-input mirror with ITEMS arriving on PROCESS.
+ITEMS is the `dsh-protocol-queue-item' list derived from the session's
+`inbox' projection (`dsh-protocol-queue-items-from-inbox') — the events
+dispatcher resolves CHAT by session id and drops frames for any other
+session.  The first frame of a connection is the connect-time snapshot
+and seeds the mirror silently; later frames diff against the mirror to
+emit the enqueue / steer / consumption feedback.
 
 While `dsh-emacs--queue-submit-suppress' is set no feedback is emitted:
 the frames are the append+claim transient of a prompt the client itself
-just submitted with an empty queue (see `dsh-emacs-queue--mark-submit-suppress') —
-the mirrored items still update, and the flag clears when the mirror
-settles back to empty or by its timeout."
+just submitted with an empty queue (see
+`dsh-emacs-queue--mark-submit-suppress') — the mirrored items still
+update, and the flag clears when the mirror settles back to empty or by
+its timeout."
   (when (buffer-live-p chat)
     (with-current-buffer chat
-      (let* ((items (dsh-protocol-queue-items-from-alist payload))
-             (seed (not (eq process dsh-emacs--queue-process))))
+      (let ((seed (not (eq process dsh-emacs--queue-process))))
         (setq dsh-emacs--queue-process process)
         (unless (or seed dsh-emacs--queue-submit-suppress)
           (dsh-emacs-queue--announce
@@ -426,10 +432,10 @@ drop any pending burst repaint, so our own actions stay instantaneous."
 ACTION is the wire action alist (e.g. ((kind . \"remove\"))).  ON-ERROR
 runs in the chat buffer when the call fails; ON-SUCCESS when it
 succeeds — both with the chat buffer current.  The mirror is normally
-confirmed by the following `session/control' `queue' frame; ON-SUCCESS
-is where this client applies our own actions OPTIMISTICALLY, so steer /
-delete / edit update the next-preview hint and the mode-line the instant
-the RPC succeeds, without waiting for the frame round-trip."
+confirmed by the following `session/control' `inbox' projection frame;
+ON-SUCCESS is where this client applies our own actions OPTIMISTICALLY,
+so steer / delete / edit update the next-preview hint and the mode-line
+the instant the RPC succeeds, without waiting for the frame round-trip."
   (let ((session-id (dsh-emacs-queue--session-id))
         (buf (current-buffer)))
     (dsh-emacs--rpc-async
@@ -469,7 +475,7 @@ the RPC succeeds, without waiting for the frame round-trip."
   "Promote queued ITEM into the running turn (kind steer).
 On success the mirror is updated optimistically (placement → steering)
 and the hint recomputed, so the promotion is visible before the
-confirming `session/queue' frames arrive.  The id joins the
+confirming `inbox' projection frames arrive.  The id joins the
 deleted-suppression list so the transient removal frame is never
 announced as a consumption (`running'); the `steering' feedback still
 rides the re-insertion frame's diff (the mirror is cleared in between)."

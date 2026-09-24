@@ -7,8 +7,9 @@ built-ins (Emacs 27.1+) with no third-party dependencies.
 
 ![Chat buffer with streaming replies and tool calls](assets/chat.png)
 
-> **0.5.0** targets the **dsh 0.1.6** wire protocol (server **0.1.6-alpha.1 or
-> newer**).
+> **0.5.x** targets the **dsh 0.1.7** wire protocol (servers **0.1.5 or newer**:
+> the queue surfaces read the `inbox` session projection, which 0.1.5, 0.1.6 and
+> 0.1.7 all publish).
 
 ## Quick start
 

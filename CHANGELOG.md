@@ -6,7 +6,23 @@ All notable changes to this project are documented here. Format follows
 sections carry the planned next version (pre-1.0: `fix` → patch, features →
 minor) and stay undated until the release is cut.
 
-## 0.6.0 - Unreleased
+## 0.5.1 - Unreleased
+
+### Fixed
+
+- **The pending-input queue works against dsh 0.1.7 servers**: dsh 0.1.7
+  removed the `session/queue` control frames (and the baseline's `queues`
+  record) that carried the pending inbox, so the mode-line `[Qn Sm]`
+  indicator, the echo-area `queued:`/`steering:`/`running:` feedback, the
+  Composer Next Message row and `C-c C-q` would all have stopped updating.
+  The mirror is now derived from the host's `inbox` session projection, which
+  carries the same fold state and predates the deleted frames — so the same
+  client keeps working against 0.1.5/0.1.6 servers.  Reconnect baselines
+  resolve session IDs consistently with live updates, restoring the pending
+  queue without waiting for another inbox change.  The new-session picker
+  also stops keying the web-consistent built-in preset labels on the roster
+  row's `trust`, which 0.1.7 removed; it keys on the preset id alone, as dsh
+  web does.  (rationale: postmortem/064)
 
 ## 0.5.0 - 2026-09-24
 

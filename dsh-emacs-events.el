@@ -174,7 +174,7 @@ generation and a new clientId.")
 (declare-function dsh-emacs--normalize-archived "dsh-emacs" (archived))
 (declare-function dsh-emacs-modeline-set-context-snapshot "dsh-emacs-modeline" (pressure window))
 (declare-function dsh-emacs-modeline-set-permission "dsh-emacs-modeline" (permission))
-(declare-function dsh-emacs-queue-apply "dsh-emacs-queue" (chat process payload))
+(declare-function dsh-emacs-queue-apply "dsh-emacs-queue" (chat process items))
 (declare-function dsh-emacs-server--basic-auth-header "dsh-emacs-server" ())
 (declare-function dsh-emacs--server-auth-cookie-header "dsh-emacs-server" ())
 
@@ -1246,8 +1246,9 @@ buffers (see `dsh-emacs-events--host-item')."
 
 (defun dsh-emacs-events--host-item (process value)
   "Consume one logical core frame VALUE arriving on PROCESS.
-`session/control' frames feed queue mirrors and projections,
-`workspace/follow' frames mutate the workspace caches, `$events' frames
+`session/control' frames feed the queue mirrors (through the `inbox'
+projection) and the other projections, `workspace/follow' frames mutate
+the workspace caches, `$events' frames
 carry the session list's live changes and the question/approval
 waterfalls: `ready' captures the generation `clientId', `emit' delivers
 `api-session/*' events, `waterfall' routes an approval/question request
@@ -1256,10 +1257,11 @@ retires a pending waterfall by `eventId'."
   (pcase (dsh-emacs-render--aget "type" value)
     ("baseline"
      ;; Baseline frames differ from the incremental ones (`upsert'/`order'/
-     ;; `queue'/`projection' put their fields directly on the frame), the
-     ;; payload is nested one level deeper: the logical baseline frame is
+     ;; `projection' put their fields directly on the frame), the payload is
+     ;; nested one level deeper: the logical baseline frame is
      ;; `{type:'baseline', value:{...}}' (workspace/follow: `items' +
-     ;; `archivedSessionIds'; session/control: `queues'/`jobs'/`projections').
+     ;; `archivedSessionIds' [`pinnedSessionIds']; session/control:
+     ;; `projections' only since dsh 0.1.7).
      ;; Unwrap that inner `value' before routing and hand each handler its
      ;; own payload shape — otherwise the check below sees no `items' at the
      ;; frame level and every baseline is misrouted to session/control,
@@ -1268,16 +1270,12 @@ retires a pending waterfall by `eventId'."
        (if (dsh-emacs-render--aget "items" payload)
            ;; workspace/follow baseline: authoritative workspace + archive set.
            (dsh-emacs-events--host-workspace-baseline payload)
-         ;; session/control baseline: seed queue mirrors + projections.
+         ;; session/control baseline: seed projections (the `inbox' cell is
+         ;; the queue mirror).
          (dsh-emacs-events--host-control-baseline process payload))))
-    ("queue"
-     (let ((sid (dsh-emacs-render--aget "sessionId" value)))
-       (when sid
-         (dsh-emacs-queue-apply
-          (or (dsh-emacs-events--chat-buffer sid) (current-buffer))
-          process value))))
     ("projection"
      (dsh-emacs-events--host-apply-projection
+      process
       (dsh-emacs-render--aget "sessionId" value)
       (dsh-emacs-render--aget "key" value)
       (dsh-emacs-render--aget "value" value)))
@@ -1381,11 +1379,12 @@ retires a pending waterfall by `eventId'."
        (when event-id
          (dsh-emacs--question-cancelled event-id)
          (dsh-emacs--approval-cancelled event-id))))
-    ;; Accepted no-op kinds (no UI consumes them yet): `session/control'
-    ;; `jobs' frames/records (background-task mirror), the `api-session/error'
-    ;; emit, and any other host frame type we do not render.  Intentionally
-    ;; dropped, not wire-parity work — revisit when a jobs/task or error
-    ;; surface is added.
+    ;; Accepted no-op kinds (no UI consumes them yet): the `api-session/error'
+    ;; emit and any other host frame type we do not render.  Background jobs
+    ;; have no frame here at all since dsh 0.1.7 — they are the `job'
+    ;; namespace's streams, which this client never opens; the 0.1.6
+    ;; `session/control' `jobs' record is gone.  Intentionally dropped, not
+    ;; wire-parity work — revisit when a jobs/task or error surface is added.
     (_ nil)))
 
 (defun dsh-emacs-events--chat-buffer (session-id)
@@ -1405,27 +1404,21 @@ retires a pending waterfall by `eventId'."
     (dsh-emacs-events--host-repaint)))
 
 (defun dsh-emacs-events--host-control-baseline (process value)
-  "Seed chat queue mirrors and projections from a `session/control'
-baseline VALUE (whole-host queues/jobs/projections records).  The `jobs'
-record is intentionally not read — no background-task UI consumes it yet
-(see the accepted no-op kinds in `dsh-emacs-events--host-item')."
-  (let* ((queues (dsh-emacs-render--aget "queues" value))
-         (projections (dsh-emacs-render--aget "projections" value)))
-    (dolist (pair (if (vectorp queues) (append queues nil)
-                    (and (listp queues) queues)))
-      (when (and (listp pair) (cdr pair))
-        (let ((sid (car pair))
-              (items (dsh-emacs--sequence-list (cdr pair))))
-          (when (and sid (buffer-live-p (dsh-emacs-events--chat-buffer sid)))
-            (dsh-emacs-queue-apply
-             (dsh-emacs-events--chat-buffer sid)
-             process
-             (list (cons 'sessionId sid) (cons 'items items)))))))
-    ;; Projection baseline: Record<sessionId, SessionProjectionBaseline>.
+  "Seed the projection caches from a `session/control' baseline VALUE.
+VALUE carries this generation's whole-host `projections' record
+(`Record<sessionId, SessionProjectionBaseline>').  Through dsh 0.1.6 it
+also carried `queues' and `jobs' records; 0.1.7 removed both, so the
+queue mirror is seeded by the same record's `inbox' cell, which
+`dsh-emacs-events--host-apply-projection' handles."
+  (let ((projections (dsh-emacs-render--aget "projections" value)))
     (dolist (pair (if (vectorp projections) (append projections nil)
                     (and (listp projections) projections)))
       (when (and (listp pair) (cdr pair))
-        (let* ((sid (car pair))
+        ;; JSON object keys decode as symbols; session ids elsewhere (and
+        ;; the chat-buffer table's keys) are strings, like incremental frames.
+        (let* ((sid (if (symbolp (car pair))
+                        (symbol-name (car pair))
+                      (car pair)))
                (baseline (cdr pair))
                (values (dsh-emacs-render--aget "values" baseline)))
           (dolist (kv (if (vectorp values) (append values nil)
@@ -1434,14 +1427,19 @@ record is intentionally not read — no background-task UI consumes it yet
             ;; the authoritative tombstone that removes the Composer row.
             (when (consp kv)
               (dsh-emacs-events--host-apply-projection
-               sid (car kv) (cdr kv)))))))))
+               process sid (car kv) (cdr kv)))))))))
 
-(defun dsh-emacs-events--host-apply-projection (session-id key value)
-  "Apply one projection cell (KEY . VALUE) of SESSION-ID locally.
+(defun dsh-emacs-events--host-apply-projection (process session-id key value)
+  "Apply one projection cell (KEY . VALUE) of SESSION-ID arriving on PROCESS.
 `contextPressure' feeds the mode-line ctx%, `permissions' the mode-line
 permission preset, `title' the session cache and chat buffer name, `goal'
-the live chat buffer's Composer Goal Row; other keys are reserved for
-later milestones."
+the live chat buffer's Composer Goal Row, and `inbox' the live chat
+buffer's pending-input mirror — the queue source since dsh 0.1.7, which
+deleted the dedicated `queue' frames; other keys are reserved for later
+milestones.  Only the `inbox' branch needs the buffer: the mirror is
+buffer-local, so a cell whose session has no live chat buffer is dropped
+(and never applied to whatever buffer is current); the other branches
+reach their consumers themselves."
   (when session-id
     (pcase (if (symbolp key) (symbol-name key) key)
       ("contextPressure"
@@ -1452,6 +1450,12 @@ later milestones."
          (dsh-emacs--events-apply-permission-projection session-id value)))
       ("goal"
        (dsh-emacs-events--apply-goal-projection session-id value))
+      ("inbox"
+       (let ((chat (dsh-emacs-events--chat-buffer session-id)))
+         (when (buffer-live-p chat)
+           (dsh-emacs-queue-apply
+            chat process
+            (dsh-protocol-queue-items-from-inbox value)))))
       ("title"
        (when (and value (not (string-empty-p value)))
          (dsh-emacs-events--apply-title nil session-id value)

@@ -9305,14 +9305,14 @@ Lets a test drive a malformed content value through the result path."
             (equal "B WS" (dsh-protocol-workspace-title ws)))
           (dsh-test-assert "host-workspace-baseline-seeds-archived"
             (gethash "s-arch" dsh-emacs--archived-sessions)))
-        ;; 2) session/control baseline (queues/jobs/projections) no longer
-        ;; swallows the workspace baseline by mistake: the workspace cache
-        ;; stays unchanged (not cleared/rewritten)
+        ;; 2) session/control baseline (`projections` only since dsh 0.1.7)
+        ;; no longer swallows the workspace baseline by mistake: the workspace
+        ;; cache stays unchanged (not cleared/rewritten)
         (dsh-emacs-events--host-dispatch
          'host-proc
          (concat "{\"type\":\"item\",\"streamId\":\"c2\","
-                 "\"value\":{\"type\":\"baseline\",\"value\":{\"queues\":{},"
-                 "\"jobs\":{},\"projections\":{}}}}}"))
+                 "\"value\":{\"type\":\"baseline\",\"value\":"
+                 "{\"projections\":{}}}}}"))
         (let ((ids (mapcar #'dsh-protocol-workspace-workspace-id
                            dsh-emacs--workspaces)))
           (dsh-test-assert "host-control-baseline-leaves-workspaces"
@@ -9876,31 +9876,28 @@ Lets a test drive a malformed content value through the result path."
 ;; list, all fields read through accessors; broken/missing fields do not
 ;; break the conversion.
 (let* ((v (dsh-protocol-agent-preset-list--from-alist
-           '((presets . [((id . "standard") (trust . "system")
-                          (isDefault . t) (name . "Standard mode"))
+           '((presets . [((id . "standard") (isDefault . t)
+                          (name . "Standard mode"))
                          ((id . "broken-agent") (broken . "load failed"))])
-             (authorable . t)
-             (hasDocument . t))))
+             (modeSelectionEnabled . t))))
        (presets (dsh-protocol-agent-preset-list-presets v))
        (p0 (car presets))
        (p1 (cadr presets)))
   (when (and (dsh-protocol-agent-preset-p p0)
              (equal "standard" (dsh-protocol-agent-preset-id p0))
-             (equal "system" (dsh-protocol-agent-preset-trust p0))
              (eq t (dsh-protocol-agent-preset-is-default p0))
              (equal "Standard mode" (dsh-protocol-agent-preset-name p0))
              (null (dsh-protocol-agent-preset-broken p0))
              (equal 2 (length presets))
              (equal "broken-agent" (dsh-protocol-agent-preset-id p1))
              (equal "load failed" (dsh-protocol-agent-preset-broken p1))
-             (eq t (dsh-protocol-agent-preset-list-authorable v))
-             (eq t (dsh-protocol-agent-preset-list-has-document v)))
+             (eq t (dsh-protocol-agent-preset-list-mode-selection-enabled v)))
     (dsh-test-pass "agent-preset-list-protocol-struct")))
 
 ;; --- Test 74b: preset / command `false' booleans normalize at the struct
 ;; --- boundary ---
-;; `AgentPresetRow.isDefault' and the roster's `authorable' / `hasDocument'
-;; are required JSON booleans, so `json-read' hands back the truthy
+;; `AgentPresetRow.isDefault' and the roster's `modeSelectionEnabled' are
+;; required JSON booleans, so `json-read' hands back the truthy
 ;; `:json-false' for every false value.  Kept raw, `isDefault' made
 ;; `dsh-emacs--preset-default-id' (a `cl-some' over the roster) return the
 ;; FIRST preset instead of the host's real default whenever
@@ -9908,16 +9905,14 @@ Lets a test drive a malformed content value through the result path."
 (let* ((roster (dsh-protocol-agent-preset-list--from-alist
                 '((presets . [((id . "alpha") (isDefault . :json-false))
                               ((id . "beta") (isDefault . t))])
-                  (authorable . :json-false)
-                  (hasDocument . :json-false))))
+                  (modeSelectionEnabled . :json-false))))
        (presets (dsh-protocol-agent-preset-list-presets roster)))
   (dsh-test-assert "agent-preset-wire-false-is-default-normalizes-to-nil"
     (null (dsh-protocol-agent-preset-is-default (car presets))))
   (dsh-test-assert "agent-preset-wire-true-is-default-normalizes-to-t"
     (eq t (dsh-protocol-agent-preset-is-default (cadr presets))))
-  (dsh-test-assert "agent-preset-roster-wire-false-flags-normalize"
-    (null (dsh-protocol-agent-preset-list-authorable roster))
-    (null (dsh-protocol-agent-preset-list-has-document roster))))
+  (dsh-test-assert "agent-preset-roster-wire-false-flag-normalizes"
+    (null (dsh-protocol-agent-preset-list-mode-selection-enabled roster))))
 (let ((input (dsh-protocol-command-input--from-alist
               '((hint . "<x>") (attachments . :json-false)))))
   (dsh-test-assert "command-input-wire-false-attachments-normalizes-to-nil"
@@ -16473,58 +16468,62 @@ candidates as the UI would via `all-completions', not by destructuring."
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-test--queue-item (id placement text &optional kind)
-  "Build one wire-shaped `session/queue' frame item for tests."
+  "Build one `dsh-protocol-queue-item' struct for tests.
+PLACEMENT is the wire string (\"queued\"/\"steering\"/\"context\") or nil;
+KIND defaults to \"user\"."
+  (make-dsh-protocol-queue-item
+   :id id
+   :placement (and placement (intern placement))
+   :text (or text "")
+   :kind (or kind "user")))
+
+(defun dsh-emacs-test--inbox-message (id text &optional kind)
+  "Build one wire `inbox' `UserMessage' alist for tests.
+ID is the message id, TEXT its single text block, KIND its source kind
+\(default \"user\")."
   (list (cons 'id id)
-        (cons 'placement placement)
-        (cons 'message (list (cons 'id id)
-                             (cons 'role "user")
-                             (cons 'content
-                                   (if text
-                                       (vector (list (cons 'type "text")
-                                                     (cons 'text text)))
-                                     []))
-                             (cons 'source (list (cons 'kind
-                                                       (or kind "user"))))))))
+        (cons 'content (vector (list (cons 'type "text") (cons 'text text))))
+        (cons 'source (list (cons 'kind (or kind "user"))))))
 
-;; Protocol layer: wire alist → struct (field names appear only in the
-;; constructor)
-(let ((item (dsh-protocol-queue-item--from-alist
-             (dsh-emacs-test--queue-item "m1" "steering" "fix the bug"))))
-  (dsh-test-assert "queue-protocol-item-extracts-fields"
-    (equal "m1" (dsh-protocol-queue-item-id item))
-    (eq 'steering (dsh-protocol-queue-item-placement item))
-    (equal "fix the bug" (dsh-protocol-queue-item-text item))
-    (equal "user" (dsh-protocol-queue-item-kind item))))
-
-;; Protocol layer: frame value (items is a vector) → struct list; missing
-;; items is safely empty
-(let ((items (dsh-protocol-queue-items-from-alist
-              (list (cons 'items
-                          (vector (dsh-emacs-test--queue-item
-                                   "a" "queued" "first")
-                                  (dsh-emacs-test--queue-item
-                                   "b" "context" nil "system-summary")))))))
-  (dsh-test-assert "queue-protocol-frame-value-normalized"
-    (= 2 (length items))
+;; Protocol layer: the `inbox' projection value → queue item structs (field
+;; names appear only in the constructor).  A `next-turn' entry is `queued'; a
+;; `next-step' entry with a `user' source is `steering', any other one
+;; `context' — exactly the mapping the host applied through dsh 0.1.6, when it
+;; published this same fold state as `session/queue' frames instead.
+(let ((items (dsh-protocol-queue-items-from-inbox
+              (list (cons 'next-turn
+                          (vector (dsh-emacs-test--inbox-message "a" "first")))
+                    (cons 'next-step
+                          (vector (dsh-emacs-test--inbox-message
+                                   "b" "steer me" "user")
+                                  (dsh-emacs-test--inbox-message
+                                   "c" "injected" "plugin")))))))
+  (dsh-test-assert "queue-inbox-value-normalized"
+    (= 3 (length items))
+    (equal "a" (dsh-protocol-queue-item-id (nth 0 items)))
     (equal "first" (dsh-protocol-queue-item-text (nth 0 items)))
-    (eq 'context (dsh-protocol-queue-item-placement (nth 1 items))))
-  (dsh-test-assert "queue-protocol-frame-value-missing-items-empty"
-    (null (dsh-protocol-queue-items-from-alist nil))
-    (null (dsh-protocol-queue-items-from-alist '((other . 1))))))
+    (eq 'queued (dsh-protocol-queue-item-placement (nth 0 items)))
+    (equal "steer me" (dsh-protocol-queue-item-text (nth 1 items)))
+    (eq 'steering (dsh-protocol-queue-item-placement (nth 1 items)))
+    (equal "injected" (dsh-protocol-queue-item-text (nth 2 items)))
+    (eq 'context (dsh-protocol-queue-item-placement (nth 2 items)))
+    (equal "plugin" (dsh-protocol-queue-item-kind (nth 2 items))))
+  (dsh-test-assert "queue-inbox-value-missing-lists-empty"
+    (null (dsh-protocol-queue-items-from-inbox nil))
+    (null (dsh-protocol-queue-items-from-inbox '((other . 1))))
+    ;; An empty cell — the ordinary reconnect baseline — is an empty list.
+    (null (dsh-protocol-queue-items-from-inbox
+           (list (cons 'next-turn []) (cons 'next-step []))))))
 
 ;; Counts: context placement does not enter the Q/S tally (aligned with
 ;; dsh web QueueDock)
 (dsh-test-assert "queue-counts-ignores-context"
   (equal '(2 . 1)
          (dsh-emacs-queue--counts-of
-          (list (dsh-protocol-queue-item--from-alist
-                 (dsh-emacs-test--queue-item "1" "queued" "a"))
-                (dsh-protocol-queue-item--from-alist
-                 (dsh-emacs-test--queue-item "2" "queued" "b"))
-                (dsh-protocol-queue-item--from-alist
-                 (dsh-emacs-test--queue-item "3" "steering" "c"))
-                (dsh-protocol-queue-item--from-alist
-                 (dsh-emacs-test--queue-item "4" "context" "d"))))))
+          (list (dsh-emacs-test--queue-item "1" "queued" "a")
+                (dsh-emacs-test--queue-item "2" "queued" "b")
+                (dsh-emacs-test--queue-item "3" "steering" "c")
+                (dsh-emacs-test--queue-item "4" "context" "d")))))
 
 ;; Preview: take the first line, truncate when overlong
 (dsh-test-assert "queue-preview-first-line-and-truncation"
@@ -16535,17 +16534,12 @@ candidates as the UI would via `all-completions', not by destructuring."
   (string-suffix-p "..." (dsh-emacs-queue-preview (make-string 100 ?x))))
 
 ;; diff: consume (disappear), newly queued, newly steering, promote
-(let* ((old (list (dsh-protocol-queue-item--from-alist
-                   (dsh-emacs-test--queue-item "keep" "queued" "kept"))
-                  (dsh-protocol-queue-item--from-alist
-                   (dsh-emacs-test--queue-item "gone" "queued" "consumed one")))
+(let* ((old (list (dsh-emacs-test--queue-item "keep" "queued" "kept")
+                  (dsh-emacs-test--queue-item "gone" "queued" "consumed one"))
                  )
-       (new (list (dsh-protocol-queue-item--from-alist
-                   (dsh-emacs-test--queue-item "keep" "queued" "kept"))
-                  (dsh-protocol-queue-item--from-alist
-                   (dsh-emacs-test--queue-item "newq" "queued" "lined up"))
-                  (dsh-protocol-queue-item--from-alist
-                   (dsh-emacs-test--queue-item "news" "steering" "steered in"))))
+       (new (list (dsh-emacs-test--queue-item "keep" "queued" "kept")
+                  (dsh-emacs-test--queue-item "newq" "queued" "lined up")
+                  (dsh-emacs-test--queue-item "news" "steering" "steered in")))
        (events (dsh-emacs-queue--diff-events old new nil)))
   (dsh-test-assert "queue-diff-events-consume-queue-steer"
     (member (cons 'running "consumed one") events)
@@ -16555,8 +16549,7 @@ candidates as the UI would via `all-completions', not by destructuring."
 
 ;; diff: an id deleted locally produces no running feedback (deletion
 ;; confirmed ≠ consumed)
-(let* ((item (dsh-protocol-queue-item--from-alist
-              (dsh-emacs-test--queue-item "del" "queued" "deleted one")))
+(let* ((item (dsh-emacs-test--queue-item "del" "queued" "deleted one"))
        (events (dsh-emacs-queue--diff-events (list item) nil '("del"))))
   (dsh-test-assert "queue-diff-events-suppresses-deleted"
     (null events))
@@ -16566,10 +16559,8 @@ candidates as the UI would via `all-completions', not by destructuring."
 
 ;; diff: queued→steering promotion (initiated by the other side) reports
 ;; steering
-(let* ((old (list (dsh-protocol-queue-item--from-alist
-                   (dsh-emacs-test--queue-item "p" "queued" "promoted"))))
-       (new (list (dsh-protocol-queue-item--from-alist
-                   (dsh-emacs-test--queue-item "p" "steering" "promoted"))))
+(let* ((old (list (dsh-emacs-test--queue-item "p" "queued" "promoted")))
+       (new (list (dsh-emacs-test--queue-item "p" "steering" "promoted")))
        (events (dsh-emacs-queue--diff-events old new nil)))
   (dsh-test-assert "queue-diff-events-promotion-is-steering"
     (equal '((steering . "promoted")) events)))
@@ -16582,20 +16573,18 @@ candidates as the UI would via `all-completions', not by destructuring."
         (with-current-buffer buf
           (dsh-emacs-mode)
           (dsh-emacs-queue-apply buf 'proc-1
-                                 (list (cons 'items
-                                             (vector (dsh-emacs-test--queue-item
-                                                      "s1" "queued" "seeded")))))
+                                 (list (dsh-emacs-test--queue-item
+                                        "s1" "queued" "seeded")))
           (dsh-test-assert "queue-apply-seeds-first-frame-silently"
             (= 1 (length dsh-emacs--queue-items))
             (equal "seeded" (dsh-protocol-queue-item-text
                              (car dsh-emacs--queue-items))))
           ;; Second frame of the same connection: full mirror replacement
           (dsh-emacs-queue-apply buf 'proc-1
-                                 (list (cons 'items
-                                             (vector (dsh-emacs-test--queue-item
-                                                      "s1" "queued" "seeded")
-                                                     (dsh-emacs-test--queue-item
-                                                      "s2" "steering" "added")))))
+                                 (list (dsh-emacs-test--queue-item
+                                        "s1" "queued" "seeded")
+                                       (dsh-emacs-test--queue-item
+                                        "s2" "steering" "added")))
           (dsh-test-assert "queue-apply-replaces-mirror"
             (= 2 (length dsh-emacs--queue-items))
             (eq 'steering (dsh-protocol-queue-item-placement
@@ -16633,9 +16622,8 @@ candidates as the UI would via `all-completions', not by destructuring."
             ;; is the dispatcher's consumer.
             (dsh-emacs-queue-apply
              chat proc
-             (list (cons 'items
-                         (vector (dsh-emacs-test--queue-item
-                                  "x1" "queued" "hello")))))
+             (list (dsh-emacs-test--queue-item
+                    "x1" "queued" "hello")))
             (dsh-test-assert "queue-submit-suppress-swallows-splice-in"
               (null announced)
               (= 1 (length dsh-emacs--queue-items))
@@ -16645,7 +16633,7 @@ candidates as the UI would via `all-completions', not by destructuring."
             (setq announced nil)
             ;; Frame 2: the item is claimed → mirror empty, flag
             ;; disarmed, still no flash
-            (dsh-emacs-queue-apply chat proc (list (cons 'items [])))
+            (dsh-emacs-queue-apply chat proc nil)
             (dsh-test-assert "queue-submit-suppress-settles-and-unarms"
               (null announced)
               (null dsh-emacs--queue-items)
@@ -16657,14 +16645,13 @@ candidates as the UI would via `all-completions', not by destructuring."
             (setq-local dsh-emacs--queue-submit-suppress t)
             (dsh-emacs-queue-apply
              chat 'proc-2
-             (list (cons 'items
-                         (vector (dsh-emacs-test--queue-item
-                                  "r1" "queued" "replay")))))
+             (list (dsh-emacs-test--queue-item
+                    "r1" "queued" "replay")))
             (dsh-test-assert "queue-submit-suppress-seed-keeps-flag"
               (= 1 (length dsh-emacs--queue-items))
               (null announced)
               dsh-emacs--queue-submit-suppress)
-            (dsh-emacs-queue-apply chat 'proc-2 (list (cons 'items [])))
+            (dsh-emacs-queue-apply chat 'proc-2 nil)
             (dsh-test-assert "queue-submit-suppress-claim-settles-after-seed"
               (null dsh-emacs--queue-items)
               (null announced)
@@ -16692,8 +16679,7 @@ candidates as the UI would via `all-completions', not by destructuring."
         (setq-local dsh-emacs--buffer-session "sess-pfx")
         (setq-local dsh-emacs--queue-submit-suppress t)
         (setq dsh-emacs--queue-items
-              (list (dsh-protocol-queue-item--from-alist
-                     (dsh-emacs-test--queue-item "g1" "queued" "gated"))))
+              (list (dsh-emacs-test--queue-item "g1" "queued" "gated")))
         (dsh-emacs-composer-render)
         (dsh-test-assert "queue-submit-suppress-gates-next-row"
           (null (dsh-test-composer-next-row)))
@@ -16718,8 +16704,7 @@ candidates as the UI would via `all-completions', not by destructuring."
                    (lambda (_delay _repeat fn) (push fn paints) t)))
           (setq-local dsh-emacs--queue-submit-suppress t)
           (setq dsh-emacs--queue-items
-                (list (dsh-protocol-queue-item--from-alist
-                       (dsh-emacs-test--queue-item "g2" "queued" "still queued"))))
+                (list (dsh-emacs-test--queue-item "g2" "queued" "still queued")))
           (dsh-emacs-composer-render)
           (dsh-test-assert "queue-submit-suppress-holds-row-hidden"
             (null (dsh-test-composer-next-row)))
@@ -16745,8 +16730,7 @@ candidates as the UI would via `all-completions', not by destructuring."
         (setq-local dsh-emacs--ml-busy t)
         (dsh-emacs-queue--mark-submit-suppress)
         (setq dsh-emacs--queue-items
-              (list (dsh-protocol-queue-item--from-alist
-                     (dsh-emacs-test--queue-item "pb" "queued" "parked"))))
+              (list (dsh-emacs-test--queue-item "pb" "queued" "parked")))
         (dsh-emacs-composer-render)
         (dsh-test-assert "queue-submit-suppress-busy-reveals-parked"
           (dsh-test-composer-next-row)
@@ -16782,9 +16766,8 @@ candidates as the UI would via `all-completions', not by destructuring."
         ;; The host's own frame carries the real item: the local preview retires.
         (dsh-emacs-queue-apply
          buf proc
-         (list (cons 'items
-                     (vector (dsh-emacs-test--queue-item
-                              "real" "queued" "queued now")))))
+         (list (dsh-emacs-test--queue-item
+                "real" "queued" "queued now")))
         (dsh-test-assert "queued-submit-preview-cleared-by-host-frame"
           (null dsh-emacs-queue--optimistic-submit)
           (string= "queued now"
@@ -16818,8 +16801,7 @@ candidates as the UI would via `all-completions', not by destructuring."
         (setq-local dsh-emacs--ml-busy t)
         ;; The splice frame carries our own just-submitted message.
         (setq dsh-emacs--queue-items
-              (list (dsh-protocol-queue-item--from-alist
-                     (dsh-emacs-test--queue-item "own" "queued" "hello"))))
+              (list (dsh-emacs-test--queue-item "own" "queued" "hello")))
         (dsh-emacs-composer-render)
         (dsh-test-assert "queue-idle-submit-splice-does-not-flash-next-row"
           (null (dsh-test-composer-next-row))
@@ -16849,8 +16831,7 @@ candidates as the UI would via `all-completions', not by destructuring."
           (dsh-emacs-queue--mark-submit-suppress)
           ;; Connection seed: empty queue, first frame on this process.
           (dsh-emacs-queue-apply buf proc
-                                 (list (cons 'sessionId "sess-empty-seed")
-                                       (cons 'items [])))
+                                 nil)
           (dsh-test-assert "queue-empty-seed-keeps-submit-suppression"
             dsh-emacs--queue-submit-suppress
             (null dsh-emacs-queue--submit-seen-p)
@@ -16858,10 +16839,8 @@ candidates as the UI would via `all-completions', not by destructuring."
           ;; Our own splice frame: still suppressed, so no row appears.
           (dsh-emacs-queue-apply
            buf proc
-           (list (cons 'sessionId "sess-empty-seed")
-                 (cons 'items
-                       (vector (dsh-emacs-test--queue-item
-                                "own" "queued" "hello")))))
+           (list (dsh-emacs-test--queue-item
+                  "own" "queued" "hello")))
           (dsh-emacs-composer-render)
           (dsh-test-assert "queue-empty-seed-splice-does-not-flash-next-row"
             (null (dsh-test-composer-next-row))
@@ -16870,8 +16849,7 @@ candidates as the UI would via `all-completions', not by destructuring."
             (null announced))
           ;; The claim frame that follows the splice then disarms.
           (dsh-emacs-queue-apply buf proc
-                                 (list (cons 'sessionId "sess-empty-seed")
-                                       (cons 'items [])))
+                                 nil)
           (dsh-test-assert "queue-empty-seed-claim-disarms"
             (null dsh-emacs--queue-submit-suppress)
             (null dsh-emacs--queue-items)
@@ -16905,8 +16883,7 @@ candidates as the UI would via `all-completions', not by destructuring."
           (dsh-emacs-queue--submit-suppress-clear)
           ;; Plain path, items parked → not armed: "queued:" is genuine
           (setq dsh-emacs--queue-items
-                (list (dsh-protocol-queue-item--from-alist
-                       (dsh-emacs-test--queue-item "p" "queued" "parked"))))
+                (list (dsh-emacs-test--queue-item "p" "queued" "parked")))
           (dsh-emacs--submit-plain "hello parked")
           (dsh-test-assert "submit-plain-parked-keeps-announce"
             (null dsh-emacs--queue-submit-suppress))
@@ -16923,8 +16900,7 @@ candidates as the UI would via `all-completions', not by destructuring."
           (dsh-emacs-queue--submit-suppress-clear)
           ;; Deferred path, items parked → not armed
           (setq dsh-emacs--queue-items
-                (list (dsh-protocol-queue-item--from-alist
-                       (dsh-emacs-test--queue-item "q" "queued" "parked2"))))
+                (list (dsh-emacs-test--queue-item "q" "queued" "parked2")))
           (dsh-emacs--submit-deferred "hello parked busy" nil nil)
           (dsh-test-assert "submit-deferred-parked-keeps-announce"
             (null dsh-emacs--queue-submit-suppress))
@@ -16990,13 +16966,17 @@ candidates as the UI would via `all-completions', not by destructuring."
           ;; suppression stay untouched.  B's mirror is seeded with an
           ;; empty baseline first (the first frame is the connect snapshot
           ;; by design), so the next frame is a real diff.
-          (dsh-emacs-queue-apply chat-b proc-b (list (cons 'items [])))
+          (dsh-emacs-queue-apply chat-b proc-b nil)
           (dsh-emacs-events--host-item
            proc-b
-           (list (cons 'type "queue")
+           (list (cons 'type "projection")
                  (cons 'sessionId "sess-multi-b")
-                 (cons 'items (vector (dsh-emacs-test--queue-item
-                                       "b1" "queued" "b-real")))))
+                 (cons 'key "inbox")
+                 (cons 'value
+                       (list (cons 'next-turn
+                                   (vector (dsh-emacs-test--inbox-message
+                                            "b1" "b-real")))
+                             (cons 'next-step [])))))
           (dsh-test-assert "queue-submit-suppress-multi-session"
             announced
             (with-current-buffer chat-b
@@ -17010,12 +16990,12 @@ candidates as the UI would via `all-completions', not by destructuring."
     (delete-process proc-a)
     (delete-process proc-b)))
 
-;; Event-dispatch level: session/control's `queue' item (value with an
-;; items array) is routed by `dsh-emacs-events--host-item' via session-id
-;; to that session's chat buffer's dsh-emacs-queue-apply --- the mirror and
-;; the [next] preview row update immediately; a queue item for another
-;; session finds no open chat buffer (falls back to current-buffer) and
-;; does not touch this mirror.
+;; Event-dispatch level: session/control's `inbox' projection cell is routed
+;; by `dsh-emacs-events--host-item' via session-id to that session's chat
+;; buffer's dsh-emacs-queue-apply --- the mirror and the [next] preview row
+;; update immediately; an inbox cell for another session (no open chat
+;; buffer) is dropped instead of landing in whatever buffer happens to be
+;; current.
 (let* ((old-chats dsh-emacs--chat-buffers)
        (chat (get-buffer-create " *t-queue-dispatch*"))
        (proc (make-pipe-process :name "t-queue-proc" :buffer nil))
@@ -17033,15 +17013,19 @@ candidates as the UI would via `all-completions', not by destructuring."
         (with-current-buffer neutral (dsh-emacs-mode))
         (cl-letf (((symbol-function 'run-at-time)
                    (lambda (_delay _repeat fn) (push fn paints) t)))
-          ;; A queue item matching the session → routed to that session chat
+          ;; An inbox item matching the session → routed to that session chat
           ;; buffer's queue-apply; after one redraw at burst end the preview row is
           ;; visible
           (dsh-emacs-events--host-item
            proc
-           (list (cons 'type "queue")
+           (list (cons 'type "projection")
                  (cons 'sessionId "sess-q")
-                 (cons 'items (vector (dsh-emacs-test--queue-item
-                                       "q1" "queued" "dispatched")))))
+                 (cons 'key "inbox")
+                 (cons 'value
+                       (list (cons 'next-turn
+                                   (vector (dsh-emacs-test--inbox-message
+                                            "q1" "dispatched")))
+                             (cons 'next-step [])))))
           (funcall (car paints))
           (setq paints nil)
           (with-current-buffer chat
@@ -17050,14 +17034,23 @@ candidates as the UI would via `all-completions', not by destructuring."
               (equal "dispatched"
                      (dsh-protocol-queue-item-text (car dsh-emacs--queue-items)))
               (dsh-test-composer-next-row)))
-          ;; Another session's queue item (no open chat buffer) → lands in
-          ;; current-buffer, this mirror and preview row stay as they were
+          ;; Another session's inbox cell (no open chat buffer) → dropped:
+          ;; this mirror and preview row stay as they were, and the current
+          ;; buffer does not silently adopt the foreign queue.
           (with-current-buffer neutral
             (dsh-emacs-events--host-item
              proc
-             (list (cons 'type "queue")
+             (list (cons 'type "projection")
                    (cons 'sessionId "sess-other")
-                   (cons 'items []))))
+                   (cons 'key "inbox")
+                   (cons 'value
+                         (list (cons 'next-turn
+                                     (vector (dsh-emacs-test--inbox-message
+                                              "o1" "foreign")))
+                               (cons 'next-step []))))))
+          (with-current-buffer neutral
+            (dsh-test-assert "queue-frame-dispatch-foreign-cell-dropped"
+              (null dsh-emacs--queue-items)))
           (with-current-buffer chat
             (dsh-test-assert "queue-frame-dispatch-filters-foreign-session"
               (= 1 (length dsh-emacs--queue-items))
@@ -17067,6 +17060,46 @@ candidates as the UI would via `all-completions', not by destructuring."
     (setq dsh-emacs--chat-buffers old-chats)
     (when (buffer-live-p chat) (kill-buffer chat))
     (when (buffer-live-p neutral) (kill-buffer neutral))
+    (when (process-live-p proc) (delete-process proc))))
+
+;; JSON level: a real `/api/remote.mux' `item' frame carrying the `inbox'
+;; projection cell (the exact 0.1.7 wire form, `next-turn'/'next-step' as
+;; kebab-case JSON keys) reaches the mirror through the whole decode path —
+;; json-read → alist → struct — so a field-name drift between host and
+;; converter cannot pass unnoticed.
+(let* ((old-chats dsh-emacs--chat-buffers)
+       (chat (get-buffer-create " *t-inbox-json*"))
+       (proc (make-pipe-process :name "t-inbox-json-proc" :buffer nil)))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs--chat-buffers
+              (let ((h (make-hash-table :test 'equal)))
+                (puthash "sess-json" chat h)
+                h))
+        (with-current-buffer chat
+          (dsh-emacs-mode)
+          (setq-local dsh-emacs--buffer-session "sess-json"))
+        (dsh-emacs-events--host-dispatch
+         proc
+         (concat "{\"type\":\"item\",\"streamId\":\"c1\",\"value\":{"
+                 "\"type\":\"projection\",\"sessionId\":\"sess-json\","
+                 "\"key\":\"inbox\",\"seq\":9,\"value\":{"
+                 "\"next-turn\":[{\"id\":\"j1\",\"content\":[{\"type\":\"text\","
+                 "\"text\":\"queued json\"}],\"source\":{\"kind\":\"user\","
+                 "\"rpcId\":\"r1\"}}],"
+                 "\"next-step\":[{\"id\":\"j2\",\"content\":[{\"type\":\"text\","
+                 "\"text\":\"steer json\"}],\"source\":{\"kind\":\"user\"}}]}}}"))
+        (with-current-buffer chat
+          (dsh-test-assert "queue-inbox-json-frame-reaches-mirror"
+            (equal '("j1" "j2")
+                   (mapcar #'dsh-protocol-queue-item-id dsh-emacs--queue-items))
+            (equal '("queued json" "steer json")
+                   (mapcar #'dsh-protocol-queue-item-text dsh-emacs--queue-items))
+            (equal '(queued steering)
+                   (mapcar #'dsh-protocol-queue-item-placement
+                           dsh-emacs--queue-items)))))
+    (setq dsh-emacs--chat-buffers old-chats)
+    (when (buffer-live-p chat) (kill-buffer chat))
     (when (process-live-p proc) (delete-process proc))))
 
 ;; Mode-line indicator: hidden for an empty queue, shows [Qn Sm] when
@@ -17079,12 +17112,9 @@ candidates as the UI would via `all-completions', not by destructuring."
           (dsh-test-assert "queue-indicator-hidden-when-empty"
             (string-empty-p (dsh-emacs-modeline--queue-indicator)))
           (setq dsh-emacs--queue-items
-                (list (dsh-protocol-queue-item--from-alist
-                       (dsh-emacs-test--queue-item "1" "queued" "a"))
-                      (dsh-protocol-queue-item--from-alist
-                       (dsh-emacs-test--queue-item "2" "queued" "b"))
-                      (dsh-protocol-queue-item--from-alist
-                       (dsh-emacs-test--queue-item "3" "steering" "c"))))
+                (list (dsh-emacs-test--queue-item "1" "queued" "a")
+                      (dsh-emacs-test--queue-item "2" "queued" "b")
+                      (dsh-emacs-test--queue-item "3" "steering" "c")))
           (let ((ind (dsh-emacs-modeline--queue-indicator)))
             (dsh-test-assert "queue-indicator-shows-counts"
               (string-match-p "\\[Q2 S1\\]" ind)
@@ -17110,22 +17140,15 @@ candidates as the UI would via `all-completions', not by destructuring."
 ;; precedence over queued (next-turn); context is host-injected content and
 ;; is never previewed. That is, "whichever one is steered, next shows that
 ;; one (when it becomes the next-step)"
-(let* ((steer-two (mapcar (lambda (x) (dsh-protocol-queue-item--from-alist x))
-                          (list (dsh-emacs-test--queue-item "a" "steering" "Alpha")
-                                (dsh-emacs-test--queue-item "c" "steering" "Charlie")
-                                (dsh-emacs-test--queue-item "b" "queued" "Beta"))))
-       (mixed (list (dsh-protocol-queue-item--from-alist
-                     (dsh-emacs-test--queue-item "a" "steering" "Alpha"))
-                    (dsh-protocol-queue-item--from-alist
-                     (dsh-emacs-test--queue-item "b" "queued" "Beta"))))
-       (queued-only (list (dsh-protocol-queue-item--from-alist
-                           (dsh-emacs-test--queue-item "b" "queued" "Beta"))))
-       (context-first (list (dsh-protocol-queue-item--from-alist
-                             (dsh-emacs-test--queue-item "x" "context" "X"))
-                            (dsh-protocol-queue-item--from-alist
-                             (dsh-emacs-test--queue-item "b" "queued" "Beta"))
-                            (dsh-protocol-queue-item--from-alist
-                             (dsh-emacs-test--queue-item "a" "steering" "Alpha")))))
+(let* ((steer-two (list (dsh-emacs-test--queue-item "a" "steering" "Alpha")
+                        (dsh-emacs-test--queue-item "c" "steering" "Charlie")
+                        (dsh-emacs-test--queue-item "b" "queued" "Beta")))
+       (mixed (list (dsh-emacs-test--queue-item "a" "steering" "Alpha")
+                    (dsh-emacs-test--queue-item "b" "queued" "Beta")))
+       (queued-only (list (dsh-emacs-test--queue-item "b" "queued" "Beta")))
+       (context-first (list (dsh-emacs-test--queue-item "x" "context" "X")
+                            (dsh-emacs-test--queue-item "b" "queued" "Beta")
+                            (dsh-emacs-test--queue-item "a" "steering" "Alpha"))))
   (let ((dsh-emacs--queue-items steer-two))
     (dsh-test-assert "queue-next-item-steering-led"
       (equal "Alpha" (dsh-protocol-queue-item-text
@@ -17147,8 +17170,7 @@ candidates as the UI would via `all-completions', not by destructuring."
       (null (dsh-emacs-queue-next-item)))))
 
 ;; Next Message uses the same prompt color as the historical next-preview prefix.
-(let ((item (dsh-protocol-queue-item--from-alist
-             (dsh-emacs-test--queue-item "a" "queued" "Alpha"))))
+(let ((item (dsh-emacs-test--queue-item "a" "queued" "Alpha")))
   (cl-letf (((symbol-function 'image-type-available-p) (lambda (_type) t))
             ((symbol-function 'create-image)
              (lambda (_data _type _data-p &rest props) (cons 'image props))))
@@ -17187,9 +17209,8 @@ candidates as the UI would via `all-completions', not by destructuring."
           ;; Burst 1: seed frame → one redraw at burst end
           (dsh-emacs-queue-apply
            buf 'proc
-           (list (cons 'items
-                       (vector (dsh-emacs-test--queue-item
-                                "a" "queued" "Alpha")))))
+           (list (dsh-emacs-test--queue-item
+                  "a" "queued" "Alpha")))
           (funcall (car paints))
           (setq paints nil)
           (dsh-test-assert "queue-next-row-steer-before-shows-next"
@@ -17204,15 +17225,14 @@ candidates as the UI would via `all-completions', not by destructuring."
                           (string-search "Next:" plain))))))
           ;; Burst 2: remove frame (mirror cleared immediately, preview line not
           ;; redrawn yet) + steering regression frame
-          (dsh-emacs-queue-apply buf 'proc (list (cons 'items [])))
+          (dsh-emacs-queue-apply buf 'proc nil)
           (dsh-test-assert "queue-mirror-clears-on-steer-remove"
             (null dsh-emacs--queue-items)
             (null (dsh-emacs-queue-next-item)))
           (dsh-emacs-queue-apply
            buf 'proc
-           (list (cons 'items
-                       (vector (dsh-emacs-test--queue-item
-                                "a" "steering" "Alpha")))))
+           (list (dsh-emacs-test--queue-item
+                  "a" "steering" "Alpha")))
           ;; Two frames combine into one redraw
           (dsh-test-assert "queue-burst-remove-reinsert-single-paint"
             (= 1 (length paints)))
@@ -17244,10 +17264,9 @@ candidates as the UI would via `all-completions', not by destructuring."
           ;; Same burst: enqueue frame + claim frame
           (dsh-emacs-queue-apply
            buf 'proc
-           (list (cons 'items
-                       (vector (dsh-emacs-test--queue-item
-                                "b1" "queued" "bursty")))))
-          (dsh-emacs-queue-apply buf 'proc (list (cons 'items [])))
+           (list (dsh-emacs-test--queue-item
+                  "b1" "queued" "bursty")))
+          (dsh-emacs-queue-apply buf 'proc nil)
           (dsh-test-assert "queue-burst-transient-single-paint-scheduled"
             (= 1 (length paints)))
           (funcall (car paints))
@@ -17259,9 +17278,8 @@ candidates as the UI would via `all-completions', not by destructuring."
           ;; line shows after the redraw
           (dsh-emacs-queue-apply
            buf 'proc
-           (list (cons 'items
-                       (vector (dsh-emacs-test--queue-item
-                                "b2" "queued" "parked")))))
+           (list (dsh-emacs-test--queue-item
+                  "b2" "queued" "parked")))
           (funcall (car paints))
           (setq paints nil)
           (dsh-test-assert "queue-burst-parked-item-paints"
@@ -17430,8 +17448,7 @@ candidates as the UI would via `all-completions', not by destructuring."
       (progn
         (with-current-buffer buf
           (setq-local dsh-emacs--buffer-session "sess-a")
-          (let ((item (dsh-protocol-queue-item--from-alist
-                       (dsh-emacs-test--queue-item "it1" "queued" "x"))))
+          (let ((item (dsh-emacs-test--queue-item "it1" "queued" "x")))
             (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                        (lambda (method params _cb)
                          (push (list method params) calls))))
@@ -17458,8 +17475,7 @@ candidates as the UI would via `all-completions', not by destructuring."
         ;; Rollback on failed delete: consumption feedback is not swallowed
         (with-current-buffer buf
           (setq dsh-emacs--queue-deleted '("it1"))
-          (let ((item (dsh-protocol-queue-item--from-alist
-                       (dsh-emacs-test--queue-item "it1" "queued" "x"))))
+          (let ((item (dsh-emacs-test--queue-item "it1" "queued" "x")))
             (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                        (lambda (_method _params cb) (funcall cb nil '((code . "x"))))))
               (dsh-emacs-queue--delete item))
@@ -17476,8 +17492,7 @@ candidates as the UI would via `all-completions', not by destructuring."
         (dsh-emacs-mode)
         (setq-local dsh-emacs--buffer-session "sess-opt")
         (setq dsh-emacs--queue-items
-              (list (dsh-protocol-queue-item--from-alist
-                     (dsh-emacs-test--queue-item "o1" "queued" "origin"))))
+              (list (dsh-emacs-test--queue-item "o1" "queued" "origin")))
         (let ((cb nil))
           (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                      (lambda (_method _params callback) (setq cb callback))))
@@ -17500,8 +17515,7 @@ candidates as the UI would via `all-completions', not by destructuring."
         (dsh-emacs-mode)
         (setq-local dsh-emacs--buffer-session "sess-opt")
         (setq dsh-emacs--queue-items
-              (list (dsh-protocol-queue-item--from-alist
-                     (dsh-emacs-test--queue-item "o2" "queued" "old text"))))
+              (list (dsh-emacs-test--queue-item "o2" "queued" "old text")))
         (let ((cb nil))
           (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                      (lambda (_method _params callback) (setq cb callback))))
@@ -17520,8 +17534,7 @@ candidates as the UI would via `all-completions', not by destructuring."
         (dsh-emacs-mode)
         (setq-local dsh-emacs--buffer-session "sess-opt")
         (setq dsh-emacs--queue-items
-              (list (dsh-protocol-queue-item--from-alist
-                     (dsh-emacs-test--queue-item "o3" "queued" "gone"))))
+              (list (dsh-emacs-test--queue-item "o3" "queued" "gone")))
         (let ((cb nil))
           (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
                      (lambda (_method _params callback) (setq cb callback))))
@@ -17550,9 +17563,8 @@ candidates as the UI would via `all-completions', not by destructuring."
                    (lambda (_method _params callback) (push callback calls))))
           (dsh-emacs-queue-apply
            buf 'proc
-           (list (cons 'items
-                       (vector (dsh-emacs-test--queue-item "p1" "queued" "First")
-                               (dsh-emacs-test--queue-item "p2" "queued" "Second")))))
+           (list (dsh-emacs-test--queue-item "p1" "queued" "First")
+                 (dsh-emacs-test--queue-item "p2" "queued" "Second")))
           ;; steer the second entry (not the queue head): next immediately flips to the
           ;; steered Second
           (let ((item (cl-find "p2" dsh-emacs--queue-items
@@ -17593,9 +17605,8 @@ candidates as the UI would via `all-completions', not by destructuring."
                    (lambda (_method _params callback) (push callback calls))))
           (dsh-emacs-queue-apply
            buf 'proc
-           (list (cons 'items
-                       (vector (dsh-emacs-test--queue-item "p3" "queued" "Third")
-                               (dsh-emacs-test--queue-item "p4" "queued" "Fourth")))))
+           (list (dsh-emacs-test--queue-item "p3" "queued" "Third")
+                 (dsh-emacs-test--queue-item "p4" "queued" "Fourth")))
           (let ((item (cl-find "p3" dsh-emacs--queue-items
                                :key (lambda (i) (dsh-protocol-queue-item-id i))
                                :test #'string=)))
@@ -17627,9 +17638,8 @@ candidates as the UI would via `all-completions', not by destructuring."
                    (lambda (_method _params callback) (push callback calls))))
           (dsh-emacs-queue-apply
            buf 'proc
-           (list (cons 'items
-                       (vector (dsh-emacs-test--queue-item "p5" "queued" "Fifth")
-                               (dsh-emacs-test--queue-item "p6" "queued" "Sixth")))))
+           (list (dsh-emacs-test--queue-item "p5" "queued" "Fifth")
+                 (dsh-emacs-test--queue-item "p6" "queued" "Sixth")))
           (let ((item (cl-find "p5" dsh-emacs--queue-items
                                :key (lambda (i) (dsh-protocol-queue-item-id i))
                                :test #'string=)))
@@ -17655,8 +17665,7 @@ candidates as the UI would via `all-completions', not by destructuring."
           (dsh-emacs-mode)
           (setq-local dsh-emacs--buffer-session "sess-q")
           (setq dsh-emacs--queue-items
-                (list (dsh-protocol-queue-item--from-alist
-                       (dsh-emacs-test--queue-item "i1" "queued" "one")))))
+                (list (dsh-emacs-test--queue-item "i1" "queued" "one"))))
         (cl-letf (((symbol-function 'completing-read)
                    (lambda (&rest _) (signal 'quit nil))))
           (with-current-buffer buf
@@ -17669,10 +17678,8 @@ candidates as the UI would via `all-completions', not by destructuring."
 
 ;; Queue menu: menu keys act on entry resolution (vertico highlight > typed
 ;; exact/prefix > queue-head fallback)
-(let* ((a (dsh-protocol-queue-item--from-alist
-           (dsh-emacs-test--queue-item "a" "queued" "fix the bug")))
-       (b (dsh-protocol-queue-item--from-alist
-           (dsh-emacs-test--queue-item "b" "steering" "steered now")))
+(let* ((a (dsh-emacs-test--queue-item "a" "queued" "fix the bug"))
+       (b (dsh-emacs-test--queue-item "b" "steering" "steered now"))
        (table (list (cons "[Q] fix the bug" a)
                     (cons "[S] steered now" b)))
        (dsh-emacs--queue-pick-table table))
@@ -17705,10 +17712,8 @@ candidates as the UI would via `all-completions', not by destructuring."
         (setq vertico--candidates
               (list (propertize "[Q] fix the bug" 'face 'completions-common-part)
                     (propertize "[S] steered now" 'face 'vertico-current)))
-        (let* ((a (dsh-protocol-queue-item--from-alist
-                   (dsh-emacs-test--queue-item "a" "queued" "fix the bug")))
-               (b (dsh-protocol-queue-item--from-alist
-                   (dsh-emacs-test--queue-item "b" "steering" "steered now")))
+        (let* ((a (dsh-emacs-test--queue-item "a" "queued" "fix the bug"))
+               (b (dsh-emacs-test--queue-item "b" "steering" "steered now"))
                (dsh-emacs--queue-pick-table
                 (list (cons "[Q] fix the bug" a)
                       (cons "[S] steered now" b))))
@@ -17731,11 +17736,9 @@ candidates as the UI would via `all-completions', not by destructuring."
       (deferred nil)
       (chat (get-buffer-create " *t-queue-chat*"))
       (table (list (cons "[Q] first"
-                         (dsh-protocol-queue-item--from-alist
-                          (dsh-emacs-test--queue-item "m1" "queued" "first")))
+                         (dsh-emacs-test--queue-item "m1" "queued" "first"))
                    (cons "[Q] second"
-                         (dsh-protocol-queue-item--from-alist
-                          (dsh-emacs-test--queue-item "m2" "queued" "second"))))))
+                         (dsh-emacs-test--queue-item "m2" "queued" "second")))))
   (unwind-protect
       (with-current-buffer chat
         (setq-local dsh-emacs--buffer-session "sess-q")
@@ -17772,11 +17775,9 @@ candidates as the UI would via `all-completions', not by destructuring."
       (deferred nil)
       (chat (get-buffer-create " *t-queue-chat*"))
       (table (list (cons "[Q] first"
-                         (dsh-protocol-queue-item--from-alist
-                          (dsh-emacs-test--queue-item "x1" "queued" "first")))
+                         (dsh-emacs-test--queue-item "x1" "queued" "first"))
                    (cons "[Q] second"
-                         (dsh-protocol-queue-item--from-alist
-                          (dsh-emacs-test--queue-item "x2" "queued" "second"))))))
+                         (dsh-emacs-test--queue-item "x2" "queued" "second")))))
   (unwind-protect
       (with-current-buffer chat
         (setq-local dsh-emacs--buffer-session "sess-q")
@@ -19562,6 +19563,94 @@ candidates as the UI would via `all-completions', not by destructuring."
     (remhash session-id dsh-emacs--chat-buffers)
     (when (buffer-live-p chat) (kill-buffer chat))))
 
+;; --- session/control baseline seeds the queue mirror through the `inbox'
+;; --- projection cell (the dedicated `queues' record is gone since 0.1.7) ---
+(let* ((session-id "sess-baseline-inbox")
+       (chat (generate-new-buffer " *t-baseline-inbox*"))
+       (inbox (list (cons 'next-turn
+                          (vector (dsh-emacs-test--inbox-message "bn1" "seeded")))
+                    (cons 'next-step
+                          (vector (dsh-emacs-test--inbox-message
+                                   "bs1" "steer me")))))
+       (baseline (list (cons 'projections
+                             (list (cons session-id
+                                         (list (cons 'asOfSeq 7)
+                                               (cons 'values
+                                                     (list (cons 'inbox inbox)))))))))
+       (announced nil))
+  (unwind-protect
+      (progn
+        (puthash session-id chat dsh-emacs--chat-buffers)
+        (with-current-buffer chat
+          (dsh-emacs-mode)
+          (setq-local dsh-emacs--buffer-session session-id))
+        (cl-letf (((symbol-function 'dsh-emacs-queue--announce)
+                   (lambda (_events) (setq announced t))))
+          ;; Exercise the real JSON boundary: record keys decode as symbols,
+          ;; whereas chat buffers are indexed by string session ids.
+          (dsh-emacs-events--host-dispatch
+           'proc-baseline
+           (json-encode
+            `((type . "item") (streamId . "control")
+              (value . ((type . "baseline") (value . ,baseline))))))
+          (with-current-buffer chat
+            (dsh-test-assert "control-baseline-seeds-inbox-mirror"
+              (equal '("bn1" "bs1")
+                     (mapcar #'dsh-protocol-queue-item-id dsh-emacs--queue-items))
+              (equal '(queued steering)
+                     (mapcar #'dsh-protocol-queue-item-placement
+                             dsh-emacs--queue-items))
+              (eq 'proc-baseline dsh-emacs--queue-process))
+            ;; The baseline IS the connect-time snapshot: it seeds silently.
+            (dsh-test-assert "control-baseline-inbox-seed-is-silent"
+              (null announced)))))
+    (remhash session-id dsh-emacs--chat-buffers)
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
+;; --- session/control baseline replaces a stale mirror on reconnect ---
+;; A reconnect's baseline arrives on a NEW process.  The empty `inbox' cell of
+;; a session with nothing pending must replace the previous connection's items
+;; (silently — it is the connect-time snapshot), not leave them behind: that is
+;; what "a reconnect restores the pending queue from the baseline" means in the
+;; common case where the queue is empty.
+(let* ((old-chats dsh-emacs--chat-buffers)
+       (session-id "sess-baseline-empty")
+       (chat (generate-new-buffer " *t-baseline-empty*"))
+       (baseline (list (cons 'projections
+                             (list (cons session-id
+                                         (list (cons 'values
+                                                     (list (cons 'inbox
+                                                                 (list (cons 'next-turn [])
+                                                                       (cons 'next-step [])))))))))))
+       (announced nil))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs--chat-buffers
+              (let ((h (make-hash-table :test 'equal)))
+                (puthash session-id chat h)
+                h))
+        (with-current-buffer chat
+          (dsh-emacs-mode)
+          (setq-local dsh-emacs--buffer-session session-id)
+          ;; Items left by the previous connection's process.
+          (dsh-emacs-queue-apply chat 'proc-old
+                                 (list (dsh-emacs-test--queue-item
+                                        "stale" "queued" "stale"))))
+        (cl-letf (((symbol-function 'dsh-emacs-queue--announce)
+                   (lambda (_events) (setq announced t))))
+          (dsh-emacs-events--host-dispatch
+           'proc-new
+           (json-encode
+            `((type . "item") (streamId . "control")
+              (value . ((type . "baseline") (value . ,baseline))))))
+          (with-current-buffer chat
+            (dsh-test-assert "control-baseline-replaces-stale-inbox-mirror"
+              (null dsh-emacs--queue-items)
+              (eq 'proc-new dsh-emacs--queue-process)
+              (null announced)))))
+    (remhash session-id dsh-emacs--chat-buffers)
+    (when (buffer-live-p chat) (kill-buffer chat))))
+
 ;; --- Composer Goal Row: hide complete goals, matching dsh web ---
 (with-temp-buffer
   (dsh-emacs-mode)
@@ -20095,8 +20184,7 @@ candidates as the UI would via `all-completions', not by destructuring."
   (dsh-emacs--replace-input "draft\nsecond line")
   (goto-char (+ dsh-emacs--input-marker 3))
   (setq dsh-emacs--queue-items
-        (list (dsh-protocol-queue-item--from-alist
-               (dsh-emacs-test--queue-item "next" "queued" "Queued work"))))
+        (list (dsh-emacs-test--queue-item "next" "queued" "Queued work")))
   (dsh-emacs-composer-set-goal-from-projection
    '((goal . ((objective . "Current goal") (phase . "active")))))
   (dsh-emacs-queue--paint-after-burst)
@@ -20131,10 +20219,9 @@ candidates as the UI would via `all-completions', not by destructuring."
 (with-temp-buffer
   (dsh-emacs-mode)
   (setq dsh-emacs--queue-items
-        (list (dsh-protocol-queue-item--from-alist
-               (dsh-emacs-test--queue-item
+        (list (dsh-emacs-test--queue-item
                 "wide" "queued"
-                "First line\nSecond line with a long continuation 中文中文中文"))))
+                "First line\nSecond line with a long continuation 中文中文中文")))
   (let ((width 60))
     (cl-letf (((symbol-function 'dsh-emacs-composer--row-width)
                (lambda () width)))
@@ -20157,8 +20244,7 @@ candidates as the UI would via `all-completions', not by destructuring."
   (dsh-emacs-mode)
   (dsh-emacs-modeline-setup)
   (setq dsh-emacs--queue-items
-        (list (dsh-protocol-queue-item--from-alist
-               (dsh-emacs-test--queue-item "row" "queued" "Pending work"))))
+        (list (dsh-emacs-test--queue-item "row" "queued" "Pending work")))
   (dsh-emacs-composer-set-goal-from-projection
    '((goal . ((objective . "Keep goal") (phase . "active")))))
   (let ((top dsh-emacs--composer-top-marker)
