@@ -127,6 +127,11 @@ Hover over the preview for its full text, or use `C-c C-q` to manage pending
 messages. Goal shortcuts and inline controls are described in
 [Goal actions](docs/customization.md#goal-actions).
 
+The mode line shows `Retry 1/3` while waiting to retry, `Retrying 1/3` once
+the request starts, and `Compacting` during context compaction. Hover, click,
+or run `M-x dsh-emacs-describe-execution` for details. See
+[Execution feedback](docs/modeline.md#execution-feedback).
+
 Expanded file-edit cards show unchanged lines once as context, with red/green
 rows and totals for the changes. See
 [Tool cards](docs/ui-styling.md#tool-calls-dsh-web-style) for the display

@@ -109,6 +109,36 @@ step shows right after the spinner:
 - A `step/end` only closes the step it names, so a replayed or out-of-order
   end cannot replace a newer step.
 
+### Execution feedback
+
+The mode line shows exceptional execution states beside the running animation:
+
+| Label | Meaning |
+|---|---|
+| `Retry 1/3` | Waiting before the first retry, with a limit of three retries |
+| `Retrying 1/3` | That retry request has started |
+| `Retry 7` | Waiting to retry under a policy with no fixed retry limit |
+| `Compacting` | Context compaction is in progress |
+
+Hover or click the label, or run `M-x dsh-emacs-describe-execution`, to see
+the provider, retry count, scheduled wait and last failure reason/code when
+available. The scheduled wait is the server's delay, not a local countdown.
+The details buffer is a snapshot taken when opened. Standalone compaction
+between turns is visible even without a running animation; if retry and
+compaction overlap, both labels appear.
+
+These labels come from `llm/retry`, `llm/retry-started`, `compaction/start`
+and `compaction/end`. Matching completion/cancellation boundaries clear them;
+disconnect clears them immediately. Reconnection rebuilds state from the
+follow snapshot's retained event window, independently of transcript dedup.
+If that window no longer includes the operation's start, no label is shown:
+the client has no current evidence of it. Loading older history never changes
+the current execution status. There is no extra polling or animation timer.
+
+Successful retry/compaction transitions do not add transcript rows. An
+automatic compaction failure leaves a `Context compaction failed` card with
+the reason; a manual `/compact` failure uses the existing command result card.
+
 ### Pending-input queue indicator
 
 While messages are queued or steering, a `[Q2 S1]` indicator (queued /

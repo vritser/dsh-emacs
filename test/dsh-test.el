@@ -22441,6 +22441,267 @@ messages (e.g. `command/done')."
       (set-marker draft-point nil)
       (set-marker reading-point nil))))
 
+;; Execution feedback: exercise the public event path, not just status setters.
+(defun dsh-test--execution-event (type seq data)
+  "Make a durable execution fixture with TYPE, SEQ and wire DATA."
+  `((type . ,type) (seq . ,seq) (data . ,data)))
+
+(let ((event (dsh-protocol-execution-event--from-alist
+              '(("type" . "llm/retry") ("seq" . 10)
+                ("data" . (("retryId" . "chain") ("turn" . 1)
+                           ("step" . 2) ("retry" . 3) ("maxRetries" . 5)
+                           ("delayMs" . 1234) ("provider" . "test-provider")
+                           ("failure" . (("code" . "rate-limit")
+                                         ("message" . "Try later")))))))))
+  (dsh-test-assert "execution-decodes-string-wire-keys"
+    (equal (dsh-protocol-execution-event-id event) "chain")
+    (= (dsh-protocol-execution-event-attempt event) 3)
+    (= (dsh-protocol-execution-event-limit event) 5)
+    (= (dsh-protocol-execution-event-delay event) 1234)
+    (equal (dsh-protocol-execution-event-code event) "rate-limit")
+    (equal (dsh-protocol-execution-event-message event) "Try later")))
+
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dolist
+      (case
+       '(("wait" "llm/retry" 10
+          ((retryId . "r") (turn . 1) (step . 1) (retry . 1)
+           (maxRetries . 3) (delayMs . 2500) (provider . "provider-a")
+           (failure . ((code . "rate-limit") (message . "Slow down"))))
+          "Retry 1/3")
+         ("started" "llm/retry-started" 11
+          ((retryId . "r") (turn . 1) (step . 1) (retry . 1)) "Retrying 1/3")
+         ("next-wait" "llm/retry" 12
+          ((retryId . "r") (turn . 1) (step . 1) (retry . 2)
+           (maxRetries . 3)) "Retry 2/3")
+         ("old-attempt-start" "llm/retry-started" 13
+          ((retryId . "r") (turn . 1) (step . 1) (retry . 1)) "Retry 2/3")
+         ("other-chain-start" "llm/retry-started" 14
+          ((retryId . "other") (turn . 1) (step . 1) (retry . 2)) "Retry 2/3")
+         ("old-sequence" "llm/retry" 9
+          ((retryId . "old") (turn . 1) (step . 1) (retry . 1)) "Retry 2/3")
+         ("other-step-end" "step/end" 15 ((turn . 1) (step . 2)) "Retry 2/3")
+         ("current-start" "llm/retry-started" 16
+          ((retryId . "r") (turn . 1) (step . 1) (retry . 2)) "Retrying 2/3")
+         ("step-end" "step/end" 17 ((turn . 1) (step . 1)) "")
+         ("unlimited" "llm/retry" 18
+          ((retryId . "unlimited") (turn . 1) (step . 2) (retry . 7)) "Retry 7")
+         ("turn-cancelled" "turn/end" 19
+          ((turn . 1) (reason . ((kind . "interrupted")))) "")
+         ("step-chain" "llm/retry" 20
+          ((retryId . "step-chain") (turn . 2) (step . 1) (retry . 1)
+           (maxRetries . 2)) "Retry 1/2")
+         ("other-step-start" "step/start" 21 ((turn . 2) (step . 2)) "")
+         ("turn-chain" "llm/retry" 22
+          ((retryId . "turn-chain") (turn . 2) (step . 2) (retry . 1)
+           (maxRetries . 2)) "Retry 1/2")
+         ("other-turn-start" "turn/start" 23 ((turn . 3)) "")))
+    (pcase-let ((`(,name ,type ,seq ,data ,expected) case))
+      (dsh-emacs-events--dispatch-event
+       (current-buffer) (dsh-test--execution-event type seq data))
+      (dsh-test-assert (concat "execution-retry-" name)
+        (equal (string-trim (or (dsh-emacs-modeline--execution-indicator) ""))
+               expected))
+      (when (equal name "wait")
+        (dsh-test-assert "execution-retry-tooltip-explains-wait"
+          (string-match-p "provider-a" (dsh-emacs-modeline--execution-detail))
+          (string-match-p "2500 ms" (dsh-emacs-modeline--execution-detail))
+          (string-match-p "Slow down" (dsh-emacs-modeline--execution-detail)))
+        (save-window-excursion
+          (dsh-emacs-describe-execution)
+          (with-current-buffer "*dsh execution*"
+            (dsh-test-assert "execution-keyboard-details"
+              (string-match-p "rate-limit" (buffer-string))
+              (string-match-p "Slow down" (buffer-string)))))))))
+
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-render-event
+   (dsh-test--execution-event "compaction/start" 1
+                              '((compactionId . "manual") (turn . nil))))
+  (dsh-test-assert "execution-compaction-without-running-turn"
+    (not dsh-emacs--ml-busy)
+    (equal (string-trim (dsh-emacs-modeline--ml-indicator)) "Compacting"))
+  (dsh-emacs-render-event
+   (dsh-test--execution-event "turn/end" 2 '((turn . 9))))
+  (dsh-emacs-render-event
+   (dsh-test--execution-event "compaction/end" 3
+                              '((compactionId . "other") (turn . nil))))
+  (dsh-test-assert "execution-compaction-matches-identity"
+    (equal (string-trim (dsh-emacs-modeline--ml-indicator)) "Compacting"))
+  (dsh-emacs-render-event
+   (dsh-test--execution-event "llm/retry" 4
+                              '((retryId . "r") (retry . 1) (turn . 10)
+                                (step . 1) (maxRetries . 2))))
+  (dsh-test-assert "execution-compaction-and-retry-coexist"
+    (equal (string-trim (dsh-emacs-modeline--ml-indicator))
+           "Compacting · Retry 1/2"))
+  (dsh-emacs-render-event
+   (dsh-test--execution-event "compaction/end" 5
+                              '((compactionId . "manual") (turn . nil))))
+  (dsh-test-assert "execution-compaction-end-keeps-retry"
+    (equal (string-trim (dsh-emacs-modeline--ml-indicator)) "Retry 1/2"))
+  (dsh-emacs-render-event
+   (dsh-test--execution-event "assistant/message" 6
+                              '((turn . 10) (step . 1)
+                                (message . ((role . "assistant")
+                                            (content . []))) (stream . []))))
+  (dsh-test-assert "execution-success-clears-retry"
+    (string-empty-p (dsh-emacs-modeline--ml-indicator))))
+
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-render-event
+   (dsh-test--execution-event "compaction/start" 1
+                              '((compactionId . "turn-scoped") (turn . 4))))
+  (dsh-test-assert "execution-turn-scoped-compaction-shows"
+    (equal (string-trim (dsh-emacs-modeline--ml-indicator)) "Compacting"))
+  (dsh-emacs-render-event
+   (dsh-test--execution-event "turn/end" 2 '((turn . 4))))
+  (dsh-test-assert "execution-turn-end-clears-same-turn-compaction"
+    (null dsh-emacs--modeline-compaction)
+    (string-empty-p (dsh-emacs-modeline--ml-indicator))))
+
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-render-event
+   (dsh-test--execution-event "compaction/start" 1
+                              '((compactionId . "auto") (turn . 1))))
+  (dsh-emacs-render-event
+   (dsh-test--execution-event "compaction/end" 2
+                              '((compactionId . "auto") (turn . 1)
+                                (error . "Summary provider unavailable"))))
+  (dsh-test-assert "execution-compaction-failure-stays-inspectable"
+    (null dsh-emacs--modeline-compaction)
+    (string-match-p "Context compaction failed" (buffer-string))
+    (string-match-p "Summary provider unavailable" (buffer-string)))
+  (dsh-emacs-render-event
+   (dsh-test--execution-event "command/run" 3
+                              '((commandId . "cmd") (name . "compact"))))
+  (dsh-emacs-render-event
+   (dsh-test--execution-event "compaction/start" 4
+                              '((compactionId . "manual")
+                                (sourceCommandId . "cmd") (turn . nil))))
+  (dsh-emacs-render-event
+   (dsh-test--execution-event "compaction/end" 5
+                              '((compactionId . "manual")
+                                (sourceCommandId . "cmd") (turn . nil)
+                                (error . "Manual failure reason"))))
+  (dsh-emacs-render-event
+   (dsh-test--execution-event "command/done" 6
+                              '((commandId . "cmd") (kind . "error")
+                                (text . "Manual failure reason"))))
+  (goto-char (car (dsh-emacs-ui-find-block
+                   (dsh-emacs-render--make-namespace) "cmd-cmd")))
+  (dsh-emacs-ui-toggle-fragment)
+  (dsh-test-assert "execution-manual-failure-uses-command-card"
+    (null dsh-emacs--modeline-compaction)
+    (= (how-many "Manual failure reason" (point-min) (point-max)) 1)
+    (= (how-many "Context compaction failed" (point-min) (point-max)) 1)))
+
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (setq-local dsh-emacs--buffer-session "execution-snapshot")
+  (let* ((retry (dsh-test--execution-event
+                 "llm/retry" 10
+                 '((retryId . "reconnect") (turn . 1) (step . 2)
+                   (retry . 3) (maxRetries . 5))))
+         (compact (dsh-test--execution-event
+                   "compaction/start" 11
+                   '((compactionId . "c") (turn . 1))))
+         (snapshot `((cursor . 11)
+                     (records . [((type . "event") (event . ,retry))
+                                 ((type . "event") (event . ,compact))]))))
+    (setq dsh-emacs--anchor-seq 11)
+    (dsh-emacs-events--follow-snapshot (current-buffer) snapshot)
+    (dsh-test-assert "execution-snapshot-folds-below-transcript-anchor"
+      (equal (string-trim (dsh-emacs-modeline--execution-indicator))
+             "Compacting · Retry 3/5"))
+    (let ((dsh-emacs--history-page t))
+      ;; Drop the seq watermark so only the history-page guard can reject the
+      ;; replayed record: an older page must never rewind the live status.
+      (setq dsh-emacs--modeline-execution-seq nil)
+      (dsh-emacs-render-history-events
+       (list `((event . ,(dsh-test--execution-event
+                         "compaction/end" 1
+                         '((compactionId . "c") (turn . 1)))))) nil 10
+       :follow-p nil))
+    (dsh-test-assert "execution-history-page-keeps-current-status"
+      (equal (string-trim (dsh-emacs-modeline--execution-indicator))
+             "Compacting · Retry 3/5"))
+    (dsh-emacs--ml-busy-clear)
+    (dsh-test-assert "execution-teardown-clears-feedback"
+      (null (dsh-emacs-modeline--execution-indicator)))
+    (let ((render (symbol-function 'dsh-emacs-render-history-events)))
+      (cl-letf (((symbol-function 'dsh-emacs-render-history-events)
+                 (lambda (&rest args)
+                   (apply render args)
+                   (dsh-emacs-events--dispatch-event
+                    (current-buffer)
+                    (dsh-test--execution-event "llm/retry-started" 12
+                                               '((retryId . "reconnect")
+                                                 (turn . 1) (step . 2)
+                                                 (retry . 3)))))))
+        (dsh-emacs-events--follow-snapshot (current-buffer) snapshot)))
+    (dsh-test-assert "execution-snapshot-cannot-overwrite-newer-live-event"
+      (equal (string-trim (dsh-emacs-modeline--execution-indicator))
+             "Compacting · Retrying 3/5"))
+    (dsh-emacs-events--follow-snapshot
+     (current-buffer)
+     `((cursor . 13)
+       (records . [((type . "event")
+                    (event . ,(dsh-test--execution-event
+                              "turn/end" 13 '((turn . 1)))))])))
+    (dsh-test-assert "execution-closed-snapshot-is-idle"
+      (null (dsh-emacs-modeline--execution-indicator)))
+    (dsh-emacs-events--follow-snapshot (current-buffer) snapshot)
+    (dsh-emacs-events--follow-snapshot
+     (current-buffer) '((cursor . 14) (records . [])))
+    (dsh-test-assert "execution-missing-snapshot-evidence-clears-stale-status"
+      (null (dsh-emacs-modeline--execution-indicator)))))
+
+(let ((first (generate-new-buffer " *execution-first*"))
+      (second (generate-new-buffer " *execution-second*")))
+  (unwind-protect
+      (progn
+        (with-current-buffer first
+          (dsh-emacs-mode)
+          (dsh-emacs-events--dispatch-event
+           first (dsh-test--execution-event
+                  "compaction/start" 1 '((compactionId . "c") (turn . nil)))))
+        (with-current-buffer second
+          (dsh-emacs-mode)
+          (dsh-test-assert "execution-state-is-buffer-local"
+            (null (dsh-emacs-modeline--execution-indicator))))
+        (save-window-excursion
+          (delete-other-windows)
+          (let ((clicked (selected-window)))
+            (set-window-buffer clicked first)
+            (select-window (split-window-below))
+            (switch-to-buffer second)
+            (call-interactively
+             #'dsh-emacs-describe-execution nil
+             (vector (list 'mouse-1 (list clicked 'mode-line '(0 . 0) 0))))
+            (with-current-buffer "*dsh execution*"
+              (dsh-test-assert "execution-click-uses-clicked-chat"
+                (equal (buffer-string)
+                       "Compacting context (between turns)\n")))))
+        (with-current-buffer first
+          (let ((process (make-pipe-process :name "execution-lost" :noquery t)))
+            (unwind-protect
+                (progn
+                  (setq dsh-emacs--event-process process)
+                  (process-put process 'dsh-emacs-chat-buffer first)
+                  (cl-letf (((symbol-function 'dsh-emacs-events--schedule-reconnect)
+                             #'ignore))
+                    (dsh-emacs-events--lost process))
+                  (dsh-test-assert "execution-socket-loss-clears-status-now"
+                    (null (dsh-emacs-modeline--execution-indicator))))
+              (delete-process process)))))
+    (kill-buffer first)
+    (kill-buffer second)))
+
 (princ "\n===== test summary =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))
       (fail (cl-count-if (lambda (r) (not (cdr r))) dsh-test-results)))

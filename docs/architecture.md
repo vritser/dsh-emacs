@@ -510,9 +510,27 @@ refresh (`C-c C-r`):
 5. **tool/result** → `dsh-emacs-render-tool-result`: updates the existing tool card (success/error state)
 6. **turn/start** / **turn/end** → `dsh-emacs-render-turn-start/end`: rendered as a divider
 
-The follow snapshot is the opening history tail: `chunks` packed rows are
-skipped and only message-aligned `event` records seed the buffer, so old
-`assistant/chunk` deltas are not replayed and the completed
+Retry and compaction events also feed execution status beside the mode-line
+spinner. `dsh-emacs-protocol.el` decodes typed execution facts;
+`dsh-emacs-modeline.el` owns buffer-local retry and compaction state, their
+matching boundaries, and `dsh-emacs-describe-execution`. Retry-started
+matches the chain id and attempt number within the same turn and step;
+compaction matches its own id and may run between turns.
+`dsh-emacs-render.el` routes those facts and keeps automatic compaction
+failures as cards; manual failures already have command result
+cards. These transitions need no new stream, polling loop or timer.
+
+Before rendering a follow snapshot, `dsh-emacs-events.el` rebuilds execution
+status from its whole retained event window, including records below the
+transcript anchor. Folding before history rendering can yield ensures a newer
+live event cannot be overwritten by the older snapshot. A sequence watermark
+rejects duplicate facts; older history pages never feed this live state.
+Disconnect/rebaseline clears it, and a snapshot lacking a start leaves the
+operation unknown. See [070](../postmortem/070-execution-feedback.md).
+
+The follow snapshot is the opening history tail: every record is one durable
+`event` (there is no packed-row form any more), so old `assistant/chunk`
+deltas are not replayed and the completed
 `assistant/message` is used directly; new chunks from live follow events
 are handled directly. The streamed body uses
 a render watermark and frozen properties so that only the not-yet-stable tail is

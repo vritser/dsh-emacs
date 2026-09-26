@@ -1755,9 +1755,9 @@ additions on existing events; the only new event type is `image/offload`
 | `schedule/change` | `{version:1, operation:'create'\|'delete'\|'dispatch', …}` | dsh-schedule |
 | `command/run` | `{commandId, name, args?, source:{kind:'user'}}` | dsh-commands |
 | `command/done` | `{commandId, kind:'success'\|'error', text?, sourceEventSeq?}` | dsh-commands |
-| `compaction/start` | `{compactionId, sourceCommandId?, turn}` | dsh-compaction |
+| `compaction/start` | `{compactionId, sourceCommandId?, turn: number\|null}` (`null` for standalone compaction between turns) | dsh-compaction |
 | `compaction/summary` | `{compactionId, sourceCommandId?, summary, shadowedRange, shadowedSeqs, shadowedTokenCount, provider, model, maxTokens?, usage?, rawOutput?}` | dsh-compaction |
-| `compaction/end` | `{compactionId, sourceCommandId?, turn, error?}` | dsh-compaction |
+| `compaction/end` | `{compactionId, sourceCommandId?, turn: number\|null, error?: string}` | dsh-compaction |
 | `compaction/prune` | `{shadowedRange, shadowedSeqs, shadowedTokenCount}` | dsh-compaction-tool-result-pruner |
 | `session/title` | `{title, messageSeqs, source:{kind:'fallback'}\|{kind:'provider',provider,model?}\|{kind:'user'}}` | dsh-session-title |
 | `session/title-llm-request` | `{titleProvider, messageSeqs, route, system, messages, maxTokens}` | dsh-session-title-llm |
@@ -1769,7 +1769,8 @@ additions on existing events; the only new event type is `image/offload`
 | `subagent/catalog` | `{version, childId, childCreatedAt, mode:'one-shot'\|'continuable', label?}` (the parent-session-side subagent registry, one per line; `continuable` requires label) | dsh-subagent |
 | `deliverables/presented` | `{turn, callId, files: [{path, description?}]}` (delivered files registered after the `present` tool closes successfully) | dsh-tool-present |
 | `hook/invoked` / `hook/result` | hook execution records | dsh-hook-protocol |
-| `llm/retry` / `llm/retry-started` | retry records; `llm/retry.failure` may carry `offloadImages?` (0.1.6) | dsh-llm-retry |
+| `llm/retry` | `{retryId, turn, step, provider, mode:'normal'\|'always', policyKey, retry, maxRetries?, delayMs, failure:{message,code?,…}}`; `maxRetries` belongs to normal mode; `failure` may carry `offloadImages?` (0.1.6) | dsh-llm-retry |
+| `llm/retry-started` | `{retryId, turn, step, retry}`; emitted after the scheduled wait, immediately before the retry request | dsh-llm-retry |
 | `image/offload` | `{ targets: [{ seq, imageIndexes: number[] }] }` — records which image occurrences of which message nodes were offloaded; **new in 0.1.6**, and a *message-projection* event: its owning interpreter (`dsh-compaction-image-offload`) derives the `offloaded` marks on those message image blocks (also replayed into `assistant/message`/`user/message`/`system/message`/`compaction/summary`/`tool/ptc-dispatch` content) | dsh-compaction-image-offload |
 | `agent/inbox/spliced` | `{target:'next-turn'\|'next-step', start, removedCount?, inserted, outcome?}` | dsh-agent |
 | `tool/ptc-dispatch-start` / `tool/ptc-dispatch` | PTC (`run_code` bridge) subcall dispatch pair: `start` opens a subcall, `dispatch` closes it out with the same `subCallId`; `dispatch` may carry `error?: { name, code, reason? }` (**new in 0.1.6**) | dsh-tools |
@@ -1823,6 +1824,17 @@ expanded, it lists one indented line per path, click to open, with no body
 background; the same path takes the latest description, and `write`/`edit` changes
 are not merged in — their tool cards are already shown). `system/message` is still
 not rendered.
+
+**Execution feedback**: `llm/retry` / `llm/retry-started` and
+`compaction/start` / `compaction/end` feed the mode line, with provider, wait
+and failure details through `M-x dsh-emacs-describe-execution`. A retry chain
+reuses `retryId` across attempts, so `retry-started` must also match `retry`.
+Compaction's `turn: null` is independent of the running-turn animation.
+Completion boundaries clear live status; disconnect clears it, and the whole
+follow snapshot rebuilds it even below the transcript dedup anchor. Automatic
+compaction failures render a retained error card; `sourceCommandId` failures
+use the existing command result instead. `compaction/summary` and
+`compaction/prune` have no dedicated renderer.
 
 **0.1.6 additions and the dispatcher**: `image/offload` is a durable event with
 no dedicated renderer, so `dsh-emacs-render-event`'s `_ → nil` default branch

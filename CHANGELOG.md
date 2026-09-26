@@ -10,6 +10,13 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Execution waits have visible status**: the mode line shows `Retry n/m`
+  while waiting, `Retrying n/m` once the request starts, and `Compacting`
+  during context compaction, including between turns. Hover, click or run
+  `M-x dsh-emacs-describe-execution` for the provider, scheduled wait and
+  failure reason. Status clears on disconnect and rebuilds from retained
+  events on reconnect; automatic compaction failures remain in the transcript.
+  (rationale: postmortem/070)
 - **Background jobs are visible and controllable**: while a session can see
   running work — a bash command the model left in the background, a subagent
   delegation, a workflow — the mode line shows `[J2]`, and `C-c C-j` opens the

@@ -182,6 +182,8 @@ generation and a new clientId.")
 ;; at runtime from teardown only.
 (declare-function dsh-emacs--ml-busy-clear "dsh-emacs-modeline" ())
 (declare-function dsh-emacs--ml-busy-set "dsh-emacs-modeline" (flag))
+(declare-function dsh-emacs-modeline-reset-execution
+                  "dsh-emacs-modeline" (&optional events))
 (declare-function dsh-emacs-render--flush-stream "dsh-emacs-render"
                   (&optional buffer final))
 (declare-function dsh-emacs-render--discard-stream "dsh-emacs-render"
@@ -605,6 +607,7 @@ cannot affect the replacement snapshot. Keep the socket and durable anchor."
                     1 (dsh-emacs-events--cancel-message old)))))
       (process-put process 'dsh-emacs-follow-stream-id
                    (dsh-emacs-events--stream-id))
+      (dsh-emacs-modeline-reset-execution)
       (dsh-emacs-events--follow-open process))))
 
 (defun dsh-emacs-events--assistant-stream-render-chunk (chat chunk)
@@ -729,6 +732,11 @@ opening history tail; no separate history fetch precedes the connect."
         ;; socket's partial text or folded Think fragments.
         (dsh-emacs-render--discard-stream)
         (setq dsh-emacs--assistant-stream-attempt nil)
+        ;; Fold the whole window before rendering can yield to newer events.
+        ;; This includes starts below the transcript anchor; absent starts
+        ;; leave an operation unknown rather than retaining stale feedback.
+        (dsh-emacs-modeline-reset-execution
+         (dsh-protocol-execution-snapshot--from-alist value))
         (when entries
           (dsh-emacs-render-history-events entries nil)
           (when (fboundp 'dsh-emacs--seed-input-history)
@@ -950,6 +958,7 @@ never stack parallel reconnect timers."
         (with-current-buffer chat
           (setq dsh-emacs--event-process nil
                 dsh-emacs--event-ready nil)
+          (dsh-emacs-modeline-reset-execution)
           ;; The connection carried every logical stream; tell each feature
           ;; handler its stream is gone so no mirror outlives it.
           (dsh-emacs-events--close-streams process)

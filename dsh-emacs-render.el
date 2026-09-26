@@ -60,6 +60,8 @@
 (declare-function dsh-emacs-modeline-note-header "dsh-emacs-modeline" (event))
 (declare-function dsh-emacs-modeline-note-step
     "dsh-emacs-modeline" (turn step start-p))
+(declare-function dsh-emacs-modeline-note-execution
+    "dsh-emacs-modeline" (event &optional defer-update))
 ;; Defined in dsh-emacs.el, which loads after this module.  Called at runtime
 ;; from the inline-image attachment path (placeholder fill / RET open).
 (declare-function dsh-emacs--active-session-id "dsh-emacs" ())
@@ -4069,6 +4071,7 @@ source filter, so without this check the same tool card is painted twice."
 (defun dsh-emacs-render-event (event)
   "Dispatch EVENT to the appropriate renderer. Returns the event seq, or nil."
   (let* ((type (dsh-emacs-render--aget "type" event))
+         (execution (dsh-protocol-execution-event--from-alist event))
          (replacement (dsh-emacs-render--replacement-p event))
          (chunk-type (and (equal type "assistant/chunk")
                           (dsh-emacs-render--aget
@@ -4082,7 +4085,23 @@ source filter, so without this check the same tool card is painted twice."
     ;; Preserve event order at boundaries; reasoning has its own burst timer.
     (unless (equal chunk-type "reasoning-delta")
       (dsh-emacs-render--flush-thinking))
+    (when (and execution (not (dsh-emacs-render--history-page-p))
+               (fboundp 'dsh-emacs-modeline-note-execution))
+      (dsh-emacs-modeline-note-execution execution))
     (pcase type
+      ((or "llm/retry" "llm/retry-started" "compaction/start")
+       (setq seq (dsh-emacs-render--event-seq event)))
+      ("compaction/end"
+       (setq seq (dsh-emacs-render--event-seq event))
+       ;; Slash-command failures already have a command/done card.  An
+       ;; automatic compaction needs its own durable, inspectable failure.
+       (when (and (dsh-protocol-execution-event-message execution)
+                  (not (dsh-protocol-execution-event-command-id execution)))
+         (dsh-emacs-render-info
+          "✗ Context compaction failed"
+          (dsh-protocol-execution-event-message execution)
+          (format "compaction-%s"
+                  (dsh-protocol-execution-event-id execution)))))
       ("user/message" (setq seq (dsh-emacs-render-user-message event)))
       ("assistant/chunk" (setq seq (dsh-emacs-render-assistant-chunk event)))
       ("assistant/message" (setq seq (dsh-emacs-render-assistant-message event))

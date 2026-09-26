@@ -38,6 +38,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'dsh-emacs-protocol)
 (require 'dsh-emacs-ui)
 (require 'dsh-emacs-faces)
 (require 'dsh-emacs-tokens)
@@ -628,6 +629,153 @@ open, before any later context data arrives."
           (setq dsh-emacs--modeline-provider provider)))
       (dsh-emacs-modeline-update))))
 
+(defvar-local dsh-emacs--modeline-retry nil
+  "Current retry as (EXECUTION-EVENT . STARTED-P), or nil.")
+
+(defvar-local dsh-emacs--modeline-compaction nil
+  "Current compaction's `dsh-protocol-execution-event', or nil.")
+
+(defvar-local dsh-emacs--modeline-execution-seq nil
+  "Newest execution event folded into this buffer's status.")
+
+(defun dsh-emacs-modeline-note-execution (event &optional defer-update)
+  "Fold a decoded execution EVENT into this buffer's live feedback.
+Retry chains reuse their id: a started transition must match both the id
+and attempt number.  Standalone compactions survive unrelated turn endings.
+With DEFER-UPDATE non-nil the mode-line refresh is left to the caller, so a
+snapshot rebuild redraws once instead of once per retained record."
+  (let* ((seq (dsh-protocol-execution-event-seq event))
+         (type (dsh-protocol-execution-event-type event))
+         (turn (dsh-protocol-execution-event-turn event))
+         (step (dsh-protocol-execution-event-step event))
+         (id (dsh-protocol-execution-event-id event))
+         (retry (car dsh-emacs--modeline-retry))
+         (same-turn (and retry (integerp turn)
+                         (equal turn (dsh-protocol-execution-event-turn retry))))
+         (same-step (and same-turn
+                         (equal step (dsh-protocol-execution-event-step retry)))))
+    (when (or (not (integerp seq))
+              (null dsh-emacs--modeline-execution-seq)
+              (> seq dsh-emacs--modeline-execution-seq))
+      (when (integerp seq) (setq dsh-emacs--modeline-execution-seq seq))
+      (pcase type
+        ("llm/retry"
+         (when (and (stringp id) (integerp turn) (integerp step)
+                    (integerp (dsh-protocol-execution-event-attempt event)))
+           (setq dsh-emacs--modeline-retry (cons event nil))))
+        ("llm/retry-started"
+         (when (and same-step
+                    (equal id (dsh-protocol-execution-event-id retry))
+                    (equal (dsh-protocol-execution-event-attempt event)
+                           (dsh-protocol-execution-event-attempt retry)))
+           (setcdr dsh-emacs--modeline-retry t)))
+        ("compaction/start"
+         (when (stringp id) (setq dsh-emacs--modeline-compaction event)))
+        ("compaction/end"
+         (when (and dsh-emacs--modeline-compaction
+                    (equal id (dsh-protocol-execution-event-id
+                               dsh-emacs--modeline-compaction)))
+           (setq dsh-emacs--modeline-compaction nil)))
+        ("turn/start"
+         (unless same-turn (setq dsh-emacs--modeline-retry nil)))
+        ("step/start"
+         (unless same-step (setq dsh-emacs--modeline-retry nil)))
+        ((or "step/end" "assistant/message" "assistant/attempt")
+         (when same-step (setq dsh-emacs--modeline-retry nil)))
+        ("turn/end"
+         (when same-turn (setq dsh-emacs--modeline-retry nil))
+         (when (and (integerp turn) dsh-emacs--modeline-compaction
+                    (equal turn (dsh-protocol-execution-event-turn
+                                 dsh-emacs--modeline-compaction)))
+           (setq dsh-emacs--modeline-compaction nil))))
+      (unless defer-update
+        (force-mode-line-update)))))
+
+(defun dsh-emacs-modeline-reset-execution (&optional events)
+  "Replace execution feedback with decoded snapshot EVENTS, or clear it.
+Fold the whole retained window independently of the transcript's dedup anchor;
+an old start may still describe the current operation after reconnection."
+  (setq dsh-emacs--modeline-retry nil
+        dsh-emacs--modeline-compaction nil
+        dsh-emacs--modeline-execution-seq nil)
+  (dolist (event events)
+    (dsh-emacs-modeline-note-execution event t))
+  (force-mode-line-update))
+
+(defun dsh-emacs-modeline--execution-detail ()
+  "Describe this buffer's current retry and compaction, or return empty text."
+  (string-join
+   (delq nil
+         (list
+          (when-let* ((event dsh-emacs--modeline-compaction))
+            (format "Compacting context (%s)"
+                    (cond
+                     ((dsh-protocol-execution-event-command-id event)
+                      "slash command")
+                     ((dsh-protocol-execution-event-turn event)
+                      (format "turn %s"
+                              (dsh-protocol-execution-event-turn event)))
+                     (t "between turns"))))
+          (when-let* ((event (car dsh-emacs--modeline-retry)))
+            (concat
+             (if (cdr dsh-emacs--modeline-retry)
+                 "Retry request started" "Waiting to retry")
+             (format "\nProvider: %s\nRetry: %s%s"
+                     (or (dsh-protocol-execution-event-provider event) "unknown")
+                     (dsh-protocol-execution-event-attempt event)
+                     (if-let* ((limit (dsh-protocol-execution-event-limit event)))
+                         (format " of %s" limit) " (no fixed limit)"))
+             (when-let* ((delay (dsh-protocol-execution-event-delay event)))
+               (format "\nScheduled wait: %s ms" delay))
+             (when-let* ((code (dsh-protocol-execution-event-code event)))
+               (format "\nFailure code: %s" code))
+             (when-let* ((reason (dsh-protocol-execution-event-message event)))
+               (format "\nLast failure: %s" reason))))))
+   "\n\n"))
+
+(defun dsh-emacs-describe-execution ()
+  "Show the current chat's retry and context-compaction details."
+  (interactive "@")
+  (unless (derived-mode-p 'dsh-emacs-mode)
+    (user-error "Execution details require a chat buffer"))
+  (let ((detail (dsh-emacs-modeline--execution-detail)))
+    (with-help-window "*dsh execution*"
+      (princ (if (string-empty-p detail)
+                 "No retry or context compaction is currently observed."
+               detail))
+      (princ "\n"))))
+
+(defvar dsh-emacs-modeline--execution-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mode-line mouse-1] #'dsh-emacs-describe-execution)
+    map)
+  "Mode-line map for execution details.")
+
+(defun dsh-emacs-modeline--execution-indicator ()
+  "Return a compact retry/compaction label, including standalone compaction."
+  (let* ((retry (car dsh-emacs--modeline-retry))
+         (text (string-join
+                (delq nil
+                      (list
+                       (and dsh-emacs--modeline-compaction "Compacting")
+                       (when retry
+                         (format "%s %s%s"
+                                 (if (cdr dsh-emacs--modeline-retry)
+                                     "Retrying" "Retry")
+                                 (dsh-protocol-execution-event-attempt retry)
+                                 (if-let* ((limit
+                                            (dsh-protocol-execution-event-limit
+                                             retry)))
+                                     (format "/%s" limit) "")))))
+                " · ")))
+    (unless (string-empty-p text)
+      (propertize (concat " " text " ")
+                  'face 'dsh-emacs-mode-line-busy-face
+                  'help-echo (concat (dsh-emacs-modeline--execution-detail)
+                                     "\n\nClick or M-x dsh-emacs-describe-execution")
+                  'mouse-face 'mode-line-highlight
+                  'local-map dsh-emacs-modeline--execution-map))))
+
 (defun dsh-emacs-modeline-note-step (turn step start-p)
   "Record the running turn's step for the mode line.
 TURN and STEP are the integers from a `step/start' / `step/end' event,
@@ -789,6 +937,7 @@ Public teardown used when the event stream is disconnected or the chat
 buffer is being abandoned; the spinner must never keep ticking detached."
   (setq dsh-emacs--ml-busy nil
         dsh-emacs--modeline-step nil)
+  (dsh-emacs-modeline-reset-execution)
   (dsh-emacs--ml-busy-stop))
 
 (defun dsh-emacs--ml-busy-indicator ()
@@ -845,20 +994,19 @@ turn-internal boundaries rather than transcript content."
                   'mouse-face 'mode-line-highlight))))
 
 (defun dsh-emacs-modeline--ml-indicator ()
-  "Return the running animation for the mode line, padded for mode-name spot.
-Empty string when idle, so the mode line is untouched; \" [██  ] \" when
-running (space on both sides, ready to sit right after the DSH mode name),
-followed by the turn's step badge (\"step 2 · 3s\") while one is known."
+  "Return the running animation, step and execution feedback near the mode name.
+Standalone compaction has feedback even while no turn animation is running."
   (let ((frame (dsh-emacs--ml-busy-indicator)))
-    (if (string-empty-p frame)
-        ""
-      (concat
-       (propertize (concat " " frame " ")
-                   'help-echo "dsh is running a request…"
-                   'mouse-face 'mode-line-highlight)
-       (let ((step (dsh-emacs-modeline--step-indicator)))
-         (unless (string-empty-p step)
-           (concat step " ")))))))
+    (concat
+     (unless (string-empty-p frame)
+       (concat
+        (propertize (concat " " frame " ")
+                    'help-echo "dsh is running a request…"
+                    'mouse-face 'mode-line-highlight)
+        (let ((step (dsh-emacs-modeline--step-indicator)))
+          (unless (string-empty-p step)
+            (concat step " ")))))
+     (dsh-emacs-modeline--execution-indicator))))
 
 (defvar dsh-emacs-modeline--queue-map
   (let ((map (make-sparse-keymap)))
@@ -1086,6 +1234,7 @@ works without reopening the session.  Should be called from
   ;; Each open re-accumulates usage from the freshly loaded history, so
   ;; drop any usage left over from a previous visit to this buffer.
   (setq dsh-emacs--modeline-usage nil)
+  (dsh-emacs-modeline-reset-execution)
   ;; Create the structural end-of-buffer overlay (kept purely as the
   ;; separator the input-area geometry relies on).  The newline is input-area
   ;; geometry, not user text: it must never become an undo step of its own.

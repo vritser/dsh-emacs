@@ -2,6 +2,9 @@
 
 _Live attempt cleanup is superseded by [060](060-stream-settlement.md)._
 
+_The retry and compaction lifecycle consumption gap is superseded by
+[070](070-execution-feedback.md)._
+
 _Status: complete; one known limitation is lifted by 041 — `deliverables/presented`
 (a plugin event) now renders as the turn-tail deliverables row._
 

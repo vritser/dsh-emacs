@@ -929,6 +929,46 @@ alist; CONSTRUCTOR converts the wire alist."
       value
     (funcall constructor value)))
 
+;; Execution feedback: durable retry/compaction facts and their boundaries.
+
+(cl-defstruct (dsh-protocol-execution-event
+               (:constructor dsh-protocol--make-execution-event))
+  "A retry, compaction or execution boundary consumed by the status UI."
+  type seq turn step id attempt limit delay provider code message command-id)
+
+(defun dsh-protocol-execution-event--from-alist (event)
+  "Decode execution feedback from wire EVENT, or nil for unrelated events."
+  (let ((type (dsh-protocol--field 'type event)))
+    (when (member type '("llm/retry" "llm/retry-started"
+                         "compaction/start" "compaction/end"
+                         "turn/start" "turn/end" "step/start" "step/end"
+                         "assistant/message" "assistant/attempt"))
+      (let* ((data (dsh-protocol--field 'data event))
+             (failure (dsh-protocol--field 'failure data)))
+        (dsh-protocol--make-execution-event
+         :type type :seq (dsh-protocol--field 'seq event)
+         :turn (dsh-protocol--field 'turn data)
+         :step (dsh-protocol--field 'step data)
+         :id (or (dsh-protocol--field 'retryId data)
+                 (dsh-protocol--field 'compactionId data))
+         :attempt (dsh-protocol--field 'retry data)
+         :limit (dsh-protocol--field 'maxRetries data)
+         :delay (dsh-protocol--field 'delayMs data)
+         :provider (dsh-protocol--field 'provider data)
+         :code (dsh-protocol--field 'code failure)
+         :message (or (dsh-protocol--field 'message failure)
+                      (dsh-protocol--field 'error data))
+         :command-id (dsh-protocol--field 'sourceCommandId data))))))
+
+(defun dsh-protocol-execution-snapshot--from-alist (snapshot)
+  "Decode execution events from a follow SNAPSHOT's whole retained window."
+  (delq nil
+        (mapcar (lambda (record)
+                  (dsh-protocol-execution-event--from-alist
+                   (dsh-protocol--field 'event record)))
+                (dsh-protocol--objects
+                 (dsh-protocol--field 'records snapshot)))))
+
 (provide 'dsh-emacs-protocol)
 
 ;;; dsh-emacs-protocol.el ends here
