@@ -15,6 +15,7 @@ dsh-emacs/
 ├── dsh-emacs-modeline.el     # Mode-line stats
 ├── dsh-emacs-queue.el        # Pending-input queue mirror (queue/steer)
 ├── dsh-emacs-jobs.el         # Background jobs: job/list + job/follow streams, stop
+├── dsh-emacs-plan.el         # Plan documents, asynchronous review and decisions
 ├── dsh-emacs-server.el       # Server bootstrap: probe / auto-start / install / browser-session auth
 ├── dsh-emacs-command.el      # Slash surface: commands/list + commands/execute, "/" completion and menu
 ├── dsh-emacs-skill.el        # Skill catalog (skills/list) and /name gestures
@@ -310,7 +311,7 @@ accepts either a wire alist or an already-converted struct, so callers and
 fixtures can stay on either side of the boundary. Other event-stream payloads
 stay raw for now (their shapes vary per event type).
 
-The question reader in `dsh-emacs.el` answers each `ask` question in one
+The question reader in `dsh-emacs.el` answers each ordinary `ask` question in one
 minibuffer read. The question text and a hint are the prompt, the numbered
 options are the completion candidates, and each
 candidate's description is delivered as a completion annotation through
@@ -335,6 +336,23 @@ matching current message and preserves unrelated command output.
 Protocol structs remain the only question wire decoder, and waterfall/RPC
 ownership is unchanged.
 See [decision record 042](../postmortem/042-question-prompts.md).
+
+Plan review is a document interaction in `dsh-emacs-plan.el`. The protocol
+question struct retains the intent kind, approval label and optional call id;
+one supported plan-review question bypasses the minibuffer queue. Pending
+requests live in their owning chat buffer, retain the originating client id,
+and use asynchronous `$events/result` callbacks. A re-issued waterfall for the
+same call id moves the one pending request onto the newest event id instead of
+stacking a second one. Document buffers can be closed or killed without
+answering; opening a transcript link or running
+`dsh-emacs-plan-review` reattaches live actions. A sending flag rejects double
+submission, failures retain the request for retry, and cancellation, connection
+retirement and chat closure disable obsolete actions; a chat closed while a
+decision is on the wire hands the waterfall back only once. Historical
+documents never recreate pending requests. The renderer derives their titled
+cards from `exit_plan_mode` arguments using `dsh-protocol-plan-document`, so
+replay needs no separate persistence store. See
+[072](../postmortem/072-plan-review-documents.md).
 
 ## RPC API
 

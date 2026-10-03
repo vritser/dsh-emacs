@@ -192,6 +192,13 @@ for no added meaning (see
   independent of argument order.  The titles are `Job Output`, `Jobs` and
   `Kill Job`.  A `job_output` without a status line (a
   malformed or failed read) keeps the generic ioCard.
+- **`exit_plan_mode` submissions appear as document cards**: the plan's heading
+  is a clickable title, and `RET` opens the complete rendered Markdown in a
+  read-only buffer. Settlement retains the link; an unsuccessful review also
+  keeps the host's explanation. Replay restores the same document without
+  reopening review automatically. The host's live plan-review question opens
+  the document with explicit approval and change-request actions; see
+  [Plan review](slash-commands.md#plan-review).
 - **`ask_user_question` rows expand into the decision record** (dsh web
   `AskQuestionCard` plus the options its composer showed): one block per
   question — its `header` chip in the accent face and its prompt, then the

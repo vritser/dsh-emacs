@@ -10,6 +10,14 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Read plans before approving them**: submitted plans open as Markdown
+  documents with **Approve and execute** and **Request changes** actions.
+  Requesting changes returns to chat to write feedback; closing the document
+  leaves review pending. Titled transcript cards reopen previous plans, and
+  `M-x dsh-emacs-plan-review` reopens the current pending review. Disconnected
+  or cancelled requests lose their approval actions, and a review the document
+  interface cannot present reports the fallback instead of silently using the
+  question reader. (rationale: postmortem/072)
 - **Plan mode is visible across turns**: the mode line shows `Plan` when
   active, `Plan → on` while entry is pending, and `Plan → off` while exit is
   pending. Hover, click or `M-x dsh-emacs-describe-status` explains the

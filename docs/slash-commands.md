@@ -35,6 +35,45 @@ server version; dsh-emacs reads it live from `commands.list`):
 | `/permission` | `<preset>` |
 | `/plan` | `[off\|message]` |
 
+## Plan mode
+
+`/plan` enters Plan mode; `/plan <message>` also sends that message for the
+model to work on in Plan mode. `/plan off` leaves it. The host applies a switch
+immediately between turns, or at the next accepted step during a turn. The
+mode-line badge distinguishes the current mode from a pending switch:
+`Plan`, `Plan → on`, or `Plan → off`. See [Plan mode](modeline.md#plan-mode).
+
+The status badge itself does not approve a plan or change permissions.
+
+### Plan review
+
+When the model submits a plan through `exit_plan_mode`, the host's
+`plan-review` question opens the complete Markdown in a read-only document
+buffer. The chat and its input remain available; no minibuffer answer is
+required while reading. The document offers:
+
+- **Approve and execute** (`C-c C-c`): approve the plan; the host leaves Plan
+  mode and the agent can begin implementation.
+- **Request changes** (`C-c C-k`): dismiss review and return to the original
+  chat input. The agent stays in Plan mode and waits for your feedback.
+- **Back to chat** (`C-c C-z`): return to the chat without answering.
+- `q`: close the document window without answering. Even killing the document
+  buffer leaves review pending. `M-x dsh-emacs-plan-review` in the chat opens
+  the most recently received pending plan again.
+
+With tool calls visible, every submitted plan has a titled, clickable card in
+the transcript. `RET` or a click opens its document, including after review
+has ended and after history reload. Opening an old plan never grants approval.
+Approval buttons disappear while sending and after settlement. A failed send
+shows its error and permits retry. Host cancellation, a disconnected core
+stream, or a closed chat expires the review; the document remains readable.
+Closing the chat hands its pending request back to the host.
+
+Only a single-choice question with explicit supported `plan-review` intent
+uses this interface. Ordinary questions and unsupported review shapes keep the
+existing question reader; an unsupported review shape says so in the echo area
+instead of falling back silently. `/plan off` still changes the mode directly.
+
 ## Three ways to run a command
 
 - **Type it**: `/goal set improve the model picker` + `C-c C-c` — dsh-emacs

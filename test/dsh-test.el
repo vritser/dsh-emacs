@@ -22859,6 +22859,307 @@ messages (e.g. `command/done')."
     (kill-buffer first)
     (kill-buffer second)))
 
+;; A plan review carries presentation intent separately from its question text.
+(let ((question (dsh-protocol-question--from-alist
+                 '((id . "review") (detail . "# Search plan\n\nThree steps.")
+                   (intent . ((kind . "plan-review") (approve . "Execute")
+                              (callId . "plan-call")))))))
+  (dsh-test-assert "plan-review-preserves-presentation-intent"
+    (and (fboundp 'dsh-protocol-question-intent-kind)
+         (equal (dsh-protocol-question-intent-kind question) "plan-review")
+         (equal (dsh-protocol-question-approve-label question) "Execute")
+         (equal (dsh-protocol-question-call-id question) "plan-call"))))
+
+(defun dsh-test--plan-question (&optional call-id)
+  "Return a wire-shaped plan review fixture with CALL-ID."
+  `((id . "review") (question . "Approve?")
+    (detail . "# Search plan\n\n1. Index sessions.\n2. Verify results.")
+    (options . [((label . "Execute")) ((label . "Keep planning"))])
+    (intent . ((kind . "plan-review") (approve . "Execute")
+               (callId . ,(or call-id "plan-call"))))))
+
+;; Review does not enter a minibuffer; reading and closing a document never
+;; answers it.  Exercise the real result serializer at the RPC seam.
+(let ((chat (generate-new-buffer " *plan-review-test*"))
+      (dsh-emacs-events--client-id "plan-client")
+      (dsh-emacs-enable-notifications nil)
+      documents sent callback)
+  (unwind-protect
+      (cl-letf (((symbol-function 'display-buffer)
+                 (lambda (buffer &rest _)
+                   (cl-pushnew buffer documents) nil))
+                ((symbol-function 'completing-read-multiple)
+                 (lambda (&rest _) (error "Plan entered the question reader")))
+                ((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (method args cb)
+                   (push (cons method args) sent)
+                   (setq callback cb))))
+        (with-current-buffer chat
+          (insert "draft feedback")
+          (dsh-emacs--question-requested
+           chat "plan-event" "plan-session" (list (dsh-test--plan-question)))
+          (let* ((review (car dsh-emacs-plan--pending))
+                 (document (plist-get review :buffer)))
+            (dsh-test-assert "plan-review-opens-full-document-without-answering"
+              (buffer-live-p document) (null sent)
+              (with-current-buffer document
+                (and buffer-read-only
+                     (string-match-p "Index sessions" (buffer-string))
+                     (string-match-p "Approve and execute" (buffer-string)))))
+            (dsh-emacs--question-requested
+             chat "plan-event" "plan-session" (list (dsh-test--plan-question)))
+            (dsh-test-assert "plan-review-replay-does-not-duplicate"
+              (= (length dsh-emacs-plan--pending) 1) (= (length documents) 1))
+            (kill-buffer document)
+            (dsh-test-assert "plan-killing-document-keeps-review-pending"
+              (null sent) (memq review dsh-emacs-plan--pending))
+            (setq document
+                  (dsh-emacs-plan--show chat "plan-call"
+                                       (dsh-protocol-question-detail
+                                        (plist-get review :question))))
+            (with-current-buffer document
+              (dsh-test-assert "plan-reopened-document-restores-actions"
+                (eq review dsh-emacs-plan--review))
+              (dsh-emacs-plan-approve)
+              (dsh-test-assert "plan-approval-sends-exact-host-label-and-request"
+                (equal (car sent)
+                       '("$events/result" (clientId . "plan-client")
+                         (eventId . "plan-event")
+                         (outcome . ((kind . "result")
+                                     (value . ((answers .
+                                                [((id . "review")
+                                                  (selected . ["Execute"]))])))))))
+                (not (string-match-p "Approve and execute" (buffer-string))))
+              (dsh-test-assert "plan-double-submit-is-blocked"
+                (condition-case nil (progn (dsh-emacs-plan-approve) nil)
+                  (user-error t))
+                (= (length sent) 1))
+              (funcall callback nil "offline")
+              (dsh-test-assert "plan-failed-response-retains-retry-and-error"
+                (not (plist-get review :retired))
+                (string-match-p "Decision failed: offline" (buffer-string))
+                (string-match-p "Approve and execute" (buffer-string)))
+              (dsh-emacs-plan-approve)
+              ;; The host retires its waterfall before the HTTP callback.
+              (dsh-emacs--question-cancelled "plan-event")
+              (funcall callback t '((ok . t)))
+              (dsh-test-assert "plan-accepted-response-retires-review"
+                (null (buffer-local-value 'dsh-emacs-plan--pending chat))
+                (string-match-p "Approved" (buffer-string))
+                (condition-case nil (progn (dsh-emacs-plan-approve) nil)
+                  (user-error t))))
+            (dsh-test-assert "plan-read-and-approve-preserve-chat-draft"
+              (equal (buffer-string) "draft feedback")))
+          (dsh-emacs--question-requested
+           chat "plan-changes" "plan-session"
+           (list (dsh-test--plan-question "plan-two")))
+          (let* ((review (car dsh-emacs-plan--pending))
+                 (document (plist-get review :buffer)) returned)
+            (with-current-buffer document (dsh-emacs-plan-request-changes))
+            (dsh-test-assert "plan-request-changes-cancels-instead-of-replanning"
+              (equal (alist-get 'kind (alist-get 'outcome (cdr (car sent))))
+                     "rejected")
+              (equal (alist-get 'name (alist-get 'error
+                                               (alist-get 'outcome
+                                                          (cdr (car sent)))))
+                     "cancelled"))
+            (cl-letf (((symbol-function 'pop-to-buffer)
+                       (lambda (buffer &rest _) (setq returned buffer))))
+              (funcall callback t nil))
+            (dsh-test-assert "plan-request-changes-returns-to-own-chat"
+              (eq returned chat) (null dsh-emacs-plan--pending)
+              (equal (buffer-string) "draft feedback")))
+          (dsh-emacs--question-requested
+           chat "plan-expired" "plan-session"
+           (list (dsh-test--plan-question "plan-three")))
+          (let* ((review (car dsh-emacs-plan--pending))
+                 (document (plist-get review :buffer)))
+            (with-current-buffer document (dsh-emacs-plan-approve))
+            (dsh-emacs--waterfall-generation-retired)
+            (funcall callback t nil)
+            (dsh-test-assert "plan-disconnect-rejects-late-callback"
+              (null dsh-emacs-plan--pending)
+              (with-current-buffer document
+                (and (string-match-p "review expired" (buffer-string))
+                     (condition-case nil (progn (dsh-emacs-plan-approve) nil)
+                       (user-error t))))))))
+    (with-current-buffer chat (dsh-emacs-plan--cancel))
+    (kill-buffer chat)
+    (dolist (buffer documents)
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+;; Equal call ids in different chats must never share actions or retirement.
+(let ((first (generate-new-buffer " *plan-first*"))
+      (second (generate-new-buffer " *plan-second*"))
+      (dsh-emacs-events--client-id "isolated-client")
+      (dsh-emacs-enable-notifications nil)
+      documents sent)
+  (unwind-protect
+      (cl-letf (((symbol-function 'display-buffer)
+                 (lambda (buffer &rest _) (push buffer documents) nil))
+                ((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (_method args callback)
+                   (push args sent) (funcall callback t nil))))
+        (dsh-emacs--question-requested
+         first "review-first" "first" (list (dsh-test--plan-question)))
+        (dsh-emacs--question-requested
+         second "review-second" "second" (list (dsh-test--plan-question)))
+        (dsh-test-assert "plan-documents-isolate-equal-call-ids-by-chat"
+          (= (length (delete-dups (copy-sequence documents))) 2))
+        (dsh-emacs--question-cancelled "review-first")
+        (dsh-test-assert "plan-host-cancel-retires-only-target-without-answer"
+          (null sent)
+          (null (buffer-local-value 'dsh-emacs-plan--pending first))
+          (= (length (buffer-local-value 'dsh-emacs-plan--pending second)) 1)
+          (with-current-buffer (cadr documents)
+            (condition-case nil (progn (dsh-emacs-plan-approve) nil)
+              (user-error t))))
+        (kill-buffer second)
+        (dsh-test-assert "plan-chat-closure-hands-back-only-own-request"
+          (equal sent
+                 '(((clientId . "isolated-client")
+                    (eventId . "review-second")
+                    (outcome . ((kind . "next"))))))
+          (with-current-buffer (car documents)
+            (string-match-p "Chat closed" (buffer-string)))))
+    (when (buffer-live-p first) (kill-buffer first))
+    (when (buffer-live-p second) (kill-buffer second))
+    (dolist (buffer documents) (kill-buffer buffer))))
+
+;; A re-issued waterfall for the same submitted document moves the single
+;; pending request onto the newest event id instead of stacking a second one.
+(let ((chat (generate-new-buffer " *plan-reissued*"))
+      (dsh-emacs-events--client-id "reissue-client")
+      (dsh-emacs-enable-notifications nil)
+      documents sent)
+  (unwind-protect
+      (cl-letf (((symbol-function 'display-buffer)
+                 (lambda (buffer &rest _) (cl-pushnew buffer documents) nil))
+                ((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (method args _callback)
+                   (push (cons method args) sent))))
+        (with-current-buffer chat
+          (dsh-emacs--question-requested
+           chat "review-old" "reissue"
+           (list (dsh-test--plan-question "call-reissued")))
+          (dsh-emacs--question-requested
+           chat "review-new" "reissue"
+           (list (dsh-test--plan-question "call-reissued")))
+          (let ((review (car dsh-emacs-plan--pending)))
+            (dsh-test-assert "plan-reissued-review-refreshes-single-pending"
+              (= (length dsh-emacs-plan--pending) 1)
+              (= (length documents) 1)
+              (equal (plist-get review :event-id) "review-new"))
+            (with-current-buffer (plist-get review :buffer)
+              (dsh-emacs-plan-approve))
+            (dsh-test-assert "plan-reissued-review-answers-newest-waterfall"
+              (equal (alist-get 'eventId (cdr (car sent))) "review-new")))))
+    (with-current-buffer chat (dsh-emacs-plan--cancel))
+    (kill-buffer chat)
+    (dolist (buffer documents)
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+;; An empty call id is no identity: two submitted documents stay two requests
+;; (and two document buffers) instead of collapsing onto each other.
+(let ((chat (generate-new-buffer " *plan-empty-call-id*"))
+      (dsh-emacs-events--client-id "empty-client")
+      (dsh-emacs-enable-notifications nil)
+      documents)
+  (unwind-protect
+      (cl-letf (((symbol-function 'display-buffer)
+                 (lambda (buffer &rest _) (cl-pushnew buffer documents) nil))
+                ((symbol-function 'dsh-emacs--rpc-async) #'ignore))
+        (with-current-buffer chat
+          (dsh-emacs--question-requested
+           chat "empty-one" "empty" (list (dsh-test--plan-question "")))
+          (dsh-emacs--question-requested
+           chat "empty-two" "empty" (list (dsh-test--plan-question "")))
+          (dsh-test-assert "plan-empty-call-id-keeps-requests-separate"
+            (= (length dsh-emacs-plan--pending) 2)
+            (= (length documents) 2)
+            (equal (mapcar (lambda (review) (plist-get review :event-id))
+                           dsh-emacs-plan--pending)
+                   '("empty-two" "empty-one")))))
+    (with-current-buffer chat (dsh-emacs-plan--cancel))
+    (kill-buffer chat)
+    (dolist (buffer documents)
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+;; Closing a chat whose decision is already on the wire must not hand the same
+;; waterfall back to the host a second time.
+(let ((chat (generate-new-buffer " *plan-busy-close*"))
+      (dsh-emacs-events--client-id "busy-client")
+      (dsh-emacs-enable-notifications nil)
+      documents sent)
+  (unwind-protect
+      (cl-letf (((symbol-function 'display-buffer)
+                 (lambda (buffer &rest _) (cl-pushnew buffer documents) nil))
+                ((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (method args _callback)
+                   (push (cons method args) sent))))
+        (with-current-buffer chat
+          (dsh-emacs--question-requested
+           chat "busy-event" "busy" (list (dsh-test--plan-question "call-busy")))
+          (with-current-buffer (plist-get (car dsh-emacs-plan--pending) :buffer)
+            (dsh-emacs-plan-approve))
+          (dsh-emacs-plan--chat-closed)
+          (dsh-test-assert "plan-chat-closure-while-sending-does-not-hand-back"
+            (= (length sent) 1)
+            (equal (alist-get 'kind (alist-get 'outcome (cdr (car sent)))) "result")
+            (null dsh-emacs-plan--pending))))
+    (when (buffer-live-p chat) (kill-buffer chat))
+    (dolist (buffer documents)
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+;; Unsupported intents keep the existing ordinary question path; a plan-review
+;; intent that cannot be presented as a document says so instead of degrading
+;; silently.
+(with-temp-buffer
+  (dolist (kind '(plain multi batch bad-label))
+    (let* ((question (dsh-test--plan-question))
+           (questions (list question))
+           messages)
+      (pcase kind
+        ('plain (setf (alist-get 'intent question) nil))
+        ('multi (push '(multiSelect . t) question) (setq questions (list question)))
+        ('batch (push (copy-tree question) questions))
+        ('bad-label (setf (alist-get 'approve (alist-get 'intent question)) "No")))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args) messages))))
+        (dsh-test-assert (format "plan-review-falls-back-for-%s" kind)
+          (not (dsh-emacs-plan--request (current-buffer) "fallback" "s" questions))
+          (if (memq kind '(multi bad-label))
+              (and messages
+                   (string-match-p "plan review" (downcase (car messages))))
+            (null messages)))))))
+
+;; Historical cards survive settlement and replay; opening them never approves.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let ((text "# Search plan\n\nA readable historical plan.")
+        opened)
+    (dsh-emacs-render-tool-call
+     (dsh-emacs-test--tool-call-event
+      1 "plan-history" "exit_plan_mode" (json-encode `((plan . ,text)))))
+    (dsh-emacs-render-tool-result
+     (dsh-emacs-test--tool-result-event
+      2 "plan-history" nil nil "Plan approved"))
+    (goto-char (point-min))
+    (search-forward "Plan: Search plan")
+    (let ((button (button-at (match-beginning 0))))
+      (dsh-test-assert "plan-history-card-keeps-document-and-title"
+        button (equal (button-get button 'dsh-emacs-plan--markdown) text)
+        (string-match-p "Approved" (buffer-string))
+        (not (string-match-p "Tool Call" (buffer-string))))
+      (cl-letf (((symbol-function 'dsh-emacs-plan--show)
+                 (lambda (chat call-id body &rest _)
+                   (setq opened (list chat call-id body)) chat))
+                ((symbol-function 'pop-to-buffer) #'ignore))
+        (button-activate button))
+      (dsh-test-assert "plan-history-card-opens-correct-call"
+        (equal opened (list (current-buffer) "plan-history" text))))))
+
 (princ "\n===== test summary =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))
       (fail (cl-count-if (lambda (r) (not (cdr r))) dsh-test-results)))

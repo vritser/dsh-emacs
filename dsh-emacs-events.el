@@ -165,6 +165,7 @@ generation and a new clientId.")
 (declare-function dsh-emacs--chat-buffer-sync "dsh-emacs" (session-id))
 (declare-function dsh-emacs--question-requested "dsh-emacs" (chat event-id session-id questions))
 (declare-function dsh-emacs--question-cancelled "dsh-emacs" (event-id))
+(declare-function dsh-emacs-plan--cancel "dsh-emacs-plan" (&optional event-id))
 (declare-function dsh-emacs--approval-requested "dsh-emacs" (chat event-id session-id tool-name reason call-id))
 (declare-function dsh-emacs--approval-cancelled "dsh-emacs" (event-id))
 (declare-function dsh-emacs--events-result-async "dsh-emacs" (client-id event-id outcome callback))
@@ -1610,6 +1611,7 @@ mode-line state."
       (with-current-buffer buffer
         (setq dsh-emacs--host-process nil
               dsh-emacs--host-ready nil)
+        (dsh-emacs-plan--cancel)
         (unless (timerp dsh-emacs--host-reconnect-timer)
           (setq dsh-emacs--host-reconnect-timer
                 (run-at-time 1 nil
@@ -1753,6 +1755,7 @@ was sent."
     ;; reconnect for an intentional teardown.
     (setq dsh-emacs--host-process nil
           dsh-emacs--host-ready nil)
+    (dsh-emacs-plan--cancel)
     (when (process-live-p process)
       (delete-process process))))
 

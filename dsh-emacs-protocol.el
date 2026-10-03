@@ -562,6 +562,12 @@ in contribution order.  The derived `custom' state is not an option."
                               (text (cdr (assq 'question alist)))
                               (header (cdr (assq 'header alist)))
                               (detail (cdr (assq 'detail alist)))
+                              (intent-kind
+                               (cdr (assq 'kind (cdr (assq 'intent alist)))))
+                              (approve-label
+                               (cdr (assq 'approve (cdr (assq 'intent alist)))))
+                              (call-id
+                               (cdr (assq 'callId (cdr (assq 'intent alist)))))
                               (options
                                (mapcar
                                 #'dsh-protocol-question-option--from-alist
@@ -581,8 +587,17 @@ in contribution order.  The derived `custom' state is not an option."
   text
   header
   detail
+  intent-kind
+  approve-label
+  call-id
   options
   multi-select)
+
+(cl-defstruct (dsh-protocol-plan-document
+               (:constructor dsh-protocol-plan-document--from-alist
+                             (alist &aux (text (cdr (assq 'plan alist))))))
+  "The complete Markdown submitted by `exit_plan_mode'."
+  text)
 
 ;; ---------------------------------------------------------------------------
 ;; inbox projection items (the pending-input queue since dsh 0.1.7)

@@ -80,6 +80,7 @@
 (require 'dsh-emacs-faces)
 (require 'dsh-emacs-tokens)
 (require 'dsh-emacs-markdown)
+(require 'dsh-emacs-plan)
 (require 'dsh-emacs-render)
 (declare-function dsh-emacs-render--cancel-markdown "dsh-emacs-render" ())
 (declare-function dsh-emacs-render--insert-user-block "dsh-emacs-render"
@@ -5042,7 +5043,7 @@ them."
                    "No options: empty input skips, text is the answer."
                    nil nil)))))
 
-(defun dsh-emacs--question-requested (chat event-id session-id questions)
+(cl-defun dsh-emacs--question-requested (chat event-id session-id questions)
   "Queue a `user-questions/request' waterfall EVENT-ID of SESSION-ID and answer it.
 The minibuffer is one global resource: with several chat buffers open, a
 $events frame can deliver the next question while the previous one is
@@ -5060,7 +5061,10 @@ withdraws the ask and the run is never left blocked; the quit is caught
 here, so it cannot leak out of the process filter as \"error in process
 filter: Quit\".
 A waterfall whose EVENT-ID is already pending (queued or active) is
-dropped instead of asked twice, mirroring the approval flow."
+dropped instead of asked twice, mirroring the approval flow.
+Explicit plan-review intent opens a document without occupying the minibuffer."
+  (when (dsh-emacs-plan--request chat event-id session-id questions)
+    (cl-return-from dsh-emacs--question-requested))
   (unless (or (and (consp dsh-emacs--question-active)
                    (equal event-id (nth 1 dsh-emacs--question-active)))
               (cl-some (lambda (entry)
@@ -5118,6 +5122,7 @@ A host `cancel' frame for EVENT-ID means the waterfall was withdrawn and
 no longer needs answering; drop any still-queued copy so a replay never
 re-asks a finished question.  When the matching waterfall owns the active
 minibuffer, close it and let its drain retire without sending an outcome."
+  (dsh-emacs-plan--cancel event-id)
   (setq dsh-emacs--question-queue
         (cl-remove-if (lambda (entry)
                         (equal event-id (nth 1 entry)))
@@ -5142,6 +5147,7 @@ know about."
     (when (or (> questions 0) (> approvals 0))
       (message "dsh: new $events generation — retiring %d queued question(s) and %d approval(s)"
                questions approvals)))
+  (dsh-emacs-plan--cancel)
   (setq dsh-emacs--question-queue nil
         dsh-emacs--approval-queue nil))
 

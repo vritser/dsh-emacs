@@ -135,6 +135,12 @@ or run `M-x dsh-emacs-describe-status` for details. See
 Plan mode shows `Plan` while active, or `Plan → on` / `Plan → off` while a
 switch is pending. Use `/plan` to enter and `/plan off` to leave; the badge
 persists across turns. See [Plan mode](docs/modeline.md#plan-mode).
+Submitted plans open as readable Markdown in a separate buffer, with
+**Approve and execute** (`C-c C-c`) and **Request changes** (`C-c C-k`).
+Requesting changes returns to the chat input for feedback. `q` only closes
+the document window; reopen a pending review with `M-x dsh-emacs-plan-review`,
+or open a previous plan from its titled transcript card. See
+[Plan review](docs/slash-commands.md#plan-review).
 
 Expanded file-edit cards show unchanged lines once as context, with red/green
 rows and totals for the changes. See

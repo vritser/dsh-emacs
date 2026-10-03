@@ -16,6 +16,8 @@
 ;; launch token is accepted.  The test creates one session, exercises the
 ;; real event stream, and archives the session during cleanup because dsh
 ;; does not expose a session deletion RPC.
+;; Set DSH_E2E_PLAN_REVIEW=1 to exercise model-generated plan review,
+;; requesting changes, and approval (requires a working model provider).
 
 ;;; Code:
 
@@ -68,6 +70,56 @@
              (equal (dsh-protocol-session-session-id session)
                     dsh-e2e--session-id))
            dsh-emacs--sessions))
+
+(defun dsh-e2e--plan-review ()
+  "Exercise document review and both decisions against the real model."
+  (dolist (approve '(nil t))
+    (dsh-e2e--rpc
+     "commands/execute"
+     `((agentId . ,dsh-e2e--session-id)
+       (line . ,(concat
+                 "/plan This is a client UI acceptance test. "
+                 "Do not read or modify files, run commands, or use other tools. "
+                 "Immediately submit a short three-step plan using exit_plan_mode, "
+                 "starting with # Client review test. The plan is only to reply "
+                 "REVIEW_ACCEPTED after approval. If review is dismissed, stop "
+                 "and wait for my feedback. After approval, reply REVIEW_ACCEPTED "
+                 "and finish without any other work."))
+       (submittedAttachments . [])))
+    (unless (dsh-e2e--wait-until
+             (lambda () (buffer-local-value 'dsh-emacs-plan--pending
+                                             dsh-e2e--chat))
+             60)
+      (error "Model did not submit a plan for review"))
+    (let* ((review (car (buffer-local-value 'dsh-emacs-plan--pending
+                                           dsh-e2e--chat)))
+           (document (plist-get review :buffer)))
+      (dsh-e2e--check
+       (if approve "plan-second-review-document" "plan-first-review-document")
+       (and (= (minibuffer-depth) 0)
+            (buffer-live-p document)
+            (with-current-buffer document
+              (and (eq major-mode 'dsh-emacs-plan-mode)
+                   (string-match-p "Client review test" (buffer-string))
+                   (string-match-p "Approve and execute" (buffer-string))))))
+      (with-current-buffer document
+        (if approve (dsh-emacs-plan-approve)
+          (dsh-emacs-plan-request-changes)))
+      (dsh-e2e--check
+       (if approve "plan-approval-acknowledged" "plan-changes-acknowledged")
+       (dsh-e2e--wait-until
+        (lambda () (equal (plist-get review :status)
+                          (if approve "Approved" "Changes requested")))
+        10))
+      (dsh-e2e--check
+       (if approve "plan-approved-mode-off" "plan-changes-stay-in-plan")
+       (dsh-e2e--wait-until
+        (lambda ()
+          (with-current-buffer dsh-e2e--chat
+            (and dsh-emacs--modeline-plan
+                 (eq (dsh-protocol-plan-active dsh-emacs--modeline-plan)
+                     (not approve)))))
+        30)))))
 
 (unwind-protect
     (condition-case error-data
@@ -204,6 +256,8 @@
              "plan-survives-turn-and-rebaseline"
              (and dsh-emacs--modeline-plan
                   (dsh-protocol-plan-active dsh-emacs--modeline-plan)))
+            (when (getenv "DSH_E2E_PLAN_REVIEW")
+              (dsh-e2e--plan-review))
             (dsh-e2e--rpc
              "commands/execute"
              `((agentId . ,dsh-e2e--session-id) (line . "/plan off")

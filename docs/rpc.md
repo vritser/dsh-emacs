@@ -542,8 +542,11 @@ Subsequent downstream frames:
 - The `request` of a `user-questions/request` waterfall = `{questions:
   AskUserQuestionItem[]}`; `AskUserQuestionItem = {id, question, header?, detail?,
   options?: [{label, description?}], multiSelect?, intent?: {kind:'plan-review',
-  approve}}` (`approve` is the button label for plan-review; intent changes only
-  the presentation, not the protocol). The answer value =
+  approve, callId?}}` (`approve` is the button label for plan-review;
+  `callId` identifies the submitted document). Supported plan reviews use a
+  document buffer and asynchronous actions; intent changes presentation, not
+  the protocol. Request changes rejects with `error.name = "cancelled"`,
+  returning the host to waiting for feedback. The answer value =
   `{answers: [{id, selected: string[], custom?}]}` (skip = `selected: []`).
 - Reconnect: `$events` is reopened per generation by the connection controller; a
   new generation has a new `clientId`, and a result from an old `clientId` becomes

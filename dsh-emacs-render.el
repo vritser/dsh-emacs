@@ -30,6 +30,7 @@
 (require 'dsh-emacs-protocol)
 (require 'dsh-emacs-tokens)
 (require 'dsh-emacs-markdown)
+(require 'dsh-emacs-plan)
 
 (declare-function dsh-emacs-markdown--stream-end "dsh-emacs-markdown" (state))
 (declare-function dsh-emacs-markdown--watermark-start "dsh-emacs-markdown"
@@ -2235,9 +2236,59 @@ the event seq but renders no ordinary tool card."
   "Return a stable block-id for TOOL-CALL-ID (so we can update it later)."
   (format "tool-%s" tool-call-id))
 
-(defun dsh-emacs-render-tool-call (event)
+(defun dsh-emacs-render--plan-text (name arguments)
+  "Decode the document in NAME's JSON ARGUMENTS, or nil for other calls."
+  (when (and (equal name "exit_plan_mode") (stringp arguments))
+    (let* ((json-object-type 'alist)
+           (json-key-type 'symbol)
+           (decoded (condition-case err
+                        (json-read-from-string arguments)
+                      (json-error
+                       (message "Invalid plan document: %s"
+                                (error-message-string err))
+                       nil)))
+           (text (and (listp decoded)
+                      (dsh-protocol-plan-document-text
+                       (dsh-protocol-plan-document--from-alist decoded)))))
+      (and (stringp text) (not (string-empty-p (string-trim text))) text))))
+
+(defun dsh-emacs-render--open-plan (button)
+  "Open the historical document carried by BUTTON."
+  (pop-to-buffer
+   (dsh-emacs-plan--show
+    (current-buffer) (button-get button 'dsh-emacs-plan--call-id)
+    (button-get button 'dsh-emacs-plan--markdown))))
+
+(defun dsh-emacs-render--plan-card (call-id text &optional status detail)
+  "Render CALL-ID's TEXT as a persistent document link with STATUS and DETAIL."
+  (let* ((ns (dsh-emacs-render--make-namespace))
+         (label (concat "Plan: " (dsh-emacs-plan--title text)))
+         (link (with-temp-buffer
+                 (insert-text-button label 'follow-link t
+                                     'action #'dsh-emacs-render--open-plan
+                                     'dsh-emacs-plan--call-id call-id 'dsh-emacs-plan--markdown text)
+                 (buffer-string))))
+    (dsh-emacs-render--close-current-group)
+    (dsh-emacs-render--set-tool-state call-id :plan-text text)
+    (dsh-emacs-ui-update-fragment
+     (dsh-emacs-ui-make-fragment
+      :namespace-id ns :block-id (dsh-emacs-render--tool-call-block-id call-id)
+      :label-left link :label-right (or status "Open plan")
+      :body detail :style 'minimal :non-foldable t)
+     :create-new (null status) :expanded t
+     :insert-before (dsh-emacs-render--input-insert-point))))
+
+(cl-defun dsh-emacs-render-tool-call (event)
   "Render a `tool/call' event. Returns seq."
   (let ((name (dsh-emacs-render--aget "name" (dsh-emacs-render--event-data event))))
+    (when-let* ((text (and dsh-emacs-show-tool-calls
+                          (dsh-emacs-render--plan-text
+                           name (dsh-emacs-render--aget
+                                 "arguments" (dsh-emacs-render--event-data event))))))
+      (dsh-emacs-render--plan-card
+       (dsh-emacs-render--aget "callId" (dsh-emacs-render--event-data event)) text)
+      (cl-return-from dsh-emacs-render-tool-call
+        (dsh-emacs-render--event-seq event)))
     (if (equal name "todo_write")
         ;; todo_write updates the live plan strip, not an ordinary tool card.
         (dsh-emacs-render-todo-write event)
@@ -3133,7 +3184,7 @@ everything else `success'."
         (signal 'error)
         (t 'success)))
 
-(defun dsh-emacs-render-tool-result (event)
+(cl-defun dsh-emacs-render-tool-result (event)
   "Render a `tool/result' event by appending to the corresponding tool-call block."
   (if (not dsh-emacs-show-tool-calls)
       nil
@@ -3171,6 +3222,12 @@ everything else `success'."
              (ns (dsh-emacs-render--make-namespace))
              (block-id (dsh-emacs-render--tool-call-block-id call-id)))
         (when-let* ((prev (dsh-emacs-render--tool-state call-id)))
+          (when-let* ((text (plist-get prev :plan-text)))
+            (dsh-emacs-render--plan-card
+             call-id text (if is-error "Review ended" "Approved")
+             (and is-error (not (string-empty-p full-text)) full-text))
+            (cl-return-from dsh-emacs-render-tool-result
+              (dsh-emacs-render--event-seq event)))
           (let* ((title (or (plist-get prev :title) "Tool"))
                  (name (or (plist-get prev :name) ""))
                  (args (or (plist-get prev :args) ""))
