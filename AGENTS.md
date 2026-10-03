@@ -320,3 +320,86 @@ refactors and renames.
 - CHANGELOG / affected docs updated in the same change when user-visible
 - Nothing committed — commits happen only when the user explicitly asks
   (enforced by the harness's auto-commit disable, not by this file)
+
+## GUI testing the Emacs client (from a headless shell)
+
+What actually works when verifying front-end behaviour (`ask` prompts, completion
+front-ends, posframes) on this machine.  Editor-only lessons: batch tests and
+the repo gate are covered by §Verification above.
+
+### Launch a real GUI Emacs from the shell
+
+```sh
+/opt/homebrew/bin/emacs -Q -l /tmp/probe.el      # macOS window server is reachable
+```
+
+`-Q` skips `package-initialize`, so load what the probe needs explicitly, then
+add the checkout to `load-path`:
+
+```elisp
+(require 'package)
+(setq package-user-dir (expand-file-name "~/.emacs.d/elpa"))
+(package-initialize)
+(require 'vertico) (require 'vertico-posframe) (require 'posframe)
+(vertico-mode 1) (vertico-posframe-mode 1)
+(add-to-list 'load-path "/Users/ed/playground/dsh-emacs")
+(require 'dsh-emacs)
+```
+
+**GUI stdout is not visible**: write every observation to a file
+(`append-to-file`) and read it after the process exits.
+
+### Drive the real reader
+
+- Start the work from `emacs-startup-hook` / `run-with-idle-timer` so the first
+  frame exists; then schedule input with `run-with-timer` and
+  `(execute-kbd-macro (kbd "2,3 RET"))`.
+- Observe from `advice-add :around` on the function under test (the reader,
+  `completing-read-multiple`, `read-string`) — that is what showed the real
+  return values and the actual prompt text.
+- Dump state, do not screenshot: log `minibuffer-contents`,
+  `completion-all-sorted-completions`, `vertico--candidates`,
+  `vertico--index`, `(current-message)`, and the final answer.
+  `screencapture` captures whatever window is frontmost (it grabbed a browser)
+  and needs a window id it cannot get reliably headless.
+- `timeout N /opt/homebrew/bin/emacs …` and `pkill` keep a probe that blocks on
+  a read from hanging the session.
+
+### Limits of headless-probe timing
+
+- Once a child frame (posframe) holds focus, the window server throttles the
+  process: timer callbacks were observed 59 s apart, so "after the posframe
+  appears" probes are unreliable.  Assertions that depend on `current-message`
+  or frame visibility during a read do not work there — verify those
+  interactively.
+- `redisplay`, frame visibility and echo-area state are not observable
+  mid-read; do not claim they were measured.
+- Probing the status quo is fine (the frame list, answers, candidate lists);
+  perception questions (does it flicker?) require a human session.
+
+### Only the real frontend run finds these
+
+Unit tests that mock `completing-read` keep passing while the GUI shows:
+
+- a bare option number arrives **unexpanded** (`"2"`, not `"2. Beta"`), so
+  resolution must accept it;
+- `require-match` + a frontend preselect turns an empty RET into the first
+  candidate, so "empty input = skip" needs `require-match` nil **and**
+  `vertico-preselect 'prompt`;
+- a partly-matched comma-separated answer silently loses the unmatched part;
+- a bare-letter skip key shadows typing that letter inside the answer;
+- the answer order follows the input order unless the caller sorts by the
+  question's option order.
+
+Conclusion: mock the framework *and* run the real front-end path; treat the GUI
+run as the acceptance test.
+
+### Checking frontend behaviour without guessing
+
+Read the installed source (`~/.emacs.d/elpa/<pkg>-*/` for vertico,
+vertico-posframe, posframe; the Emacs tree for `icomplete.el`, `crm.el`).
+Settled this way: `crm-prompt` is `"[%d] %p"` (so CRM, not the caller, prefixes
+`[comma-separated list]`), `vertico--move-to-front` runs *after* sorting (so
+`vertico-sort-function` cannot stop a default being promoted),
+`icomplete--sorted-completions` deliberately bubbles a matching default, and
+`string-prefix-p` is case-sensitive while `compare-strings` folds case.
