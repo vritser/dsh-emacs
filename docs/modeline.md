@@ -120,7 +120,7 @@ The mode line shows exceptional execution states beside the running animation:
 | `Retry 7` | Waiting to retry under a policy with no fixed retry limit |
 | `Compacting` | Context compaction is in progress |
 
-Hover or click the label, or run `M-x dsh-emacs-describe-execution`, to see
+Hover or click the label, or run `M-x dsh-emacs-describe-status`, to see
 the provider, retry count, scheduled wait and last failure reason/code when
 available. The scheduled wait is the server's delay, not a local countdown.
 The details buffer is a snapshot taken when opened. Standalone compaction
@@ -138,6 +138,36 @@ the current execution status. There is no extra polling or animation timer.
 Successful retry/compaction transitions do not add transcript rows. An
 automatic compaction failure leaves a `Context compaction failed` card with
 the reason; a manual `/compact` failure uses the existing command result card.
+
+### Plan mode
+
+The mode line shows the session's collaboration mode even when no turn is
+running:
+
+| Label | Current state | Requested change |
+|---|---|---|
+| `Plan` | Active | None |
+| `Plan → on` | Inactive | Enter Plan mode |
+| `Plan → off` | Active | Leave Plan mode |
+| Hidden | Inactive or unavailable | None |
+
+Use `/plan` to enter and `/plan off` to leave. Hover, click or run
+`M-x dsh-emacs-describe-status` to inspect the current and pending state.
+Pending means the host has not confirmed the selected mode; it is not a
+request for user approval. During a turn the switch applies at the next
+accepted step; between turns the host can apply it immediately.
+
+The `plan` projection is authoritative. Finishing a turn or loading older
+history keeps the current mode. A disconnected chat retains its last known
+mode; opening a new core connection clears the old generation's state and
+reseeds it. Follow snapshots and control baselines merge by sequence, so an
+older snapshot cannot undo a newer selection, including a pending switch.
+An absent `plan` key in a current baseline removes the badge and means the
+capability is unavailable.
+
+Plan mode supplies planning guidance to the model. Sandbox permissions and
+approval policy remain independent. Todo cards continue to show task progress;
+their presence does not imply that Plan mode is active.
 
 ### Pending-input queue indicator
 

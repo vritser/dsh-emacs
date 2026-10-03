@@ -4108,6 +4108,9 @@ source filter, so without this check the same tool card is painted twice."
        (when (and (not (dsh-emacs-render--history-page-p))
                   (fboundp 'dsh-emacs-modeline-note-event))
          (dsh-emacs-modeline-note-event event)))
+      ;; A `plan/mode' record is durable but paints no row: the `plan'
+      ;; projection owns the badge, so the event is only consumed.
+      ("plan/mode" (setq seq (dsh-emacs-render--event-seq event)))
       ("request/context" (setq seq (dsh-emacs-render--event-seq event))
        (when (and (not (dsh-emacs-render--history-page-p))
                   (fboundp 'dsh-emacs-modeline-note-request))

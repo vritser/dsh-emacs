@@ -10,10 +10,17 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Plan mode is visible across turns**: the mode line shows `Plan` when
+  active, `Plan → on` while entry is pending, and `Plan → off` while exit is
+  pending. Hover, click or `M-x dsh-emacs-describe-status` explains the
+  current state and requested change. The host's `plan` projection drives the
+  badge; reconnect snapshots restore it without overwriting newer updates.
+  Use the existing `/plan` and `/plan off` commands to switch.
+  (rationale: postmortem/071)
 - **Execution waits have visible status**: the mode line shows `Retry n/m`
   while waiting, `Retrying n/m` once the request starts, and `Compacting`
   during context compaction, including between turns. Hover, click or run
-  `M-x dsh-emacs-describe-execution` for the provider, scheduled wait and
+  `M-x dsh-emacs-describe-status` for the provider, scheduled wait and
   failure reason. Status clears on disconnect and rebuilds from retained
   events on reconnect; automatic compaction failures remain in the transcript.
   (rationale: postmortem/070)

@@ -629,6 +629,26 @@ open, before any later context data arrives."
           (setq dsh-emacs--modeline-provider provider)))
       (dsh-emacs-modeline-update))))
 
+(defvar-local dsh-emacs--modeline-plan nil
+  "Last confirmed `dsh-protocol-plan' for this chat, or nil if unavailable.
+Plan mode persists across turns and disconnects until a projection replaces it.")
+
+(defvar-local dsh-emacs--modeline-plan-seq nil
+  "Newest Plan projection sequence, retained even when the capability is absent.")
+
+(defun dsh-emacs-modeline-set-plan (plan)
+  "Merge decoded PLAN by its sequence; nil resets this chat's Plan mirror.
+An absent capability still carries a watermark, so an older update cannot
+resurrect it after a newer baseline removed it."
+  (let ((seq (and plan (dsh-protocol-plan-seq plan))))
+    (when (or (not (integerp seq)) (null dsh-emacs--modeline-plan-seq)
+              (>= seq dsh-emacs--modeline-plan-seq))
+      (setq dsh-emacs--modeline-plan
+            (and plan (dsh-protocol-plan-available plan) plan))
+      (cond ((integerp seq) (setq dsh-emacs--modeline-plan-seq seq))
+            ((null plan) (setq dsh-emacs--modeline-plan-seq nil)))
+      (force-mode-line-update))))
+
 (defvar-local dsh-emacs--modeline-retry nil
   "Current retry as (EXECUTION-EVENT . STARTED-P), or nil.")
 
@@ -702,11 +722,19 @@ an old start may still describe the current operation after reconnection."
     (dsh-emacs-modeline-note-execution event t))
   (force-mode-line-update))
 
-(defun dsh-emacs-modeline--execution-detail ()
-  "Describe this buffer's current retry and compaction, or return empty text."
+(defun dsh-emacs-modeline--status-detail ()
+  "Describe this buffer's execution and Plan mode, or return empty text."
   (string-join
    (delq nil
          (list
+          (when-let* ((plan dsh-emacs--modeline-plan))
+            (concat
+             (format "Plan mode: %s"
+                     (if (dsh-protocol-plan-active plan) "active" "inactive"))
+             (when (dsh-protocol-plan-pending plan)
+               (format "\nPending: %s Plan mode (awaiting host confirmation)"
+                       (if (dsh-protocol-plan-active plan) "leave" "enter")))
+             "\nUse /plan to enter, /plan off to leave."))
           (when-let* ((event dsh-emacs--modeline-compaction))
             (format "Compacting context (%s)"
                     (cond
@@ -733,23 +761,39 @@ an old start may still describe the current operation after reconnection."
                (format "\nLast failure: %s" reason))))))
    "\n\n"))
 
-(defun dsh-emacs-describe-execution ()
-  "Show the current chat's retry and context-compaction details."
+(defun dsh-emacs-describe-status ()
+  "Show the current chat's retry, context-compaction and Plan mode details."
   (interactive "@")
   (unless (derived-mode-p 'dsh-emacs-mode)
-    (user-error "Execution details require a chat buffer"))
-  (let ((detail (dsh-emacs-modeline--execution-detail)))
-    (with-help-window "*dsh execution*"
+    (user-error "Status details require a chat buffer"))
+  (let ((detail (dsh-emacs-modeline--status-detail)))
+    (with-help-window "*dsh status*"
       (princ (if (string-empty-p detail)
-                 "No retry or context compaction is currently observed."
+                 "No retry, context compaction or Plan mode is observed."
                detail))
       (princ "\n"))))
 
-(defvar dsh-emacs-modeline--execution-map
+(defvar dsh-emacs-modeline--status-map
   (let ((map (make-sparse-keymap)))
-    (define-key map [mode-line mouse-1] #'dsh-emacs-describe-execution)
+    (define-key map [mode-line mouse-1] #'dsh-emacs-describe-status)
     map)
-  "Mode-line map for execution details.")
+  "Mode-line map for status details.")
+
+(defun dsh-emacs-modeline--plan-indicator ()
+  "Return the active or pending Plan mode label, independent of turn liveness."
+  (when-let* ((plan dsh-emacs--modeline-plan)
+              ((or (dsh-protocol-plan-active plan)
+                   (dsh-protocol-plan-pending plan))))
+    (propertize
+     (if (dsh-protocol-plan-pending plan)
+         (if (dsh-protocol-plan-active plan) " Plan → off " " Plan → on ")
+       " Plan ")
+     'face (if (dsh-protocol-plan-pending plan)
+               'dsh-emacs-mode-line-busy-face 'dsh-emacs-accent-face)
+     'help-echo (concat (dsh-emacs-modeline--status-detail)
+                        "\n\nClick or M-x dsh-emacs-describe-status")
+     'mouse-face 'mode-line-highlight
+     'local-map dsh-emacs-modeline--status-map)))
 
 (defun dsh-emacs-modeline--execution-indicator ()
   "Return a compact retry/compaction label, including standalone compaction."
@@ -771,10 +815,10 @@ an old start may still describe the current operation after reconnection."
     (unless (string-empty-p text)
       (propertize (concat " " text " ")
                   'face 'dsh-emacs-mode-line-busy-face
-                  'help-echo (concat (dsh-emacs-modeline--execution-detail)
-                                     "\n\nClick or M-x dsh-emacs-describe-execution")
+                  'help-echo (concat (dsh-emacs-modeline--status-detail)
+                                     "\n\nClick or M-x dsh-emacs-describe-status")
                   'mouse-face 'mode-line-highlight
-                  'local-map dsh-emacs-modeline--execution-map))))
+                  'local-map dsh-emacs-modeline--status-map))))
 
 (defun dsh-emacs-modeline-note-step (turn step start-p)
   "Record the running turn's step for the mode line.
@@ -1006,6 +1050,7 @@ Standalone compaction has feedback even while no turn animation is running."
         (let ((step (dsh-emacs-modeline--step-indicator)))
           (unless (string-empty-p step)
             (concat step " ")))))
+     (dsh-emacs-modeline--plan-indicator)
      (dsh-emacs-modeline--execution-indicator))))
 
 (defvar dsh-emacs-modeline--queue-map
@@ -1234,6 +1279,7 @@ works without reopening the session.  Should be called from
   ;; Each open re-accumulates usage from the freshly loaded history, so
   ;; drop any usage left over from a previous visit to this buffer.
   (setq dsh-emacs--modeline-usage nil)
+  (dsh-emacs-modeline-set-plan nil)
   (dsh-emacs-modeline-reset-execution)
   ;; Create the structural end-of-buffer overlay (kept purely as the
   ;; separator the input-area geometry relies on).  The newline is input-area

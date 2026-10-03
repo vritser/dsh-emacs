@@ -184,6 +184,7 @@ generation and a new clientId.")
 (declare-function dsh-emacs--ml-busy-set "dsh-emacs-modeline" (flag))
 (declare-function dsh-emacs-modeline-reset-execution
                   "dsh-emacs-modeline" (&optional events))
+(declare-function dsh-emacs-modeline-set-plan "dsh-emacs-modeline" (plan))
 (declare-function dsh-emacs-render--flush-stream "dsh-emacs-render"
                   (&optional buffer final))
 (declare-function dsh-emacs-render--discard-stream "dsh-emacs-render"
@@ -716,6 +717,7 @@ opening history tail; no separate history fetch precedes the connect."
     (with-current-buffer chat
       (let* ((session-id dsh-emacs--buffer-session)
              (cursor (dsh-emacs-render--aget "cursor" value))
+             (projections (dsh-emacs-render--aget "projections" value))
              (records (let ((r (dsh-emacs-render--aget "records" value)))
                         (cond ((vectorp r) (append r nil))
                               ((listp r) r)
@@ -737,6 +739,10 @@ opening history tail; no separate history fetch precedes the connect."
         ;; leave an operation unknown rather than retaining stale feedback.
         (dsh-emacs-modeline-reset-execution
          (dsh-protocol-execution-snapshot--from-alist value))
+        ;; Plan is projection-owned and must be seeded before history can
+        ;; yield to a newer control increment.  History never folds Plan.
+        (dsh-emacs-modeline-set-plan
+         (dsh-protocol-plan-baseline--from-alist projections))
         (when entries
           (dsh-emacs-render-history-events entries nil)
           (when (fboundp 'dsh-emacs--seed-input-history)
@@ -780,7 +786,7 @@ opening history tail; no separate history fetch precedes the connect."
                                       record))
                            (text . ,text)))))))))
         (dsh-emacs-events--apply-snapshot-projections
-         session-id (dsh-emacs-render--aget "projections" value))
+         session-id projections)
         (setq dsh-emacs--ws-last-event-time (float-time))))))
 
 (defun dsh-emacs-events--apply-snapshot-projections (session-id projections)
@@ -788,7 +794,8 @@ opening history tail; no separate history fetch precedes the connect."
 `title' feeds the session cache/buffer name, `contextPressure' the
 mode-line ctx%, `permissions' the mode-line permission preset, `goal' the
 Composer Goal Row — the same consumers as the `session/control' projection
-increment frames use."
+increment frames use.  Plan is seeded earlier in `--follow-snapshot', before
+history rendering can yield to live updates."
   (let ((values (and (listp projections)
                      (dsh-emacs-render--aget "values" projections))))
     (when (listp values)
@@ -1371,11 +1378,14 @@ retires a pending waterfall by `eventId'."
          ;; the queue mirror).
          (dsh-emacs-events--host-control-baseline process payload))))
     ("projection"
-     (dsh-emacs-events--host-apply-projection
-      process
-      (dsh-emacs-render--aget "sessionId" value)
-      (dsh-emacs-render--aget "key" value)
-      (dsh-emacs-render--aget "value" value)))
+     (let ((key (dsh-emacs-render--aget "key" value)))
+       (dsh-emacs-events--host-apply-projection
+        process
+        (dsh-emacs-render--aget "sessionId" value)
+        key
+        (if (member key '(plan "plan"))
+            (dsh-protocol-plan-update--from-alist value)
+          (dsh-emacs-render--aget "value" value)))))
     ("upsert"
      (let ((ws (dsh-emacs-render--aget "workspace" value)))
        (when ws
@@ -1518,11 +1528,15 @@ queue mirror is seeded by the same record's `inbox' cell, which
                       (car pair)))
                (baseline (cdr pair))
                (values (dsh-emacs-render--aget "values" baseline)))
+          ;; Carry the cut even for absent Plan capability, so an old
+          ;; reconnect baseline cannot erase a newer control increment.
+          (dsh-emacs-events--host-apply-projection
+           process sid "plan" (dsh-protocol-plan-baseline--from-alist baseline))
           (dolist (kv (if (vectorp values) (append values nil)
                         (and (listp values) values)))
             ;; Projection values may legitimately be nil: `(goal . nil)' is
             ;; the authoritative tombstone that removes the Composer row.
-            (when (consp kv)
+            (when (and (consp kv) (not (member (car kv) '(plan "plan"))))
               (dsh-emacs-events--host-apply-projection
                process sid (car kv) (cdr kv)))))))))
 
@@ -1530,13 +1544,11 @@ queue mirror is seeded by the same record's `inbox' cell, which
   "Apply one projection cell (KEY . VALUE) of SESSION-ID arriving on PROCESS.
 `contextPressure' feeds the mode-line ctx%, `permissions' the mode-line
 permission preset, `title' the session cache and chat buffer name, `goal'
-the live chat buffer's Composer Goal Row, and `inbox' the live chat
-buffer's pending-input mirror — the queue source since dsh 0.1.7, which
-deleted the dedicated `queue' frames; other keys are reserved for later
-milestones.  Only the `inbox' branch needs the buffer: the mirror is
-buffer-local, so a cell whose session has no live chat buffer is dropped
-(and never applied to whatever buffer is current); the other branches
-reach their consumers themselves."
+the Composer Goal Row, `plan' its persistent collaboration mode, and `inbox'
+the pending-input mirror.  Plan VALUE carries its decoded sequence; legacy
+fixtures may supply a raw projection.  Plan and inbox cells with no live chat
+buffer are dropped, never applied to whichever buffer happens to be current.
+Other branches reach their consumers themselves."
   (when session-id
     (pcase (if (symbolp key) (symbol-name key) key)
       ("contextPressure"
@@ -1547,6 +1559,13 @@ reach their consumers themselves."
          (dsh-emacs--events-apply-permission-projection session-id value)))
       ("goal"
        (dsh-emacs-events--apply-goal-projection session-id value))
+      ("plan"
+       (let ((chat (dsh-emacs-events--chat-buffer session-id)))
+         (when (buffer-live-p chat)
+           (with-current-buffer chat
+             (dsh-emacs-modeline-set-plan
+              (dsh-protocol--struct #'dsh-protocol-plan-p
+                                    #'dsh-protocol-plan--from-alist value))))))
       ("inbox"
        (let ((chat (dsh-emacs-events--chat-buffer session-id)))
          (when (buffer-live-p chat)
@@ -1678,6 +1697,13 @@ stream id is recorded on PROCESS so a later re-baseline
 (`dsh-emacs-events--core-workspace-rebaseline') can retire it before
 re-opening (never two live workspace streams on one socket)."
   (when (process-live-p process)
+    ;; A new Host generation may replay a Session in a new sequence space.
+    ;; Drop the previous Plan cuts before its baselines and increments arrive.
+    (maphash (lambda (_session-id chat)
+               (when (buffer-live-p chat)
+                 (with-current-buffer chat
+                   (dsh-emacs-modeline-set-plan nil))))
+             dsh-emacs--chat-buffers)
     (dolist (endpoint '("session/control" "workspace/follow" "$events"))
       (let* ((stream-id (dsh-emacs-events--stream-id))
              (json (dsh-emacs-events--open-message stream-id endpoint nil)))

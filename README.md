@@ -129,8 +129,12 @@ messages. Goal shortcuts and inline controls are described in
 
 The mode line shows `Retry 1/3` while waiting to retry, `Retrying 1/3` once
 the request starts, and `Compacting` during context compaction. Hover, click,
-or run `M-x dsh-emacs-describe-execution` for details. See
+or run `M-x dsh-emacs-describe-status` for details. See
 [Execution feedback](docs/modeline.md#execution-feedback).
+
+Plan mode shows `Plan` while active, or `Plan → on` / `Plan → off` while a
+switch is pending. Use `/plan` to enter and `/plan off` to leave; the badge
+persists across turns. See [Plan mode](docs/modeline.md#plan-mode).
 
 Expanded file-edit cards show unchanged lines once as context, with red/green
 rows and totals for the changes. See

@@ -287,6 +287,9 @@ when the server protocol changes you sync exactly one file. Covered payloads:
   `authorable` flag, so the web-consistent built-in labels key on the id alone
 - `goal` session projection (§9) → `dsh-protocol-goal` (id, revision,
   objective, phase, blocked-reason, max-goal-rounds, rounds-started)
+- `plan` session projection → `dsh-protocol-plan` (active, pending, available,
+  seq); constructors decode both control increments and projection baselines,
+  including the watermark of an absent capability
 - `commands/list` → `dsh-protocol-command` (name, description, input) and
   `skills/list` → `dsh-protocol-skill-list` (skills) → `dsh-protocol-skill`
   (name, description, when-to-use, model-invocable, path) — the two catalogs
@@ -513,7 +516,7 @@ refresh (`C-c C-r`):
 Retry and compaction events also feed execution status beside the mode-line
 spinner. `dsh-emacs-protocol.el` decodes typed execution facts;
 `dsh-emacs-modeline.el` owns buffer-local retry and compaction state, their
-matching boundaries, and `dsh-emacs-describe-execution`. Retry-started
+matching boundaries, and `dsh-emacs-describe-status`. Retry-started
 matches the chain id and attempt number within the same turn and step;
 compaction matches its own id and may run between turns.
 `dsh-emacs-render.el` routes those facts and keeps automatic compaction
@@ -527,6 +530,15 @@ live event cannot be overwritten by the older snapshot. A sequence watermark
 rejects duplicate facts; older history pages never feed this live state.
 Disconnect/rebaseline clears it, and a snapshot lacking a start leaves the
 operation unknown. See [070](../postmortem/070-execution-feedback.md).
+
+Plan mode is persistent projection state in the modeline module. The control
+stream delivers live updates; follow and control baselines seed the same
+buffer-local mirror. `seq` / `asOfSeq` guards prevent stale snapshots from
+overwriting or clearing newer state. A new core connection resets the old
+generation's values and watermarks. Follow seeds Plan before history can yield,
+and raw `plan/mode` events never rewind it. The badge and the status-details
+command share the existing mode-line surface; switching still uses the host
+slash commands. See [071](../postmortem/071-plan-mode-status.md).
 
 The follow snapshot is the opening history tail: every record is one durable
 `event` (there is no packed-row form any more), so old `assistant/chunk`

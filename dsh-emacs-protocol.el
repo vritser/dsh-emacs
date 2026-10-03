@@ -717,6 +717,30 @@ canonical `@[label](dsh-session:...)' prompt text the client inserts."
           (alist-get 'roundsStarted value))
     goal))
 
+;; Plan mode is persistent collaboration state, separate from Todo items.
+(cl-defstruct (dsh-protocol-plan
+               (:constructor dsh-protocol--make-plan))
+  "The host's committed Plan mode and whether an opposite selection is pending."
+  active pending available seq)
+
+(defun dsh-protocol-plan--from-alist (value &optional seq)
+  "Decode a `plan' projection VALUE at SEQ, retaining capability absence."
+  (dsh-protocol--make-plan
+   :active (dsh-protocol--boolean (dsh-protocol--field 'active value))
+   :pending (dsh-protocol--boolean (dsh-protocol--field 'pending value))
+   :available (consp value) :seq seq))
+
+(defun dsh-protocol-plan-update--from-alist (frame)
+  "Decode Plan mode and its watermark from a control projection FRAME."
+  (dsh-protocol-plan--from-alist
+   (dsh-protocol--field 'value frame) (dsh-protocol--field 'seq frame)))
+
+(defun dsh-protocol-plan-baseline--from-alist (baseline)
+  "Decode Plan mode or capability absence at projection BASELINE's watermark."
+  (dsh-protocol-plan--from-alist
+   (dsh-protocol--field 'plan (dsh-protocol--field 'values baseline))
+   (dsh-protocol--field 'asOfSeq baseline)))
+
 ;; Process-local assistant presentation frames and reconnect state.
 (cl-defstruct (dsh-protocol-assistant-frame
                (:constructor dsh-protocol-assistant-frame--from-alist

@@ -22505,12 +22505,12 @@ messages (e.g. `command/done')."
                expected))
       (when (equal name "wait")
         (dsh-test-assert "execution-retry-tooltip-explains-wait"
-          (string-match-p "provider-a" (dsh-emacs-modeline--execution-detail))
-          (string-match-p "2500 ms" (dsh-emacs-modeline--execution-detail))
-          (string-match-p "Slow down" (dsh-emacs-modeline--execution-detail)))
+          (string-match-p "provider-a" (dsh-emacs-modeline--status-detail))
+          (string-match-p "2500 ms" (dsh-emacs-modeline--status-detail))
+          (string-match-p "Slow down" (dsh-emacs-modeline--status-detail)))
         (save-window-excursion
-          (dsh-emacs-describe-execution)
-          (with-current-buffer "*dsh execution*"
+          (dsh-emacs-describe-status)
+          (with-current-buffer "*dsh status*"
             (dsh-test-assert "execution-keyboard-details"
               (string-match-p "rate-limit" (buffer-string))
               (string-match-p "Slow down" (buffer-string)))))))))
@@ -22681,9 +22681,9 @@ messages (e.g. `command/done')."
             (select-window (split-window-below))
             (switch-to-buffer second)
             (call-interactively
-             #'dsh-emacs-describe-execution nil
+             #'dsh-emacs-describe-status nil
              (vector (list 'mouse-1 (list clicked 'mode-line '(0 . 0) 0))))
-            (with-current-buffer "*dsh execution*"
+            (with-current-buffer "*dsh status*"
               (dsh-test-assert "execution-click-uses-clicked-chat"
                 (equal (buffer-string)
                        "Compacting context (between turns)\n")))))
@@ -22699,6 +22699,163 @@ messages (e.g. `command/done')."
                   (dsh-test-assert "execution-socket-loss-clears-status-now"
                     (null (dsh-emacs-modeline--execution-indicator))))
               (delete-process process)))))
+    (kill-buffer first)
+    (kill-buffer second)))
+
+;; Plan is a persistent projection, never inferred from commands or old events.
+(let ((plan (dsh-protocol-plan--from-alist
+             '(("active" . :json-false) ("pending" . t)))))
+  (dsh-test-assert "plan-decodes-string-keys-and-json-false"
+    (not (dsh-protocol-plan-active plan))
+    (dsh-protocol-plan-pending plan)
+    (not (dsh-protocol-plan-available (dsh-protocol-plan--from-alist nil)))))
+
+(let ((first (generate-new-buffer " *plan-main*"))
+      (second (generate-new-buffer " *plan-other*"))
+      (dsh-emacs--chat-buffers (make-hash-table :test 'equal)))
+  (unwind-protect
+      (progn
+        (puthash "plan-main" first dsh-emacs--chat-buffers)
+        (puthash "plan-other" second dsh-emacs--chat-buffers)
+        (with-current-buffer first
+          (dsh-emacs-mode)
+          (setq-local dsh-emacs--buffer-session "plan-main")
+          (setq dsh-emacs--todo-list '(("Keep working" . "in_progress"))))
+        (with-current-buffer second (dsh-emacs-mode))
+        (dolist (case '(("inactive" :json-false :json-false "")
+                        ("entering" :json-false t "Plan → on")
+                        ("entry-cancelled" :json-false :json-false "")
+                        ("active" t :json-false "Plan")
+                        ("leaving" t t "Plan → off")
+                        ("exit-failed" t :json-false "Plan")
+                        ("left" :json-false :json-false "")))
+          (pcase-let ((`(,name ,active ,pending ,label) case))
+            (with-current-buffer second
+              (dsh-emacs-events--host-item
+               nil `((type . "projection") (sessionId . "plan-main")
+                     (key . "plan")
+                     (value . ((active . ,active) (pending . ,pending))))))
+            (with-current-buffer first
+              (dsh-test-assert (concat "plan-live-" name)
+                (equal (string-trim (dsh-emacs-modeline--ml-indicator)) label)
+                (equal dsh-emacs--todo-list '(("Keep working" . "in_progress"))))
+              (when (eq pending t)
+                (dsh-test-assert (concat "plan-detail-" name)
+                  (string-match-p
+                   (if (eq active t) "Pending: leave" "Pending: enter")
+                   (dsh-emacs-modeline--status-detail)))))))
+        (with-current-buffer second
+          (dsh-emacs-events--host-item
+           nil '((type . "projection") (sessionId . "unopened")
+                 (key . "plan") (value . ((active . t) (pending . t)))))
+          (dsh-test-assert "plan-foreign-projections-do-not-change-current-chat"
+            (null dsh-emacs--modeline-plan)))
+        ;; Real JSON exercises symbol session keys and false booleans in baselines.
+        (dsh-emacs-events--host-item
+         nil (json-read-from-string
+              "{\"type\":\"baseline\",\"value\":{\"projections\":{\"plan-main\":{\"asOfSeq\":4,\"values\":{\"plan\":{\"active\":true,\"pending\":false}}}}}}"))
+        (with-current-buffer first
+          (dsh-test-assert "plan-control-baseline-restores-active"
+            (equal (string-trim (dsh-emacs-modeline--ml-indicator)) "Plan"))
+          (dsh-emacs-render-event
+           (dsh-test--execution-event "turn/end" 4 '((turn . 1))))
+          (dsh-emacs--ml-busy-clear)
+          (dsh-test-assert "plan-persists-after-turn-and-transport-teardown"
+            (equal (string-trim (dsh-emacs-modeline--ml-indicator)) "Plan"))
+          ;; Plan is projection-owned, so a `plan/mode' record has no event
+          ;; path into the badge; this is a tripwire for a future event-based
+          ;; implementation, not the guard that keeps history from rewinding.
+          (let ((dsh-emacs--history-page t))
+            (dsh-emacs-render-history-events
+             (list `((type . "event")
+                     (event . ,(dsh-test--execution-event
+                                "plan/mode" 1 '((active . :json-false))))))
+             nil 4 :follow-p nil))
+          (dsh-test-assert "plan-history-does-not-rewind-projection"
+            (equal (string-trim (dsh-emacs-modeline--ml-indicator)) "Plan"))
+          (dsh-emacs-events--follow-snapshot
+           first '((cursor . 5) (records . [])
+                   (projections . ((asOfSeq . 5)
+                                   (values . ((plan . ((active . t)
+                                                      (pending . t)))))))))
+          (dsh-test-assert "plan-follow-snapshot-restores-pending-without-events"
+            (equal (string-trim (dsh-emacs-modeline--ml-indicator)) "Plan → off"))
+          (save-window-excursion
+            (dsh-emacs-describe-status)
+            (with-current-buffer "*dsh status*"
+              (dsh-test-assert "plan-keyboard-details-include-current-and-target"
+                (string-match-p "Plan mode: active" (buffer-string))
+                (string-match-p "Pending: leave" (buffer-string)))))
+          (let ((render (symbol-function 'dsh-emacs-render-history-events)))
+            (cl-letf (((symbol-function 'dsh-emacs-render-history-events)
+                       (lambda (&rest args)
+                         (apply render args)
+                         (dsh-emacs-events--host-apply-projection
+                          nil "plan-main" "plan"
+                          '((active . t) (pending . :json-false))))))
+              (dsh-emacs-events--follow-snapshot
+               first `((cursor . 6)
+                       (records . [((type . "event")
+                                    (event . ,(dsh-test--execution-event
+                                               "plan/mode" 6
+                                               '((active . :json-false)))))])
+                       (projections . ((asOfSeq . 6)
+                                       (values . ((plan . ((active . :json-false)
+                                                          (pending . t)))))))))))
+          (dsh-test-assert "plan-live-increment-during-history-wins"
+            (equal (string-trim (dsh-emacs-modeline--ml-indicator)) "Plan"))
+          (dsh-emacs-events--follow-snapshot
+           first '((cursor . 7) (records . []) (projections . ((values)))))
+          (dsh-test-assert "plan-absent-from-follow-clears-capability"
+            (null dsh-emacs--modeline-plan)
+            (string-empty-p (dsh-emacs-modeline--ml-indicator))))
+        (dsh-emacs-events--host-apply-projection
+         nil "plan-main" "plan" '((active . t) (pending . nil)))
+        (dsh-emacs-events--host-control-baseline
+         nil '((projections . ((plan-main . ((asOfSeq . 8) (values)))))))
+        (with-current-buffer first
+          (dsh-test-assert "plan-absent-from-control-clears-capability"
+            (null dsh-emacs--modeline-plan))
+          (dsh-emacs-events--host-item
+           nil '((type . "projection") (sessionId . "plan-main")
+                 (key . "plan") (seq . 12)
+                 (value . ((active . t) (pending . :json-false)))))
+          (dsh-emacs-events--follow-snapshot
+           first '((cursor . 11) (records . [])
+                   (projections . ((asOfSeq . 11)
+                                   (values . ((plan . ((active . :json-false)
+                                                      (pending . :json-false)))))))))
+          (dsh-test-assert "plan-older-follow-cannot-overwrite-newer-control"
+            (equal (string-trim (dsh-emacs-modeline--ml-indicator)) "Plan"))
+          (dsh-emacs-events--host-item
+           nil '((type . "projection") (sessionId . "plan-main")
+                 (key . "plan") (seq . 10)
+                 (value . ((active . :json-false) (pending . :json-false)))))
+          (dsh-emacs-events--host-control-baseline
+           nil '((projections . ((plan-main . ((asOfSeq . 11) (values)))))))
+          (dsh-test-assert "plan-older-increment-and-absent-baseline-are-ignored"
+            (equal (string-trim (dsh-emacs-modeline--ml-indicator)) "Plan"))
+          (dsh-emacs-events--follow-snapshot
+           first '((cursor . 13) (records . [])
+                   (projections . ((asOfSeq . 13) (values)))))
+          (dsh-emacs-events--host-item
+           nil '((type . "projection") (sessionId . "plan-main")
+                 (key . "plan") (seq . 12)
+                 (value . ((active . t) (pending . :json-false)))))
+          (dsh-test-assert "plan-absence-keeps-watermark-against-late-increment"
+            (null dsh-emacs--modeline-plan))
+          (let ((process (make-pipe-process :name "plan-new-host" :noquery t)))
+            (unwind-protect
+                (cl-letf (((symbol-function 'process-send-string) #'ignore))
+                  (dsh-emacs-events--host-open process))
+              (delete-process process)))
+          (dsh-emacs-events--host-control-baseline
+           nil '((projections
+                  . ((plan-main . ((asOfSeq . 1)
+                                   (values . ((plan . ((active . t)
+                                                      (pending . :json-false)))))))))))
+          (dsh-test-assert "plan-new-host-generation-can-start-at-lower-sequence"
+            (equal (string-trim (dsh-emacs-modeline--ml-indicator)) "Plan"))))
     (kill-buffer first)
     (kill-buffer second)))
 

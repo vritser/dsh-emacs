@@ -12,7 +12,7 @@ the existing follow stream already delivered these facts.
 ## Decision
 
 Show retry and compaction in the existing mode-line status, with details via
-hover, click or `M-x dsh-emacs-describe-execution`. The protocol module decodes
+hover, click or `M-x dsh-emacs-describe-status`. The protocol module decodes
 execution facts; modeline owns their buffer-local state. Render routes the
 facts and retains automatic compaction failures. Events clears stale state on
 disconnect and rebuilds it from the entire follow snapshot before rendering

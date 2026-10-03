@@ -1827,7 +1827,7 @@ not rendered.
 
 **Execution feedback**: `llm/retry` / `llm/retry-started` and
 `compaction/start` / `compaction/end` feed the mode line, with provider, wait
-and failure details through `M-x dsh-emacs-describe-execution`. A retry chain
+and failure details through `M-x dsh-emacs-describe-status`. A retry chain
 reuses `retryId` across attempts, so `retry-started` must also match `retry`.
 Compaction's `turn: null` is independent of the running-turn animation.
 Completion boundaries clear live status; disconnect clears it, and the whole
@@ -1925,7 +1925,7 @@ a host-internal cell to the client's queue source; the table's `subagent` /
 | `sessionStats` | `{ turns, steps, llmMs, toolMs, ttftMs, ttftSteps, decodeMs, decodeTokens }` |
 | `goal` | `{ goal: {id, revision, objective, phase, blockedReason?, maxGoalRounds}, roundsStarted, createdAt, updatedAt } \| null` |
 | `todos` | `TodoItem[] \| null` (null before the first write) |
-| `plan` | `{ active: boolean, pending: boolean }` |
+| `plan` | `{ active: boolean, pending: boolean }` — committed mode and whether an opposite selection is pending; missing key means the capability is absent. dsh-emacs consumes this for its Plan badge |
 | `permissions` | `{ currentValue: string }` (key missing = no permission service). **Changed in 0.1.6**: through 0.1.5 this value also carried `options: [{value, name, description?}]`; the selectable options are now the process-level `permissionPresets/catalog` Remote (§4.19), and `currentValue` is a configured key, live `auto`, or the derived `custom` |
 | `tokenUsage` | `{ uncachedInputTokens, outputTokens, cacheReadTokens, cacheWriteTokens }` (cumulative totals) |
 | `contextPressure` | `{ pressureTokens?, projectedTokens?, contextWindow? }` |
@@ -1938,6 +1938,14 @@ a host-internal cell to the client's queue source; the table's `subagent` /
 | `sessionListMetadata` | `{ blank, lastPromptAt }` (list row hint) |
 | `imageLimits` | `{ maxImageBytes, maxImagesPerMessage, maxMessageImageBytes, maxImagePixels, maxImageDimension, mediaTypes }` (key missing = no attachment service) |
 | `modelSelection` | `{ lastUsed: {provider, model, reasoningEffort?} \| null, next: … \| null }` |
+
+Plan's `pending` is a logged `/plan` selection awaiting settlement/application,
+not a user-review flag. During an open turn the change applies at an accepted
+pre-step; between turns it can be logged immediately. `plan/mode` records the
+committed mode; its event alone does not carry the pending selection. The
+client reads control increments (`seq`) and follow/control baselines
+(`asOfSeq`), retaining the newest cut even when the capability is absent.
+It resets these watermarks when a new core connection opens.
 
 The projections contain **no** "this session is waiting for the user" state
 (neither history nor 0.1.5 has `sessionStats.pendingInteraction`). The web keeps

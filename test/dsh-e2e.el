@@ -75,6 +75,18 @@
           (dsh-e2e--rpc "session/list" (dsh-emacs--session-list-args))
           (dsh-e2e--pass "health-check")
 
+          ;; The normal entry point owns the core control/projection stream;
+          ;; opening a chat directly only starts its transcript follow stream.
+          (dsh-emacs)
+          (dsh-e2e--check
+           "core-stream-ready"
+           (dsh-e2e--wait-until
+            (lambda ()
+              (and dsh-emacs-events--client-id
+                   (buffer-local-value 'dsh-emacs--host-ready
+                                       (get-buffer dsh-emacs-sessions-buffer))))
+            10))
+
           (let* ((preset (getenv "DSH_E2E_PRESET"))
                  (request `((cwd . ,(expand-file-name default-directory))))
                  (request (if (and preset (not (string-empty-p preset)))
@@ -116,6 +128,24 @@
             (dsh-e2e--check "modeline-rendered"
                             (not (string-empty-p
                                   (dsh-emacs-modeline-format))))
+
+            (dsh-e2e--check
+             "plan-projection-available"
+             (dsh-e2e--wait-until
+              (lambda () (dsh-protocol-plan-p dsh-emacs--modeline-plan)) 10))
+            (dsh-e2e--rpc
+             "commands/execute"
+             `((agentId . ,dsh-e2e--session-id) (line . "/plan")
+               (submittedAttachments . [])))
+            (dsh-e2e--check
+             "plan-command-enters-mode"
+             (dsh-e2e--wait-until
+              (lambda ()
+                (and dsh-emacs--modeline-plan
+                     (dsh-protocol-plan-active dsh-emacs--modeline-plan)
+                     (equal (string-trim (dsh-emacs-modeline--plan-indicator))
+                            "Plan")))
+              10))
 
             (let ((message (format "dsh-emacs e2e transport probe %s"
                                    (float-time))))
@@ -169,6 +199,24 @@
                       (not (equal old (process-get process
                                                    'dsh-emacs-follow-stream-id)))
                       (null dsh-emacs--event-reconnect-timer)))))
+
+            (dsh-e2e--check
+             "plan-survives-turn-and-rebaseline"
+             (and dsh-emacs--modeline-plan
+                  (dsh-protocol-plan-active dsh-emacs--modeline-plan)))
+            (dsh-e2e--rpc
+             "commands/execute"
+             `((agentId . ,dsh-e2e--session-id) (line . "/plan off")
+               (submittedAttachments . [])))
+            (dsh-e2e--check
+             "plan-command-leaves-mode"
+             (dsh-e2e--wait-until
+              (lambda ()
+                (and dsh-emacs--modeline-plan
+                     (not (dsh-protocol-plan-active dsh-emacs--modeline-plan))
+                     (not (dsh-protocol-plan-pending dsh-emacs--modeline-plan))
+                     (null (dsh-emacs-modeline--plan-indicator))))
+              10))
 
             (let ((dsh-emacs-modeline-format-spec
                    '(:separator " " :segments (tokens))))
