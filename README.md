@@ -291,6 +291,9 @@ first to align the scope. Run `scripts/verify.sh` before pushing. It checks
 syntax, checker self-tests, byte compilation, the full unit suite, silent
 loading, diff whitespace, and generated-file cleanup.
 
+Real-server tests are separate. See [E2E testing](docs/architecture.md#real-server-e2e-testing)
+for the batch smoke suite and timed-question tests in a running Emacs.
+
 ## Acknowledgments
 
 The UI mirrors [dsh web](https://github.com/deepseek-ai/deepseek-harness),

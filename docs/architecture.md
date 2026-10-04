@@ -883,3 +883,39 @@ follows the viewport once. Per-event follow calls skip a pending burst.
 Non-reasoning events, step changes and stream teardown flush pending text
 before continuing. This keeps transport delivery immediate while limiting
 reasoning-driven buffer invalidation. See [027](../postmortem/027-thinking-refresh.md).
+
+## Real-server E2E testing
+
+`emacs -Q --batch -L . -l test/dsh-e2e.el` runs the transport smoke suite.
+`DSH_E2E_URL` selects the server and `DSH_E2E_PRESET` selects the test session's
+preset. `DSH_E2E_PLAN_REVIEW=1` additionally exercises model-generated review.
+
+Timed-question E2E needs a working model and a preset that configures
+`@deepseek-ai/dsh-tool-ask-user` with `mode: timed`, plus the Plan capability
+used by the smoke suite. Use an otherwise idle graphical Emacs connected to
+that server. Disconnect other answer-capable clients for the duration: a Web
+client can independently reject the shared waterfall when its countdown ends.
+In the running Emacs, evaluate:
+
+```elisp
+(load "/path/to/dsh-emacs/test/dsh-e2e.el" nil t)
+(let ((process-environment (copy-sequence process-environment)))
+  (setenv "DSH_E2E_PRESET" "your-timed-preset")
+  (dsh-emacs-e2e-run t))
+```
+
+The suite creates and archives its own session. It uses existing authentication
+and the real minibuffer frontend, automatically entering option 2. An answer
+is deliberately held past the host deadline and its actual HTTP request is
+delayed another second; assertions require a live claim until acknowledgement
+and the exact returned answer in the card. A second question expires while
+queued, is answered through `dsh-emacs-answer-question`, and must settle through
+the live projection. Duplicate submission must receive a false response and
+display rejection. Rebaseline and a fresh buffer with older-history paging
+must retain the saved answer.
+
+The interactive runner preserves existing chats, the core connection, window
+layout and clipboard; it never exits Emacs. It returns `(NAME PASSED DETAIL)`
+records, and reports failures instead of counting an unavailable timed preset
+or model as a skip. Deterministic unit tests cover deliberately reordered
+snapshots and concurrent prompt exits; the E2E suite exercises live delivery.
