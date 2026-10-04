@@ -3203,38 +3203,13 @@ everything else `success'."
   "Render a `tool/result' event by appending to the corresponding tool-call block."
   (if (not dsh-emacs-show-tool-calls)
       nil
-    (let* ((data (dsh-emacs-render--event-data event))
-           (message (dsh-emacs-render--aget "message" data))
-           ;; dsh Web stores the originating tool id under message.source;
-           ;; accept the compact message.callId shape too (used by older
-           ;; events/tests and some RPC responses).
-           (call-id (or (dsh-emacs-render--aget "callId" message)
-                        (dsh-emacs-render--aget
-                         "callId" (dsh-emacs-render--aget "source" message))
-                        (dsh-emacs-render--aget "callId" data)))
-           (content (dsh-emacs-render--aget "content" message))
-           (error-code (dsh-emacs-render--aget
-                        "code" (dsh-emacs-render--aget "error" data)))
-           ;; dsh 0.1.6: the user-facing refusal reason, which the host keeps
-           ;; outside the model-facing `message'.
-           (error-reason (dsh-emacs-render--aget
-                          "reason" (dsh-emacs-render--aget "error" data)))
-           (is-error nil)
-           (block-exit-code nil)
-           (block-signal nil)
-           (text-parts '()))
-      (dolist (block (dsh-emacs-render--wire-list content))
-        (when (equal (dsh-emacs-render--aget "type" block) "tool-result")
-          (setq is-error (dsh-emacs-render--json-bool (dsh-emacs-render--aget "isError" block)))
-          (setq block-exit-code (dsh-emacs-render--aget "exitCode" block))
-          (setq block-signal (dsh-emacs-render--aget "signal" block))
-          (dolist (inner (dsh-emacs-render--wire-list
-                          (dsh-emacs-render--aget "content" block)))
-            (when (equal (dsh-emacs-render--aget "type" inner) "text")
-              (push (dsh-emacs-render--aget "text" inner) text-parts)))))
-      (let* ((full-text (mapconcat #'identity (nreverse text-parts) "\n"))
-             (meta (dsh-emacs-render--aget "meta" data))
-             (ns (dsh-emacs-render--make-namespace))
+    (pcase-let* (((cl-struct dsh-protocol-tool-result
+                             call-id (text full-text) is-error
+                             (exit-code block-exit-code) (signal block-signal)
+                             error-code error-reason meta)
+                  (dsh-protocol-tool-result--from-alist
+                   (dsh-emacs-render--event-data event))))
+      (let* ((ns (dsh-emacs-render--make-namespace))
              (block-id (dsh-emacs-render--tool-call-block-id call-id)))
         (when-let* ((prev (dsh-emacs-render--tool-state call-id)))
           (when-let* ((text (plist-get prev :plan-text)))

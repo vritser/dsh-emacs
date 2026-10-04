@@ -93,6 +93,10 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **dsh 0.2.0 tool results render correctly**: direct tool-message text and
+  error flags are decoded alongside the older nested format. Question cards
+  now display real answers and pending state, including late replies restored
+  from history, instead of losing the tool's result body.
 - **Timed answers survive concurrent activity**: submitting an answer keeps
   its timeout protection until the host responds, and incoming prompts wait
   until a late-answer reader closes. Older snapshots no longer hide pending

@@ -2005,6 +2005,13 @@ it, §4.1). The aborted `reason` (AgentCancelCause):
 With `kind:'error'`, `error` may additionally carry `offloadImages?: number`
 (0.1.6, image-offload accounting) — an optional field a renderer can ignore.
 
+On dsh 0.2.0 a tool result's `message` carries `role: 'tool'`,
+`source: {kind: 'tool', callId}`, `toolCallId`, `isError`, and direct
+`content: [{type: 'text', text}, …]`. There is no enclosing `tool-result`
+content block. `dsh-protocol-tool-result--from-alist` normalizes this shape and
+the older nested result shape before rendering; the question's JSON answer or
+pending document is the text of that message.
+
 `request/header.reason`: `'initial'|'resume'|'change'|'series'`; **0.2.0**
 decoupled the optional `startsSeries` marker from this reason (a coincident
 series boundary may be reported on any of them).

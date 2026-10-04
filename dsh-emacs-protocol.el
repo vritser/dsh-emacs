@@ -608,6 +608,55 @@ in contribution order.  The derived `custom' state is not an option."
   "The complete Markdown submitted by `exit_plan_mode'."
   text)
 
+(cl-defstruct (dsh-protocol-tool-result
+               (:constructor dsh-protocol-tool-result--from-alist
+                             (alist
+                              &aux
+                              (message (dsh-protocol--field 'message alist))
+                              (content (dsh-protocol--objects
+                                        (dsh-protocol--field 'content message)))
+                              (nested
+                               (cl-remove-if-not
+                                (lambda (block)
+                                  (equal (dsh-protocol--field 'type block)
+                                         "tool-result"))
+                                content))
+                              (outcome (if nested (car (last nested)) message))
+                              (blocks
+                               (if nested
+                                   (cl-loop for block in nested append
+                                            (dsh-protocol--objects
+                                             (dsh-protocol--field 'content block)))
+                                 content))
+                              (failure (dsh-protocol--field 'error alist))
+                              (call-id
+                               (or (dsh-protocol--field 'toolCallId message)
+                                   (dsh-protocol--field 'callId message)
+                                   (dsh-protocol--field
+                                    'callId (dsh-protocol--field 'source message))
+                                   (dsh-protocol--field 'callId alist)))
+                              (text
+                               (mapconcat
+                                #'identity
+                                (cl-loop for block in blocks
+                                         for text = (dsh-protocol--field 'text block)
+                                         when (and (equal "text" (dsh-protocol--field
+                                                                  'type block))
+                                                   (stringp text))
+                                         collect text)
+                                "\n"))
+                              (is-error (dsh-protocol--boolean
+                                         (dsh-protocol--field 'isError outcome)))
+                              (exit-code (dsh-protocol--field 'exitCode outcome))
+                              (signal (dsh-protocol--field 'signal outcome))
+                              (error-code (dsh-protocol--field 'code failure))
+                              (error-reason (dsh-protocol--field 'reason failure))
+                              (meta (dsh-protocol--field 'meta alist)))))
+  "Decoded tool/result data, including its message's text and outcome.
+Current hosts use direct text blocks and message-level isError; older
+hosts and fixtures wrap both in a tool-result content block."
+  call-id text is-error exit-code signal error-code error-reason meta)
+
 ;; ---------------------------------------------------------------------------
 ;; userQuestions projection + timed-question wait (dsh 0.2.0)
 ;; ---------------------------------------------------------------------------

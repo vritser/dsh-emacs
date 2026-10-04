@@ -23355,6 +23355,35 @@ messages (e.g. `command/done')."
         (progn (dsh-emacs-answer-question) nil)
       (user-error t))))
 
+(dolist (case '(("{\"answers\":[{\"id\":\"q1\",\"selected\":[\"Stacked\"]}]}"
+                nil success "1/1 answered")
+               ("{\"pending\":true,\"callId\":\"wire-call\"}"
+                nil success "pending")
+               ("The question failed" t error "The question failed")))
+  ;; Captured dsh 0.2.0 shape: text and isError belong to the tool message,
+  ;; not to a nested content block with type=tool-result.
+  (pcase-let ((`(,text ,is-error ,state ,summary) case))
+    (with-temp-buffer
+      (dsh-emacs-mode)
+      (dsh-emacs-modeline-setup)
+      (dsh-emacs-render-tool-call
+       (dsh-emacs-test--tool-call-event
+        1 "wire-call" "ask_user_question" dsh-emacs-test--ask-args))
+      (dsh-emacs-render-tool-result
+       `((type . "tool/result") (seq . 2)
+         (data . ((message . ((role . "tool")
+                             (source . ((kind . "tool") (callId . "wire-call")))
+                             (toolCallId . "wire-call")
+                             (content . [((type . "text") (text . ,text))])
+                             (isError . ,(if is-error t :json-false))))))))
+      (let ((result (dsh-emacs-render--tool-state "wire-call"))
+            (block (dsh-emacs-test--tool-block-text
+                    (dsh-emacs-render--make-namespace) "tool-wire-call")))
+        (dsh-test-assert (format "ask-live-wire-result-%s" summary)
+          (equal (plist-get result :result) text)
+          (eq (plist-get result :state) state)
+          (string-match-p (regexp-quote summary) block))))))
+
 (with-temp-buffer
   (dsh-emacs-mode)
   (dsh-emacs-modeline-setup)
