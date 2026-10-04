@@ -23160,6 +23160,499 @@ messages (e.g. `command/done')."
       (dsh-test-assert "plan-history-card-opens-correct-call"
         (equal opened (list (current-buffer) "plan-history" text))))))
 
+;; --- Test 31g: timed `ask_user_question' support (dsh 0.2.0) ---
+;;
+;; A timed question the user does not answer inside the foreground window
+;; stays answerable: the host publishes it as the `userQuestions' projection
+;; and the answer goes through `userQuestions/answer'.  These pin the protocol
+;; decoding, the projection dispatch into chat-local state, the foreground-wait
+;; claim held around the reader, the late-answer RPC, and the pending row.
+
+(let* ((view (dsh-protocol-user-questions--from-alist
+              '((active . [((callId . "c1")
+                            (state . "continued")
+                            (questions . [((id . "q1")
+                                           (question . "Which?"))
+                                          "oops"
+                                          ((id . "q2")
+                                           (question . "And?")
+                                           (options . [((label . "A"))]))]))])
+                (settled . [((callId . "c0")
+                             (answers . [((id . "q1")
+                                          (selected . ["A"])
+                                          (custom . "note"))
+                                         ((id . "q2")
+                                          (selected . []))]))]))))
+       (active (dsh-protocol-user-questions-active view))
+       (settled (dsh-protocol-user-questions-settled view)))
+  (dsh-test-assert "protocol-user-questions-decodes"
+    (= 1 (length active))
+    (eq 'continued (dsh-protocol-pending-question-state (car active)))
+    (equal "c1" (dsh-protocol-pending-question-call-id (car active)))
+    ;; The malformed question element declines at the protocol boundary.
+    (= 2 (length (dsh-protocol-pending-question-questions (car active))))
+    (= 1 (length settled))
+    (equal '("A")
+           (dsh-protocol-question-answer-selected
+            (car (dsh-protocol-settled-question-answers (car settled)))))
+    (equal "note"
+           (dsh-protocol-question-answer-custom
+            (car (dsh-protocol-settled-question-answers (car settled))))))
+  (let ((open (dsh-protocol-pending-question--from-alist
+               '((callId . "c2") (state . "open") (questions . [])))))
+    (dsh-test-assert "protocol-pending-question-open-state"
+      (eq 'open (dsh-protocol-pending-question-state open)))))
+
+(dsh-test-assert "protocol-user-questions-empty-decodes"
+  (let ((empty (dsh-protocol-user-questions--from-alist nil)))
+    (null (dsh-protocol-user-questions-active empty))
+    (null (dsh-protocol-user-questions-settled empty))))
+
+(dsh-test-assert "protocol-question-wait-flags-timed"
+  (let ((timed (dsh-protocol-question-wait--from-alist
+                '((callId . "c9") (timed . t))))
+        (untimed (dsh-protocol-question-wait--from-alist '((callId . "c9")))))
+    (equal "c9" (dsh-protocol-question-wait-call-id timed))
+    (dsh-protocol-question-wait-timed timed)
+    (not (dsh-protocol-question-wait-timed untimed))))
+
+(let* ((old-chats dsh-emacs--chat-buffers)
+       (chat (get-buffer-create " *t-uq-dispatch*"))
+       (neutral (get-buffer-create " *t-uq-neutral*"))
+       (proc (make-pipe-process :name "t-uq-proc" :buffer nil)))
+  (unwind-protect
+      (progn
+        (setq dsh-emacs--chat-buffers
+              (let ((h (make-hash-table :test 'equal)))
+                (puthash "sess-uq" chat h)
+                h))
+        (with-current-buffer chat
+          (dsh-emacs-mode)
+          (setq-local dsh-emacs--buffer-session "sess-uq"))
+        (dsh-emacs-events--host-apply-projection
+         proc "sess-uq" "userQuestions"
+         '((active . [((callId . "c1") (state . "continued")
+                       (questions . [((id . "q1") (question . "Which?"))]))])
+           (settled . [])))
+        (with-current-buffer chat
+          (dsh-test-assert "userQuestions-projection-stores-chat-state"
+            (equal '("c1")
+                   (mapcar #'dsh-protocol-pending-question-call-id
+                           (dsh-protocol-user-questions-active
+                            dsh-emacs--session-questions)))))
+        (with-current-buffer neutral
+          (dsh-emacs-events--host-apply-projection
+           proc "sess-other" "userQuestions"
+           '((active . [((callId . "x") (state . "continued")
+                         (questions . []))])
+             (settled . [])))
+          (dsh-test-assert "userQuestions-foreign-session-cell-dropped"
+            (null dsh-emacs--session-questions))))
+    (setq dsh-emacs--chat-buffers old-chats)
+    (when (buffer-live-p chat) (kill-buffer chat))
+    (when (buffer-live-p neutral) (kill-buffer neutral))
+    (delete-process proc)))
+
+(let* ((chat (get-buffer-create " *t-uq-claim*"))
+       (proc (make-pipe-process :name "t-uq-claim-proc" :buffer nil))
+       (opened nil) (closed nil) (reply nil))
+  (unwind-protect
+      (progn
+        (with-current-buffer chat
+          (dsh-emacs-mode)
+          (setq-local dsh-emacs--buffer-session "sess-uq")
+          (setq-local dsh-emacs--event-process proc))
+        (let ((dsh-emacs-events--client-id "gen-uq"))
+          (cl-letf (((symbol-function 'dsh-emacs-events-open-stream)
+                     (lambda (_p endpoint args _name _handler)
+                       (setq opened (cons endpoint args)) "stream-uq"))
+                    ((symbol-function 'dsh-emacs-events-close-stream)
+                     (lambda (_p id) (push id closed)))
+                    ((symbol-function 'dsh-emacs--collect-question-answers)
+                     (lambda (_questions _session)
+                       '(((id . "q1") (selected . [])))))
+                    ((symbol-function 'dsh-emacs--events-result-async)
+                     (lambda (_client _event _outcome callback)
+                       (setq reply callback))))
+            (dsh-emacs--question-requested
+             chat "ev-uq" "sess-uq"
+             (list (dsh-protocol-question--from-alist
+                    '((id . "q1") (question . "Which?"))))
+             (dsh-protocol-question-wait--from-alist
+              '((callId . "c1") (timed . t))))
+            (dsh-test-assert "question-claim-held-until-answer-acknowledged"
+              reply (null closed))
+            (funcall reply t nil)))
+        (dsh-test-assert "question-drain-claims-timed-wait"
+          (equal "userQuestions/attachWait" (car opened))
+          (equal '((agentId . "sess-uq") (callId . "c1")) (cdr opened))
+          (equal '("stream-uq") closed)))
+    (when (buffer-live-p chat) (kill-buffer chat))
+    (delete-process proc)))
+
+(let* ((chat (get-buffer-create " *t-uq-untimed*"))
+       (proc (make-pipe-process :name "t-uq-untimed-proc" :buffer nil))
+       (opened nil))
+  (unwind-protect
+      (progn
+        (with-current-buffer chat
+          (dsh-emacs-mode)
+          (setq-local dsh-emacs--buffer-session "sess-uq")
+          (setq-local dsh-emacs--event-process proc))
+        (let ((dsh-emacs-events--client-id "gen-uq"))
+          (cl-letf (((symbol-function 'dsh-emacs-events-open-stream)
+                     (lambda (&rest _) (setq opened t) "s"))
+                    ((symbol-function 'dsh-emacs--collect-question-answers)
+                     (lambda (_questions _session)
+                       '(((id . "q1") (selected . [])))))
+                    ((symbol-function 'dsh-emacs--events-result-async)
+                     (lambda (&rest _) nil)))
+            (dsh-emacs--question-requested
+             chat "ev-uq2" "sess-uq"
+             (list (dsh-protocol-question--from-alist
+                    '((id . "q1") (question . "Which?"))))
+             (dsh-protocol-question-wait--from-alist '((callId . "c2"))))))
+        (dsh-test-assert "question-drain-does-not-claim-untimed-wait"
+          (null opened)))
+    (when (buffer-live-p chat) (kill-buffer chat))
+    (delete-process proc)))
+
+(let ((sent nil))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (setq-local dsh-emacs--buffer-session "sess-uq")
+    (setq-local dsh-emacs--session-questions
+                (dsh-protocol-user-questions--from-alist
+                 '((active . [((callId . "c1") (state . "continued")
+                               (questions . [((id . "q1")
+                                              (question . "Which?"))]))])
+                   (settled . []))))
+    (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+               (lambda (method params _callback)
+                 (setq sent (cons method params))))
+              ((symbol-function 'dsh-emacs--collect-question-answers)
+               (lambda (_questions _session)
+                 '(((id . "q1") (selected . ["A"]))))))
+      (dsh-emacs-answer-question))
+    (dsh-test-assert "answer-question-submits-late-batch"
+      (equal "userQuestions/answer" (car sent))
+      (equal "sess-uq" (cdr (assq 'agentId (cdr sent))))
+      (equal "c1" (cdr (assq 'callId (cdr sent))))
+      (equal '(((id . "q1") (selected . ["A"])))
+             (cdr (assq 'answers
+                        (cdr (assq 'answer (cdr sent)))))))))
+
+(dsh-test-assert "answer-question-reports-without-continued-call"
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (setq-local dsh-emacs--buffer-session "sess-uq")
+    (setq-local dsh-emacs--session-questions
+                (dsh-protocol-user-questions--from-alist
+                 '((active . [((callId . "c1") (state . "open")
+                               (questions . []))])
+                   (settled . []))))
+    (condition-case nil
+        (progn (dsh-emacs-answer-question) nil)
+      (user-error t))))
+
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "kp" "ask_user_question"
+                                    dsh-emacs-test--ask-args))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event
+    2 "kp" nil 0
+    (json-encode '((pending . t) (callId . "kp")
+                   (message . "No answer batch arrived before the timeout.")))))
+  (let ((block (dsh-emacs-test--tool-block-text
+                (dsh-emacs-render--make-namespace) "tool-kp")))
+    (dsh-test-assert "ask-pending-result-is-summarized-and-explained"
+      (string-match-p "Ask question · pending" block)
+      (string-match-p "dsh-emacs-answer-question" block))))
+
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "ks" "ask_user_question"
+                                    dsh-emacs-test--ask-args))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event
+    2 "ks" nil 0 (json-encode '((pending . t) (callId . "ks")))))
+  ;; The settled cell of the projection is what completes the pending row.
+  (dsh-emacs--session-questions-apply
+   (dsh-protocol-user-questions--from-alist
+    '((active . [])
+      (settled . [((callId . "ks")
+                   (answers . [((id . "q1") (selected . ["Stacked"]))
+                               ((id . "q2") (selected . [])
+                                (custom . "late"))]))]))))
+  (let ((block (dsh-emacs-test--tool-block-text
+                (dsh-emacs-render--make-namespace) "tool-ks")))
+    (dsh-test-assert "ask-settled-late-answer-completes-the-pending-card"
+      (string-match-p "Ask question · 2/2 answered" block)
+      (string-match-p "^   1\\. ✓ Stacked$" block)
+      (string-match-p "^  → late$" block)
+      (not (string-match-p "pending" block)))))
+
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "ki" "ask_user_question"
+                                    dsh-emacs-test--ask-args))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event
+    2 "ki" nil 0
+    (json-encode '((answers . [((id . "q1") (selected . ["Stacked"]))
+                               ((id . "q2") (selected . []))])))))
+  (dsh-emacs-render-question-settled
+   "ki"
+   (dsh-protocol-question-answers-json
+    (list (dsh-protocol-question-answer--from-alist
+           '((id . "q1") (selected . ["Compact"]))))))
+  (let ((block (dsh-emacs-test--tool-block-text
+                (dsh-emacs-render--make-namespace) "tool-ki")))
+    (dsh-test-assert "ask-in-time-answer-is-not-overwritten-by-projection"
+      ;; q2 carries no selection and no custom, so the settled document reads
+      ;; 1/2; the point is that the projection's different batch never lands.
+      (string-match-p "Ask question · 1/2 answered" block)
+      (string-match-p "^   1\\. ✓ Stacked$" block)
+      (not (string-match-p "✓ Compact" block)))))
+
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs-modeline-setup)
+  (setq-local dsh-emacs-tool-expand-by-default t)
+  (setq-local dsh-emacs--buffer-session "sess-uq")
+  (dsh-emacs-render-tool-call
+   (dsh-emacs-test--tool-call-event 1 "kr" "ask_user_question"
+                                    dsh-emacs-test--ask-args))
+  (dsh-emacs-render-tool-result
+   (dsh-emacs-test--tool-result-event
+    2 "kr" nil 0 (json-encode '((pending . t) (callId . "kr")))))
+  ;; A resumed transcript's snapshot carries the settled cell, applied after
+  ;; the records have rendered.
+  (dsh-emacs-events--apply-snapshot-projections
+   "sess-uq"
+   '((values . ((userQuestions
+                 . ((active . [])
+                    (settled . [((callId . "kr")
+                                 (answers . [((id . "q1")
+                                              (selected . ["Stacked"]))]))])))))))
+  (let ((block (dsh-emacs-test--tool-block-text
+                (dsh-emacs-render--make-namespace) "tool-kr")))
+    (dsh-test-assert "ask-snapshot-settles-a-resumed-pending-card"
+      (string-match-p "Ask question · 1/1 answered" block)
+      (string-match-p "^   1\\. ✓ Stacked$" block)
+      (not (string-match-p "pending" block)))))
+
+;; Both asynchronous failure and synchronous exits release the wait claim.
+(dolist (outcome '(http-failure rpc-error reader-error quit))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (let ((chat (current-buffer))
+          (dsh-emacs--question-active nil)
+          (dsh-emacs--approval-active nil)
+          (dsh-emacs--question-queue nil)
+          (dsh-emacs--approval-queue nil)
+          reply released)
+      (cl-letf (((symbol-function 'dsh-emacs--question-claim-wait)
+                 (lambda (&rest _) 'claim))
+                ((symbol-function 'dsh-emacs--question-release-wait)
+                 (lambda (claim) (when claim (push claim released))))
+                ((symbol-function 'dsh-emacs--collect-question-answers)
+                 (lambda (&rest _)
+                   (pcase outcome
+                     ('reader-error (error "Reader failed"))
+                     ('quit (signal 'quit nil))
+                     (_ '(((id . "q") (selected . ["A"])))))))
+                ((symbol-function 'dsh-emacs--events-result-async)
+                 (lambda (_client _event _answer callback)
+                   (if (eq outcome 'rpc-error)
+                       (error "Send failed")
+                     (setq reply callback))))
+                ((symbol-function 'dsh-emacs-notify--post) #'ignore))
+        (dsh-emacs--question-requested
+         chat "failure-event" "failure-session"
+         '(((id . "q") (question . "Which?")))
+         (dsh-protocol-question-wait--from-alist
+          '((callId . "call") (timed . t))))
+        (when (eq outcome 'http-failure)
+          (dsh-test-assert "question-claim-held-before-http-failure"
+            reply (null released))
+          (funcall reply nil "offline")))
+      (dsh-test-assert (format "question-claim-released-on-%s" outcome)
+        (equal released '(claim))
+        (null dsh-emacs--question-active)))))
+
+;; Envelope success does not imply that the host accepted a late answer.
+(dolist (response '((t t "Answered 1 question(s)")
+                    (t :json-false "Question is no longer waiting for an answer")
+                    (t nil "Question is no longer waiting for an answer")
+                    (nil "offline" "Question answer not accepted (offline)")))
+  (pcase-let ((`(,ok ,value ,expected) response))
+    (let (reported)
+      (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (_method _params callback) (funcall callback ok value)))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (setq reported (apply #'format format-string args)))))
+        (dsh-emacs--question-answer-late
+         "late" "call" '(((id . "q") (selected . ["A"])))))
+      (dsh-test-assert (format "late-answer-reports-response-%S-%S" ok value)
+        (equal expected reported)))))
+
+;; Settled state may arrive before the pending result or its history page.
+(dolist (source '(history live))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (setq-local dsh-emacs--buffer-session "questions-history")
+    (setq-local dsh-emacs--history-earliest-seq 10)
+    (setq-local dsh-emacs-tool-expand-by-default t)
+    (let* ((call (dsh-emacs-test--tool-call-event
+                  1 "older" "ask_user_question" dsh-emacs-test--ask-args))
+           (result (dsh-emacs-test--tool-result-event
+                    2 "older" nil 0
+                    (json-encode '((pending . t) (callId . "older"))))))
+      (when (eq source 'live)
+        (dsh-emacs-render-tool-call call))
+      (dsh-emacs--session-questions-apply
+       (dsh-protocol-user-questions--from-alist
+        '((active . [])
+          (settled . [((callId . "older")
+                       (answers . [((id . "q1") (selected . ["Stacked"]))
+                                   ((id . "q2") (selected . [])
+                                    (custom . "saved reply"))]))]))))
+      (if (eq source 'live)
+          (dsh-emacs-render-tool-result result)
+        (dsh-emacs--load-older-history-page
+         (current-buffer)
+         `((records . [((type . "event") (event . ,call))
+                       ((type . "event") (event . ,result))])
+           (hasMore . :json-false))))
+      (let ((block (dsh-emacs-test--tool-block-text
+                    (dsh-emacs-render--make-namespace) "tool-older")))
+        (dsh-test-assert (format "question-settled-before-%s-is-shown" source)
+          (string-match-p "Ask question · 2/2 answered" block)
+          (string-match-p "✓ Stacked" block)
+          (string-match-p "→ saved reply" block)
+          (not (string-match-p "pending" block)))))))
+
+;; Follow and control streams can deliver their cuts out of order.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (setq-local dsh-emacs--buffer-session "questions-seq")
+  (let* ((dsh-emacs--chat-buffers (make-hash-table :test 'equal))
+         (continued '((active . [((callId . "new") (state . "continued")
+                                  (questions . [((id . "q")
+                                                 (question . "New?"))]))])
+                      (settled . [])))
+         (update `((type . "projection") (sessionId . "questions-seq")
+                   (key . "userQuestions") (seq . 11)
+                   (value . ,continued)))
+         (old-snapshot '((cursor . 10)
+                         (records . [((type . "event")
+                                      (event . ((type . "step/end")
+                                                (seq . 10))))])
+                         (projections . ((asOfSeq . 10)
+                                         (values . ((userQuestions
+                                                     . ((active . [])
+                                                        (settled . [])))))))))
+         (process (make-pipe-process :name "t-questions-seq" :buffer nil)))
+    (unwind-protect
+        (progn
+          (puthash "questions-seq" (current-buffer) dsh-emacs--chat-buffers)
+          (cl-letf (((symbol-function 'dsh-emacs-render-history-events)
+                     (lambda (&rest _)
+                       (dsh-emacs-events--host-item nil update))))
+            (dsh-emacs-events--follow-snapshot (current-buffer) old-snapshot))
+          (dsh-test-assert "question-live-update-during-history-wins"
+            (equal '("new")
+                   (mapcar #'dsh-protocol-pending-question-call-id
+                           (dsh-emacs--question-continued))))
+          (dsh-emacs-events--host-item nil update)
+          (dsh-emacs-events--host-control-baseline
+           nil '((projections . ((questions-seq . ((asOfSeq . 10)
+                                                  (values)))))))
+          (dsh-emacs-events--follow-snapshot (current-buffer) old-snapshot)
+          (dsh-test-assert "question-old-baselines-cannot-erase-newer-update"
+            (= 1 (length (dsh-emacs--question-continued))))
+          (dsh-emacs-events--host-control-baseline
+           nil '((projections . ((questions-seq . ((asOfSeq . 12)
+                                                  (values)))))))
+          (dsh-emacs-events--host-item nil update)
+          (dsh-test-assert "question-absent-capability-retains-newer-cut"
+            (null (dsh-emacs--question-continued)))
+          (cl-letf (((symbol-function 'process-send-string) #'ignore))
+            (dsh-emacs-events--host-open process))
+          (dsh-emacs-events--host-control-baseline
+           nil `((projections . ((questions-seq
+                                  . ((asOfSeq . 1)
+                                     (values . ((userQuestions . ,continued)))))))))
+          (dsh-test-assert "question-new-generation-resets-sequence"
+            (= 1 (length (dsh-emacs--question-continued)))))
+      (delete-process process))))
+
+;; Late answers share the prompt slot from picker entry through every exit.
+(dolist (outcome '(answer quit error))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (setq-local dsh-emacs--buffer-session "late")
+    (setq-local dsh-emacs--session-questions
+                (dsh-protocol-user-questions--from-alist
+                 '((active . [((callId . "first") (state . "continued")
+                                (questions . [((id . "q1")
+                                               (question . "First"))]))
+                               ((callId . "second") (state . "continued")
+                                (questions . [((id . "q2")
+                                               (question . "Second"))]))]))))
+    (let ((chat (current-buffer))
+          (dsh-emacs--question-active nil)
+          (dsh-emacs--approval-active nil)
+          (dsh-emacs--question-queue nil)
+          (dsh-emacs--approval-queue nil)
+          order)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _)
+                   (dsh-emacs--question-requested
+                    chat "queued-question" "live"
+                    '(((id . "new") (question . "New?"))))
+                   (dsh-emacs--approval-requested
+                    chat "queued-approval" "live" "bash" "Check" nil)
+                   (push 'picker order)
+                   "First"))
+                ((symbol-function 'dsh-emacs--collect-question-answers)
+                 (lambda (_questions session)
+                   (if (equal session "late")
+                       (progn
+                         (push 'late order)
+                         (pcase outcome
+                           ('quit (signal 'quit nil))
+                           ('error (error "Reader failed"))))
+                     (push 'question order))
+                   '(((id . "q1") (selected . ["A"])))))
+                ((symbol-function 'dsh-emacs--approval-prompt)
+                 (lambda (&rest _) (push 'approval order) t))
+                ((symbol-function 'dsh-emacs-notify--post) #'ignore)
+                ((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (_method _params callback) (funcall callback t t))))
+        (condition-case nil
+            (dsh-emacs-answer-question)
+          (quit nil)
+          (error nil)))
+      (dsh-test-assert (format "late-answer-serializes-prompts-on-%s" outcome)
+        (equal (nreverse order) '(picker late question approval))
+        (null dsh-emacs--question-active)
+        (null dsh-emacs--approval-active)
+        (null dsh-emacs--question-queue)
+        (null dsh-emacs--approval-queue)))))
+
 (princ "\n===== test summary =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))
       (fail (cl-count-if (lambda (r) (not (cdr r))) dsh-test-results)))

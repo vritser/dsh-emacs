@@ -10,6 +10,15 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Timed questions stay answerable**: when a dsh 0.2.0 `ask_user_question`
+  foreground window expires before an answer, the question is no longer lost.
+  Its transcript row reads `pending` and explains itself, and `M-x
+  dsh-emacs-answer-question` (`C-c C-p`) answers it through the host's
+  `userQuestions` API with the ordinary minibuffer reader. While a timed
+  question is being answered the client holds the host's foreground wait, so
+  the window cannot expire out from under the prompt, and a late answer
+  completes the original card. Requires dsh 0.2.0; on 0.1.7 the blocking
+  question flow is unchanged. (rationale: postmortem/073)
 - **Read plans before approving them**: submitted plans open as Markdown
   documents with **Approve and execute** and **Request changes** actions.
   Requesting changes returns to chat to write feedback; closing the document
@@ -84,6 +93,11 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Timed answers survive concurrent activity**: submitting an answer keeps
+  its timeout protection until the host responds, and incoming prompts wait
+  until a late-answer reader closes. Older snapshots no longer hide pending
+  questions, loaded history shows saved late replies, and answers declined
+  by the host no longer report success.
 - **Confirmed skill invocations use skill styling**: host evidence now replaces
   a same-named command's border and tooltip with the skill presentation,
   including when the skill catalog has not loaded yet.

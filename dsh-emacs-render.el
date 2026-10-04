@@ -82,6 +82,8 @@
 (defvar dsh-emacs--command-spinners)
 (defvar dsh-emacs--input-marker)
 (defvar dsh-emacs--composer-top-marker)
+;; Latest decoded question projection, owned by dsh-emacs.el.
+(defvar dsh-emacs--session-questions)
 
 ;;; ---------------------------------------------------------------------------
 ;;; Customization
@@ -3043,22 +3045,35 @@ questions unanswered."
                       custom))))
        answers))))
 
-(defun dsh-emacs-render--ask-summary (answers error-code settled)
+(defun dsh-emacs-render--ask-pending-p (text)
+  "Whether ask result TEXT is the timed tool's pending payload.
+dsh 0.2.0's timed `ask_user_question' returns `{pending:true, callId,
+message}' when the foreground window expired before an answer batch arrived;
+the questions stay answerable, so this is not an empty result and the card
+must say so.  Mirrors the host's own `isPendingResult'."
+  (let ((parsed (and (stringp text) (dsh-emacs-render--ask-json text))))
+    (and (listp parsed)
+         (eq t (dsh-emacs-render--json-bool
+                (dsh-emacs-render--aget "pending" parsed))))))
+
+(defun dsh-emacs-render--ask-summary (answers error-code settled &optional pending)
   "Collapsed-row summary for an ask call, or nil to keep the caller's summary.
 ANSWERS is `dsh-emacs-render--ask-answers' output, nil while the call runs or
 when its result carried no answer entry; ERROR-CODE is the settled
-`data.error.code'; SETTLED non-nil means the call has a result.  Mirrors dsh
-web, whose total is the answer document's own length: `A/B answered' once the
-answers are known, `cancelled' for a user-dismissed question set,
-`interrupted' for an abandoned one, `waiting' while the call runs — and nil
-for any other settled outcome, which the caller reports with its result
-preview."
+`data.error.code'; SETTLED non-nil means the call has a result; PENDING means
+the result is the timed tool's pending payload.  Mirrors dsh web, whose total
+is the answer document's own length: `A/B answered' once the answers are
+known, `cancelled' for a user-dismissed question set, `interrupted' for an
+abandoned one, `pending' when the window expired with the questions still
+answerable, `waiting' while the call runs — and nil for any other settled
+outcome, which the caller reports with its result preview."
   (cond
    (answers
     (format "%d/%d answered"
             (cl-count-if (lambda (cell) (or (nth 1 cell) (nth 2 cell)))
                          answers)
             (length answers)))
+   (pending "pending")
    ((equal error-code "ASK_CANCELLED") "cancelled")
    ((equal error-code "ASK_ABORTED") "interrupted")
    ((not settled) "waiting")))
@@ -3235,6 +3250,24 @@ everything else `success'."
                  (summary (or (plist-get prev :summary) ""))
                  (icon (or (plist-get prev :icon) ""))
                  (variant (plist-get prev :variant))
+                 ;; Control can settle a question before its follow result or
+                 ;; older history page renders.  Reconcile at row creation as
+                 ;; well as on projection updates; the recorded result stays
+                 ;; pending forever even after the late answer is admitted.
+                 (settled-question
+                  (and (equal variant "question")
+                       dsh-emacs--session-questions
+                       (dsh-emacs-render--ask-pending-p full-text)
+                       (cl-find call-id
+                                (dsh-protocol-user-questions-settled
+                                 dsh-emacs--session-questions)
+                                :key #'dsh-protocol-settled-question-call-id
+                                :test #'equal)))
+                 (full-text
+                  (if settled-question
+                      (dsh-protocol-question-answers-json
+                       (dsh-protocol-settled-question-answers settled-question))
+                    full-text))
                  ;; The shell status rides in the result text, not the wire
                  ;; block: parse it before resolving the display state.
                  (shell (and (equal variant "bash")
@@ -3268,13 +3301,19 @@ everything else `success'."
                                       args-raw)))
                  (ask-answers (and ask-questions
                                    (dsh-emacs-render--ask-answers full-text)))
+                 ;; dsh 0.2.0's timed tool reports an expired foreground
+                 ;; window as a successful pending result; the questions stay
+                 ;; answerable (`dsh-emacs-answer-question'), so the row must
+                 ;; not read as an answered or failed set.
+                 (ask-pending (and ask-questions
+                                   (dsh-emacs-render--ask-pending-p full-text)))
                  ;; An ask row's header states the outcome of its question
-                 ;; set (`2/3 answered', `interrupted', `cancelled'); a
-                 ;; settled set the card cannot describe falls back to the
-                 ;; result preview like any other row.
+                 ;; set (`2/3 answered', `pending', `interrupted',
+                 ;; `cancelled'); a settled set the card cannot describe falls
+                 ;; back to the result preview like any other row.
                  (row-summary (if ask-questions
                                   (or (dsh-emacs-render--ask-summary
-                                       ask-answers error-code t)
+                                       ask-answers error-code t ask-pending)
                                       (dsh-emacs-render--tool-result-preview
                                        full-text))
                                 summary))
@@ -3292,6 +3331,13 @@ everything else `success'."
                  (status-text (and (memq state '(error stopped))
                                    (dsh-emacs-render--tool-status-text
                                     state exit-code signal error-reason)))
+                 ;; A timed question whose window expired explains itself in
+                 ;; the body, where the questionnaire still is, and names the
+                 ;; command that answers it later.
+                 (pending-text (and ask-pending
+                                    (concat "This question set is pending — "
+                                            "answer it later with M-x "
+                                            "dsh-emacs-answer-question.")))
                  ;; A settled bash/pwsh call expands into a terminal card
                  ;; (`$' prompt rows + output + status footer), a file read into
                  ;; the line-numbered read card, a write/edit into its diff
@@ -3302,7 +3348,7 @@ everything else `success'."
                  (body (or (and ask-questions
                                 (dsh-emacs-render--ask-body
                                  ask-questions ask-answers
-                                 (or ask-verdict status-text)))
+                                 (or pending-text ask-verdict status-text)))
                            (and (equal variant "bash")
                                 (dsh-emacs-render--bash-card-body
                                  args (nth 0 shell) state exit-code signal
@@ -3325,22 +3371,28 @@ everything else `success'."
                            (dsh-emacs-render--tool-leading icon state)
                            (propertize title 'face 'dsh-emacs-tool-title-face))
               :label-right (if (string-empty-p row-summary)
-                                (dsh-emacs-render--tool-result-preview
-                                 full-text)
-                              row-summary)
+                               (dsh-emacs-render--tool-result-preview
+                                full-text)
+                             row-summary)
               :body body
               :style 'minimal
               ;; State tint on the header row only: the ioCard body keeps its
               ;; own neutral faces instead of inheriting the status accent.
               :header-face face
               :status (pcase state
-                           ('success 'tool-success)
-                           ('error 'tool-error)
-                           (_ 'tool-stopped)))
+                        ('success 'tool-success)
+                        ('error 'tool-error)
+                        (_ 'tool-stopped)))
              :create-new nil)
-             ;; Track the new state.
-             (dsh-emacs-render--set-tool-state
-              call-id :state state :result full-text :exit-code exit-code))
+            ;; Track the new state, keeping the call-time identity the card
+            ;; was built from: a later projection-driven settle
+            ;; (`dsh-emacs-render-question-settled') replays this row through
+            ;; the ordinary result path and needs the original arguments.
+            (dsh-emacs-render--set-tool-state
+             call-id :state state :result full-text :exit-code exit-code
+             :variant variant :title title :name name :args args
+             :args-raw args-raw :icon icon :summary summary
+             :call-time (plist-get prev :call-time) :ns (plist-get prev :ns)))
           ;; Increment completed counter in the current group.
           (when (and dsh-emacs--current-group-id
                      (equal (plist-get (dsh-emacs-render--tool-state call-id) :group-id)
@@ -3348,6 +3400,38 @@ everything else `success'."
             (setq dsh-emacs--current-group-completed
                   (1+ dsh-emacs--current-group-completed))))))
     (dsh-emacs-render--event-seq event)))
+
+(defun dsh-emacs-render-question-settled (call-id answers-json)
+  "Settle the transcript ask row for CALL-ID with ANSWERS-JSON.
+The `userQuestions' projection reports a timed question settled when its late
+answer was steered in; the recorded tool result is only the pending payload,
+so the card is completed by replaying the settled batch through the one
+tool-result path that updates a row in place (an in-time answer already
+settled its row normally, so its card is left alone).  No-op unless this
+buffer still tracks CALL-ID's row and that row is showing the pending result."
+  (let ((prev (dsh-emacs-render--tool-state call-id)))
+    (when (and prev
+               (equal (plist-get prev :variant) "question")
+               (dsh-emacs-render--ask-pending-p (plist-get prev :result)))
+      ;; Re-rendering an already-settled row is not a new result, so the
+      ;; activity group's completed counter must not move.
+      (let ((completed dsh-emacs--current-group-completed))
+        (unwind-protect
+            (dsh-emacs-render-tool-result
+             (list (cons "type" "tool/result")
+                   (cons "data"
+                         (list (cons "message"
+                                     (list (cons "callId" call-id)
+                                           (cons "content"
+                                                 (vector
+                                                  (list (cons "type" "tool-result")
+                                                        (cons "isError" :json-false)
+                                                        (cons "content"
+                                                              (vector
+                                                               (list (cons "type" "text")
+                                                                     (cons "text"
+                                                                           answers-json)))))))))))))
+          (setq dsh-emacs--current-group-completed completed))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Renderer: turn start / end / interrupt / error

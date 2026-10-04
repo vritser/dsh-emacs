@@ -303,6 +303,17 @@ when the server protocol changes you sync exactly one file. Covered payloads:
   `multiSelect`, which keeps both spellings in one place, and unpacks its
   `options` array through `dsh-protocol--objects` so a non-object element
   declines at the boundary rather than signalling out of the constructor.
+- the request's optional `wait` → `dsh-protocol-question-wait` (call-id,
+  timed) — dsh 0.2.0's timed `ask_user_question`, which names the tool call
+  whose foreground wait the answer UI may claim.
+- the `userQuestions` projection → `dsh-protocol-user-questions` (active,
+  settled, seq) → `dsh-protocol-pending-question` (call-id, questions, state:
+  `open`/`continued`) and `dsh-protocol-settled-question` (call-id, answers)
+  → `dsh-protocol-question-answer` (id, selected, custom). The reverse
+  direction, `dsh-protocol-question-answers-json`, re-serializes a settled
+  batch as the host's answer document so the transcript card can be completed
+  through the ordinary result renderer; all wire field names stay in this
+  module.
 
 Conversion is one-way and lossless: `session/modelCatalog` responses become a
 `dsh-protocol-model-directory` before the picker reads them; the cached
@@ -336,6 +347,30 @@ matching current message and preserves unrelated command output.
 Protocol structs remain the only question wire decoder, and waterfall/RPC
 ownership is unchanged.
 See [decision record 042](../postmortem/042-question-prompts.md).
+
+dsh 0.2.0's **timed** form adds two rules on top of that reader, without
+changing it. While a timed question owns the answer slot, the drain claims the
+host's foreground wait with `userQuestions/attachWait` (a stream on the chat
+socket). A submitted answer holds the claim until the asynchronous RPC
+response; other exits release it immediately. The host reschedules its original
+deadline on release, so releasing before acknowledgement could discard an
+answer after a long read. A question whose window closed — `continued` in
+the `userQuestions` projection — is answered later by
+`M-x dsh-emacs-answer-question`, which runs the same reader and submits through
+`userQuestions/answer`. The picker and reader reserve the same global prompt
+slot as foreground questions and approvals, draining queued work on exit.
+Only a true answer response reports acceptance. The questions come from the
+projection, which `dsh-emacs-events.el` keeps buffer-local per chat (the `session/control`
+increment, the control baseline, and the follow snapshot all feed it).
+The decoded sequence orders these updates, including absent capabilities;
+a new host generation resets the watermark. The late answer is steered as a
+`user-question-reply` user message, which the transcript
+source filter hides; the settled cell completes the original ask card through
+`dsh-emacs-render-question-settled`, which replays the batch through the
+ordinary in-place tool-result path. That path also consults the stored settled
+state when rendering a pending result, covering delayed live results and
+older history loaded after the projection arrived.
+See [decision record 073](../postmortem/073-timed-question-answers.md).
 
 Plan review is a document interaction in `dsh-emacs-plan.el`. The protocol
 question struct retains the intent kind, approval label and optional call id;
@@ -380,6 +415,7 @@ is the `client-request` envelope with `payload = {args: {...}}`:
 | `commands/list` / `commands/execute` | List / run slash commands |
 | `skills/list` | List the session's user-invocable skills (the `/` completion's second catalog; invocation is a `/name` gesture in a prompt, rpc.md §4.2) |
 | `$events/result` | Answer a `$events` waterfall (approval/question), args `{clientId, eventId, outcome}` |
+| `userQuestions/answer` | Answer a timed question whose foreground window closed (dsh 0.2.0), args `{agentId, callId, answer}`; `dsh-emacs-events-open-stream`/`-close-stream` carry the matching `userQuestions/attachWait` claim |
 
 Real-time state — the transcript, the session list, queue/steer mirrors,
 projections, and the approval/question waterfalls — is NOT polled; it

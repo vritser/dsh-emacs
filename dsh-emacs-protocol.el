@@ -48,6 +48,14 @@
 ;;   permissionPresets/catalog → dsh-protocol-permission-catalog (options)
 ;;                        └─ dsh-protocol-permission-option (value name
 ;;                             description)
+;;   userQuestions projection → dsh-protocol-user-questions (active settled seq)
+;;                        ├─ dsh-protocol-pending-question (call-id questions
+;;                        │    state)
+;;                        │    └─ dsh-protocol-question (see above)
+;;                        └─ dsh-protocol-settled-question (call-id answers)
+;;                             └─ dsh-protocol-question-answer (id selected
+;;                                  custom)
+;;   user-questions/request wait → dsh-protocol-question-wait (call-id timed)
 ;;
 ;; Conversion entry points all accept a wire alist; note that arrays (vectors)
 ;; on the wire are always normalized to lists inside the structs.  Once
@@ -57,6 +65,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'json)
 
 (defun dsh-protocol--list (value)
   "JSON VALUE (list or vector) as a proper list."
@@ -598,6 +607,128 @@ in contribution order.  The derived `custom' state is not an option."
                              (alist &aux (text (cdr (assq 'plan alist))))))
   "The complete Markdown submitted by `exit_plan_mode'."
   text)
+
+;; ---------------------------------------------------------------------------
+;; userQuestions projection + timed-question wait (dsh 0.2.0)
+;; ---------------------------------------------------------------------------
+;; dsh 0.2.0 added a timed `ask_user_question' tool: a question the user does
+;; not answer inside the foreground window stays answerable, and the host
+;; publishes that state as the `userQuestions' session projection.  The
+;; waterfall request then carries an optional `wait' naming the tool call, and
+;; a late answer goes through the `userQuestions/answer' Remote whose value is
+;; the same answer batch the in-time `$events/result' outcome carries.
+
+(cl-defstruct (dsh-protocol-question-wait
+               (:constructor dsh-protocol-question-wait--from-alist
+                             (alist
+                              &aux
+                              (call-id (dsh-protocol--field 'callId alist))
+                              (timed (dsh-protocol--boolean
+                                      (dsh-protocol--field 'timed alist))))))
+  "The optional `wait' of a `user-questions/request': the tool CALL-ID the
+answer UI may claim on `userQuestions/attachWait', and whether that wait is
+TIMED (an expiring foreground window) rather than indefinite."
+  call-id
+  timed)
+
+(cl-defstruct (dsh-protocol-question-answer
+               (:constructor dsh-protocol-question-answer--from-alist
+                             (alist
+                              &aux
+                              (id (dsh-protocol--field 'id alist))
+                              (selected (dsh-protocol--list
+                                         (dsh-protocol--field 'selected alist)))
+                              (custom (dsh-protocol--field 'custom alist)))))
+  "One answer of a settled question batch: question ID, the SELECTED option
+labels (empty when the question was skipped or answered with free text), and
+the optional free-text CUSTOM."
+  id
+  selected
+  custom)
+
+(cl-defstruct (dsh-protocol-pending-question
+               (:constructor dsh-protocol-pending-question--from-alist
+                             (alist
+                              &aux
+                              (call-id (dsh-protocol--field 'callId alist))
+                              (questions (mapcar
+                                          #'dsh-protocol-question--from-alist
+                                          (dsh-protocol--objects
+                                           (dsh-protocol--field
+                                            'questions alist))))
+                              (state (pcase (dsh-protocol--field 'state alist)
+                                       ("open" 'open)
+                                       ("continued" 'continued)
+                                       (_ nil))))))
+  "One timed `ask_user_question' call of the `userQuestions' projection:
+CALL-ID, its QUESTIONS, and STATE (`open' while the foreground window runs,
+`continued' once only a later answer can settle it)."
+  call-id
+  questions
+  state)
+
+(cl-defstruct (dsh-protocol-settled-question
+               (:constructor dsh-protocol-settled-question--from-alist
+                             (alist
+                              &aux
+                              (call-id (dsh-protocol--field 'callId alist))
+                              (answers (mapcar
+                                        #'dsh-protocol-question-answer--from-alist
+                                        (dsh-protocol--objects
+                                         (dsh-protocol--field
+                                          'answers alist)))))))
+  "One settled timed call of the `userQuestions' projection: CALL-ID and the
+answer batch it settled with (empty when the late reply carried none)."
+  call-id
+  answers)
+
+(cl-defstruct (dsh-protocol-user-questions
+               (:constructor dsh-protocol-user-questions--from-alist
+                             (alist &optional seq
+                                    &aux
+                                    (active (mapcar
+                                             #'dsh-protocol-pending-question--from-alist
+                                             (dsh-protocol--objects
+                                              (dsh-protocol--field 'active alist))))
+                                    (settled (mapcar
+                                              #'dsh-protocol-settled-question--from-alist
+                                              (dsh-protocol--objects
+                                               (dsh-protocol--field
+                                                'settled alist)))))))
+  "The `userQuestions' projection value: ACTIVE questions still answerable
+(open or continued) and SETTLED ones, in ask and settlement order.  A session
+that only ever used the blocking legacy tool folds to two empty lists.
+SEQ is the projection's watermark, including when the capability is absent."
+  active
+  settled
+  seq)
+
+(defun dsh-protocol-user-questions-update--from-alist (frame)
+  "Decode the question projection and its watermark from control FRAME."
+  (dsh-protocol-user-questions--from-alist
+   (dsh-protocol--field 'value frame) (dsh-protocol--field 'seq frame)))
+
+(defun dsh-protocol-user-questions-baseline--from-alist (baseline)
+  "Decode question state or capability absence at BASELINE's watermark."
+  (dsh-protocol-user-questions--from-alist
+   (dsh-protocol--field 'userQuestions (dsh-protocol--field 'values baseline))
+   (dsh-protocol--field 'asOfSeq baseline)))
+
+(defun dsh-protocol-question-answers-json (answers)
+  "Serialize ANSWERS as the host's answer document.
+ANSWERS is a list of `dsh-protocol-question-answer' structs.  The result is
+the same `{\"answers\": [...]}' text a settled `ask_user_question' result
+carries, so a caller can replay a late answer through the ordinary result
+renderer; the wire field names stay in this module."
+  (json-encode
+   `((answers
+      . ,(mapcar (lambda (answer)
+                   (let ((custom (dsh-protocol-question-answer-custom answer)))
+                     `((id . ,(dsh-protocol-question-answer-id answer))
+                       (selected
+                        . ,(vconcat (dsh-protocol-question-answer-selected answer)))
+                       ,@(and custom `((custom . ,custom))))))
+                 answers)))))
 
 ;; ---------------------------------------------------------------------------
 ;; inbox projection items (the pending-input queue since dsh 0.1.7)

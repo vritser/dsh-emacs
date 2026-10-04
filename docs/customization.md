@@ -220,6 +220,34 @@ Command errors and status messages take priority. On exit, cleanup removes
 only the question's own message and preserves an unrelated message that has
 replaced it.
 
+### Timed questions (dsh 0.2.0)
+
+A dsh 0.2.0 `ask_user_question` call may carry a foreground window (120
+seconds by default). While the prompt is on screen Emacs holds the host's
+foreground wait, so the window cannot expire and discard what you are typing.
+Submitting keeps that protection until the host responds.
+If the window does close before an answer — for example because the question
+was queued behind another session's prompt — the question becomes **pending**
+instead of lost:
+
+- the transcript's ask row reads `❓ Ask question · pending`, and its expanded
+  body keeps the questionnaire and names the recovery command;
+- `M-x dsh-emacs-answer-question` (`C-c C-p`) lists the session's pending
+  questions (one call is answered directly; several are chosen by their first
+  question), asks them with the same reader, and submits the batch as a late
+  reply. Incoming questions and approvals wait until this picker and reader
+  close, including when you cancel with `C-g`;
+- when the host records that reply the original card completes to
+  `N/M answered` with the chosen options marked, and the answers also arrive in
+  the transcript history on the next open or when loading older messages.
+
+If another client answers the question before your reply is accepted, Emacs
+reports that it is no longer waiting for an answer instead of reporting success.
+
+The pending state comes from the host's `userQuestions` projection, so a
+question asked while Emacs was disconnected is still answerable. On dsh 0.1.7
+there is no timed mode and none of this appears.
+
 `M-x dsh-emacs-question-preview` runs a local three-question sample batch
 through the same reader — a multi-select with option descriptions, a
 single-select, and an option-less free-text question — so it also shows the

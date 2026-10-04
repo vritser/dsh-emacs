@@ -921,6 +921,10 @@ matches the workspace registered for it under any spelling."
 
 (declare-function dsh-emacs-events--host-upsert-workspace
                   "dsh-emacs-events" (workspace))
+(declare-function dsh-emacs-events-open-stream
+                  "dsh-emacs-events" (process endpoint args name handler))
+(declare-function dsh-emacs-events-close-stream
+                  "dsh-emacs-events" (process stream-id))
 (declare-function dsh-emacs--server-local-host-p "dsh-emacs-server" ())
 (declare-function dsh-emacs--server-auth-http-401-p "dsh-emacs-server" (err))
 (declare-function dsh-emacs--server-auth-maybe-expire "dsh-emacs-server" ())
@@ -2043,6 +2047,7 @@ repaints)."
     (define-key map (kbd "C-c C-b") #'dsh-emacs-interrupt-turn)
     (define-key map (kbd "C-c C-q") #'dsh-emacs-list-queue)
     (define-key map (kbd "C-c C-j") #'dsh-emacs-list-jobs)
+    (define-key map (kbd "C-c C-p") #'dsh-emacs-answer-question)
     (define-key map (kbd "C-c C-r") #'dsh-emacs-refresh)
     (define-key map (kbd "C-c C-o") #'dsh-emacs-load-older-history)
     (define-key map (kbd "C-c C-l") #'dsh-emacs-list-sessions-display)
@@ -4526,13 +4531,14 @@ This is the main entry command of dsh-emacs."
 (defvar dsh-emacs--question-queue nil
   "Pending `user-questions/request' waterfalls awaiting the single
 interactive answering slot; each entry is (CHAT EVENT-ID SESSION-ID
-QUESTIONS).")
+QUESTIONS WAIT).")
 
 (defvar dsh-emacs--question-active nil
   "The `user-questions/request' waterfall currently occupying the
 interactive answering slot, or nil.  The slot is shared with the
 approval flow (`dsh-emacs--approval-active'): only one prompt may own
-the minibuffer at a time.")
+the minibuffer at a time.  `late-answer' reserves it for the late-answer
+picker and reader, which have no waterfall event id.")
 
 ;; Declared here — before `dsh-emacs--question-drain' references them in
 ;; the shared-slot handoff — because the byte-compiler reads the file
@@ -4554,6 +4560,34 @@ The drain that owns the id clears it and sends no stale outcome.")
 
 (defvar dsh-emacs--waterfall-prompt-event-id nil
   "Event id owning the dynamically active waterfall minibuffer.")
+
+(defvar-local dsh-emacs--session-questions nil
+  "Latest `userQuestions' projection view of this chat's session, or nil.
+A `dsh-protocol-user-questions' struct: the timed `ask_user_question' calls
+still answerable and the ones already settled (dsh 0.2.0).  It is the only
+source for a question whose foreground waterfall is gone, so
+`dsh-emacs-answer-question' reads it and a settled transcript card can be
+completed from it.")
+
+(defun dsh-emacs--session-questions-apply (questions)
+  "Merge decoded question projection QUESTIONS by sequence for this chat.
+Nil resets the mirror on a new host generation.  Capability absence retains
+its sequence, so an older update cannot restore stale questions.
+A newly settled call also completes its transcript ask row, so a late answer
+is recorded on the card that asked the question."
+  (let ((seq (and questions (dsh-protocol-user-questions-seq questions)))
+        (previous (and dsh-emacs--session-questions
+                       (dsh-protocol-user-questions-seq
+                        dsh-emacs--session-questions))))
+    (when (or (not (integerp seq)) (not (integerp previous))
+              (>= seq previous))
+      (setq dsh-emacs--session-questions questions)
+      (dolist (settled (and questions
+                           (dsh-protocol-user-questions-settled questions)))
+        (dsh-emacs-render-question-settled
+         (dsh-protocol-settled-question-call-id settled)
+         (dsh-protocol-question-answers-json
+          (dsh-protocol-settled-question-answers settled)))))))
 
 (defun dsh-emacs--waterfall-cancel-active (event-id active)
   "Cancel the active waterfall when EVENT-ID matches ACTIVE.
@@ -4609,7 +4643,11 @@ same minibuffer.  Runs from whatever filter context delivered the
 current frame; queued frames are collected in their own chat buffer
 regardless of which stream they arrived on.
 Each frame is keyed by its waterfall EVENT-ID; the answer goes to
-`$events/result' carrying the current `$events' generation's client-id."
+`$events/result' carrying the current `$events' generation's client-id.
+A dsh 0.2.0 timed frame additionally names its tool call in `wait': while the
+reader owns the minibuffer this drain claims that foreground wait, so the host
+cannot expire the question out from under the user.  A submitted answer keeps
+the claim until its asynchronous response arrives; other exits release it."
   (while (and (null dsh-emacs--question-active)
               (null dsh-emacs--approval-active)
               dsh-emacs--question-queue)
@@ -4617,39 +4655,56 @@ Each frame is keyed by its waterfall EVENT-ID; the answer goes to
            (chat (nth 0 frame))
            (event-id (nth 1 frame))
            (session-id (nth 2 frame))
-           (questions (dsh-emacs--sequence-list (nth 3 frame))))
+           (questions (dsh-emacs--sequence-list (nth 3 frame)))
+           (wait (nth 4 frame)))
       (setq dsh-emacs--question-active frame)
-      (let ((dsh-emacs--waterfall-prompt-event-id event-id))
-        (condition-case err
-            (let ((answers
-                   (when (buffer-live-p chat)
-                     (with-current-buffer chat
-                       (dsh-emacs--collect-question-answers
-                        questions session-id)))))
-              (cond
-               ((equal event-id dsh-emacs--waterfall-cancelled-event-id)
-                (message "Question was answered elsewhere"))
-               (answers
-                (dsh-emacs--events-result-async
-                 dsh-emacs-events--client-id
-                 event-id
-                 `((kind . "result")
-                   (value . ((answers . ,answers))))
-                 (lambda (ok value)
-                   (if ok
-                       (message "Answered %d question(s)" (length answers))
-                     (message "Question response not accepted (%s)" value)))))
-               (t
-                ;; No choices collected (aborted via an empty no-option
-                ;; input, or the chat buffer died): abandon the whole
-                ;; waterfall — outcome kind `rejected' with an error body
-                ;; (dsh web's "abandon questions") so the ask aborts
-                ;; host-side and the run is never left blocked.
-                (dsh-emacs--question-decline event-id))))
-          (quit
-           (unless (equal event-id dsh-emacs--waterfall-cancelled-event-id)
-             (dsh-emacs--question-decline event-id)))
-          (error (message "dsh question error: %S" err))))
+      (let ((dsh-emacs--waterfall-prompt-event-id event-id)
+            (claim nil)
+            (submitted nil))
+        (unwind-protect
+            (condition-case err
+                (progn
+                  (setq claim
+                        (and wait
+                             (dsh-protocol-question-wait-timed wait)
+                             (dsh-emacs--question-claim-wait
+                              chat session-id
+                              (dsh-protocol-question-wait-call-id wait))))
+                  (let ((answers
+                         (when (buffer-live-p chat)
+                           (with-current-buffer chat
+                             (dsh-emacs--collect-question-answers
+                              questions session-id)))))
+                    (cond
+                     ((equal event-id dsh-emacs--waterfall-cancelled-event-id)
+                      (message "Question was answered elsewhere"))
+                     (answers
+                      (dsh-emacs--events-result-async
+                       dsh-emacs-events--client-id
+                       event-id
+                       `((kind . "result")
+                         (value . ((answers . ,answers))))
+                       (lambda (ok value)
+                         (unwind-protect
+                             (if ok
+                                 (message "Answered %d question(s)" (length answers))
+                               (message "Question response not accepted (%s)" value))
+                           (dsh-emacs--question-release-wait claim)
+                           (setq claim nil))))
+                      (setq submitted t))
+                     (t
+                      ;; No choices collected (aborted via an empty no-option
+                      ;; input, or the chat buffer died): abandon the whole
+                      ;; waterfall — outcome kind `rejected' with an error body
+                      ;; (dsh web's "abandon questions") so the ask aborts
+                      ;; host-side and the run is never left blocked.
+                      (dsh-emacs--question-decline event-id)))))
+              (quit
+               (unless (equal event-id dsh-emacs--waterfall-cancelled-event-id)
+                 (dsh-emacs--question-decline event-id)))
+              (error (message "dsh question error: %S" err)))
+          (unless submitted
+            (dsh-emacs--question-release-wait claim))))
       (when (equal event-id dsh-emacs--waterfall-cancelled-event-id)
         (setq dsh-emacs--waterfall-cancelled-event-id nil))
       (setq dsh-emacs--question-active nil)))
@@ -4660,6 +4715,35 @@ Each frame is keyed by its waterfall EVENT-ID; the answer goes to
              (null dsh-emacs--approval-active)
              dsh-emacs--approval-queue)
     (dsh-emacs--approval-drain)))
+
+(defun dsh-emacs--question-claim-wait (chat session-id call-id)
+  "Claim the timed foreground wait of CALL-ID on CHAT while it is being read.
+The host suspends the wait's deadline while a client holds the
+`userQuestions/attachWait' stream (dsh 0.2.0), so an answer prompt cannot be
+expired and closed out from under the user.  Returns a (PROCESS . STREAM-ID)
+token for `dsh-emacs--question-release-wait', or nil when there is nothing to
+claim — no live socket, or no named call."
+  (when (and (buffer-live-p chat)
+             (stringp call-id)
+             (not (string-empty-p call-id)))
+    (with-current-buffer chat
+      (let ((process dsh-emacs--event-process))
+        (when (process-live-p process)
+          (let ((stream
+                 (dsh-emacs-events-open-stream
+                  process "userQuestions/attachWait"
+                  `((agentId . ,session-id) (callId . ,call-id))
+                  "userQuestions/attachWait"
+                  (lambda (_value) nil))))
+            (and stream (cons process stream))))))))
+
+(defun dsh-emacs--question-release-wait (claim)
+  "Release a CLAIM made by `dsh-emacs--question-claim-wait'.
+Closing the stream reschedules the host's original deadline, which can
+already have passed.  Submitted answers must hold it until acknowledgement.
+Safe on nil."
+  (when claim
+    (dsh-emacs-events-close-stream (car claim) (cdr claim))))
 
 ;; Forward declaration of the $events generation's client-id, owned by
 ;; dsh-emacs-events.el.  The bare (defvar X) form asserts existence without
@@ -5043,8 +5127,12 @@ them."
                    "No options: empty input skips, text is the answer."
                    nil nil)))))
 
-(cl-defun dsh-emacs--question-requested (chat event-id session-id questions)
+(cl-defun dsh-emacs--question-requested (chat event-id session-id questions
+                                                  &optional wait)
   "Queue a `user-questions/request' waterfall EVENT-ID of SESSION-ID and answer it.
+WAIT, when non-nil, is the frame's `dsh-protocol-question-wait' struct: it
+names the timed tool call whose foreground wait the reader claims while the
+question is on screen (dsh 0.2.0; nil for the blocking legacy tool).
 The minibuffer is one global resource: with several chat buffers open, a
 $events frame can deliver the next question while the previous one is
 still being answered interactively.  Nested `completing-read' calls
@@ -5072,7 +5160,7 @@ Explicit plan-review intent opens a document without occupying the minibuffer."
                        dsh-emacs--question-queue))
     (setq dsh-emacs--question-queue
           (nconc dsh-emacs--question-queue
-                 (list (list chat event-id session-id questions))))
+                 (list (list chat event-id session-id questions wait))))
     ;; Desktop notice, turn-finish style (`dsh-emacs-enable-notifications'):
     ;; the answering prompt may wait behind another session's prompt, so
     ;; announce a pending question even when the user is away from the
@@ -5129,6 +5217,85 @@ minibuffer, close it and let its drain retire without sending an outcome."
                       dsh-emacs--question-queue))
   (dsh-emacs--waterfall-cancel-active
    event-id dsh-emacs--question-active))
+
+(defun dsh-emacs--question-continued ()
+  "Return this chat's still-answerable `continued' timed questions.
+Entries are `dsh-protocol-pending-question' structs in ask order."
+  (let ((view dsh-emacs--session-questions))
+    (when view
+      (cl-remove-if-not
+       (lambda (question)
+         (eq 'continued (dsh-protocol-pending-question-state question)))
+       (dsh-protocol-user-questions-active view)))))
+
+(defun dsh-emacs--question-continued-label (question)
+  "Short picker label for a `continued' QUESTION.
+Its first question text names the call; a call the projection could not
+describe falls back to the call id."
+  (let ((first (car (dsh-protocol-pending-question-questions question))))
+    (or (and first (dsh-protocol-question-text first))
+        (dsh-protocol-pending-question-call-id question)
+        "Question")))
+
+(defun dsh-emacs--question-answer-late (session-id call-id answers)
+  "Submit ANSWERS for the timed CALL-ID of SESSION-ID.
+ANSWERS is the reader's wire-shaped answer list.  The host steers the batch
+into the agent as a late reply; a later `userQuestions' projection frame
+reports the call settled."
+  (dsh-emacs--rpc-async
+   "userQuestions/answer"
+   `((agentId . ,session-id)
+     (callId . ,call-id)
+     (answer . ((answers . ,answers))))
+   (lambda (ok value)
+     (cond
+      ((not ok) (message "Question answer not accepted (%s)" value))
+      ((eq value t) (message "Answered %d question(s)" (length answers)))
+      (t (message "Question is no longer waiting for an answer"))))))
+
+;;;###autoload
+(defun dsh-emacs-answer-question ()
+  "Answer a timed `ask_user_question' whose foreground window has closed.
+A timed question the user did not answer before its window expired stays
+answerable (dsh 0.2.0).  This command reads the session's `userQuestions'
+projection, asks the chosen call's questions in the minibuffer with the
+ordinary reader, and submits the batch through `userQuestions/answer'; the
+host steers it into the agent as a late reply.  With several calls waiting,
+one is chosen by its first question, and the batch must cover every question
+of that call.  Reports instead of prompting when nothing is waiting."
+  (interactive)
+  (let ((session-id (and (boundp 'dsh-emacs--buffer-session)
+                         dsh-emacs--buffer-session))
+        (pending (dsh-emacs--question-continued)))
+    (unless session-id
+      (user-error "Not in a dsh chat buffer"))
+    (unless pending
+      (user-error "No question is waiting for a later answer"))
+    (when (or dsh-emacs--question-active dsh-emacs--approval-active
+              (active-minibuffer-window))
+      (user-error "Another prompt is active"))
+    (unwind-protect
+        (let* ((dsh-emacs--question-active 'late-answer)
+               (entry (if (= 1 (length pending))
+                          (car pending)
+                        (let ((choices
+                               (mapcar (lambda (question)
+                                         (cons (dsh-emacs--question-continued-label
+                                                question)
+                                               question))
+                                       pending)))
+                          (cdr (assoc (completing-read "Answer which question: "
+                                                       choices nil t)
+                                      choices)))))
+               (call-id (dsh-protocol-pending-question-call-id entry))
+               (questions (dsh-protocol-pending-question-questions entry))
+               (answers (dsh-emacs--collect-question-answers questions session-id)))
+          (unless answers
+            (user-error "Question left unanswered"))
+          (dsh-emacs--question-answer-late session-id call-id answers))
+      ;; The dynamic reservation has unwound even on C-g or a reader error.
+      ;; The question drain also hands queued approvals their turn.
+      (dsh-emacs--question-drain))))
 
 (defun dsh-emacs--waterfall-generation-retired ()
   "Retire all pending question/approval waterfalls of a dead generation.

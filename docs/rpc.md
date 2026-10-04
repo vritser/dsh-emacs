@@ -664,8 +664,8 @@ surface, because the `session/control` `jobs` record it replaces is gone (§0.4)
 profile: `schedule` rides the optional, switched-off
 `@deepseek-ai/dsh-experimental-schedule-bundle`, and `productAnalytics` is
 composed only under the Desktop profile (the shared Remote assembly advertises
-it, so on an ordinary Web host those endpoints are unclaimed). All three are
-unused by dsh-emacs.
+it, so on an ordinary Web host those endpoints are unclaimed). dsh-emacs uses
+`userQuestions`; the other two are unused.
 
 Implementation anchors (master source):
 - session / skills / fileReferences → `packages/api/session-controller`

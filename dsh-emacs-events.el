@@ -159,11 +159,15 @@ generation and a new clientId.")
 ;; own the values.
 (defvar dsh-emacs-base-url)
 (defvar dsh-emacs--buffer-session)
+;; Owned by dsh-emacs.el (`defvar-local'); the `userQuestions' projection
+;; consumer and the late-answer command share it with the result renderer.
+(defvar dsh-emacs--session-questions)
 (defvar dsh-emacs-history-window)
 (declare-function dsh-emacs--chat-session-item "dsh-emacs" (session-id))
 (declare-function dsh-emacs--seed-input-history "dsh-emacs" (events session-id &optional older))
 (declare-function dsh-emacs--chat-buffer-sync "dsh-emacs" (session-id))
-(declare-function dsh-emacs--question-requested "dsh-emacs" (chat event-id session-id questions))
+(declare-function dsh-emacs--question-requested "dsh-emacs" (chat event-id session-id questions &optional wait))
+(declare-function dsh-emacs--session-questions-apply "dsh-emacs" (questions))
 (declare-function dsh-emacs--question-cancelled "dsh-emacs" (event-id))
 (declare-function dsh-emacs-plan--cancel "dsh-emacs-plan" (&optional event-id))
 (declare-function dsh-emacs--approval-requested "dsh-emacs" (chat event-id session-id tool-name reason call-id))
@@ -794,7 +798,8 @@ opening history tail; no separate history fetch precedes the connect."
   "Apply a follow snapshot's PROJECTIONS block (`{asOfSeq, values}').
 `title' feeds the session cache/buffer name, `contextPressure' the
 mode-line ctx%, `permissions' the mode-line permission preset, `goal' the
-Composer Goal Row — the same consumers as the `session/control' projection
+Composer Goal Row, and `userQuestions' the timed-question state behind the
+late-answer command — the same consumers as the `session/control' projection
 increment frames use.  Plan is seeded earlier in `--follow-snapshot', before
 history rendering can yield to live updates."
   (let ((values (and (listp projections)
@@ -816,7 +821,13 @@ history rendering can yield to live updates."
       (when (boundp 'dsh-emacs--chat-buffers)
         (let ((goal-value (dsh-emacs-render--aget "goal" values)))
           (when (listp goal-value)
-            (dsh-emacs-events--apply-goal-projection session-id goal-value)))))))
+            (dsh-emacs-events--apply-goal-projection session-id goal-value))))
+      ;; A resumed transcript can already contain a timed question that was
+      ;; settled after its pending result was written.  This runs after the
+      ;; records above were rendered, so the settled cell completes the ask
+      ;; row now that it exists (and is a no-op when it is not settled).
+      (dsh-emacs--session-questions-apply
+       (dsh-protocol-user-questions-baseline--from-alist projections)))))
 
 
 (defun dsh-emacs-events--consume-frames (process)
@@ -1384,9 +1395,11 @@ retires a pending waterfall by `eventId'."
         process
         (dsh-emacs-render--aget "sessionId" value)
         key
-        (if (member key '(plan "plan"))
-            (dsh-protocol-plan-update--from-alist value)
-          (dsh-emacs-render--aget "value" value)))))
+        (pcase key
+          ((or 'plan "plan") (dsh-protocol-plan-update--from-alist value))
+          ((or 'userQuestions "userQuestions")
+           (dsh-protocol-user-questions-update--from-alist value))
+          (_ (dsh-emacs-render--aget "value" value))))))
     ("upsert"
      (let ((ws (dsh-emacs-render--aget "workspace" value)))
        (when ws
@@ -1478,7 +1491,13 @@ retires a pending waterfall by `eventId'."
             (dsh-emacs--question-requested
              chat event-id agent-id
              (dsh-emacs--sequence-list
-              (dsh-emacs-render--aget "questions" request))))
+              (dsh-emacs-render--aget "questions" request))
+             ;; dsh 0.2.0: a timed call names its tool call here so the
+             ;; answerer can claim the foreground wait; absent on the
+             ;; blocking legacy tool and on older servers.
+             (let ((wait (dsh-emacs-render--aget "wait" request)))
+               (and (consp wait)
+                    (dsh-protocol-question-wait--from-alist wait)))))
            (_ nil)))))
     ("cancel"
      ;; Waterfall retirement: drop any still-queued question/approval frame
@@ -1490,9 +1509,9 @@ retires a pending waterfall by `eventId'."
     ;; Accepted no-op kinds (no UI consumes them yet): the `api-session/error'
     ;; emit and any other host frame type we do not render.  Background jobs
     ;; have no frame here at all since dsh 0.1.7 — they are the `job'
-    ;; namespace's streams, which this client never opens; the 0.1.6
+    ;; namespace's own streams (`dsh-emacs-jobs.el'); the 0.1.6
     ;; `session/control' `jobs' record is gone.  Intentionally dropped, not
-    ;; wire-parity work — revisit when a jobs/task or error surface is added.
+    ;; wire-parity work — revisit when an error surface is added.
     (_ nil)))
 
 (defun dsh-emacs-events--chat-buffer (session-id)
@@ -1529,15 +1548,20 @@ queue mirror is seeded by the same record's `inbox' cell, which
                       (car pair)))
                (baseline (cdr pair))
                (values (dsh-emacs-render--aget "values" baseline)))
-          ;; Carry the cut even for absent Plan capability, so an old
+          ;; Carry cuts even for absent Plan/question capabilities, so an old
           ;; reconnect baseline cannot erase a newer control increment.
           (dsh-emacs-events--host-apply-projection
            process sid "plan" (dsh-protocol-plan-baseline--from-alist baseline))
+          (dsh-emacs-events--host-apply-projection
+           process sid "userQuestions"
+           (dsh-protocol-user-questions-baseline--from-alist baseline))
           (dolist (kv (if (vectorp values) (append values nil)
                         (and (listp values) values)))
             ;; Projection values may legitimately be nil: `(goal . nil)' is
             ;; the authoritative tombstone that removes the Composer row.
-            (when (and (consp kv) (not (member (car kv) '(plan "plan"))))
+            (when (and (consp kv)
+                       (not (member (car kv)
+                                    '(plan "plan" userQuestions "userQuestions"))))
               (dsh-emacs-events--host-apply-projection
                process sid (car kv) (cdr kv)))))))))
 
@@ -1545,11 +1569,12 @@ queue mirror is seeded by the same record's `inbox' cell, which
   "Apply one projection cell (KEY . VALUE) of SESSION-ID arriving on PROCESS.
 `contextPressure' feeds the mode-line ctx%, `permissions' the mode-line
 permission preset, `title' the session cache and chat buffer name, `goal'
-the Composer Goal Row, `plan' its persistent collaboration mode, and `inbox'
-the pending-input mirror.  Plan VALUE carries its decoded sequence; legacy
-fixtures may supply a raw projection.  Plan and inbox cells with no live chat
-buffer are dropped, never applied to whichever buffer happens to be current.
-Other branches reach their consumers themselves."
+the Composer Goal Row, `plan' its persistent collaboration mode, `inbox'
+the pending-input mirror, and `userQuestions' the timed-question state the
+late-answer command reads.  Plan and userQuestions VALUEs carry their decoded
+sequences; legacy fixtures may supply raw projections.  These and inbox cells
+with no live chat buffer are dropped, never applied to whichever buffer
+happens to be current.  Other branches reach their consumers themselves."
   (when session-id
     (pcase (if (symbolp key) (symbol-name key) key)
       ("contextPressure"
@@ -1573,6 +1598,17 @@ Other branches reach their consumers themselves."
            (dsh-emacs-queue-apply
             chat process
             (dsh-protocol-queue-items-from-inbox value)))))
+      ("userQuestions"
+       ;; dsh 0.2.0: the timed-question state for this session.  Like the
+       ;; inbox cell it is buffer-local chat state, so a cell with no live
+       ;; chat buffer is dropped rather than applied to whatever is current.
+       (let ((chat (dsh-emacs-events--chat-buffer session-id)))
+         (when (buffer-live-p chat)
+           (with-current-buffer chat
+             (dsh-emacs--session-questions-apply
+              (dsh-protocol--struct
+               #'dsh-protocol-user-questions-p
+               #'dsh-protocol-user-questions--from-alist value))))))
       ("title"
        (when (and value (not (string-empty-p value)))
          (dsh-emacs-events--apply-title nil session-id value)
@@ -1700,11 +1736,12 @@ stream id is recorded on PROCESS so a later re-baseline
 re-opening (never two live workspace streams on one socket)."
   (when (process-live-p process)
     ;; A new Host generation may replay a Session in a new sequence space.
-    ;; Drop the previous Plan cuts before its baselines and increments arrive.
+    ;; Drop Plan/question cuts before its baselines and increments arrive.
     (maphash (lambda (_session-id chat)
                (when (buffer-live-p chat)
                  (with-current-buffer chat
-                   (dsh-emacs-modeline-set-plan nil))))
+                   (dsh-emacs-modeline-set-plan nil)
+                   (dsh-emacs--session-questions-apply nil))))
              dsh-emacs--chat-buffers)
     (dolist (endpoint '("session/control" "workspace/follow" "$events"))
       (let* ((stream-id (dsh-emacs-events--stream-id))
