@@ -1,17 +1,22 @@
-# dsh RPC Protocol Reference (dsh 0.1.7-rc.1, master baseline)
+# dsh RPC Protocol Reference (dsh 0.2.0-rc.2, master baseline)
 
 This document is the complete reference for the public protocol of the dsh
 (DeepSeek Harness) Web service, for maintaining the existing dsh-emacs
 implementation and for subsequent feature development. The protocol surface is
-verified against the `deepseek-harness` repository at `dsh-v0.1.7-rc.1`
-(`46a7f68b09`). The 0.1.5 round was a **live probe** against `dsh-v0.1.5-rc.1`
-(`aa8262ec09`, the surface of the 0.1.5 npm `latest`); the 0.1.6 and 0.1.7
-rounds were established by full tag-to-tag source / type / persistence schema
-comparisons (`dsh-v0.1.5-rc.2` → `dsh-v0.1.6-alpha.1` → `dsh-v0.1.7-rc.1`).
-**0.1.6 was additive to every surface dsh-emacs calls; 0.1.7 is not** — it
-removes the `session/control` queue/jobs frames and reshapes
-`agentPresets/list`, so dsh-emacs needed a migration (§0.4), which has landed
-(postmortem/064).
+verified against the `deepseek-harness` repository at `dsh-v0.2.0-rc.2`
+(`639ed01539`). The 0.1.5 round was a **live probe** against `dsh-v0.1.5-rc.1`
+(`aa8262ec09`, the surface of the 0.1.5 npm `latest`); the 0.1.6, 0.1.7 and
+0.2.0 rounds were established by full tag-to-tag source / type / persistence
+schema comparisons (`dsh-v0.1.5-rc.2` → `dsh-v0.1.6-alpha.1` →
+`dsh-v0.1.7-rc.1` → `dsh-v0.2.0-rc.2`).
+**0.1.6 was additive to every surface dsh-emacs calls; 0.1.7 and 0.2.0 are
+not** — 0.1.7 removed the `session/control` queue/jobs frames and reshaped
+`agentPresets/list` (§0.4; the client migration has landed, postmortem/064), and
+0.2.0 drops `agentPresets/list.modeSelectionEnabled`, makes every `account/*`
+operation take a client-metadata argument, and strips the request args from
+`workspace/initializeDefault` (§0.5). The transport layer, envelope,
+authentication, HTTP route set, Session format version (still **V4**) and the
+`KNOWN_SESSION_EVENT_TYPES` set (still **59**) are unchanged across 0.2.0.
 
 - Protocol model: **unary Remote RPC (HTTP POST) + multiplexed Remote stream (a
   single WebSocket)**. Logical messages are decoupled from the physical channel:
@@ -37,9 +42,10 @@ removes the `session/control` queue/jobs frames and reshapes
 > `/api/present.*`, `/api/session/uploadFileBinary`). The dsh-emacs client **has
 > already migrated to this protocol surface** (`/api/<namespace>/<method>` unary
 > calls + `session/follow`, `session/control`, `workspace/follow`, `$events` on
-> the single `/api/remote.mux`); the next section records the four rounds of
-> upstream changes, 0.1.2 and 0.1.5 (both live-verified) and 0.1.6 / 0.1.7
-> (source-compared).
+> the single `/api/remote.mux`); the next section records the five rounds of
+> upstream changes, 0.1.2 and 0.1.5 (both live-verified) and 0.1.6 / 0.1.7 /
+> 0.2.0 (source-compared). §11 is the per-feature usage companion to the 0.2.0
+> delta table in §0.5.
 
 ## 0. Migration Cross-Reference (dsh-emacs Perspective)
 
@@ -115,18 +121,19 @@ and the Session format version (**still V3**) are unchanged. Every 0.1.6 change:
 | goal activation listener `agent/session-start` | `agent/created` — host-internal; the `goal` projection and `goals/*` are unchanged |
 
 **Impact on dsh-emacs: no migration required.** At the 0.1.6 baseline the
-client needed no code change, and two additions have since been adopted as
+client needed no code change, and later rounds adopted several additions as
 features: `workspace/unarchiveSession` backs `dsh-emacs-unarchive-session`
-(postmortem/049) and `tool/result.error.reason` is shown on failed tool rows.
-The remaining new surfaces are unused or ignored: `terminal` is never called;
-the widened roster / descriptor / `SkillEntry` values are read through
-`assq`-style alist parsing that ignores unknown fields; the narrowed
-`permissions` projection is not consumed; the new `$events` emit falls through
-the client's `_ → nil` handler; and the new `image/offload` event is dropped by
+(postmortem/049); `tool/result.error.reason` is shown on failed tool rows;
+`permissionPresets/catalog` backs the permission-preset picker
+(`dsh-emacs-set-permission`), paired with the narrowed `permissions` projection's
+`currentValue` (the mode-line permission segment). The remaining new surfaces are
+unused or ignored: `terminal` is never called; the widened roster / descriptor /
+`SkillEntry` values are read through `assq`-style alist parsing that ignores
+unknown fields; the new `$events` emit falls through the client's `_ → nil`
+handler; and the new `image/offload` event is dropped by
 `dsh-emacs-render-event`'s default branch (unknown optional fields on rendered
 events are ignored). The sections below record 0.1.6 so the reference stays
-current. (`permissionPresets/catalog` has since been adopted — it backs the
-permission-preset picker — so the "never called" reading no longer holds;
+current.
 
 ### 0.4 0.1.7 Deltas (verified by source comparison)
 
@@ -182,9 +189,10 @@ implemented in the client; the two surfaces that had to move:
 
 Everything else in the table is additive or unread by the client: the widened
 `session/list` row, the `turnWindow`/`application` options, the workspace pin
-set, the new namespaces, the `permissionPresets` catalog fields, the
-`displayTitle` hint and the two new durable events all fall through the client's
-`assq`-style alist parsing and its `_ → nil` frame/event defaults.
+set, the new namespaces (except `job`, which the client consumes — §4.21), the
+`permissionPresets` catalog fields, the `displayTitle` hint and the two new
+durable events all fall through the client's `assq`-style alist parsing and its
+`_ → nil` frame/event defaults.
 
 Migration checklist: open only one WS, `/api/remote.mux`; approvals/questions go
 through `$events` waterfall + `$events/result`; **projections (including the
@@ -194,6 +202,66 @@ particular, no longer wait for `assistant/chunk`, but consume `assistant-stream`
 frames (§3.2.1) or `assistant/message.data.stream`; `commands/execute` now sends
 `submittedAttachments`. **0.1.6 adds no client-side migration step** (§0.3);
 **0.1.7 requires the two migrations above** (§0.4).
+
+### 0.5 0.2.0 Deltas (verified by source comparison)
+
+Baseline: `dsh-v0.1.7-rc.1` (`46a7f68b09`) → target: `dsh-v0.2.0-rc.2`
+(`639ed01539`, the 0.2.0 release tag). Transport, envelope, browser-session
+authentication, the single `/api/remote.mux` carrier, the exact HTTP route set,
+the Session format (**still V4**) and `KNOWN_SESSION_EVENT_TYPES` (**still 59**)
+are unchanged. This round is **partly breaking**: three method families change
+their argument/value shape, but only one of them touches dsh-emacs.
+
+| 0.1.7 | 0.2.0 |
+|---|---|
+| 26 mounted namespaces | **29** in the shared client wiring table: adds `schedule` (§4.24), `userQuestions` (§4.25) and `productAnalytics` (§4.26). Only `userQuestions` is mounted by a default profile: `schedule` rides the optional, switched-off `@deepseek-ai/dsh-experimental-schedule-bundle` (and 0.2.0 deletes the 0.1.7 `schedule` projection outright — §9), and `productAnalytics` only exists under the Desktop profile |
+| `account/getProfile {}`, `getBalance {}`, `startSignIn {locale, …}`, `signOut {}` | every account operation now takes a leading **`client: AccountClientMetadata`** = `{version, locale, timezoneOffsetSeconds}`; `startSignIn`'s `locale` is replaced by `client.locale`. **New**: `getUnnotifiedBonuses(client)`, `ackBonusNotified(accountId, orderId, client)`, `hasRunningAccountTasks()` and the `watchExpiry` stream (§4.22) |
+| `workspace/initializeDefault {request:{directoryName, title}}` | **takes no request args**; the leaf directory is fixed (`<Documents>/deepseek-harness/default-workspace`) and its stored title is that same automatic name (the browser localizes it); the old blank/trim/separator `gateway/bad-request` validation is gone (§4.4) |
+| `agentPresets/list` → `{presets, modeSelectionEnabled}` | roster is **`{presets}`**: `modeSelectionEnabled` is **deleted** (the chooser is always enabled and the saved default always applies) (§4.6) |
+| `session.*` | new `session/initializeDefaultModel` (no args); `selectModel` now rejects a model absent from the live catalog (`session/model-unavailable`) and persists the deployment default in the background; `modelCatalog.routableProviders` narrows to providers with ≥1 currently available model (§4.1) |
+| `workspaceFiles/list` | follows a **final** symlink/junction that resolves to a directory, listing the resolved directory; `read` keeps its no-follow gate (§4.16) |
+| `terminal/shells` discovery | candidates de-duplicate by **executable name** (case-insensitive, `.exe` stripped) instead of full path (§4.20) |
+| `permissionPresets` Auto bundle | the derived `auto` preset's approval policy is **`ask`** (was `never`); a still-selected `auto` also matches a `never` approval knob so a delegated child keeps a final denial (§4.19) |
+| `$events` allowlist 23 (21 emit + 2 waterfall) | **27** (25 emit + 2 waterfall): adds `credentials/record-updated`, `deepseek-account/model-sign-in-required`, `deepseek-account/session-expired` and `schedule/changed` (§6.2) |
+| client-visible projections 18 | **19**: adds `userQuestions` = `{active: PendingUserQuestion[], settled: SettledUserQuestion[]}` (`stateVersion` 2) (§9) |
+| `schedule/change` (the `schedule` projection is deleted at 0.2.0) | named tasks: new records require `title` (≤120 chars) and the rule set adds `daily` / `weekly` / `cron` (explicit IANA zone); `every`'s minimum interval drops 5 min → 1 min. Legacy records without `title` still read (§7.3) |
+| `request/header.startsSeries` | now marks "this request begins a distinct message series" **independently of `reason`**, instead of being reserved for `reason:'change'` (§7.2) |
+| `ApprovalRequestEvent` | gains optional `displayReason?: {en: string, [locale]: string}` — localized presentation only, never written to the audit events (§3.3) |
+| `user/message` sources | adds `user-question-reply` (`{kind, callId, outcome:'answered'}`) — the steer message that closes a continued timed question (§7.2) |
+| error codes | adds `session/provider-credentials-unavailable` `{}` and `session/provider-models-unavailable` `{provider}` (§5.2) |
+
+**Impact on dsh-emacs: one inert field drop; no mandatory migration.** The
+client's RPC call set (session / workspace / commands / goals / job /
+agentPresets / skills / fileReferences / permissionPresets /
+sessionReferenceResolver) is otherwise untouched by 0.2.0:
+
+1. **`agentPresets/list.modeSelectionEnabled` is gone.** `dsh-emacs-protocol.el`
+   still declares and parses the slot, so the value now reads `nil`; no business
+   code consumes it (`grep` finds the symbol only in the protocol struct, its
+   header comment and the unit tests), so the picker is unaffected. The dead
+   struct slot and its comment are a documentation/code divergence to delete
+   when the protocol file is next edited.
+2. **The `account/*` and `workspace/initializeDefault` arg changes do not apply
+   to dsh-emacs**: the client calls neither namespace.
+3. **Timed questions are adopted (§4.25).** dsh-emacs claims a timed
+   question's foreground wait while its prompt is on screen, renders the
+   expired-window result as `pending`, and answers a `continued` call later
+   through `userQuestions/answer` (`M-x dsh-emacs-answer-question`), completing
+   the original ask card from the projection (postmortem/073). The rest of the
+   additivity falls through the client's `assq`-style parsing and `_ → nil`
+   frame/event defaults: `schedule` and `productAnalytics`, the four new host
+   emits, the `schedule` rule widening, `displayReason`, and the
+   `user-question-reply` source kind.
+
+Migration checklist for 0.2.0: nothing is required to keep the current client
+working. Timed-question support is additive and dormant on a 0.1.7 server
+(there is no `wait` field and no `userQuestions` cell). If the account surface
+is ever adopted, every call must carry
+`client = {version: <app version>, locale: <UI language>, timezoneOffsetSeconds:
+<UTC offset>}` and `startSignIn` has no separate `locale`; a client that calls
+`workspace/initializeDefault` must drop its `directoryName`/`title` arguments
+and localize the automatic `default-workspace` title itself. Per-feature call
+recipes are §11.
 
 ---
 
@@ -533,19 +601,28 @@ Subsequent downstream frames:
   corresponding question or approval is being displayed in the minibuffer, it
   closes it immediately and does not send a stale outcome.
 - The `request` of an `approval/request` waterfall (after agent/signal stripping) =
-  `{toolName, callId?, reason?}`; the answer value = an `ApprovalOutcome` string:
+  `{toolName, callId?, reason?, displayReason?}`; **0.2.0** adds
+  `displayReason?: {en: string, [locale]: string}`, a presentation-only
+  localization that is **never persisted** in the audit events (a client that
+  renders `reason` verbatim is unaffected). The answer value = an
+  `ApprovalOutcome` string:
   `"allowed-once" | "rejected" | "cancelled" | "unavailable"` (the web taker
   usually replies only allowed-once / rejected, passing the rest to `next()`).
   **There is no approvalId on the wire**: the host-generated approval id appears
   only in the persistent audit event pair `approval/asked`
   (`{id, toolName, callId?, reason?}`) → `approval/decided` (`{id, outcome}`).
 - The `request` of a `user-questions/request` waterfall = `{questions:
-  AskUserQuestionItem[]}`; `AskUserQuestionItem = {id, question, header?, detail?,
-  options?: [{label, description?}], multiSelect?, intent?: {kind:'plan-review',
-  approve, callId?}}` (`approve` is the button label for plan-review;
-  `callId` identifies the submitted document). Supported plan reviews use a
-  document buffer and asynchronous actions; intent changes presentation, not
-  the protocol. Request changes rejects with `error.name = "cancelled"`,
+  AskUserQuestionItem[], wait?}`; `AskUserQuestionItem = {id, question, header?,
+  detail?, options?: [{label, description?}], multiSelect?, intent?:
+  {kind:'plan-review', approve, callId?}}` (`approve` is the button label for
+  plan-review; `callId` identifies the submitted document). Supported plan reviews
+  use a document buffer and asynchronous actions; intent changes presentation,
+  not the protocol. **0.2.0** adds optional `wait?: {callId, timed?: true}`: a
+  timed foreground wait that can expire while the question stays answerable — an
+  answerer that wants to show a countdown attaches to
+  `userQuestions/attachWait` (§4.25) before starting its local timer, and a
+  continued question is later answered through `userQuestions/answer` rather
+  than this waterfall. Request changes rejects with `error.name = "cancelled"`,
   returning the host to waiting for feedback. The answer value =
   `{answers: [{id, selected: string[], custom?}]}` (skip = `selected: []`).
 - Reconnect: `$events` is reopened per generation by the connection controller; a
@@ -577,9 +654,18 @@ with `terminal` that namespace also claims the `terminal/follow` /
 `terminal/retain` stream endpoints).
 
 **0.1.7 adds five** → **26**: `account`, `job`, `pluginManager`,
-`pluginRegistryProbe`, `officeToPdf` (§4.21–§4.23). All five are unused by
-dsh-emacs; `job` matters to any client that wants a background-task surface,
-because the `session/control` `jobs` record it replaces is gone (§0.4).
+`pluginRegistryProbe`, `officeToPdf` (§4.21–§4.23). `job` is consumed by the
+client (background-job roster/output/kill, `dsh-emacs-jobs.el`, §4.21); the
+other four are unused. `job` matters to any client that wants a background-task
+surface, because the `session/control` `jobs` record it replaces is gone (§0.4).
+
+**0.2.0 adds three** → **29**: `schedule` (§4.24), `userQuestions` (§4.25) and
+`productAnalytics` (§4.26). Only `userQuestions` is mounted by a default
+profile: `schedule` rides the optional, switched-off
+`@deepseek-ai/dsh-experimental-schedule-bundle`, and `productAnalytics` is
+composed only under the Desktop profile (the shared Remote assembly advertises
+it, so on an ordinary Web host those endpoints are unclaimed). All three are
+unused by dsh-emacs.
 
 Implementation anchors (master source):
 - session / skills / fileReferences → `packages/api/session-controller`
@@ -607,6 +693,10 @@ Implementation anchors (master source):
 - pluginManager / pluginRegistryProbe → `packages/boot/plugin-manager` and
   `packages/client/ui-plugin-manager` (**new in 0.1.7**)
 - officeToPdf → `packages/document/office-to-pdf` (**new in 0.1.7**)
+- schedule → `packages/schedule/schedule` (**new in 0.2.0**)
+- userQuestions → `packages/interaction/user-questions` (**new in 0.2.0**)
+- productAnalytics → `packages/client/product-analytics` (**new in 0.2.0**,
+  Desktop composition only)
 
 The `name` of `@Remote('name')` is the wire method (a bare `@Remote` uses the
 method name); parameter names correspond one-to-one with `args` fields, but lookup
@@ -682,9 +772,28 @@ value    { sessionId, agentPreset? }
 args     { request: { sessionId, provider, model, reasoningEffort? } }
 value    { selected: { provider, model, reasoningEffort? } }
 ```
-After an explicit resume, `model/selection` is installed by folding request/header;
-a routing resolution failure → `session/model-unavailable` (details carry
-provider/model).
+After an explicit resume, `model/selection` is installed by folding
+request/header. **0.2.0** validates the pair against the live catalog first: a
+provider with no registered adapter, a model that is not currently advertised,
+or a model-listing failure → `session/model-unavailable` (details carry
+provider/model). The deployment default is now saved in the background after
+the per-Session selection is installed, so the returned value no longer waits
+for (or fails on) default persistence. `session/prompt` dropped its own
+provider-route pre-check in the same change, so an unavailable model surfaces
+from `selectModel` (or the agent's admission) rather than at prompt time.
+
+#### session.initializeDefaultModel
+```
+args     {}
+value    void
+```
+**New in 0.2.0.** Picks the first available `deepseek-account` model after login
+when no provider API key is configured, and saves it as the deployment default.
+It is a no-op when any configurable API-key provider has a configured
+credential. When the account provider advertises no model →
+`session/provider-models-unavailable` (details carry provider); when the
+settings/credentials services are absent →
+`session/provider-credentials-unavailable`. dsh-emacs does not call it.
 
 #### session.modelCatalog
 ```
@@ -695,8 +804,13 @@ value    ModelCatalog
 string[], groups: ModelProviderGroup[], failures: ModelCatalogFailure[] }`;
 `ModelProviderGroup = { id, name, models: [{id, name, description?, reasoning?:
 {efforts:[{id,name,description?}], defaultEffort?}}] }`. Failing providers are
-listed separately in `failures` and do not enter groups. Session-independent (used
-by the settings surface/picker).
+listed separately in `failures` and do not enter groups. Session-independent
+(used by the settings surface/picker). **0.2.0** narrows `routableProviders` from
+"providers with a registered route, including empty catalogs" to **providers
+with at least one currently available catalog model** (it is derived from the
+same non-empty groups). A catalog-driven entry point may therefore restrict
+selection and submission to the advertised models, even though core routing is
+unchanged.
 
 #### session.canOpenWorkspacePath / session.openWorkspacePath / session.workspacePathApplications
 ```
@@ -937,7 +1051,7 @@ the `workspace/follow` stream baseline.
 | `workspace/unarchiveSession` | `{ request: { sessionId } }` | `{ archivedSessionIds }` | **new in 0.1.6**: drops one id from the registry-global archive set; an id that is not archived is a no-op (idempotent), so a lost race resolves cleanly |
 | `workspace/pinSession` | `{ request: { sessionId } }` | `{ pinnedSessionIds }` | **new in 0.1.7**: surfaces a known unarchived Session ahead of unpinned ones; the full set comes back, most recently pinned first |
 | `workspace/unpinSession` | `{ request: { sessionId } }` | `{ pinnedSessionIds }` | **new in 0.1.7**: removes one pin without touching the saved Session order; idempotent |
-| `workspace/initializeDefault` | `{ request: { directoryName, title } }` | `{ workspace } \| undefined` | **new in 0.1.7**, first-use only: initializes or reuses the default Workspace (never renames an existing default) and creates no Session or message; `undefined` when first-use initialization is ineligible; blank/trimmed/host-invalid `directoryName` (separators, colon, NUL, trailing dot) or blank `title` → `gateway/bad-request` |
+| `workspace/initializeDefault` | `{}` | `{ workspace } \| undefined` | **new in 0.1.7; request args removed in 0.2.0**, first-use only: initializes or reuses the default Workspace (never renames or relocates an existing default) and creates no Session or message; `undefined` when first-use initialization is ineligible. The leaf directory is now fixed to `<system Documents>/deepseek-harness/default-workspace` and the stored initial title is that same automatic segment (browser consumers localize it for display); the old client-supplied `directoryName`/`title` and their blank/trim/separator `gateway/bad-request` validation are gone |
 
 #### workspace.follow (stream)
 ```
@@ -975,12 +1089,13 @@ complete-result limit).
 
 ### 4.6 agentPresets.*
 
-`AgentPresetRoster = { presets: AgentPresetRow[], modeSelectionEnabled }`;
-`AgentPresetRow = { id, isDefault, name?, description?, broken? }`. A non-empty
-`broken` = currently unable to assemble a session. id grammar
-`^[a-z0-9][a-z0-9-]*$`; the roster is sorted by `order` (ascending, absent last)
-then id, and a row may additionally carry the undeclared-at-the-type-level
-`order?: number`, which a client may read but must not require.
+`AgentPresetRoster = { presets: AgentPresetRow[] }` (**0.2.0 removed the
+`modeSelectionEnabled` member**); `AgentPresetRow = { id, isDefault, name?,
+description?, broken? }`. A non-empty `broken` = currently unable to assemble a
+session. id grammar `^[a-z0-9][a-z0-9-]*$`; the roster is sorted by `order`
+(ascending, absent last) then id, and a row may additionally carry the
+undeclared-at-the-type-level `order?: number`, which a client may read but must
+not require.
 
 **0.1.7 removed `trust`** from both the roster row and the read document, and
 **deleted `agentPresets/copy` and `agentPresets/deletePreset`**: the namespace
@@ -988,12 +1103,13 @@ has no write path at all, and the roster's `authorable` flag is gone with them. 
 client that used `trust === 'system'` to pick a built-in label must key the label
 on the id alone (which is what the web's own `presetDisplayText` does).
 
-`modeSelectionEnabled` is **new (required) in 0.1.6**: whether visible mode
-selection governs unnamed new sessions. When it is `false` the picker is hidden
-and the policy-effective default is the deployment's configured default — a
-stale user-saved choice is deliberately ignored — so a client must not derive
-"the default" from the saved setting; it is exactly the row whose `isDefault` is
-set.
+`modeSelectionEnabled` was **new (required) in 0.1.6** and is **deleted in
+0.2.0**: the chooser is always enabled and the saved default always applies, so
+there is no longer a state in which the picker is hidden or a stale saved choice
+is ignored. A client must still take "the default" from the row whose
+`isDefault` is set (the host resolves it), never from the saved setting.
+dsh-emacs still declares the removed slot in `dsh-emacs-protocol.el`; it parses
+as `nil`, and no business code consumes it (§0.5).
 
 | Endpoint | args | value | Notes |
 |---|---|---|---|
@@ -1214,6 +1330,11 @@ locked inside the workspace root.
 | `workspaceFiles/list` | `{ workspaceFileScopeId, path }` | `WorkspaceDirectoryListing` (`path` is a workspace-relative path; **listing the root requires an explicit `""`**; a missing field → `gateway/bad-request` `"path is required"`; limit `maxEntries`=2000) |
 | `workspaceFiles/changes` (stream) | `{ workspaceFileScopeId, path }` | `{kind:'ready'}` → `{kind:'change', change}` (`{absolutePath, version}` or `{absolutePath, absent:true}`) |
 
+- **0.2.0 final-link listing**: `list` accepts a final symlink or Windows
+  junction and lists through the directory it resolves to (the entry is
+  `stat`ed and must resolve to a directory, otherwise it stays
+  `workspace-file/not-directory`). `read` keeps its own no-follow gate on the
+  final component, so a symlinked **file** is not silently followed.
 - **0.1.7 collapses the byte methods**: `readAll` (whole file) and `readRelated`
   (resolve relative to a sibling) are **deleted**. `readBytes` now takes a single
   `options` object: omit `range` for the whole-file read (the old `readAll`), and
@@ -1331,6 +1452,10 @@ value    { options: [{ value, name, description? }],
   `Config.defaultPreset` is omitted). The configured default moved from a
   settings-namespace section to a volatile Host config field, so this Remote is
   now its only read path.
+- **0.2.0**: the derived `auto` preset's fixed bundle now uses approval policy
+  **`ask`** (it was `never`), and a still-selected `auto` also matches a `never`
+  approval knob, so a delegated child that pins `never` keeps a final reviewer
+  denial. The catalog's option set and value shape are unchanged.
 - `option.value` is a configured preset key, or `auto` while the experimental
   Auto-review integration is live. The derived value `custom` is **not** an
   option: it appears only as the projection's `currentValue` when the effective
@@ -1339,8 +1464,10 @@ value    { options: [{ value, name, description? }],
 - The catalog changes when the auto integration registers/unregisters, announced
   by the `$events` emit `permission-presets/catalog-changed` (payload-free — a
   consumer re-reads the complete catalog, §6.2).
-- dsh-emacs does not implement a permission control, so it calls neither this
-  Remote nor reads the projection.
+- dsh-emacs **does** consume both faces: `dsh-emacs-set-permission` reads this
+  Remote for the picker, and the `permissions` projection's `currentValue` drives
+  the mode-line permission segment. The `permission-presets/catalog-changed`
+  emit re-reads the catalog (§6.2).
 
 ### 4.20 terminal.* (new in 0.1.6: Session-owned user terminals)
 
@@ -1368,6 +1495,12 @@ completeness.
   through the Gateway); `sessionId` on `list`/`retain` is the displayed Session
   identity and never activates. Every attachment begins with a complete bounded
   screen (`snapshot`) before ordered output.
+- **0.2.0 shell discovery** de-duplicates by **executable name**
+  (case-insensitive, `.exe` stripped) rather than by full path, keeping the
+  earliest entry per name with the default first. A system whose PATH resolves
+  the default through another directory (`/usr/bin/bash` for `/bin/bash` on
+  merged-`/usr` systems) therefore lists each shell once. `TerminalShell` is
+  unchanged (`{ path, args, name }`).
 - **0.1.7 semantics change**: terminals are no longer confined by the Session's
   sandbox mode and no longer consult `sandboxPolicy` — they are **Session-owned
   user terminals running with the execution environment's own system-user
@@ -1390,8 +1523,11 @@ completeness.
 
 `packages/api/job-controller`, namespace `job`. This is the replacement for the
 `session/control` `jobs` record and `jobs` frames that 0.1.6 carried (§0.4), so it
-is the **only** background-job surface at 0.1.7. dsh-emacs has no
-background-task UI and does not call it.
+is the **only** background-job surface at 0.1.7. dsh-emacs consumes all three
+verbs (`dsh-emacs-jobs.el`, shipped in 0.6.0): a `job/list` stream per followed
+chat buffer drives its roster mirror and the mode line's `[J2]` badge, `C-c C-j`
+lists the roster, `RET` opens a job's `job/follow` output in a read-only buffer,
+and `k` sends `job/kill` (armed by a second press).
 
 | Endpoint | args | value |
 |---|---|---|
@@ -1427,13 +1563,28 @@ crosses it** (that is the separate `credentials` namespace, §4.8).
 | Endpoint | args | value |
 |---|---|---|
 | `account/getState` | `{}` | `AccountView` |
-| `account/getProfile` | `{}` | `AccountDetails['profile'] \| null` |
-| `account/getBalance` | `{}` | `AccountDetails['balance'] \| null` |
-| `account/startSignIn` | `{ locale, callbackOrigin, loginSource: 'web'\|'desktop' }` | `AccountView` |
+| `account/getProfile` | `{ client }` | `AccountDetails['profile'] \| null` |
+| `account/getBalance` | `{ client }` | `AccountDetails['balance'] \| null` |
+| `account/getUnnotifiedBonuses` (**new in 0.2.0**) | `{ client }` | `AccountBonusBatch \| null` |
+| `account/ackBonusNotified` (**new in 0.2.0**) | `{ accountId, orderId, client }` | `boolean` |
+| `account/startSignIn` | `{ client, callbackOrigin, loginSource: 'web'\|'desktop' }` | `AccountView` |
 | `account/cancelSignIn` | `{ attemptId }` | `AccountView` |
-| `account/signOut` | `{}` | `AccountView` |
+| `account/signOut` | `{ client }` | `AccountView` |
+| `account/hasRunningAccountTasks` (**new in 0.2.0**) | `{}` | `boolean` |
 | `account/watch` (stream) | `{}` | initial `AccountView` snapshot, then changes |
+| `account/watchExpiry` (stream, **new in 0.2.0**) | `{}` | `'session-expired'` per credential-expiry notification; no replay of prior notifications |
 
+- **0.2.0 `client` metadata**: every operation that reaches Platform (and every
+  operation that captures request identity) takes
+  `AccountClientMetadata = { version: string, locale: string,
+  timezoneOffsetSeconds: number }` — the requesting UI's version, active
+  language (only its primary subtag selects the Platform wire locale) and UTC
+  offset. It is **required positional `args`**, not nested under `request`:
+  `getProfile` → `{ args: { client: {…} } }`, `ackBonusNotified` →
+  `{ args: { accountId, orderId, client } }`, `startSignIn` →
+  `{ args: { client, callbackOrigin, loginSource } }`. The removed `locale`
+  parameter of `startSignIn` is `client.locale`; a joined attempt keeps its
+  original identity. `getState`, `cancelSignIn` and `watch` do **not** take it.
 - `AccountView = { status: 'signed-out'|'credential-stored', links: { usageUrl,
   topUpUrl }, attempt: SignInAttemptView | null }`; `credential-stored` is not a
   claim that the server validated the token.
@@ -1444,9 +1595,25 @@ crosses it** (that is the separate `credentials` namespace, §4.8).
 - `AccountDetails` settles `profile` and `balance` independently, each
   `{status:'ready', value}` or `{status:'failed'}`; `getProfile`/`getBalance`
   return `null` when the account grant is absent or changed. Wallet balances are
-  decimal strings (`{currency: 'CNY'|'USD', balance}`).
+  decimal strings (`{currency: 'CNY'|'USD', balance}`);
+  `balance.bonusWallets` carries bonus balances separately.
+- **Bonuses (0.2.0)**: `AccountBonusBatch = { accountId, bonuses:
+  AccountBonusNotification[] }` (Platform order) with
+  `AccountBonusNotification = { orderId, campaign, amount, currency, grantedAt,
+  expiresAt, message }` — `message` is server-localized display text and
+  `amount` is the granted amount, never the remaining balance.
+  `getUnnotifiedBonuses` returns `null` when the grant is absent/changed;
+  `ackBonusNotified` returns `true` once Platform records the acknowledgement and
+  `false` when signed out or the account changed (a different current account is
+  never acknowledged).
+- `hasRunningAccountTasks()` reports whether any running Agent task has its latest
+  request on the account route (used to warn before sign-out).
+- `watchExpiry` subscribes without replaying prior notifications and yields
+  `'session-expired'` while subscribed; the same condition is also forwarded as
+  the `$events` emit `deepseek-account/session-expired` (§6.2).
 - `signOut` removes the local grant and revokes it through Platform in the
-  background, without deleting API keys.
+  background (the captured `client` supplies the retry headers), without deleting
+  API keys.
 
 ### 4.23 pluginManager.* / pluginRegistryProbe.* / officeToPdf.* (new in 0.1.7)
 
@@ -1468,6 +1635,103 @@ them**.
 - `officeToPdf` (`packages/document/office-to-pdf`) — `officeToPdf/render`
   (unary, `(workspaceFileScope, path, priority)`) and `officeToPdf/generation`
   (stream) for converting Office documents to PDF.
+
+### 4.24 schedule.* (new in 0.2.0: Session reminders)
+
+`packages/schedule/schedule`, namespace `schedule`. Reminders already existed at
+0.1.7 (the `schedule` projection and the durable `schedule/change` event), but
+0.2.0 is the first round with a Remote surface for them: named tasks
+(`title`, ≤120 chars, required on new records) and the added `daily` / `weekly`
+/ `cron` rule kinds (`every`'s minimum interval drops from 5 minutes to 1).
+
+The service rides the **optional** `@deepseek-ai/dsh-experimental-schedule-bundle`,
+which the installation ships switched off (a default profile mounts neither this
+namespace nor the `schedule` projection). All verbs are Session-bound and none
+resumes an Agent.
+
+| Endpoint | args | value |
+|---|---|---|
+| `schedule/list` | `{ request: { sessionId } }` | `ScheduleRecord[]` (active tasks bound to that Session, storage order; does not resume the Agent) |
+| `schedule/catalog` | `{}` | `ScheduleCatalogEntry[]` (every active and inactive Host reminder with its `sessionId`/`status`, `scheduledAt` ascending then id) |
+| `schedule/history` | `{ request: { sessionId, id, limit, before? } }` | `ScheduleDeliveryHistoryResult` (newest-first inbox deliveries in append order; `limit` must be 1–100) |
+| `schedule/delete` | `{ request: { sessionId, id } }` | `{ id, deleted: true }` or `{ id, deleted: false, code: 'schedule_not_found' }` |
+| `schedule/update` | `{ request: { sessionId, id, expected, change?, title?, prompt? } }` | `ScheduleUpdateResult` (CAS against the complete observed record; a timing edit may switch recurrence kind) |
+
+- `ScheduleCatalogEntry = ScheduleRecord & { sessionId, status:
+  'active'|'inactive', lastDelivery?: ScheduleDeliveryReceipt }`;
+  `ScheduleDeliveryReceipt = { scheduledAt, deliveredAt, messageId }`.
+- Timing shapes: `after {afterSeconds}`, `at {scheduledAt}`,
+  `every {everySeconds, scheduledAt}`, and the 0.2.0 wall-clock kinds
+  `daily`/`weekly`/`cron` (`{…, timeZone, scheduledAt}`; local `time` is
+  `HH:mm:ss[.SSS]`, weekdays are ISO 1–7, cron is five fields). Legacy records
+  without `title` still read.
+- Non-mutating misses are **value results** (`schedule_not_found`,
+  `schedule_ended`, `schedule_conflict`, `delivery_cursor_not_found`), not
+  envelope errors; a model-supplied rule that cannot become a record throws
+  `ScheduleInputError` (codes `invalid_prompt`, `invalid_selector`,
+  `invalid_rule`, `invalid_time_zone`, `not_future`, `time_out_of_range`,
+  `frequency_too_high`). That class is a plain `Error` subclass, so on the wire
+  it folds into `gateway/internal` with its message preserved (the same shape as
+  `GoalError`, §4.10). `schedule/history` also returns the Host's retention
+  bounds (`{days, records}`) and, when older records remain, the `nextBefore`
+  message cursor.
+- Each mutation writes a `schedule/change` session event and emits the
+  payload-free host event `schedule/changed` (§6.2). dsh-emacs calls none of it.
+
+### 4.25 userQuestions.* (new in 0.2.0: timed question answers)
+
+`packages/interaction/user-questions`, namespace `userQuestions`. The
+`ask_user_question` tool gained a `timed` mode whose foreground wait can expire
+while the question stays answerable; this namespace lets a Client answer such a
+**continued** question and hold a live countdown. The blocking legacy path still
+uses the `user-questions/request` waterfall + `$events/result` (§3.3) and is
+unchanged; a timed call adds an optional `wait` to that same waterfall and, once
+continued, is answered here instead. The end-to-end recipe is §11.1.
+
+| Endpoint | args | value |
+|---|---|---|
+| `userQuestions/answer` | `{ agentId, callId, answer }` | `boolean` (whether the question was still `continued`) |
+| `userQuestions/attachWait` (stream) | `{ agentId, callId }` | `{ remainingMs: number }` — one host-computed remaining duration, then no frames once the wait ends (empty when the call has no foreground wait) |
+
+- `agentId` is the ordinary lookup parameter and must resolve to the **exact
+  live root Agent**; a delegated child is rejected (`DELEGATED_CALLER`), as is a
+  call whose agent is not live (`CALLER_NOT_LIVE`).
+- `answer = { answers: AskUserQuestionAnswerItem[] }`, each item
+  `{ id, selected: string[], custom? }`. The batch must name each question of
+  the call exactly once (`BAD_ANSWER`), and a reply already queued →
+  `REPLY_QUEUED`. The accepted answer is steered into the Agent as a
+  `user/message` whose source is `user-question-reply` (`{kind, callId,
+  outcome:'answered'}`, §7.2); that message is what closes the question in the
+  `userQuestions` projection (§9). Both rejections above are `UserQuestionError`
+  codes (`extends HarnessError`, **not** `RemoteError`), so on the wire the
+  `code` is `gateway/internal` and only the message survives — a client cannot
+  route on `DELEGATED_CALLER` / `CALLER_NOT_LIVE` / `BAD_ANSWER` / `REPLY_QUEUED`.
+- dsh-emacs **does** call both verbs (postmortem/073): while a timed question
+  is being read it holds `userQuestions/attachWait` so the window cannot expire
+  mid-prompt, and `M-x dsh-emacs-answer-question` submits a `continued` call
+  through `userQuestions/answer`. The `wait` field of the request (§3.3) is how
+  it learns the call id; `userQuestions/attachWait` for a `wait` without
+  `timed` (the indefinite form) yields no frames and is not called.
+
+### 4.26 productAnalytics.* (new in 0.2.0: Desktop analytics)
+
+`packages/client/product-analytics`, namespace `productAnalytics`. Contributed
+by the shared Remote assembly, but the host service is composed only by the
+**Desktop** app, so an ordinary Web host does not claim these endpoints.
+dsh-emacs does not use it.
+
+| Endpoint | args | value |
+|---|---|---|
+| `productAnalytics/enabled` | `{}` | `boolean` (whether this Host currently accepts Desktop analytics) |
+| `productAnalytics/watchPolicy` (stream) | `{}` | `boolean` policy values initially and after live configuration edits |
+| `productAnalytics/report` | `{ event: ProductEvent }` | void |
+
+- `ProductEvent = { eventName, timestamp, attributes }`; `eventName` is a closed
+  Desktop event name (`desktop_app_launch`, `send_button_click`, `model_switch`,
+  `context_compression`, …) and `attributes` carries that event's selected
+  fields only. No message content or credential crosses it, and submission is
+  fire-and-forget (no delivery acknowledgement); a disabled instance neither
+  inspects identity nor accepts events.
 
 ---
 
@@ -1509,7 +1773,9 @@ unary envelope error and the stream error frame).
 | `session/projections-unavailable` | `{}` | **new in 0.1.7**: `session/projections` on a Session whose projection registry is unavailable |
 | `session/writer-held` | `{ sessionId }` | **new in 0.1.7**: another writer holds the Session, so the command cannot proceed |
 | `session/agent-busy` | `{ reason }` | a subagent session addressed through an ordinary path (including list/search/prompt/cancel/updateQueue/selectModel/rename); other prompt admission failure |
-| `session/model-unavailable` | `{ provider, model }` | selectModel/prompt routing unavailable |
+| `session/model-unavailable` | `{ provider, model }` | model routing unavailable. **0.2.0**: `selectModel` requires the exact provider/model pair in the available catalog (a registered route is not enough), while prompt admission keeps the saved route without that catalog gate — so submission no longer rejects here and request execution reports the missing credential/model instead. Availability never rewrites a Session selection |
+| `session/provider-credentials-unavailable` | `{}` | **new in 0.2.0**: `initializeDefaultModel` cannot inspect provider credentials because settings/credentials are not mounted |
+| `session/provider-models-unavailable` | `{ provider }` | **new in 0.2.0**: `initializeDefaultModel` found no available model for the account provider |
 | `session/invalid-time-zone` | `{ value }` | clientTimeZone not UTC/IANA |
 | `session/workspace-attach-failed` | `{ sessionId, workspaceId }` | attach failure after create/fork publication |
 | `session/attachment-invalid` | `{ reason }` | model does not support images / image not referenced by the log / queue edit is non-text / attachment read failure |
@@ -1567,7 +1833,7 @@ unary envelope error and the stream error frame).
 
 ### 6.1 session.control Frames (host-wide live control plane)
 
-**0.1.7 shape:**
+**0.1.7 shape (unchanged in 0.2.0):**
 ```
 baseline   { type:'baseline', value: {
               projections: Record<sessionId, SessionProjectionBaseline> } }
@@ -1618,20 +1884,26 @@ names pass through, arguments as-is):
 | `api-session/removed` | `(sessionId)` | session left the host registry |
 | `api-session/status` | `(sessionId, running: boolean)` | running-state change |
 | `commands/change` | `()` | command registration/deregistration |
+| `credentials/record-updated` | `(ref)` | a credential record changed; **new in 0.2.0** (§4.22's account routes also consume it) |
 | `credentials/reference-updated` | `(ref)` | credential reference change |
 | `cordis/request-run`, `cordis/request-run-resolved`, `cordis/dynamic-package`, `cordis/dynamic-retract`, `cordis/inspect-query`, `cordis/inspect-query-resolved` | plugin host | plugin dynamic loading/panel queries |
+| `deepseek-account/model-sign-in-required` | `()` | an account model request needs the user to sign in; **new in 0.2.0** |
+| `deepseek-account/session-expired` | `()` | a server rejection removed the current account credential; **new in 0.2.0**, never replayed (§4.22 `watchExpiry`) |
 | `llm/adapters-updated` | `()` | adapter registration change |
 | `goal/activation-changed` | `(payload: GoalActivationChanged)` = `{sessionId, goal?: {id, revision, activation: 'armed'\|'disarmed'}}` (`goal` omitted after clear) | in-process goal continuation eligibility change; new in 0.1.5 |
 | `permission-presets/catalog-changed` | `()` | the selectable permission catalog changed; payload-free, re-read `permissionPresets/catalog` (§4.19); new in 0.1.6 |
 | `plugin-manager/changed`, `plugin-manager/install-log`, `plugin-manager/install-state` | plugin manager | current-profile bundle/plugin mutation progress; **new in 0.1.7** (§4.23) |
+| `schedule/changed` | `()` | a reminder was created, updated, deleted or dispatched; **new in 0.2.0**, payload-free — re-read `schedule/catalog` (§4.24) |
 | `settings/document-updated` | `(ns, revision)` | settings document change |
 | `user-questions/request` | waterfall | question request (§3.3) |
 
 Count check: `API_REMOTE_FORWARDED_EVENTS` in
-`packages/api/remotes/src/remote-events.ts` has **23 entries** = 21 emit + 2
+`packages/api/remotes/src/remote-events.ts` has **27 entries** = 25 emit + 2
 waterfall (`approval/request`, `user-questions/request`); the table above is the
 complete set, and not one extra event is forwarded. (0.1.6 had 20 = 18 + 2; the
-three `plugin-manager/*` emits are the 0.1.7 additions.)
+three `plugin-manager/*` emits were the 0.1.7 additions; the 0.2.0 additions are
+`credentials/record-updated`, `deepseek-account/model-sign-in-required`,
+`deepseek-account/session-expired` and `schedule/changed`.)
 
 > Suggested dsh-emacs subscription strategy: `session/control` (baseline +
 > `projection` deltas) provides the projections — including `inbox`, which *is*
@@ -1666,7 +1938,8 @@ The event envelope used for persistence/transport (the wire shape
   `KNOWN_SESSION_EVENT_TYPES` in
   `packages/core/session/src/known-event-types.ts` (56 at 0.1.5, 57 at 0.1.6 with
   the added `image/offload`, **59 at 0.1.7** with `developer/message` and
-  `workspace/changes`; 0.1.6 also adds the companion
+  `workspace/changes`, and **unchanged at 59 through 0.2.0**; 0.1.6 also adds
+  the companion
   `MESSAGE_PROJECTION_EVENT_TYPES = { image/offload }` — an event in that set
   requires its owning pure interpreter, or the host refuses the read); an event
   outside the set without `ignorable` makes it refuse to interpret the whole log.
@@ -1712,14 +1985,14 @@ The event envelope used for persistence/transport (the wire shape
 | `turn/end` | `{ turn, reason }` | closes a turn; reason below |
 | `step/start` | `{ turn, step }` | opens a step (one model call + tool execution) |
 | `step/end` | `{ turn, step }` | closes a step |
-| `user/message` | `UserMessage` | user-surface message; `source.kind` distinguishes human/rpc/plugin/goal… |
+| `user/message` | `UserMessage` | user-surface message; `source.kind` distinguishes human/rpc/plugin/goal… (**0.2.0** adds `user-question-reply`, the steer message that closes a continued timed question, §4.25) |
 | `developer/message` | `{ turn, step, message: DeveloperMessage, headerSeq? }` | **new in V4/0.1.7**: an incremental agent-session change (tool additions/removals) admitted at that turn/step; `headerSeq` names the earlier `request/header` defining every tool addition and is required exactly when additions are present. A surface event (carries `surfaceOp`) |
 | `system/message` | `{ turn, step, message: SystemMessage }` | **new in V3**: the rendered system prompt = surface node 0; when the prompt changes, replace the nearest system node or (in-history route) append a new node |
 | `assistant/message` | `{ turn, step, message, stream: AssistantStreamRecord[], usage?, interrupted?: true }` | assembled assistant message; `stream` is the exact stream record of that attempt; usage hangs off this event too |
 | `assistant/attempt` | `{ turn, step, stream: AssistantStreamRecord[] }` | **new in V3**: a failed/retried/cancelled attempt that committed no surface message |
 | `tool/call` | `{ turn, step, callId, name, arguments: string }` | the model's raw JSON string |
 | `tool/result` | `{ turn, step, message, error?: { name, code, reason? }, meta? }` | model-surface result; `meta` is tool-owned (must be JSON-safe). `error.reason` — a raw user-facing explanation kept **outside** the model-facing `message` — is **new in 0.1.6** and optional |
-| `request/header` | `{ header: EpochHeader, reason, startsSeries? }` | complete header for the next request; log-only. V3 requires the header to **not** carry a `system` field (the system prompt has moved to `system/message`) |
+| `request/header` | `{ header: EpochHeader, reason, startsSeries? }` | complete header for the next request; log-only. V3 requires the header to **not** carry a `system` field (the system prompt has moved to `system/message`). **0.2.0** redefines `startsSeries` as "this request begins a distinct message series", set independently of `reason` (it is no longer reserved for `reason:'change'`); still optional and log-only |
 | `request/context` | `{ provider, model, contextWindow?, systemPromptUpdate? }` | routing metadata (recorded only on change); log-only. `systemPromptUpdate: 'in-history'` means that route treats the latest system message as the effective system prompt |
 | `session/end-seed` | `{ inherited?: true }` | seed end marker (resume/fork/replay boundary); log-only |
 
@@ -1731,7 +2004,10 @@ it, §4.1). The aborted `reason` (AgentCancelCause):
 `{kind:'user'|'parent'|'disposed'} | {kind:'hook', reason} | {kind:'legacy'}`.
 With `kind:'error'`, `error` may additionally carry `offloadImages?: number`
 (0.1.6, image-offload accounting) — an optional field a renderer can ignore.
-`request/header.reason`: `'initial'|'resume'|'change'|'series'`.
+
+`request/header.reason`: `'initial'|'resume'|'change'|'series'`; **0.2.0**
+decoupled the optional `startsSeries` marker from this reason (a coincident
+series boundary may be reported on any of them).
 
 **Image offload (0.1.6)**: an image content block inside a message may carry
 `offloaded?: true` (the model sees placeholder text naming the image and its
@@ -1755,7 +2031,7 @@ additions on existing events; the only new event type is `image/offload`
 | `approval/asked` | `{id, toolName, callId?, reason?}` (the persistent approval ask pair) | dsh-user-approval |
 | `approval/decided` | `{id, outcome}` | dsh-user-approval |
 | `approval/policy` | `{policy:'ask'\|'never', source?}` | dsh-user-approval |
-| `schedule/change` | `{version:1, operation:'create'\|'delete'\|'dispatch', …}` | dsh-schedule |
+| `schedule/change` | `{version:1, operation:'create'\|'delete'\|'dispatch', …}` — **0.2.0** widens creates to named tasks (`title`) and the `daily`/`weekly`/`cron` rule kinds, and drops `every`'s minimum interval to 1 min (§4.24) | dsh-schedule |
 | `command/run` | `{commandId, name, args?, source:{kind:'user'}}` | dsh-commands |
 | `command/done` | `{commandId, kind:'success'\|'error', text?, sourceEventSeq?}` | dsh-commands |
 | `compaction/start` | `{compactionId, sourceCommandId?, turn: number\|null}` (`null` for standalone compaction between turns) | dsh-compaction |
@@ -1861,6 +2137,18 @@ where the client already renders seed history without special-casing the closer
 event vocabulary: it is the `session/control` queue source (§0.4, §6.1), which
 the client has since migrated to the `inbox` projection (postmortem/064).
 
+**0.2.0 adds no durable event type** (`KNOWN_SESSION_EVENT_TYPES` stays 59), so
+the transcript dispatcher needs no new event branch. The durable change is a
+tool result's *meaning*: the timed `ask_user_question` pending payload is
+rendered as `pending` and settled from the `userQuestions` projection cell
+(adopted — §4.25, postmortem/073). The remaining additions — the
+`user-question-reply` `user/message` source, `ApprovalRequestEvent.displayReason`
+and the four host emits — are an unknown key in an alist the client already
+reads or an unknown frame that falls through its `_ → nil` default, and the
+`user-question-reply` message is deliberately hidden by the transcript source
+filter. The `session/control` / `session/follow` shapes and the `inbox` queue
+source are unchanged from 0.1.7, so no migration is required (§0.5).
+
 ---
 
 ## 8. queue / steer Semantics (transient inbox + control plane)
@@ -1917,7 +2205,9 @@ hint over the same key space.
 
 Client-visible keys (18 at 0.1.6; present when mounted) and value shapes (0.1.5
 adds `subagentCatalog`; 0.1.6 narrows `permissions`; 0.1.7 promotes `inbox` from
-a host-internal cell to the client's queue source; the table's `subagent` /
+a host-internal cell to the client's queue source and mounts `schedule`;
+**0.2.0 swaps cells — adds `userQuestions` and deletes the `schedule`
+projection, so a 0.2.0 host exposes the same 19 keys**; the table's `subagent` /
 `subagentTiming` / `subagentCatalog` all come from the subagent package):
 
 | key | value shape |
@@ -1930,6 +2220,7 @@ a host-internal cell to the client's queue source; the table's `subagent` /
 | `todos` | `TodoItem[] \| null` (null before the first write) |
 | `plan` | `{ active: boolean, pending: boolean }` — committed mode and whether an opposite selection is pending; missing key means the capability is absent. dsh-emacs consumes this for its Plan badge |
 | `permissions` | `{ currentValue: string }` (key missing = no permission service). **Changed in 0.1.6**: through 0.1.5 this value also carried `options: [{value, name, description?}]`; the selectable options are now the process-level `permissionPresets/catalog` Remote (§4.19), and `currentValue` is a configured key, live `auto`, or the derived `custom` |
+| `userQuestions` | `{ active: PendingUserQuestion[], settled: SettledUserQuestion[] }` — **new in 0.2.0** (§4.25): `PendingUserQuestion = {callId, questions: AskUserQuestionItem[], state: 'open'\|'continued'}` (in ask order) and `SettledUserQuestion = {callId, answers: AskUserQuestionAnswerItem[]}` (in settlement order, empty `answers` when the late reply carried none). Only **timed** `ask_user_question` calls enter either half; the blocking legacy tool appears in neither. Missing key = the user-questions capability is not mounted. **dsh-emacs reads it**: the chat buffer keeps the latest cell, `M-x dsh-emacs-answer-question` answers `continued` calls, and a settled cell completes the original ask card (postmortem/073) |
 | `tokenUsage` | `{ uncachedInputTokens, outputTokens, cacheReadTokens, cacheWriteTokens }` (cumulative totals) |
 | `contextPressure` | `{ pressureTokens?, projectedTokens?, contextWindow? }` |
 | `contextBreakdown` | `{ systemTokens, toolsTokens, messageTokens }` |
@@ -1937,7 +2228,7 @@ a host-internal cell to the client's queue source; the table's `subagent` /
 | `subagent` | `{mode:'one-shot', label?, seq} \| {mode:'continuable', label, seq} \| null` |
 | `subagentTiming` | `{ settledMs, active?: {since, through} }` |
 | `subagentCatalog` | `SubagentCatalogEntry[]` (parent-session-side subagent catalog, in `subagent/catalog` event order; does not include fork-inherited facts) |
-| `schedule` | `ScheduleRecord[]` (effective reminders for that session; mounted only with a schedule service) |
+| `schedule` | **deleted in 0.2.0** — the 0.1.7 cell was `ScheduleRecord[]` (effective reminders, mounted only with a schedule service). The 0.2.0 schedule package registers **no** Session projection, so read `schedule/list` / `schedule/catalog` and invalidate on the payload-free `schedule/changed` emit (§4.24, §11.3) |
 | `sessionListMetadata` | `{ blank, lastPromptAt }` (list row hint) |
 | `imageLimits` | `{ maxImageBytes, maxImagesPerMessage, maxMessageImageBytes, maxImagePixels, maxImageDimension, mediaTypes }` (key missing = no attachment service) |
 | `modelSelection` | `{ lastUsed: {provider, model, reasoningEffort?} \| null, next: … \| null }` |
@@ -1975,8 +2266,9 @@ used for host-side folding and do not appear in wire frames.
 `contextPressure` and `contextBreakdown` from 4 to 5 (image-offload accounting in
 the fold) without changing either value shape; **0.1.7** raised `subagent` and
 `subagentCatalog` from 2 to 3 and `agentTeam` from 3 to 4 (again with unchanged
-wire view shapes). A client that sees a cache cell from an older version simply
-re-reads it.
+wire view shapes); **0.2.0** adds the `userQuestions` cell at `stateVersion` 2
+and leaves every existing cell's version unchanged. A client that sees a cache
+cell from an older version simply re-reads it.
 
 > The 0.1.1-rc.2 mux projection frame (`session/projection`) was replaced in 0.1.2
 > by the `projection` delta frames of `session.control`; projection sources =
@@ -2080,3 +2372,260 @@ body: raw bytes
 - The obtained `receiptId` is used for §4.1's `{type:'file', receiptId}` or §4.11's
   `CommandSubmitAttachment`; small files may also use the unary
   `fileUploads/upload` (base64).
+
+---
+
+## 11. 0.2.0 New Features: How to Use Them
+
+§0.5 records *what* changed at 0.2.0; this section is its usage companion — for
+every client-visible addition it gives the call order and the semantics that
+decide it, plus what dsh-emacs does with it today. Wire shapes stay in §3–§9 and
+are cross-referenced rather than repeated.
+
+| Feature | Surface | dsh-emacs today |
+|---|---|---|
+| Timed / continued questions | `wait` on the question waterfall, `userQuestions/*`, `userQuestions` projection | **adopted** — §11.1 |
+| Platform account | `account/*` (7 verbs + 2 streams) | unused; the largest genuinely new capability — §11.2 |
+| Session reminders | `schedule/*` (optional bundle) | unused — §11.3 |
+| Default-model bootstrap | `session/initializeDefaultModel`, changed `selectModel` / `modelCatalog` | unused — §11.4 |
+| Localized approval reason | `ApprovalRequestEvent.displayReason` | unused; a one-line win — §11.5 |
+| Reshaped existing surfaces | `agentPresets/list`, `workspace/initializeDefault`, `workspaceFiles/list`, `terminal/shells` | breaking but inert — §11.6 |
+| Semantics-only changes | `startsSeries`, Auto policy, two error codes, four emits | no migration — §11.7 |
+| Desktop analytics | `productAnalytics/*` | skip — Desktop-only, §11.8 |
+
+### 11.1 Timed / continued questions (`userQuestions`) — adopted
+
+**What it buys.** `ask_user_question` can now run in a `timed` mode: the host
+holds a foreground wait but does **not** retire the question when it elapses.
+The call becomes `continued` and stays answerable. A client that only implements
+the blocking waterfall is left with a stale card whose answer path no longer
+exists. The window is per call — the timed tool's model-facing `timeout`
+parameter in seconds, default 120 — and `timeout: -1` selects the indefinite
+form (a `wait` without `timed`). The mode itself is host opt-in
+(`mode: 'timed'` on `@deepseek-ai/dsh-tool-ask-user`); the shipped Web preset
+mounts the tool with no config, so a stock host keeps the legacy blocking tool
+and never sends `wait`.
+
+**Wire** (§3.3, §4.25, §9): the waterfall request gains
+`wait?: {callId, timed?: true}`; the tool result after expiry is
+`{pending: true, callId, message}`; the state lives in the `userQuestions`
+projection cell `{active, settled}`.
+
+**How to use it**, in order:
+
+1. **Read `wait` off the waterfall.** No `wait` on the request — or no
+   `userQuestions` key in the projections — means a host older than 0.2.0; take
+   today's blocking path unchanged. That is the whole compatibility story: one
+   code path, no version probe.
+2. **Claim a timed wait before prompting.** For `wait.timed`, open
+   `userQuestions/attachWait {agentId, callId}` and keep it open while the
+   prompt is on screen — while attached, the host deadline is suspended, so a
+   slow answer cannot be timed out mid-read. The stream yields one
+   `{remainingMs}` and stays open until released or settled; it is not a ticker.
+   A `wait` without `timed` is the indefinite form: `attachWait` yields no
+   frames, so do not call it.
+3. **Release the claim on every exit path.** For a submitted answer, transfer
+   cleanup to the RPC callback and hold the stream until the response arrives.
+   Other exits release immediately. Release reschedules the **original** host
+   deadline, which may already have passed; it does not restart a saved duration.
+   The stream lifetime is the claim, so a dropped socket releases it as well.
+4. **Answer in time through the unchanged waterfall:** `$events/result` with
+   `{answers: [{id, selected, custom?}]}` (§3.3).
+5. **Treat expiry as pending, not unanswered.** The recorded tool result is
+   `{pending: true, callId, message}` (the service returns `{pending, callId}`
+   and the tool layer adds `message`): not an answer document, and the
+   projection moves that `callId` to `state:'continued'` inside `active`.
+6. **Answer later with `userQuestions/answer {agentId, callId, answer}`.**
+   `agentId` must be the exact live root Agent; the service rejects a delegated
+   child, a call whose agent is not live, a batch that does not name every
+   question exactly once, and an already-queued reply (in-process
+   `UserQuestionError` codes `DELEGATED_CALLER`, `CALLER_NOT_LIVE`, `BAD_ANSWER`,
+   `REPLY_QUEUED`). Those are **not** `RemoteError`s, so on the wire they all fold
+   to `gateway/internal` with the message preserved (§5). Skip is
+   `selected: []`; the value is a boolean — whether the call was still
+   `continued`. A successful envelope carrying `false` means the batch was not
+   accepted and must not be reported as answered.
+7. **Let the steer message close it.** The accepted answer enters the Agent as a
+   `user/message` with `source.kind = 'user-question-reply'`; that message is
+   what moves the call from `active`/`continued` to `settled` (settlement order,
+   empty `answers` when the late reply carried none). A transcript normally hides
+   that synthetic message.
+8. **Track state from the projection, not from a local timer.** Seed the cell
+   from the follow snapshot / control baseline and apply increments
+   higher-seq-wins (§9); a missing key is a capability signal, not an unknown
+   value.
+
+**dsh-emacs** (postmortem/073): holds `attachWait` around the read, renders the
+expired result as `❓ Ask question · pending`, answers a continued call with
+`M-x dsh-emacs-answer-question` (`C-c C-p`), and completes the original card from
+`settled`. Dormant against a 0.1.7 server (no `wait`, no cell).
+
+### 11.2 Platform account (`account/*`) — unused
+
+**What it buys.** DeepSeek-account sign-in plus profile/balance/bonus display,
+and the "sign-in required" / "session expired" signals. Every operation that
+reaches Platform carries the requesting UI's identity.
+
+**Client metadata (the 0.2.0 breaking part).** `client = {version: string,
+locale: string, timezoneOffsetSeconds: number}` is a required positional `args`
+field on `getProfile`, `getBalance`, `getUnnotifiedBonuses`, `ackBonusNotified`,
+`startSignIn` and `signOut`. `timezoneOffsetSeconds` is seconds, **positive east**
+of Greenwich. `getState`, `cancelSignIn` and both streams do not
+take it. `startSignIn`'s removed `locale` argument is now `client.locale`.
+
+**How to use it** — the minimal sign-in loop:
+
+1. `account/getState {}` → `AccountView`; the namespace is mounted only when the
+   deployment composes the `deepseekAccount` provider.
+2. When `status: 'signed-out'`, call `account/startSignIn {client,
+   callbackOrigin, loginSource: 'web'|'desktop'}` → a view carrying `attempt`
+   (`SignInAttemptView`); present `attempt.authorizeUrl` once its `phase`
+   reaches `waiting-browser`, and follow `exchanging → committing → succeeded`
+   on `account/watch` (stream: initial snapshot, then changes). The URL is not
+   returned synchronously — the host runs the flow in the background — and
+   re-calling while a phase is live is idempotent.
+3. `account/cancelSignIn {attemptId}` cancels (the id is `attempt.id`);
+   `AccountView.links.usageUrl` / `topUpUrl` are always present for the UI.
+4. Profile and balance settle independently: `account/getProfile {client}` /
+   `getBalance {client}` → `null` (grant absent or changed) or
+   `{status:'ready', value}` / `{status:'failed'}`. Balances are decimal strings,
+   with `balance.bonusWallets` carried separately.
+5. Bonuses: `account/getUnnotifiedBonuses {client}` → `AccountBonusBatch |
+   null`; show each notification's server-localized `message`, then
+   `account/ackBonusNotified {accountId, orderId, client}` → `boolean` (`false`
+   when signed out or the account changed).
+6. Sign-out: guard with `account/hasRunningAccountTasks {}` (a running task's
+   latest request is on the account route); `account/signOut {client}` drops the
+   local grant and revokes it in the background, leaving API keys alone.
+7. Expiry: `account/watchExpiry` (stream) yields `'session-expired'` without
+   replaying earlier notifications; the same condition is forwarded as the
+   `$events` emit `deepseek-account/session-expired`, and a request needing
+   sign-in raises `deepseek-account/model-sign-in-required` (§6.2).
+
+**dsh-emacs**: calls none of it today. A minimal `/login` (getState →
+startSignIn → watch + watchExpiry) captures most of the value without the bonus
+half.
+
+### 11.3 Session reminders (`schedule/*`) — unused
+
+**Mounted only with the optional bundle, and read-mostly on the Remote side.**
+The namespace comes from `@deepseek-ai/dsh-experimental-schedule-bundle`, which
+the installation ships switched off, so a default host has no `schedule`
+endpoint and `schedule/*` is capability-gated rather than assumed. Two shape
+surprises: 0.2.0 **deleted the 0.1.7 `schedule` Session projection** (no
+`schedule` key exists at all — client state comes from `schedule/list` /
+`schedule/catalog`, invalidated by `schedule/changed`), and there is **no Remote
+`create`**: records are created by the model's `schedule_create` tool, so the
+Remote surface is list / catalog / history / update / delete only.
+
+**How to use it:**
+
+1. Per session: `schedule/list {request: {sessionId}}` → `ScheduleRecord[]` in
+   storage order; it never resumes the Agent. Host-wide: `schedule/catalog {}`
+   adds `sessionId`, `status` and `lastDelivery`. Delivery history is
+   newest-first and paged by message cursor:
+   `schedule/history {request: {sessionId, id, limit, before?}}` (`limit` 1–100)
+   with the retention bounds and a `nextBefore` cursor in the result.
+2. Mutate through the CAS verb: `schedule/update {request: {sessionId, id,
+   expected, change?, title?, prompt?}}`, where `expected` is the complete
+   observed record. A timing edit may switch recurrence kind. New records
+   require `title` (≤120 chars).
+3. `schedule/delete {request: {sessionId, id}}` for removal.
+4. **Misses are values, not errors**: `{deleted: false, code:
+   'schedule_not_found'}` and `schedule_ended` / `schedule_conflict` /
+   `delivery_cursor_not_found` arrive inside the result. Only a rule that cannot
+   become a record throws (`ScheduleInputError`, whose codes fold into
+   `gateway/internal` with the message preserved).
+5. Re-read on the payload-free `schedule/changed` emit (§6.2), fired by every
+   create/update/delete/dispatch.
+6. Rules: `after` / `at` / `every`, plus 0.2.0's wall-clock `daily` / `weekly` /
+   `cron` (explicit IANA `timeZone`, local `HH:mm:ss[.SSS]`, ISO weekdays 1–7,
+   five-field cron); `every`'s floor dropped from 5 min to 1 min. Legacy records
+   without `title` still read.
+
+**dsh-emacs**: unused.
+
+### 11.4 Default-model bootstrap and catalog narrowing — unused
+
+**How to use it.** After an account sign-in that leaves no provider API key,
+`session/initializeDefaultModel {}` picks the first available
+`deepseek-account` model and saves it as the deployment default. It is a no-op
+when any configurable API-key provider already has a credential; with no account
+model it is `session/provider-models-unavailable {provider}`, and with
+settings/credentials unmounted
+`session/provider-credentials-unavailable {}`.
+
+**Changed existing calls.** `session/selectModel` now validates the exact
+provider/model pair against the live catalog — a registered route with an empty
+catalog is no longer enough — and answers `session/model-unavailable {provider,
+model}`; the deployment default is persisted in the background, so the returned
+`{selected}` no longer waits for or fails on that write.
+`session/modelCatalog.routableProviders` narrows to providers with ≥1 currently
+available model, and `session/prompt` dropped its own route pre-check, so an
+unavailable model surfaces from `selectModel` (or the agent's admission) instead
+of at prompt time.
+
+**dsh-emacs**: calls neither `initializeDefaultModel` nor `selectModel`'s
+catalog gate; its model picker reads `groups`, not `routableProviders`
+(`dsh-protocol-model-directory` deliberately drops the list), so the narrowing is
+invisible to it.
+
+### 11.5 Localized approval reason (`displayReason`) — unused, one-line win
+
+`approval/request`'s `request` gains optional `displayReason?: {en: string,
+[locale]: string}`. It is presentation-only and never persisted — the durable
+audit pair `approval/asked`/`approval/decided` still carries `reason` — so a
+client should prefer `displayReason` for the locale it is showing and keep
+`reason` as the fallback for an older host or an absent locale.
+
+**dsh-emacs**: not consumed; a single alist read in the approval card.
+
+### 11.6 Reshaped existing surfaces — breaking but inert
+
+- **`agentPresets/list` lost `modeSelectionEnabled`** (its value is now
+  `{presets}`). The chooser is always enabled and the saved default always
+  applies; take "the default" from the row whose `isDefault` is set, never from
+  a saved setting.
+- **`workspace/initializeDefault` takes no request args.** The leaf directory is
+  fixed to `<Documents>/deepseek-harness/default-workspace` and the stored title
+  is that automatic `default-workspace` segment, which a client localizes for
+  display itself; the old `directoryName`/`title` args and their
+  `gateway/bad-request` validation are gone.
+- **`workspaceFiles/list` follows a final symlink/junction** that resolves to a
+  directory, listing the resolved directory; `read` keeps its no-follow gate, so
+  a symlinked directory lists while a symlinked *file* is not read through.
+- **`terminal/shells` de-duplicates by executable name** (case-insensitive,
+  `.exe` stripped) instead of full path, keeping the earliest entry per name
+  with the default first; `TerminalShell` is unchanged.
+
+**dsh-emacs**: only `modeSelectionEnabled` touches the client — the struct slot
+still parses, now always to `nil`, and no business code reads it (a dead slot to
+delete with the next protocol edit). The rest is in namespaces it never calls.
+
+### 11.7 Semantics-only changes — no migration
+
+- **`request/header.startsSeries`** now means "this request begins a distinct
+  message series" and is set independently of `reason`, no longer reserved for
+  `reason:'change'`; still optional and log-only.
+- **`permissionPresets/catalog`'s derived `auto`** preset now uses approval
+  policy `ask` (was `never`), and a still-selected `auto` also matches a `never`
+  approval knob, so a delegated child that pins `never` keeps a final denial. The
+  option set and value shape are unchanged.
+- **New error codes** `session/provider-credentials-unavailable {}` and
+  `session/provider-models-unavailable {provider}`, both from
+  `initializeDefaultModel` (§5.2).
+- **Four new `$events` emits** — `credentials/record-updated (ref)`,
+  `deepseek-account/model-sign-in-required ()`,
+  `deepseek-account/session-expired ()` and `schedule/changed ()` — raising the
+  allowlist from 23 to 27 (§6.2). They matter only to a client that builds
+  §11.2/§11.3; otherwise they fall through an unknown-frame default.
+
+**dsh-emacs**: nothing to migrate; all four sit behind existing `assq` /
+`_ → nil` parsing.
+
+### 11.8 Desktop analytics (`productAnalytics/*`) — skip
+
+Three endpoints (`enabled`, `watchPolicy`, `report`) contributed by the shared
+Remote assembly, but the host service is composed only by the Desktop app, so an
+ordinary Web host does not claim them. A Web client has nothing to integrate
+(carries no message content or credential by design).
