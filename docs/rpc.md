@@ -12,8 +12,8 @@ schema comparisons (`dsh-v0.1.5-rc.2` → `dsh-v0.1.6-alpha.1` →
 **0.1.6 was additive to every surface dsh-emacs calls; 0.1.7 and 0.2.0 are
 not** — 0.1.7 removed the `session/control` queue/jobs frames and reshaped
 `agentPresets/list` (§0.4; the client migration has landed, postmortem/064), and
-0.2.0 drops `agentPresets/list.modeSelectionEnabled`, makes every `account/*`
-operation take a client-metadata argument, and strips the request args from
+0.2.0 drops `agentPresets/list.modeSelectionEnabled`, adds client metadata to
+Platform-facing `account/*` calls, and strips the request args from
 `workspace/initializeDefault` (§0.5). The transport layer, envelope,
 authentication, HTTP route set, Session format version (still **V4**) and the
 `KNOWN_SESSION_EVENT_TYPES` set (still **59**) are unchanged across 0.2.0.
@@ -215,7 +215,7 @@ their argument/value shape, but only one of them touches dsh-emacs.
 | 0.1.7 | 0.2.0 |
 |---|---|
 | 26 mounted namespaces | **29** in the shared client wiring table: adds `schedule` (§4.24), `userQuestions` (§4.25) and `productAnalytics` (§4.26). Only `userQuestions` is mounted by a default profile: `schedule` rides the optional, switched-off `@deepseek-ai/dsh-experimental-schedule-bundle` (and 0.2.0 deletes the 0.1.7 `schedule` projection outright — §9), and `productAnalytics` only exists under the Desktop profile |
-| `account/getProfile {}`, `getBalance {}`, `startSignIn {locale, …}`, `signOut {}` | every account operation now takes a leading **`client: AccountClientMetadata`** = `{version, locale, timezoneOffsetSeconds}`; `startSignIn`'s `locale` is replaced by `client.locale`. **New**: `getUnnotifiedBonuses(client)`, `ackBonusNotified(accountId, orderId, client)`, `hasRunningAccountTasks()` and the `watchExpiry` stream (§4.22) |
+| `account/getProfile {}`, `getBalance {}`, `startSignIn {locale, …}`, `signOut {}` | these Platform-facing calls now take **`client: AccountClientMetadata`** = `{version, locale, timezoneOffsetSeconds}`; `startSignIn`'s `locale` is replaced by `client.locale`. **New**: `getUnnotifiedBonuses(client)`, `ackBonusNotified(accountId, orderId, client)`, `hasRunningAccountTasks()` and the `watchExpiry` stream (§4.22) |
 | `workspace/initializeDefault {request:{directoryName, title}}` | **takes no request args**; the leaf directory is fixed (`<Documents>/deepseek-harness/default-workspace`) and its stored title is that same automatic name (the browser localizes it); the old blank/trim/separator `gateway/bad-request` validation is gone (§4.4) |
 | `agentPresets/list` → `{presets, modeSelectionEnabled}` | roster is **`{presets}`**: `modeSelectionEnabled` is **deleted** (the chooser is always enabled and the saved default always applies) (§4.6) |
 | `session.*` | new `session/initializeDefaultModel` (no args); `selectModel` now rejects a model absent from the live catalog (`session/model-unavailable`) and persists the deployment default in the background; `modelCatalog.routableProviders` narrows to providers with ≥1 currently available model (§4.1) |
@@ -223,7 +223,7 @@ their argument/value shape, but only one of them touches dsh-emacs.
 | `terminal/shells` discovery | candidates de-duplicate by **executable name** (case-insensitive, `.exe` stripped) instead of full path (§4.20) |
 | `permissionPresets` Auto bundle | the derived `auto` preset's approval policy is **`ask`** (was `never`); a still-selected `auto` also matches a `never` approval knob so a delegated child keeps a final denial (§4.19) |
 | `$events` allowlist 23 (21 emit + 2 waterfall) | **27** (25 emit + 2 waterfall): adds `credentials/record-updated`, `deepseek-account/model-sign-in-required`, `deepseek-account/session-expired` and `schedule/changed` (§6.2) |
-| client-visible projections 18 | **19**: adds `userQuestions` = `{active: PendingUserQuestion[], settled: SettledUserQuestion[]}` (`stateVersion` 2) (§9) |
+| client-visible projection keys 19 | **19**: adds `userQuestions` = `{active: PendingUserQuestion[], settled: SettledUserQuestion[]}` (`stateVersion` 2) and deletes `schedule` (§9) |
 | `schedule/change` (the `schedule` projection is deleted at 0.2.0) | named tasks: new records require `title` (≤120 chars) and the rule set adds `daily` / `weekly` / `cron` (explicit IANA zone); `every`'s minimum interval drops 5 min → 1 min. Legacy records without `title` still read (§7.3) |
 | `request/header.startsSeries` | now marks "this request begins a distinct message series" **independently of `reason`**, instead of being reserved for `reason:'change'` (§7.2) |
 | `ApprovalRequestEvent` | gains optional `displayReason?: {en: string, [locale]: string}` — localized presentation only, never written to the audit events (§3.3) |
@@ -256,7 +256,7 @@ sessionReferenceResolver) is otherwise untouched by 0.2.0:
 Migration checklist for 0.2.0: nothing is required to keep the current client
 working. Timed-question support is additive and dormant on a 0.1.7 server
 (there is no `wait` field and no `userQuestions` cell). If the account surface
-is ever adopted, every call must carry
+is ever adopted, its Platform-facing calls must carry
 `client = {version: <app version>, locale: <UI language>, timezoneOffsetSeconds:
 <UTC offset>}` and `startSignIn` has no separate `locale`; a client that calls
 `workspace/initializeDefault` must drop its `directoryName`/`title` arguments
@@ -1634,7 +1634,7 @@ them**.
   registry).
 - `officeToPdf` (`packages/document/office-to-pdf`) — `officeToPdf/render`
   (unary, `(workspaceFileScope, path, priority)`) and `officeToPdf/generation`
-  (stream) for converting Office documents to PDF.
+  (unary) for converting Office documents to PDF.
 
 ### 4.24 schedule.* (new in 0.2.0: Session reminders)
 
@@ -2392,7 +2392,7 @@ are cross-referenced rather than repeated.
 | Feature | Surface | dsh-emacs today |
 |---|---|---|
 | Timed / continued questions | `wait` on the question waterfall, `userQuestions/*`, `userQuestions` projection | **adopted** — §11.1 |
-| Platform account | `account/*` (7 verbs + 2 streams) | unused; the largest genuinely new capability — §11.2 |
+| Platform account | `account/*` (9 unary endpoints + 2 streams) | unused — §11.2 |
 | Session reminders | `schedule/*` (optional bundle) | unused — §11.3 |
 | Default-model bootstrap | `session/initializeDefaultModel`, changed `selectModel` / `modelCatalog` | unused — §11.4 |
 | Localized approval reason | `ApprovalRequestEvent.displayReason` | unused; a one-line win — §11.5 |
@@ -2572,8 +2572,9 @@ available model, and `session/prompt` dropped its own route pre-check, so an
 unavailable model surfaces from `selectModel` (or the agent's admission) instead
 of at prompt time.
 
-**dsh-emacs**: calls neither `initializeDefaultModel` nor `selectModel`'s
-catalog gate; its model picker reads `groups`, not `routableProviders`
+**dsh-emacs**: does not call `initializeDefaultModel`. Its model picker calls
+`selectModel` and therefore inherits the server's catalog validation; it reads
+`groups`, not `routableProviders`
 (`dsh-protocol-model-directory` deliberately drops the list), so the narrowing is
 invisible to it.
 
