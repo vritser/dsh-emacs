@@ -56,6 +56,8 @@
 ;;                             └─ dsh-protocol-question-answer (id selected
 ;;                                  custom)
 ;;   user-questions/request wait → dsh-protocol-question-wait (call-id timed)
+;;   approval/request → dsh-protocol-approval-request (tool-name call-id
+;;                       reason display-reasons)
 ;;
 ;; Conversion entry points all accept a wire alist; note that arrays (vectors)
 ;; on the wire are always normalized to lists inside the structs.  Once
@@ -656,6 +658,31 @@ in contribution order.  The derived `custom' state is not an option."
 Current hosts use direct text blocks and message-level isError; older
 hosts and fixtures wrap both in a tool-result content block."
   call-id text is-error exit-code signal error-code error-reason meta)
+
+(cl-defstruct (dsh-protocol-approval-request
+               (:constructor dsh-protocol-approval-request--from-alist
+                             (alist
+                              &aux
+                              (tool-name (dsh-protocol--field 'toolName alist))
+                              (call-id (dsh-protocol--field 'callId alist))
+                              (reason (dsh-protocol--field 'reason alist))
+                              (display-reasons
+                               (cl-loop
+                                for (locale . text) in
+                                (dsh-protocol--objects
+                                 (dsh-protocol--field 'displayReason alist))
+                                when (and (or (stringp locale) (symbolp locale))
+                                          (stringp text)
+                                          (string-match-p "[^ \t\r\n]" text))
+                                collect
+                                (cons (downcase
+                                       (replace-regexp-in-string
+                                        "_" "-" (format "%s" locale)))
+                                      text))))))
+  "An approval request with raw REASON and localized DISPLAY-REASONS.
+DISPLAY-REASONS maps lowercase, hyphenated language tags to nonblank text;
+the UI selects a translation without changing the host's audit reason."
+  tool-name call-id reason display-reasons)
 
 ;; ---------------------------------------------------------------------------
 ;; userQuestions projection + timed-question wait (dsh 0.2.0)

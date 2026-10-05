@@ -11498,6 +11498,105 @@ Lets a test drive a malformed content value through the result path."
             (and responds (equal "rpc-ap2" (nth 1 (car responds)))))))
     (when (buffer-live-p chat) (kill-buffer chat))))
 
+;; Localized reasons travel through dispatch, queue, notification and the
+;; ordinary decision reader.  Every expected string differs from raw reason.
+(let* ((wire '(("toolName" . "bash") ("callId" . "call-localized")
+               ("reason" . "Audit reason")
+               ("displayReason" . (("en" . "Display reason")
+                                   ("zh" . "显示理由")))))
+       (original (copy-tree wire))
+       (request (dsh-protocol-approval-request--from-alist wire))
+       (dsh-emacs-approval-language "zh"))
+  (dsh-test-assert "approval-localization-preserves-audit-and-call-identity"
+    (equal (dsh-protocol-approval-request-tool-name request) "bash")
+    (equal (dsh-protocol-approval-request-call-id request) "call-localized")
+    (equal (dsh-protocol-approval-request-reason request) "Audit reason")
+    (equal (dsh-emacs--approval-display-reason request) "显示理由")
+    (equal wire original)))
+
+(dolist (case
+         '(("explicit-region" "ZH_cn.UTF-8" "en_US.UTF-8" nil
+            ((en . "English") (zh . "中文") (zh-CN . "简体")) "简体")
+           ("base-language" "zh-TW" nil nil
+            ((en . "English") (zh . "中文")) "中文")
+           ("message-locale" nil "zh_CN.UTF-8" "en_US.UTF-8"
+            ((en . "English") (zh . "中文")) "中文")
+           ("environment-locale" nil nil "zh_CN.UTF-8"
+            ((en . "English") (zh . "中文")) "中文")
+           ("lc-all-precedence" nil nil
+            (("LC_ALL" . "zh_CN.UTF-8") ("LC_MESSAGES" . "en_US.UTF-8")
+             ("LANG" . "en_US.UTF-8"))
+            ((en . "English") (zh . "中文")) "中文")
+           ("lc-messages-precedence" nil nil
+            (("LC_ALL" . "") ("LC_MESSAGES" . "zh_CN.UTF-8")
+             ("LANG" . "en_US.UTF-8"))
+            ((en . "English") (zh . "中文")) "中文")
+           ("english-fallback" "fr-FR" nil nil
+            ((en . "English") (zh . "中文")) "English")
+           ("blank-translation" "zh" nil nil
+            ((en . "English") (zh . "  \n")) "English")
+           ("malformed-translation" "zh" nil nil
+            ((en . "English") (zh . 7)) "English")
+           ("raw-fallback" "fr" nil nil ((zh . "中文")) "Raw reason")
+           ("legacy" "zh" nil nil nil "Raw reason")
+           ("malformed-map" "zh" nil nil :json-false "Raw reason")
+           ("string-keys" "zh-CN" nil nil
+            (("en" . "English") ("ZH_cn" . "简体")) "简体")))
+  (pcase-let ((`(,name ,language ,messages ,environment ,translations ,expected)
+               case))
+    (let ((chat (generate-new-buffer " *dsh-test-localized-approval*"))
+          (dsh-emacs-approval-language language)
+          (system-messages-locale messages)
+          (process-environment (copy-sequence process-environment))
+          (dsh-emacs--chat-buffers (make-hash-table :test 'equal))
+          (dsh-emacs--question-active 'occupied)
+          (dsh-emacs--question-queue nil)
+          (dsh-emacs--approval-active nil)
+          (dsh-emacs--approval-queue nil)
+          (dsh-emacs-events--client-id "localized-client")
+          prompted notified response)
+      (unwind-protect
+          (progn
+            (dolist (variable '("LC_ALL" "LC_MESSAGES" "LANG"))
+              (setenv variable nil))
+            (if (listp environment)
+                (dolist (entry environment) (setenv (car entry) (cdr entry)))
+              (setenv "LANG" environment))
+            (puthash "localized-session" chat dsh-emacs--chat-buffers)
+            (cl-letf (((symbol-function 'y-or-n-p)
+                       (lambda (prompt) (setq prompted prompt) nil))
+                      ((symbol-function 'dsh-emacs-notify--post)
+                       (lambda (_session body _chat) (setq notified body)))
+                      ((symbol-function 'dsh-emacs--events-result-async)
+                       (lambda (client event outcome callback)
+                         (setq response (list client event outcome))
+                         (funcall callback t nil))))
+              (dsh-emacs-events--host-item
+               'process
+               `((type . "waterfall") (event . "approval/request")
+                 (eventId . "localized-event") (agentId . "localized-session")
+                 (request . ((toolName . "bash") (callId . "localized-call")
+                             (reason . "Raw reason")
+                             (displayReason . ,translations)))))
+              (dsh-test-assert (concat "approval-localized-queued-" name)
+                (null prompted)
+                (equal (nth 4 (car dsh-emacs--approval-queue)) expected)
+                (equal notified (concat "Approval: " expected)))
+              ;; Changing language after queueing does not make the prompt
+              ;; disagree with the notification already shown.
+              (setq dsh-emacs--question-active nil
+                    dsh-emacs-approval-language "de")
+              (dsh-emacs--approval-drain)
+              (dsh-test-assert (concat "approval-localized-reader-" name)
+                (equal (substring-no-properties prompted) expected)
+                (eq (get-text-property 0 'face prompted)
+                    'dsh-emacs-approval-justification-face)
+                (equal response '("localized-client" "localized-event"
+                                  ((kind . "result") (value . "rejected"))))
+                (null dsh-emacs--approval-queue)
+                (null dsh-emacs--approval-active))))
+        (kill-buffer chat)))))
+
 ;; --- Test 78a1: cancel closes a displayed question, no stale outcome sent back ---
 (let ((chat (get-buffer-create " *dsh-test-question-active-cancel*"))
       (responds nil)

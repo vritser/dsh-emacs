@@ -167,6 +167,29 @@ An interrupted attempt may repeat computation; a formatting error is reported
 and leaves the raw reply visible. See
 [decision record 036](../postmortem/036-bounded-stream-markdown.md).
 
+## Approval prompts
+
+`dsh-emacs-approval-language` selects the language of approval reasons supplied
+by a dsh 0.2.0 host. Its default, **nil**, uses the first nonempty value from
+`system-messages-locale`, `LC_ALL`, `LC_MESSAGES`, and `LANG`, then English.
+Set a language tag explicitly when your preferred reading language differs
+from the editor's message locale:
+
+```elisp
+(setq dsh-emacs-approval-language "zh")
+```
+
+Lookup tries the full language tag, its base language, English (`en`), then
+the original `reason`. Tags are case-insensitive; underscores and POSIX locale
+suffixes are accepted (`zh_CN.UTF-8` selects `zh-cn`, then `zh`). Empty or
+invalid translation values are skipped. Older hosts without localized reasons
+keep displaying their original text.
+
+The selected reason is fixed when the approval enters the queue, keeping the
+prompt and notification consistent. Notifications still prefer the actual
+command when it is available. This option selects host-provided text only;
+it does not translate commands, the yes/no reader, or the saved audit record.
+
 ## `ask` question prompts
 
 Each question is one minibuffer read. The question text is the prompt, the

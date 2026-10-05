@@ -171,6 +171,7 @@ generation and a new clientId.")
 (declare-function dsh-emacs--question-cancelled "dsh-emacs" (event-id))
 (declare-function dsh-emacs-plan--cancel "dsh-emacs-plan" (&optional event-id))
 (declare-function dsh-emacs--approval-requested "dsh-emacs" (chat event-id session-id tool-name reason call-id))
+(declare-function dsh-emacs--approval-display-reason "dsh-emacs" (request))
 (declare-function dsh-emacs--approval-cancelled "dsh-emacs" (event-id))
 (declare-function dsh-emacs--events-result-async "dsh-emacs" (client-id event-id outcome callback))
 (declare-function dsh-emacs--waterfall-generation-retired "dsh-emacs" ())
@@ -1482,11 +1483,12 @@ retires a pending waterfall by `eventId'."
               (lambda (_ok _value) nil)))
          (pcase event-name
            ("approval/request"
-            (dsh-emacs--approval-requested
-             chat event-id agent-id
-             (dsh-emacs-render--aget "toolName" request)
-             (dsh-emacs-render--aget "reason" request)
-             (dsh-emacs-render--aget "callId" request)))
+            (let ((approval (dsh-protocol-approval-request--from-alist request)))
+              (dsh-emacs--approval-requested
+               chat event-id agent-id
+               (dsh-protocol-approval-request-tool-name approval)
+               (dsh-emacs--approval-display-reason approval)
+               (dsh-protocol-approval-request-call-id approval))))
            ("user-questions/request"
             (dsh-emacs--question-requested
              chat event-id agent-id

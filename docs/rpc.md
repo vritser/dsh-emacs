@@ -247,11 +247,12 @@ sessionReferenceResolver) is otherwise untouched by 0.2.0:
    question's foreground wait while its prompt is on screen, renders the
    expired-window result as `pending`, and answers a `continued` call later
    through `userQuestions/answer` (`M-x dsh-emacs-answer-question`), completing
-   the original ask card from the projection (postmortem/073). The rest of the
-   additivity falls through the client's `assq`-style parsing and `_ → nil`
-   frame/event defaults: `schedule` and `productAnalytics`, the four new host
-   emits, the `schedule` rule widening, `displayReason`, and the
-   `user-question-reply` source kind.
+   the original ask card from the projection (postmortem/073).
+4. **Localized approval reasons are adopted (§11.5).** `displayReason` is
+   decoded at the protocol boundary and selected before notification/queueing,
+   using `dsh-emacs-approval-language` or the Emacs message locale
+   (postmortem/074). `schedule`, `productAnalytics` and the four new host emits
+   remain unused; `user-question-reply` messages are intentionally hidden.
 
 Migration checklist for 0.2.0: nothing is required to keep the current client
 working. Timed-question support is additive and dormant on a 0.1.7 server
@@ -2148,12 +2149,11 @@ the client has since migrated to the `inbox` projection (postmortem/064).
 the transcript dispatcher needs no new event branch. The durable change is a
 tool result's *meaning*: the timed `ask_user_question` pending payload is
 rendered as `pending` and settled from the `userQuestions` projection cell
-(adopted — §4.25, postmortem/073). The remaining additions — the
-`user-question-reply` `user/message` source, `ApprovalRequestEvent.displayReason`
-and the four host emits — are an unknown key in an alist the client already
-reads or an unknown frame that falls through its `_ → nil` default, and the
-`user-question-reply` message is deliberately hidden by the transcript source
-filter. The `session/control` / `session/follow` shapes and the `inbox` queue
+(adopted — §4.25, postmortem/073). `ApprovalRequestEvent.displayReason` is
+consumed by the live approval prompt (§11.5); it is not a durable event field.
+The four new host emits remain ignored, and `user-question-reply` messages are
+deliberately hidden by the transcript source filter. The
+`session/control` / `session/follow` shapes and the `inbox` queue
 source are unchanged from 0.1.7, so no migration is required (§0.5).
 
 ---
@@ -2395,7 +2395,7 @@ are cross-referenced rather than repeated.
 | Platform account | `account/*` (9 unary endpoints + 2 streams) | unused — §11.2 |
 | Session reminders | `schedule/*` (optional bundle) | unused — §11.3 |
 | Default-model bootstrap | `session/initializeDefaultModel`, changed `selectModel` / `modelCatalog` | unused — §11.4 |
-| Localized approval reason | `ApprovalRequestEvent.displayReason` | unused; a one-line win — §11.5 |
+| Localized approval reason | `ApprovalRequestEvent.displayReason` | **adopted** — §11.5 |
 | Reshaped existing surfaces | `agentPresets/list`, `workspace/initializeDefault`, `workspaceFiles/list`, `terminal/shells` | breaking but inert — §11.6 |
 | Semantics-only changes | `startsSeries`, Auto policy, two error codes, four emits | no migration — §11.7 |
 | Desktop analytics | `productAnalytics/*` | skip — Desktop-only, §11.8 |
@@ -2578,7 +2578,7 @@ of at prompt time.
 (`dsh-protocol-model-directory` deliberately drops the list), so the narrowing is
 invisible to it.
 
-### 11.5 Localized approval reason (`displayReason`) — unused, one-line win
+### 11.5 Localized approval reason (`displayReason`) — adopted
 
 `approval/request`'s `request` gains optional `displayReason?: {en: string,
 [locale]: string}`. It is presentation-only and never persisted — the durable
@@ -2586,7 +2586,12 @@ audit pair `approval/asked`/`approval/decided` still carries `reason` — so a
 client should prefer `displayReason` for the locale it is showing and keep
 `reason` as the fallback for an older host or an absent locale.
 
-**dsh-emacs**: not consumed; a single alist read in the approval card.
+**dsh-emacs**: `dsh-protocol-approval-request` preserves the raw reason and
+decodes valid translations. Before queueing, `dsh-emacs-approval-language`
+(nil by default: Emacs message locale, then environment) selects the full tag,
+base language, English, then raw reason. Empty or malformed translations are
+skipped. The prompt and notification fallback share this selected text; command
+details and the allowed/rejected response are unchanged (postmortem/074).
 
 ### 11.6 Reshaped existing surfaces — breaking but inert
 

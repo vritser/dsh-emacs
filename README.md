@@ -175,6 +175,18 @@ question, so the menu cannot flicker or reorder.
 Try `M-x dsh-emacs-question-preview` locally, without contacting a server.
 See [Question prompts](docs/customization.md#ask-question-prompts) for details.
 
+### Approval reasons
+
+Approval prompts use the host's localized reason when available (dsh 0.2.0),
+following the Emacs message locale. To select Chinese explicitly:
+
+```elisp
+(setq dsh-emacs-approval-language "zh") ; nil follows the Emacs locale
+```
+
+Missing translations fall back to English, then the original reason. See
+[Approval prompts](docs/customization.md#approval-prompts) for the lookup order.
+
 ### Workspaces
 
 Workspaces group sessions by project/directory.

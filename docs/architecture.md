@@ -372,6 +372,14 @@ state when rendering a pending result, covering delayed live results and
 older history loaded after the projection arrived.
 See [decision record 073](../postmortem/073-timed-question-answers.md).
 
+Approval waterfalls decode through `dsh-protocol-approval-request`: the raw
+audit reason stays intact beside a normalized locale-to-text alist.
+`dsh-emacs--approval-display-reason` selects the full language tag, base language,
+English, then raw reason, using `dsh-emacs-approval-language` or the Emacs message
+locale. Selection occurs before queueing, so the notification and ordinary
+yes/no prompt share one value. The command detail and outcome RPC are unchanged.
+See [decision record 074](../postmortem/074-localized-approval-reasons.md).
+
 Plan review is a document interaction in `dsh-emacs-plan.el`. The protocol
 question struct retains the intent kind, approval label and optional call id;
 one supported plan-review question bypasses the minibuffer queue. Pending

@@ -10,6 +10,11 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Approval reasons follow your language**: dsh 0.2.0 approval prompts use
+  the host's localized reason, following the Emacs message locale by default.
+  `dsh-emacs-approval-language` selects a language explicitly; missing
+  translations fall back to English and then the original reason.
+  (rationale: postmortem/074)
 - **Timed questions stay answerable**: when a dsh 0.2.0 `ask_user_question`
   foreground window expires before an answer, the question is no longer lost.
   Its transcript row reads `pending` and explains itself, and `M-x

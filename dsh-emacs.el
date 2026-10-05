@@ -282,6 +282,17 @@ the echo area carries only the question's own detail."
                  (const :tag "No help" nil))
   :group 'dsh-emacs)
 
+(defcustom dsh-emacs-approval-language nil
+  "Language used for host-localized approval reasons.
+Use a language tag such as \"zh\", \"zh-CN\" or \"en\".  nil follows
+`system-messages-locale', then LC_ALL, LC_MESSAGES and LANG, ignoring
+empty values.  Region tags and POSIX locales such as zh_CN.UTF-8 work.
+Fallback order is the full tag, its base language, English, then the
+original reason.  Only translations supplied by the host are displayed."
+  :type '(choice (const :tag "Follow Emacs message locale" nil)
+                 (string :tag "Language tag"))
+  :group 'dsh-emacs)
+
 ;;; ---------------------------------------------------------------------------
 ;;;  Internal variables
 ;;; ---------------------------------------------------------------------------
@@ -5342,6 +5353,24 @@ know about."
 ;; the defvars above); while either is active new frames queue up
 ;; serially, and the two drains hand off to each other as their
 ;; queues empty, never nesting two minibuffer prompts.
+
+(defun dsh-emacs--approval-display-reason (request)
+  "Choose the localized reason of decoded approval REQUEST.
+Resolve once before queueing, so the notification and prompt agree."
+  (let* ((locale
+          (cl-find-if
+           (lambda (value) (and (stringp value) (not (string-empty-p value))))
+           (list dsh-emacs-approval-language system-messages-locale
+                 (getenv "LC_ALL") (getenv "LC_MESSAGES") (getenv "LANG")
+                 "en")))
+         (tag (car (split-string
+                    (downcase (replace-regexp-in-string "_" "-" locale))
+                    "[.@]")))
+         (translations (dsh-protocol-approval-request-display-reasons request)))
+    (or (cdr (assoc tag translations))
+        (cdr (assoc (car (split-string tag "-")) translations))
+        (cdr (assoc "en" translations))
+        (dsh-protocol-approval-request-reason request))))
 
 (defun dsh-emacs--approval-command-line (call-id)
   "One-line summary of the tool call CALL-ID from the live transcript.
