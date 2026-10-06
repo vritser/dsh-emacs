@@ -1038,21 +1038,37 @@ turn-internal boundaries rather than transcript content."
                                      (plist-get state :step))
                   'mouse-face 'mode-line-highlight))))
 
+(defun dsh-emacs-modeline--join (&rest parts)
+  "Join nonempty PARTS with one space, preserving display-bearing spaces.
+Only ordinary edge padding is removed; SVG placeholders, internal spacing
+and text properties remain intact."
+  (let (trimmed)
+    (dolist (text parts)
+      (when text
+        (let ((start 0) (end (length text)))
+          (while (and (< start end) (= (aref text start) ?\s)
+                      (not (get-text-property start 'display text)))
+            (setq start (1+ start)))
+          (while (and (> end start) (= (aref text (1- end)) ?\s)
+                      (not (get-text-property (1- end) 'display text)))
+            (setq end (1- end)))
+          (when (< start end) (push (substring text start end) trimmed)))))
+    (string-join (nreverse trimmed) " ")))
+
 (defun dsh-emacs-modeline--ml-indicator ()
   "Return the running animation, step and execution feedback near the mode name.
 Standalone compaction has feedback even while no turn animation is running."
-  (let ((frame (dsh-emacs--ml-busy-indicator)))
-    (concat
-     (unless (string-empty-p frame)
-       (concat
-        (propertize (concat " " frame " ")
-                    'help-echo "dsh is running a request…"
-                    'mouse-face 'mode-line-highlight)
-        (let ((step (dsh-emacs-modeline--step-indicator)))
-          (unless (string-empty-p step)
-            (concat step " ")))))
-     (dsh-emacs-modeline--plan-indicator)
-     (dsh-emacs-modeline--execution-indicator))))
+  (let* ((frame (dsh-emacs--ml-busy-indicator))
+         (text (dsh-emacs-modeline--join
+                (unless (string-empty-p frame)
+                  (propertize frame
+                              'help-echo "dsh is running a request…"
+                              'mouse-face 'mode-line-highlight))
+                (unless (string-empty-p frame)
+                  (dsh-emacs-modeline--step-indicator))
+                (dsh-emacs-modeline--plan-indicator)
+                (dsh-emacs-modeline--execution-indicator))))
+    (if (string-empty-p text) "" (concat " " text " "))))
 
 (defvar dsh-emacs-modeline--queue-map
   (let ((map (make-sparse-keymap)))
@@ -1196,15 +1212,7 @@ like doom-modeline that render everything through a single `:eval' — the
 segments are inserted right after the first element instead, so they stay
 visible at the left edge of the line instead of being clipped past the
 width-filling renderer.  BASE is the pre-existing mode-line-format list."
-  (let* ((stats '(:eval (dsh-emacs-modeline--modeinline)))
-         (anim '(:eval (dsh-emacs-modeline--ml-indicator)))
-         (queue '(:eval (dsh-emacs-modeline--queue-indicator)))
-         ;; Animation and queue indicator sit right after the mode name (after
-         ;; DSH); the stats segment comes last.
-         (jobs '(:eval (dsh-emacs-modeline--jobs-indicator)))
-         (children '(:eval (dsh-emacs-modeline--escape-percent
-                           (dsh-emacs-subagent-indicator))))
-         (segments (list anim queue jobs children stats)))
+  (let ((segments '((:eval (dsh-emacs-modeline--doom-segment)))))
     (cond
      ((memq 'mode-line-modes base)
       ;; Insert directly after the mode names cluster.
@@ -1221,16 +1229,26 @@ width-filling renderer.  BASE is the pre-existing mode-line-format list."
       segments))))
 
 (defun dsh-emacs-modeline--doom-segment ()
-  "Doom-modeline segment body: the running animation right after the DSH
-mode name, followed by the compact dsh stats.  Empty when idle or
-outside a dsh-emacs buffer, so doom-modeline's layout stays untouched."
+  "Compose dsh status for both Doom and the native mode-line splice.
+Nonempty pieces have one separating space.  Outer padding separates the
+mode name and protects the final column on right-aligned mode lines."
   (if (not (derived-mode-p 'dsh-emacs-mode))
       ""
-    (concat (dsh-emacs-modeline--ml-indicator)
-            (dsh-emacs-modeline--queue-indicator)
-            (dsh-emacs-modeline--jobs-indicator)
-            (dsh-emacs-modeline--escape-percent (dsh-emacs-subagent-indicator))
-            (dsh-emacs-modeline--modeinline))))
+    (let ((text (dsh-emacs-modeline--join
+                 (dsh-emacs-modeline--ml-indicator)
+                 (dsh-emacs-modeline--queue-indicator)
+                 (dsh-emacs-modeline--jobs-indicator)
+                 (dsh-emacs-modeline--escape-percent (dsh-emacs-subagent-indicator))
+                 (dsh-emacs-modeline--modeinline))))
+      (if (string-empty-p text) "" (concat " " text " ")))))
+
+(defun dsh-emacs-modeline--doom-major-mode (text)
+  "Remove Doom's duplicate mode-label padding in dsh buffers from TEXT.
+Neighboring Doom segments and our stats already supply the separating
+spaces.  Keep the label's image, faces and standard major-mode menu."
+  (if (and (derived-mode-p 'dsh-emacs-mode) (stringp text))
+      (dsh-emacs-modeline--join text)
+    text))
 
 (defun dsh-emacs-modeline--install-doom-segment ()
   "Register the dsh stats as a doom-modeline segment after `major-mode'.
@@ -1246,6 +1264,11 @@ anchor (caller then falls back to the plain mode-line splice)."
                     (sides (cdr def))              ; (lhs rhs)
                     (rhs (and sides (cadr sides))))
                (and rhs (memq 'major-mode rhs))))
+    (let ((renderer (alist-get 'major-mode
+                               (symbol-value 'doom-modeline--fn-alist))))
+      (when (and (symbolp renderer) (fboundp renderer))
+        (advice-add renderer :filter-return
+                    #'dsh-emacs-modeline--doom-major-mode)))
     (unless dsh-emacs-modeline--doom-segment-installed
       ;; Define the segment at runtime with eval so the official macro
       ;; (not expandable at our byte-compile time — it lives in the user's
@@ -1265,6 +1288,11 @@ anchor (caller then falls back to the plain mode-line splice)."
 
 (defun dsh-emacs-modeline--remove-doom-segment ()
   "Unregister the dsh stats segment from doom-modeline."
+  (when (boundp 'doom-modeline--fn-alist)
+    (let ((renderer (alist-get 'major-mode
+                               (symbol-value 'doom-modeline--fn-alist))))
+      (when (and (symbolp renderer) (fboundp renderer))
+        (advice-remove renderer #'dsh-emacs-modeline--doom-major-mode))))
   (when (and dsh-emacs-modeline--doom-segment-installed
              (featurep 'doom-modeline)
              (fboundp 'doom-modeline-remove-segment))

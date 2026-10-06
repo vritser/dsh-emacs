@@ -111,6 +111,11 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Consistent mode-line spacing**: status indicators and model details use one
+  separating space in native and Doom mode lines; SVG icons and click targets
+  stay intact. Chat buffers also remove Doom's duplicate padding around the
+  major-mode label.
+
 - **dsh 0.2.0 tool results render correctly**: direct tool-message text and
   error flags are decoded alongside the older nested format. Question cards
   now display real answers and pending state, including late replies restored

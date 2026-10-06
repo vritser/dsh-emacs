@@ -1,7 +1,14 @@
 # Mode-line Status
 
-The mode line shows the
-following segments (separated by ` • `):
+The stats use `dsh-emacs-modeline-format-spec` to choose segments and their
+separator (one space by default). Status indicators—animation, Plan/retry,
+queue, jobs and subagents—and the parenthesized stats have one separating
+space in both native and Doom mode lines. Empty indicators add no gaps; SVG
+placeholders retain their display and click properties. Doom's extra padding
+around the major-mode label is removed in chat buffers so adjacent segments
+provide a single separating space.
+
+Available stats segments:
 
 - **cwd**: current working directory (home path abbreviated with `~`)
 - **branch**: git branch name (auto-detected)

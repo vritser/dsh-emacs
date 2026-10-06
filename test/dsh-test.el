@@ -24500,6 +24500,62 @@ messages (e.g. `command/done')."
                        (eq (get-text-property 1 'face indicator) 'dsh-emacs-modeline-face)
                        (eq (get-text-property 1 'local-map indicator) dsh-emacs-subagent-map)))))
 
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let* ((image '(image :type svg :data "test-svg"))
+         (map (make-sparse-keymap))
+         (children (propertize (concat " " (propertize " " 'display image) "3")
+                               'local-map map 'help-echo "3 children")))
+    (cl-letf (((symbol-function 'dsh-emacs--ml-busy-indicator) (lambda () "█"))
+              ((symbol-function 'dsh-emacs-modeline--step-indicator) (lambda () ""))
+              ((symbol-function 'dsh-emacs-modeline--plan-indicator) (lambda () " Plan "))
+              ((symbol-function 'dsh-emacs-modeline--execution-indicator) (lambda () " Retry 1/3 "))
+              ((symbol-function 'dsh-emacs-modeline--queue-indicator) (lambda () " [Q1 S1]"))
+              ((symbol-function 'dsh-emacs-modeline--jobs-indicator) (lambda () " [J2]"))
+              ((symbol-function 'dsh-emacs-subagent-indicator) (lambda () children))
+              ((symbol-function 'dsh-emacs-modeline--modeinline) (lambda () "(model CH24%%) ")))
+      (let* ((text (dsh-emacs-modeline--doom-segment))
+             (icon-pos (string-match " 3" text)))
+        (dsh-test-assert "modeline-joins-status-pieces-with-one-space"
+                         (equal (substring-no-properties text)
+                                " █ Plan Retry 1/3 [Q1 S1] [J2]  3 (model CH24%%) "))
+        (dsh-test-assert "modeline-spacing-preserves-svg-and-mouse-properties"
+                         icon-pos
+                         (equal (get-text-property icon-pos 'display text) image)
+                         (eq (get-text-property (1+ icon-pos) 'local-map text) map)
+                         (equal (get-text-property (1+ icon-pos) 'help-echo text) "3 children")))
+      (dsh-test-assert "native-modeline-uses-the-same-composition-as-doom"
+                       (equal (dsh-emacs-modeline--splice '("left" mode-line-modes "right"))
+                              '("left" mode-line-modes
+                                (:eval (dsh-emacs-modeline--doom-segment)) "right")))
+      (cl-letf (((symbol-function 'dsh-emacs-modeline--ml-indicator) (lambda () ""))
+                ((symbol-function 'dsh-emacs-modeline--queue-indicator) (lambda () ""))
+                ((symbol-function 'dsh-emacs-modeline--jobs-indicator) (lambda () ""))
+                ((symbol-function 'dsh-emacs-subagent-indicator) (lambda () "")))
+        (dsh-test-assert "modeline-empty-indicators-add-no-extra-gaps"
+                         (equal (dsh-emacs-modeline--doom-segment) " (model CH24%%) "))
+        (cl-letf (((symbol-function 'dsh-emacs-modeline--modeinline) (lambda () "")))
+          (dsh-test-assert "modeline-empty-composition-has-no-padding"
+                           (equal (dsh-emacs-modeline--doom-segment) "")))))))
+
+;; Doom pads both the mode name and its neighboring segments.
+(let* ((image '(image :type svg :data "whale"))
+       (map (make-sparse-keymap))
+       (label (propertize "DSH" 'display image 'local-map map
+                          'help-echo "Major mode"))
+       (padded (concat " " label " ")))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (dsh-test-assert "doom-major-mode-removes-duplicate-edge-padding"
+                     (and (fboundp 'dsh-emacs-modeline--doom-major-mode)
+                          (equal-including-properties
+                           (dsh-emacs-modeline--doom-major-mode padded) label))))
+  (with-temp-buffer
+    (dsh-test-assert "doom-major-mode-preserves-other-buffers"
+                     (and (fboundp 'dsh-emacs-modeline--doom-major-mode)
+                          (eq (dsh-emacs-modeline--doom-major-mode padded)
+                              padded)))))
+
 (princ "\n===== test summary =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))
       (fail (cl-count-if (lambda (r) (not (cdr r))) dsh-test-results)))
