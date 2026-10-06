@@ -2429,6 +2429,7 @@ metadata preserves nearest-first ordering for display and cycling."
 (define-derived-mode dsh-emacs-mode fundamental-mode "DSH"
   "DeepSeek Harness chat mode.
 \\{dsh-emacs-mode-map}"
+  (setq-local mode-name '(:eval (dsh-emacs-modeline--mode-name)))
   (setq buffer-read-only nil)
   (setq truncate-lines nil)
   (setq word-wrap t)

@@ -10,6 +10,12 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Whale mode label**: graphical Emacs with SVG support shows the
+  DeepSeek Harness whale in place of `DSH`, blue on dark themes and black
+  on light themes, with its visible height matching the permission shield.
+  Colors follow theme changes. The
+  standard major-mode menu stays available; terminals keep the `DSH` label.
+
 - **Browse and continue subagent conversations**: `M-x dsh-emacs-list-subagents`
   selects direct children through minibuffer completion, while `TAB` in the
   session list expands nested children. Arrows appear only for confirmed

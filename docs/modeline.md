@@ -1,5 +1,13 @@
 # Mode-line Status
 
+The major-mode label uses the DeepSeek Harness whale SVG with its vertical
+padding cropped to match the permission shield's visible height, without
+making the mode line taller or adding a badge or background. It retains the
+standard Emacs major-mode menu in both native and Doom mode lines. Terminals
+and builds without SVG support display `DSH`. The logo is blue (`#4d6bfe`) on dark
+frames and black on light frames, following Emacs's `background-mode` frame
+parameter on each redraw. Changing themes updates the color automatically.
+
 The stats use `dsh-emacs-modeline-format-spec` to choose segments and their
 separator (one space by default). Status indicators—animation, Plan/retry,
 queue, jobs and subagents—and the parenthesized stats have one separating

@@ -45,6 +45,11 @@ For an optional `use-package` setup, see
 
 ## Using it
 
+Chat buffers show the DeepSeek Harness whale in the mode line when SVG is
+supported: blue on dark themes, black on light themes, with `DSH` as the
+terminal fallback. Colors follow theme changes. The icon keeps the
+standard Emacs major-mode menu. See [Mode-line status](docs/modeline.md).
+
 ### Session list
 
 `M-x dsh-emacs` opens your sessions, grouped by workspace. Press `c` to
