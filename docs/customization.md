@@ -73,14 +73,14 @@ These default keys apply in the session list opened by `M-x dsh-emacs`:
 
 | Key | Action |
 |---|---|
-| `RET` | Open the session under point; on a group header, toggle folding |
+| `RET` | Open the session or subagent under point; on a group header, toggle folding |
 | `c` / `C` | Create a session / create with a chosen agent preset |
 | `r` | Rename the session under point |
 | `d` | Archive the session without deleting it |
 | `u` | Restore an archived session (pick from the archive set) |
 | `/` | Search |
 | `g` | Refresh |
-| `TAB` | Toggle folding for the workspace group |
+| `TAB` | Toggle a workspace header or a session's direct subagents |
 | `W` | Create a workspace |
 | `R` | Rename the workspace under point |
 | `D` | Delete the workspace under point |
@@ -97,13 +97,28 @@ Workspace and `Ungrouped` groups start expanded by default. Set
 groups collapsed. `M-x dsh-emacs-collapse-workspaces` and
 `M-x dsh-emacs-expand-workspaces` fold or unfold every group in the list.
 
+Subagents start collapsed beneath their parent session. `TAB` on a session
+row expands its direct children; repeat on a child to reveal nested children.
+Only sessions with a known nonempty child catalog show an expansion arrow;
+unknown and empty catalogs show none. `TAB` can still request an unknown catalog.
+`RET` opens the child through its direct parent, and `M-,` returns to the
+departing list row. Child rows show mode and activity; `i` adds their id and
+available metrics. `r`, `d` and `f` are unavailable on child rows.
+
+Missing catalogs load asynchronously on expansion. Loading, empty and failed
+reads have distinct inline feedback; collapse and expand again to retry a
+failure. Workspace context, child expansion and per-window cursor positions
+survive refreshes. Collapsing a parent retains its children's expansion choices.
+
 Opening the list (`M-x dsh-emacs`, `C-c C-l`) puts the cursor on the current
-session's row and scrolls it into view; when that session sits in a folded
-group, the group is unfolded to show it, and a `w` workspace filter that
+session's row and scrolls it into view; for a subagent, its ancestors and
+workspace are expanded. When a session sits in a folded group, the group
+is unfolded to show it, and a `w` workspace filter that
 would hide the row is cleared. Refreshing the list in place (`g`, events,
 auto-refresh) instead keeps the row you are on. Opening a list that is
 already live reuses the cached rows — the server's event stream keeps them
-current — and makes no request; a cold list (nothing fetched yet) is
+current — and makes no session-list request. Missing ancestor catalogs are
+fetched when opening the list from a child. A cold list (nothing fetched yet) is
 fetched, and `g` refreshes on demand. Re-opening keeps the list's state:
 folded groups stay folded and an active `w` filter stays set.
 

@@ -48,11 +48,45 @@ For an optional `use-package` setup, see
 ### Session list
 
 `M-x dsh-emacs` opens your sessions, grouped by workspace. Press `c` to
-create a session or `RET` to open one. See
+create a session or `RET` to open one. `TAB` folds a workspace header or
+expands a session's subagents beneath it. Expansion arrows appear only when
+children are confirmed; unknown or empty catalogs have none. Child rows show
+their mode and activity; use `TAB` for nested children and `RET` to open a child
+conversation.
+Expansion and cursor position survive refreshes. See
 [Session and workspace controls](docs/customization.md#session-and-workspace-controls)
 for list management and navigation.
 
 ![Session list grouped by workspace](assets/sessions.png)
+
+### Subagent conversations
+
+`M-x dsh-emacs-list-subagents` (or mouse-1 on the mode-line child count) opens
+minibuffer completion for this conversation's direct children. `RET` opens the
+selected chat; `C-u` before the command opens it in another window. `C-g`
+cancels and `M-,` returns to the originating chat position through xref.
+Inside a child, run the command again to select its children. Your normal
+completion frontend and keys apply; no separate browser buffer is created.
+
+The count uses a thin brain-and-circuit SVG, with the brain above three
+downward branches, in the existing muted status-text color.
+Without SVG support it falls back to Nerd Font `source_branch`, then `Sub`.
+Only the total appears (for example `Sub3`); hover for the running count.
+Candidates show mode, activity and available duration/token metrics.
+`M-x dsh-emacs-subagent-refresh`
+refreshes the current conversation's catalog and parent availability.
+
+Continuable children accept text with `C-c C-c` and stop with `C-c C-b`;
+`C-u C-c C-c` steers. Input closes while the parent is unavailable or the host
+connection is lost. One-shot children are read-only and cannot be interrupted
+through this surface. `C-c C-o` pages older child history. Queue editing, model
+selection, attachments, slash commands and late question answers are unavailable
+inside child chats. `M-x dsh-emacs-subagent-stop` chooses a running continuable
+child to stop after confirmation; `M-x dsh-emacs-subagent-describe` chooses a
+child for detailed inspection. Token totals include cache usage and are session
+projections, not billing estimates or the chat mode line's message accumulator.
+
+See [subagent integration](docs/subagents.md) for protocol and test details.
 
 ### Inside a chat buffer
 

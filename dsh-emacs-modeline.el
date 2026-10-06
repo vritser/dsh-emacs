@@ -36,6 +36,7 @@
 ;; (all by default).
 
 ;;; Code:
+(declare-function dsh-emacs-subagent-indicator "dsh-emacs-subagent" ())
 
 (require 'cl-lib)
 (require 'dsh-emacs-protocol)
@@ -1201,7 +1202,9 @@ width-filling renderer.  BASE is the pre-existing mode-line-format list."
          ;; Animation and queue indicator sit right after the mode name (after
          ;; DSH); the stats segment comes last.
          (jobs '(:eval (dsh-emacs-modeline--jobs-indicator)))
-         (segments (list anim queue jobs stats)))
+         (children '(:eval (dsh-emacs-modeline--escape-percent
+                           (dsh-emacs-subagent-indicator))))
+         (segments (list anim queue jobs children stats)))
     (cond
      ((memq 'mode-line-modes base)
       ;; Insert directly after the mode names cluster.
@@ -1226,6 +1229,7 @@ outside a dsh-emacs buffer, so doom-modeline's layout stays untouched."
     (concat (dsh-emacs-modeline--ml-indicator)
             (dsh-emacs-modeline--queue-indicator)
             (dsh-emacs-modeline--jobs-indicator)
+            (dsh-emacs-modeline--escape-percent (dsh-emacs-subagent-indicator))
             (dsh-emacs-modeline--modeinline))))
 
 (defun dsh-emacs-modeline--install-doom-segment ()

@@ -18,6 +18,7 @@
 ;; does not expose a session deletion RPC.
 ;; Set DSH_E2E_PLAN_REVIEW=1 to exercise model-generated plan review,
 ;; requesting changes, and approval (requires a working model provider).
+;; Set DSH_E2E_SUBAGENTS=1 for real delegation, paging, follow-up and stop.
 ;; For timed questions, load this file in a running graphical Emacs, select
 ;; a timed preset via DSH_E2E_PRESET, then call (dsh-emacs-e2e-run t).
 ;; Keep other answer-capable clients disconnected during this test: a Web
@@ -401,6 +402,125 @@ waterfalls, wait claims, HTTP replies and projections all come from the host."
                      (not approve)))))
         30)))))
 
+(defun dsh-e2e--choose-subagent (chat entry &optional other-window)
+  "Choose ENTRY through CHAT's real minibuffer, optionally in OTHER-WINDOW."
+  (let ((choice (format "%s [%s]" (dsh-emacs-subagent--label entry)
+                        (dsh-protocol-subagent-entry-id entry)))
+        timer)
+    (unwind-protect
+        (with-current-buffer chat
+          (minibuffer-with-setup-hook
+              (lambda ()
+                (insert choice)
+                (setq timer (run-with-timer
+                             0.1 nil #'execute-kbd-macro (kbd "RET"))))
+            (dsh-emacs-list-subagents other-window)))
+      (when (timerp timer) (cancel-timer timer)))))
+
+(defun dsh-e2e--subagents ()
+  "Exercise real delegated children; requires an available model provider."
+  (let ((parent dsh-e2e--session-id)
+        (parent-chat dsh-e2e--chat)
+        children)
+    (unless (display-graphic-p)
+      (error "Subagent E2E requires graphical Emacs for its real minibuffer"))
+    (save-window-excursion
+      (unwind-protect
+          (progn
+            (with-current-buffer parent-chat
+              (dsh-emacs--submit-prompt
+               "Client integration test: delegate exactly two children using your subagent tool. First call: run_in_background=false, label e2e-one-shot, ask it to reply ONE_SHOT_READY without tools. Second call: run_in_background=true, label e2e-continuable, ask it to reply BACKGROUND_READY without tools. Do not read/write files or ask questions. Do not send further messages to the children. Reply PARENT_READY."))
+            (unless (dsh-e2e--wait-until
+                     (lambda ()
+                       (let ((entries (dsh-emacs-subagent--value parent 'subagentCatalog)))
+                         (and (cl-find "one-shot" entries :test #'equal
+                                       :key #'dsh-protocol-subagent-entry-mode)
+                              (cl-find "continuable" entries :test #'equal
+                                       :key #'dsh-protocol-subagent-entry-mode)))) 120)
+              (error "Model did not create both child modes"))
+            (let* ((entries (dsh-emacs-subagent--value parent 'subagentCatalog))
+                   (one (cl-find "one-shot" entries :test #'equal
+                                 :key #'dsh-protocol-subagent-entry-mode))
+                   (continuable (cl-find "continuable" entries :test #'equal
+                                         :key #'dsh-protocol-subagent-entry-mode))
+                   (id (dsh-protocol-subagent-entry-id one)))
+              (dsh-e2e--check
+               "subagent-usage-before-chat-open"
+               (dsh-e2e--wait-until
+                (lambda () (dsh-emacs-subagent--value id 'tokenUsage)) 15))
+              (let* ((cold (dsh-e2e--rpc "session/projections"
+                                         (dsh-protocol-subagent-projections-request id)))
+                     (cells (dsh-protocol-subagent-baseline--from-alist cold))
+                     (identity (cl-find 'subagent cells
+                                        :key #'dsh-protocol-subagent-cell-key)))
+                (dsh-e2e--check "subagent-settled-cold-projections"
+                                (and identity (dsh-protocol-subagent-cell-value identity))))
+              (switch-to-buffer parent-chat)
+              (let ((dsh-emacs-history-window 1)
+                    (departure (point-marker)))
+                (dsh-e2e--choose-subagent parent-chat one)
+                (let ((chat dsh-emacs--current-buffer))
+                  (push chat children)
+                  (unless (dsh-e2e--wait-until
+                           (lambda () (buffer-local-value 'dsh-emacs--event-ready chat)) 15)
+                    (error "Child follow failed"))
+                  (with-current-buffer chat
+                    (dsh-e2e--check "subagent-one-shot-read-only"
+                                    (and buffer-read-only
+                                         (condition-case nil
+                                             (progn (goto-char dsh-emacs--input-marker) (insert "blocked") nil)
+                                           (buffer-read-only t))))
+                    (let ((before dsh-emacs--history-earliest-seq))
+                      (unless dsh-emacs--history-has-more (error "No second child history page"))
+                      (dsh-emacs-load-older-history)
+                      (dsh-e2e--check
+                       "subagent-real-history-second-page"
+                       (dsh-e2e--wait-until
+                        (lambda () (and (not dsh-emacs--history-loading)
+                                        (< dsh-emacs--history-earliest-seq before))) 15))))
+                  (funcall (key-binding (kbd "M-,")))
+                  (dsh-e2e--check "subagent-xref-returns-to-parent-position"
+                                  (and (eq (current-buffer) parent-chat)
+                                       (= (point) (marker-position departure)))
+                                  (format "actual=%s:%s expected=%s:%s"
+                                          (buffer-name) (point)
+                                          (buffer-name parent-chat) (marker-position departure)))
+                  (set-marker departure nil)))
+              (let ((window (selected-window)))
+                (dsh-e2e--choose-subagent parent-chat continuable t)
+                (dsh-e2e--check "subagent-picker-other-window"
+                                (not (eq window (selected-window)))))
+              (let ((chat dsh-emacs--current-buffer))
+                (push chat children)
+                (unless (dsh-e2e--wait-until
+                         (lambda () (and (buffer-local-value 'dsh-emacs--event-ready chat)
+                                         (not (buffer-local-value 'buffer-read-only chat)))) 15)
+                  (error "Continuable child did not become writable"))
+                (with-current-buffer chat
+                  (dsh-emacs--submit-prompt
+                   "Reply with the concatenation of SUBAGENT_ and FOLLOWUP_DONE, nothing else. Do not use tools.")
+                  (dsh-e2e--check
+                   "subagent-real-follow-up-completes"
+                   (dsh-e2e--wait-until
+                    (lambda () (string-match-p "SUBAGENT_FOLLOWUP_DONE" (buffer-string))) 90))
+                  (dsh-emacs--submit-prompt
+                   "Run the bash command sleep 30 and then reply STOP_TEST_DONE. Do not access files.")
+                  (unless (dsh-e2e--wait-until #'dsh-emacs--busy-p 30)
+                    (error "Child never became busy for stop"))
+                  (dsh-emacs-interrupt-turn)
+                  (dsh-e2e--check "subagent-real-stop-settles"
+                                  (dsh-e2e--wait-until (lambda () (not (dsh-emacs--busy-p))) 30)))
+                (with-current-buffer (get-buffer dsh-emacs-sessions-buffer)
+                  (dsh-emacs-events-host-disconnect)
+                  (dsh-e2e--check "subagent-disconnect-closes-input"
+                                  (buffer-local-value 'buffer-read-only chat))
+                  (dsh-emacs-events-host-connect))
+                (dsh-e2e--check "subagent-reconnect-refreshes-parent-gate"
+                                (dsh-e2e--wait-until
+                                 (lambda () (not (buffer-local-value 'buffer-read-only chat))) 20)))))
+        (dolist (chat children)
+          (when (buffer-live-p chat) (kill-buffer chat)))))))
+
 (defun dsh-emacs-e2e-run (&optional questions)
   "Run real-server E2E checks and return (NAME PASSED DETAIL) results.
 With QUESTIONS (interactively, a prefix argument), include timed questions.
@@ -581,6 +701,10 @@ DSH_E2E_PRESET selects the preset; existing chats and connections are preserved.
                            (not (dsh-protocol-plan-pending dsh-emacs--modeline-plan))
                            (null (dsh-emacs-modeline--plan-indicator))))
                     10))
+
+                  (if (equal (getenv "DSH_E2E_SUBAGENTS") "1")
+                      (dsh-e2e--subagents)
+                    (princ "SKIP: subagent delegation (DSH_E2E_SUBAGENTS=1)\n"))
 
                   (let ((dsh-emacs-modeline-format-spec
                          '(:separator " " :segments (tokens))))

@@ -64,6 +64,8 @@
 ;; done here.
 
 ;;; Code:
+(declare-function dsh-emacs-subagent-require "dsh-emacs-subagent"
+                  (action &optional session-id))
 
 (require 'cl-lib)
 (require 'dsh-emacs-protocol)
@@ -206,6 +208,8 @@ admitted command, nil on admission miss (unknown/malformed), OK is
 nil on transport failure (`dsh-emacs--rpc-async' already reported it),
 and ERR is the raw RPC error value on failure (nil otherwise).  Runs
 asynchronously; returns nil."
+
+  (dsh-emacs-subagent-require 'mutate session-id)
   (dsh-emacs--rpc-async
    "commands/execute"
    `((agentId . ,session-id)

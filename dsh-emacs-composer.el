@@ -34,6 +34,10 @@
 ;; position.
 
 ;;; Code:
+(defvar dsh-emacs--buffer-subagent)
+(declare-function dsh-emacs-subagent-input-reason "dsh-emacs-subagent" (address))
+(declare-function dsh-emacs-subagent-require "dsh-emacs-subagent"
+                  (action &optional session-id))
 
 (require 'cl-lib)
 (require 'dsh-emacs-protocol)
@@ -561,11 +565,15 @@ Repeated renders preserve the region when content and width are unchanged."
                       dsh-emacs--composer-goal))
            (next (dsh-emacs-queue-next-item))
            (attachments (dsh-emacs-pending-attachments))
-           (sig (dsh-emacs-composer--sig goal next attachments)))
+           (notice (and (bound-and-true-p dsh-emacs--buffer-subagent)
+                        (dsh-emacs-subagent-input-reason dsh-emacs--buffer-subagent)))
+           (sig (cons notice (dsh-emacs-composer--sig goal next attachments))))
       (unless (and (equal sig dsh-emacs--composer-sig)
-                   (or (not (or goal next attachments))
+                   (or (not (or goal next attachments notice))
                        (dsh-emacs-composer--region)))
         (let ((text (concat
+                     (when notice
+                       (propertize (concat notice "\n") 'face 'dsh-emacs-hint-face))
                      (when goal
                        (propertize
                         (concat (dsh-emacs-composer--render-row goal) "\n")
@@ -653,6 +661,8 @@ Resolves the session id (agentId) and CAS ref from the live goal.  Guards a
 pending in-flight mutation so rapid keys can't double-CAS.  ON-OK (optional)
 receives the parsed result view (clear returns a goal containing only its
 tombstone identity).  Failures surface via `message' and leave the row unchanged."
+
+  (dsh-emacs-subagent-require 'mutate)
   (let* ((session-id (dsh-emacs--active-session-id))
          (goal dsh-emacs--composer-goal))
     (cond

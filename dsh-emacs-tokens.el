@@ -34,6 +34,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'dsh-emacs-protocol)
 
 ;;; ---------------------------------------------------------------------------
 ;;; Number formatting
@@ -221,6 +222,13 @@ field names (strings).  ALIST may also be a vector of (KEY . VALUE) cells."
      ((stringp raw)
       (condition-case nil (string-to-number raw) (error nil)))
      (t nil))))
+
+(defun dsh-emacs-subagent-token-total (usage)
+  "Total decoded cumulative USAGE, including both cache components."
+  (+ (dsh-protocol-token-usage-input usage)
+     (dsh-protocol-token-usage-output usage)
+     (dsh-protocol-token-usage-cache-read usage)
+     (dsh-protocol-token-usage-cache-write usage)))
 
 (provide 'dsh-emacs-tokens)
 

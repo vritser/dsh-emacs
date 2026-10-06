@@ -199,3 +199,18 @@ The branch segment has a 10-second TTL cache
 can trigger a mode-line recomputation about every 80ms, and without caching each
 tick would fork a `git rev-parse` subprocess (~30ms+), which would freeze Emacs;
 the nil result for non-git directories is cached too, so it never respawns.
+
+## Subagents
+
+The child count uses a 1px SVG with a brain above three downward branches,
+inheriting
+`dsh-emacs-modeline-face` like the existing status text. Without SVG support it
+uses `nerd-icons`' `nf-md-source_branch` when available, then `Sub`.
+`Sub3` means three direct children. Only the total is shown; the tooltip
+includes the running count. Mouse-1 opens `dsh-emacs-list-subagents` in the
+minibuffer. `S` remains reserved for steering messages.
+Child chats show their direct parent, label and mode. A child that has
+descendants can also have its own child-count indicator.
+The completion annotations' cumulative token projection includes uncached
+input, output, cache read and cache write; it is independent of this mode line's message-based
+usage accumulator and does not estimate cost.

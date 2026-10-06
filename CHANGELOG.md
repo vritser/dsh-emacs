@@ -10,6 +10,19 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Browse and continue subagent conversations**: `M-x dsh-emacs-list-subagents`
+  selects direct children through minibuffer completion, while `TAB` in the
+  session list expands nested children. Arrows appear only for confirmed
+  children; missing catalogs load on demand. Large lists retain responsive
+  folding, cursor position and return navigation through refreshes and regrouping.
+  `RET` opens a child and `M-,` returns, with history paging and cumulative
+  usage available. Continuable children accept queue/steer input through their
+  live direct parent and can be stopped; one-shot records and unavailable-parent
+  input stay read-only. The mode line shows a muted brain-and-circuit child count
+  (Nerd Font / `Sub` fallback), with running counts in the tooltip. Child lineage
+  remains visible; `S` stays reserved for steering messages.
+  (rationale: postmortem/075, postmortem/076, postmortem/077, postmortem/078)
+
 - **Approval reasons follow your language**: dsh 0.2.0 approval prompts use
   the host's localized reason, following the Emacs message locale by default.
   `dsh-emacs-approval-language` selects a language explicitly; missing

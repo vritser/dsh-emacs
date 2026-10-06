@@ -21,6 +21,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'dsh-emacs-subagent)
 (require 'json)
 (require 'url-parse)
 (require 'dsh-emacs-protocol)
@@ -123,6 +124,9 @@ generation and a new clientId.")
 (defvar dsh-emacs--host-refresh-frames nil
   "Frames (in arrival order) received while a refresh was in flight.")
 
+(defvar dsh-emacs-events--defer-host-repaint nil
+  "Non-nil while applying a whole host baseline before its final repaint.")
+
 ;; `:nowait' network process filters installed as native-compiled subrs are
 ;; never invoked (repeatedly) on some Emacs builds: the socket is read once
 ;; at most, then Emacs stops dispatching to the subr while HTTP/url-retrieve
@@ -159,6 +163,8 @@ generation and a new clientId.")
 ;; own the values.
 (defvar dsh-emacs-base-url)
 (defvar dsh-emacs--buffer-session)
+(defvar dsh-emacs--buffer-subagent)
+(defvar dsh-emacs--subagent-departure)
 ;; Owned by dsh-emacs.el (`defvar-local'); the `userQuestions' projection
 ;; consumer and the late-answer command share it with the result renderer.
 (defvar dsh-emacs--session-questions)
@@ -339,12 +345,7 @@ NEXT is the byte offset following this frame; INPUT is never copied as a tail."
       (when item
         (setf (dsh-protocol-session-title-value item) title)
         (setf (dsh-protocol-session-blank item) nil)))
-    ;; Repaint the session list if it is currently displayed.
-    (when (and (listp dsh-emacs--sessions)
-               dsh-emacs-sessions-buffer
-               (get-buffer dsh-emacs-sessions-buffer))
-      (with-current-buffer (get-buffer dsh-emacs-sessions-buffer)
-        (dsh-emacs-session--render)))
+    (dsh-emacs-events--host-repaint)
     ;; The live chat buffer of that session (if any) renames immediately;
     ;; `dsh-emacs--chat-buffer-sync' also refreshes default-directory.
     (when (and (fboundp 'dsh-emacs--chat-buffer-sync)
@@ -549,8 +550,8 @@ The opening snapshot replaces the local revision and attempt baseline."
                               (process-put process 'dsh-emacs-follow-stream-id id)
                               id)))
              (chat (dsh-emacs-events--chat process))
-             (request `((address . ((kind . "session")
-                                    (sessionId . ,session-id)))
+             (request `((address . ,(dsh-protocol-session-address-json
+                                     session-id (process-get process 'dsh-emacs-follow-address)))
                         (assistantStream . t)))
              (request (if (bound-and-true-p dsh-emacs-history-window)
                           (append request
@@ -793,6 +794,9 @@ opening history tail; no separate history fetch precedes the connect."
                            (text . ,text)))))))))
         (dsh-emacs-events--apply-snapshot-projections
          session-id projections)
+        (when (markerp dsh-emacs--subagent-departure)
+          (xref-push-marker-stack dsh-emacs--subagent-departure)
+          (setq dsh-emacs--subagent-departure nil))
         (setq dsh-emacs--ws-last-event-time (float-time))))))
 
 (defun dsh-emacs-events--apply-snapshot-projections (session-id projections)
@@ -803,6 +807,8 @@ Composer Goal Row, and `userQuestions' the timed-question state behind the
 late-answer command — the same consumers as the `session/control' projection
 increment frames use.  Plan is seeded earlier in `--follow-snapshot', before
 history rendering can yield to live updates."
+  (dsh-emacs-subagent-apply
+   session-id (dsh-protocol-subagent-baseline--from-alist projections))
   (let ((values (and (listp projections)
                      (dsh-emacs-render--aget "values" projections))))
     (when (listp values)
@@ -1122,6 +1128,8 @@ reconnect is re-armed and another connect scheduled."
                ;; handshake completion (see `dsh-emacs-events--follow-open').
                (process-put process 'dsh-emacs-follow-session
                             (buffer-local-value 'dsh-emacs--buffer-session chat))
+               (process-put process 'dsh-emacs-follow-address
+                            dsh-emacs--buffer-subagent)
               (process-put process 'dsh-emacs-event-input "")
               (process-put process 'dsh-emacs-event-ready nil)
               ;; Install the bytecode delegates, not the native subrs directly:
@@ -1206,7 +1214,8 @@ reconnect is re-armed and another connect scheduled."
 
 (defun dsh-emacs-events--host-repaint ()
   "Repaint the session list buffer, if it is live."
-  (when (and (listp dsh-emacs--sessions)
+  (when (and (not dsh-emacs-events--defer-host-repaint)
+             (listp dsh-emacs--sessions)
              dsh-emacs-sessions-buffer
              (get-buffer dsh-emacs-sessions-buffer))
     (with-current-buffer (get-buffer dsh-emacs-sessions-buffer)
@@ -1311,17 +1320,22 @@ Unknown trailing ids (a workspace appearing in the payload before its
   (dsh-emacs-events--host-repaint))
 
 (defun dsh-emacs-events--host-session-added (summary)
-  "Cache a freshly visible session from an `api-session/added' SUMMARY.
-The summary is the `SessionSummary' wire alist (sessionId, running,
-blank, cwd, projections...); the row is only inserted when not already
-cached (a `session/create' callback may have raced ahead).  Workspace
-membership is reported separately by `workspace/follow' frames."
-  (let ((session-id (and (listp summary)
-                         (dsh-emacs-render--aget "sessionId" summary))))
-    (when (and session-id
-               (not (dsh-emacs--chat-session-item session-id)))
-      (push (dsh-protocol-session--from-alist summary)
-            dsh-emacs--sessions)
+  "Merge live facts from SUMMARY without replacing newer projection cells."
+  (let* ((incoming (dsh-protocol-session--from-alist summary))
+         (id (dsh-protocol-session-session-id incoming))
+         (existing (and id (dsh-emacs--chat-session-item id))))
+    (when id
+      (if existing
+          (setf (dsh-protocol-session-running existing)
+                (dsh-protocol-session-running incoming)
+                (dsh-protocol-session-blank existing)
+                (dsh-protocol-session-blank incoming)
+                (dsh-protocol-session-agent-available existing)
+                (dsh-protocol-session-agent-available incoming)
+                (dsh-protocol-session-updated-at existing)
+                (dsh-protocol-session-updated-at incoming))
+        (push incoming dsh-emacs--sessions))
+      (dsh-emacs-subagent-summary-changed id)
       (dsh-emacs-events--host-repaint))))
 
 (defun dsh-emacs-events--host-session-removed (session-id)
@@ -1332,6 +1346,7 @@ membership is reported separately by `workspace/follow' frames."
            (not (equal session-id
                        (dsh-protocol-session-session-id s))))
          dsh-emacs--sessions))
+  (dsh-emacs-subagent-summary-changed session-id)
   (dsh-emacs-events--host-repaint))
 
 (defun dsh-emacs-events--host-session-status (session-id running)
@@ -1340,6 +1355,7 @@ membership is reported separately by `workspace/follow' frames."
     (when item
       (setf (dsh-protocol-session-running item)
             (dsh-protocol--boolean running))))
+  (dsh-emacs-subagent-summary-changed session-id t)
   (dsh-emacs-events--host-repaint))
 
 (defun dsh-emacs-events--host-dispatch (process json)
@@ -1400,6 +1416,9 @@ retires a pending waterfall by `eventId'."
           ((or 'plan "plan") (dsh-protocol-plan-update--from-alist value))
           ((or 'userQuestions "userQuestions")
            (dsh-protocol-user-questions-update--from-alist value))
+          ((or 'subagentCatalog "subagentCatalog" 'subagent "subagent"
+               'subagentTiming "subagentTiming" 'tokenUsage "tokenUsage")
+           (dsh-protocol-subagent-cell--from-alist value))
           (_ (dsh-emacs-render--aget "value" value))))))
     ("upsert"
      (let ((ws (dsh-emacs-render--aget "workspace" value)))
@@ -1539,33 +1558,41 @@ VALUE carries this generation's whole-host `projections' record
 also carried `queues' and `jobs' records; 0.1.7 removed both, so the
 queue mirror is seeded by the same record's `inbox' cell, which
 `dsh-emacs-events--host-apply-projection' handles."
-  (let ((projections (dsh-emacs-render--aget "projections" value)))
-    (dolist (pair (if (vectorp projections) (append projections nil)
-                    (and (listp projections) projections)))
-      (when (and (listp pair) (cdr pair))
-        ;; JSON object keys decode as symbols; session ids elsewhere (and
-        ;; the chat-buffer table's keys) are strings, like incremental frames.
-        (let* ((sid (if (symbolp (car pair))
-                        (symbol-name (car pair))
-                      (car pair)))
-               (baseline (cdr pair))
-               (values (dsh-emacs-render--aget "values" baseline)))
-          ;; Carry cuts even for absent Plan/question capabilities, so an old
-          ;; reconnect baseline cannot erase a newer control increment.
-          (dsh-emacs-events--host-apply-projection
-           process sid "plan" (dsh-protocol-plan-baseline--from-alist baseline))
-          (dsh-emacs-events--host-apply-projection
-           process sid "userQuestions"
-           (dsh-protocol-user-questions-baseline--from-alist baseline))
-          (dolist (kv (if (vectorp values) (append values nil)
-                        (and (listp values) values)))
-            ;; Projection values may legitimately be nil: `(goal . nil)' is
-            ;; the authoritative tombstone that removes the Composer row.
-            (when (and (consp kv)
-                       (not (member (car kv)
-                                    '(plan "plan" userQuestions "userQuestions"))))
-              (dsh-emacs-events--host-apply-projection
-               process sid (car kv) (cdr kv)))))))))
+  ;; Updating each title/catalog separately used to repaint the entire list
+  ;; twice per session inside the process filter, starving input on large hosts.
+  (let ((dsh-emacs-events--defer-host-repaint t))
+    (when (and (processp process) (not dsh-emacs--subagent-host-live))
+      (dsh-emacs-subagent-host-reset t))
+    (let ((projections (dsh-emacs-render--aget "projections" value)))
+      (dolist (pair (if (vectorp projections) (append projections nil)
+                      (and (listp projections) projections)))
+        (when (and (listp pair) (cdr pair))
+          ;; JSON object keys decode as symbols; session ids elsewhere (and
+          ;; the chat-buffer table's keys) are strings, like incremental frames.
+          (let* ((sid (if (symbolp (car pair))
+                          (symbol-name (car pair))
+                        (car pair)))
+                 (baseline (cdr pair))
+                 (values (dsh-emacs-render--aget "values" baseline)))
+            (dsh-emacs-subagent-apply
+             sid (dsh-protocol-subagent-baseline--from-alist baseline))
+            ;; Carry cuts even for absent Plan/question capabilities, so an old
+            ;; reconnect baseline cannot erase a newer control increment.
+            (dsh-emacs-events--host-apply-projection
+             process sid "plan" (dsh-protocol-plan-baseline--from-alist baseline))
+            (dsh-emacs-events--host-apply-projection
+             process sid "userQuestions"
+             (dsh-protocol-user-questions-baseline--from-alist baseline))
+            (dolist (kv (if (vectorp values) (append values nil)
+                          (and (listp values) values)))
+              ;; Projection values may legitimately be nil: `(goal . nil)' is
+              ;; the authoritative tombstone that removes the Composer row.
+              (when (and (consp kv)
+                         (not (member (car kv)
+                                      '(plan "plan" userQuestions "userQuestions"))))
+                (dsh-emacs-events--host-apply-projection
+                 process sid (car kv) (cdr kv)))))))))
+  (dsh-emacs-events--host-repaint))
 
 (defun dsh-emacs-events--host-apply-projection (process session-id key value)
   "Apply one projection cell (KEY . VALUE) of SESSION-ID arriving on PROCESS.
@@ -1579,6 +1606,9 @@ with no live chat buffer are dropped, never applied to whichever buffer
 happens to be current.  Other branches reach their consumers themselves."
   (when session-id
     (pcase (if (symbolp key) (symbol-name key) key)
+      ((or "subagentCatalog" "subagent" "subagentTiming" "tokenUsage")
+       (when (dsh-protocol-subagent-cell-p value)
+         (dsh-emacs-subagent-apply session-id (list value))))
       ("contextPressure"
        (when (listp value)
          (dsh-emacs--events-apply-context-projection session-id value)))
@@ -1649,6 +1679,7 @@ mode-line state."
       (with-current-buffer buffer
         (setq dsh-emacs--host-process nil
               dsh-emacs--host-ready nil)
+        (dsh-emacs-subagent-host-reset)
         (dsh-emacs-plan--cancel)
         (unless (timerp dsh-emacs--host-reconnect-timer)
           (setq dsh-emacs--host-reconnect-timer
@@ -1794,6 +1825,7 @@ was sent."
     ;; reconnect for an intentional teardown.
     (setq dsh-emacs--host-process nil
           dsh-emacs--host-ready nil)
+    (when process (dsh-emacs-subagent-host-reset))
     (dsh-emacs-plan--cancel)
     (when (process-live-p process)
       (delete-process process))))

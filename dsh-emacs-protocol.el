@@ -127,6 +127,10 @@ struct never hands a caller `:json-false'."
                                           (v (and p (cdr (assq 'values p)))))
                                      (and v (cdr (assq 'agentPreset v))))
                                    (cdr (assq 'agentPreset alist))))
+                              (agent-available
+                               (when (assq 'agentAvailable alist)
+                                 (if (eq t (cdr (assq 'agentAvailable alist)))
+                                     t :unavailable)))
                               (updated-at (cdr (assq 'updatedAt alist)))
                               (blank (dsh-protocol--boolean
                                       (cdr (assq 'blank alist))))
@@ -198,6 +202,7 @@ struct never hands a caller `:json-false'."
   updated-at
   blank
   running
+  agent-available
   origin
   parent-session-id
   title-value
@@ -1214,6 +1219,111 @@ alist; CONSTRUCTOR converts the wire alist."
                    (dsh-protocol--field 'event record)))
                 (dsh-protocol--objects
                  (dsh-protocol--field 'records snapshot)))))
+
+;;; Subagent wire boundaries.
+(cl-defstruct (dsh-protocol-subagent-address
+               (:constructor dsh-protocol-subagent-address-create
+                             (parent child mode)))
+  parent child mode)
+
+(cl-defstruct (dsh-protocol-subagent-entry
+               (:constructor dsh-protocol-subagent-entry--from-alist
+                             (alist &aux
+                                    (id (cdr (assq 'id alist)))
+                                    (mode (or (cdr (assq 'mode alist)) "unknown"))
+                                    (label (cdr (assq 'label alist)))
+                                    (created-at (cdr (assq 'createdAt alist))))))
+  id mode label created-at)
+
+(cl-defstruct (dsh-protocol-subagent-identity
+               (:constructor dsh-protocol-subagent-identity--from-alist
+                             (alist &aux
+                                    (mode (cdr (assq 'mode alist)))
+                                    (label (cdr (assq 'label alist)))
+                                    (seq (cdr (assq 'seq alist))))))
+  mode label seq)
+
+(cl-defstruct (dsh-protocol-subagent-timing
+               (:constructor dsh-protocol-subagent-timing--from-alist
+                             (alist &aux
+                                    (settled-ms (or (cdr (assq 'settledMs alist)) 0))
+                                    (active-since (cdr (assq 'since (cdr (assq 'active alist)))))
+                                    (active-through (cdr (assq 'through (cdr (assq 'active alist)))))
+                                    (completed (eq t (cdr (assq 'lastTurnCompleted alist)))))))
+  settled-ms active-since active-through completed)
+
+(cl-defstruct (dsh-protocol-token-usage
+               (:constructor dsh-protocol-token-usage--from-alist
+                             (alist &aux
+                                    (input (or (cdr (assq 'uncachedInputTokens alist)) 0))
+                                    (output (or (cdr (assq 'outputTokens alist)) 0))
+                                    (cache-read (or (cdr (assq 'cacheReadTokens alist)) 0))
+                                    (cache-write (or (cdr (assq 'cacheWriteTokens alist)) 0)))))
+  input output cache-read cache-write)
+
+(cl-defstruct (dsh-protocol-subagent-cell
+               (:constructor dsh-protocol-subagent-cell--from-alist
+                             (alist &aux
+                                    (key (intern (format "%s" (cdr (assq 'key alist)))))
+                                    (seq (or (cdr (assq 'seq alist)) -1))
+                                    (present (if (assq 'present alist)
+                                                 (cdr (assq 'present alist)) t))
+                                    (value
+                                     (let ((raw (cdr (assq 'value alist))))
+                                       (pcase key
+                                         ('subagentCatalog
+                                          (mapcar #'dsh-protocol-subagent-entry--from-alist
+                                                  (dsh-protocol--list raw)))
+                                         ('subagent (and raw (dsh-protocol-subagent-identity--from-alist raw)))
+                                         ('subagentTiming (and raw (dsh-protocol-subagent-timing--from-alist raw)))
+                                         ('tokenUsage (and raw (dsh-protocol-token-usage--from-alist raw)))))))))
+  key seq present value)
+
+(defun dsh-protocol-subagent-baseline--from-alist (alist)
+  "Decode ALIST into sequenced cells, retaining absence watermarks."
+  (let ((values (cdr (assq 'values alist)))
+        (seq (or (cdr (assq 'asOfSeq alist)) -1)))
+    (mapcar
+     (lambda (key)
+       (let ((entry (assq key values)))
+         (dsh-protocol-subagent-cell--from-alist
+          `((key . ,key) (seq . ,seq) (present . ,(and entry t))
+            (value . ,(cdr entry))))))
+     '(subagentCatalog subagent subagentTiming tokenUsage))))
+
+(defun dsh-protocol-session-address-json (session-id &optional address)
+  "Serialize SESSION-ID or its durable subagent ADDRESS."
+  (if address
+      `((kind . "subagent")
+        (parentSessionId . ,(dsh-protocol-subagent-address-parent address))
+        (childSessionId . ,(dsh-protocol-subagent-address-child address))
+        (mode . ,(dsh-protocol-subagent-address-mode address)))
+    `((kind . "session") (sessionId . ,session-id))))
+
+(defun dsh-protocol-subagent-projections-request (session-id)
+  "Cold-read request for SESSION-ID."
+  `((request . ((sessionId . ,session-id)))))
+
+(defun dsh-protocol-subagent-prompt-request (address id delivery text zone)
+  "Serialize ADDRESS, caller ID, DELIVERY, TEXT and ZONE for follow-up."
+  `((request . ((requestId . ,id)
+                (parentSessionId . ,(dsh-protocol-subagent-address-parent address))
+                (childSessionId . ,(dsh-protocol-subagent-address-child address))
+                (mode . ,(dsh-protocol-subagent-address-mode address))
+                (delivery . ,delivery)
+                (content . [((type . "text") (text . ,text))])
+                (clientTimeZone . ,zone)))))
+
+(defun dsh-protocol-subagent-stop-request (address)
+  "Serialize the direct-parent stop ADDRESS."
+  `((parentSessionId . ,(dsh-protocol-subagent-address-parent address))
+    (childSessionId . ,(dsh-protocol-subagent-address-child address))
+    (mode . ,(dsh-protocol-subagent-address-mode address))))
+
+(defun dsh-protocol-session-list--from-alist (alist)
+  "Decode the session list ALIST."
+  (mapcar #'dsh-protocol-session--from-alist
+          (dsh-protocol--list (cdr (assq 'items alist)))))
 
 (provide 'dsh-emacs-protocol)
 

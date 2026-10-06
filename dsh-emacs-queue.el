@@ -35,6 +35,9 @@
 ;;     row above the input; this module owns selection and transient gating.
 
 ;;; Code:
+(defvar dsh-emacs--buffer-subagent)
+(declare-function dsh-emacs-subagent-require "dsh-emacs-subagent"
+                  (action &optional session-id))
 
 (require 'cl-lib)
 (require 'dsh-emacs-protocol)
@@ -436,6 +439,8 @@ confirmed by the following `session/control' `inbox' projection frame;
 ON-SUCCESS is where this client applies our own actions OPTIMISTICALLY,
 so steer / delete / edit update the next-preview hint and the mode-line
 the instant the RPC succeeds, without waiting for the frame round-trip."
+
+  (dsh-emacs-subagent-require 'mutate)
   (let ((session-id (dsh-emacs-queue--session-id))
         (buf (current-buffer)))
     (dsh-emacs--rpc-async
@@ -739,7 +744,7 @@ setup value."
   (use-local-map (dsh-emacs-queue--chooser-keymap))
   nil)
 
-(defun dsh-emacs-list-queue ()
+(cl-defun dsh-emacs-list-queue ()
   "Manage this session's pending queue (minibuffer menu).
 Opens the queue as a candidate list (`[Q]' queued, `[S]' steering;
 vertico/icomplete up/down moves) and acts on the picked entry with the
@@ -751,6 +756,12 @@ it wakes the queue drain).  One `C-g' cancels.  Keys and RPCs run back
 in the chat buffer the menu was opened from.  Host-injected `context'
 items are never shown or acted on."
   (interactive)
+  (when (bound-and-true-p dsh-emacs--buffer-subagent)
+    (with-help-window "*DSH Subagent Queue*"
+      (princ "Subagent queue (read-only)\n\n")
+      (dolist (item (dsh-emacs-queue-items))
+        (princ (concat (dsh-protocol-queue-item-text item) "\n"))))
+    (cl-return-from dsh-emacs-list-queue))
   (dsh-emacs-queue--session-id)
   ;; A single C-g exits everything (menu, edit, delete-all confirmation),
   ;; leaving no half-open minibuffer.

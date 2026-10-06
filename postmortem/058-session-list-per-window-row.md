@@ -1,5 +1,8 @@
 # 058 — Session list keeps one row per window
 
+Erase-and-rebuild rendering superseded by [077](077-session-list-subagents.md).
+Per-window row identity and viewport restoration remain in use.
+
 ## Background
 
 The session list (`*dsh-sessions*`) is a single buffer that a user can show

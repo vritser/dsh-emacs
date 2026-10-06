@@ -14,6 +14,7 @@ dsh-emacs/
 ├── dsh-emacs-events.el       # Event stream: native WebSocket + reconnect
 ├── dsh-emacs-modeline.el     # Mode-line stats
 ├── dsh-emacs-queue.el        # Pending-input queue mirror (queue/steer)
+├── dsh-emacs-subagent.el     # Durable child catalogs, completion, availability and navigation
 ├── dsh-emacs-jobs.el         # Background jobs: job/list + job/follow streams, stop
 ├── dsh-emacs-plan.el         # Plan documents, asynchronous review and decisions
 ├── dsh-emacs-server.el       # Server bootstrap: probe / auto-start / install / browser-session auth
@@ -927,3 +928,36 @@ layout and clipboard; it never exits Emacs. It returns `(NAME PASSED DETAIL)`
 records, and reports failures instead of counting an unavailable timed preset
 or model as a skip. Deterministic unit tests cover deliberately reordered
 snapshots and concurrent prompt exits; the E2E suite exercises live delivery.
+
+## Subagent conversations
+
+`dsh-emacs-subagent.el` owns the host-wide four-cell projection store, per-cell
+sequence cuts, cold-read retries and minibuffer child selection. Protocol
+constructors normalize identity/catalog/timing and cumulative token usage; token arithmetic
+stays in `dsh-emacs-tokens.el`. The event layer feeds control deltas/baselines
+and follow snapshots, and merges summary facts without replacing projection
+hints. Availability is true / explicitly unavailable / unknown; disconnect
+invalidates it and a generation-checked summary read restores it.
+
+Each child chat carries its direct-parent address. Follow, paging, prompt and
+stop serialize that address in the protocol module. The entry point owns input
+read-only presentation and command guards; Composer renders its reason. Cold
+reads use a host-owned callback buffer so closing the originating chat cannot
+strand requests. The picker reads a missing root catalog at command time and
+uses standard completion with status/metric annotations. The existing session
+list owns buffer-local child expansion, indented rows and ancestor reveal.
+Rows carry the same direct-parent catalog entry used by the picker. Rendering
+reads cached state; expansion requests missing catalogs and projection changes
+repaint the list. Existing row identities preserve focus and viewport position.
+The list renders into a temporary buffer, deletes rows that are no longer visible,
+moves surviving rows by identity with
+`transpose-regions`, and diffs only individual changed lines. This preserves
+xref departure markers even when workspaces reorder, without a whole-list diff.
+It reapplies all row properties afterward because matching text may otherwise
+retain an old child's address. Unknown and empty catalogs have no disclosure
+arrow; only confirmed children display one.
+There is no separate browser mode or display timer. Xref owns return history to the actual
+originating chat position. See [decision record 075](../postmortem/075-subagent-conversations.md)
+and navigation revisions [076](../postmortem/076-subagent-minibuffer.md) and
+[077](../postmortem/077-session-list-subagents.md), with row update rationale in
+[078](../postmortem/078-session-list-row-updates.md).

@@ -7291,7 +7291,7 @@ Lets a test drive a malformed content value through the result path."
 ;; --- Test 51b: session list workspace collapse survives redraw ---
 (dsh-test-assert "workspace-fold-tab-keybinding"
   (eq (lookup-key dsh-emacs-session-mode-map (kbd "TAB"))
-      #'dsh-emacs-session-toggle-workspace))
+      #'dsh-emacs-session-toggle))
 
 (let* ((sessions (dsh-emacs-test--session-items
                   (list (list (cons 'sessionId "s1") (cons 'updatedAt 100)
@@ -23780,6 +23780,725 @@ messages (e.g. `command/done')."
         (null dsh-emacs--approval-active)
         (null dsh-emacs--question-queue)
         (null dsh-emacs--approval-queue)))))
+
+;; A repeated summary updates live facts without discarding projection cells.
+(let* ((item (dsh-protocol-session--from-alist
+              '((sessionId . "subagent-parent") (running . :json-false)
+                (projections . ((values . ((title . "New control title")
+                                           (contextPressure . ((pressureTokens . 42)
+                                                               (contextWindow . 100))))))))))
+       (dsh-emacs--sessions (list item)))
+  (cl-letf (((symbol-function 'dsh-emacs-events--host-repaint) #'ignore))
+    (dsh-emacs-events--host-session-added
+     '((sessionId . "subagent-parent") (running . t) (agentAvailable . t)
+       (updatedAt . 73) (projections . ((values . ((title . "Old hint"))))))))
+  (dsh-test-assert "subagent-summary-upsert-preserves-projections"
+                   (dsh-protocol-session-running item)
+                   (equal (dsh-protocol-session-title-value item) "New control title")
+                   (= (dsh-protocol-session-context-pressure item) 42)))
+
+;; Subagent protocol, store and capability contracts.
+(let ((unknown (dsh-protocol-session--from-alist '((sessionId . "p"))))
+      (offline (dsh-protocol-session--from-alist '((agentAvailable . :json-false))))
+      (online (dsh-protocol-session--from-alist '((agentAvailable . t)))))
+  (dsh-test-assert "subagent-availability-three-states"
+                   (null (dsh-protocol-session-agent-available unknown))
+                   (eq :unavailable (dsh-protocol-session-agent-available offline))
+                   (eq t (dsh-protocol-session-agent-available online))))
+
+(let* ((usage (dsh-protocol-token-usage--from-alist
+               '((uncachedInputTokens . 13) (outputTokens . 7)
+                 (cacheReadTokens . 101) (cacheWriteTokens . 3))))
+       (address (dsh-protocol-subagent-address-create "direct" "grandchild" "continuable"))
+       (follow (dsh-protocol-session-address-json "grandchild" address))
+       (prompt (cdr (assq 'request (dsh-protocol-subagent-prompt-request
+                                    address "req" "steer" "hello" "UTC")))))
+  (dsh-test-assert "subagent-cumulative-token-contract"
+                   (= (dsh-protocol-token-usage-input usage) 13)
+                   (= (dsh-emacs-subagent-token-total usage) 124))
+  (dsh-test-assert "subagent-direct-parent-address"
+                   (equal (cdr (assq 'parentSessionId follow)) "direct")
+                   (equal (cdr (assq 'childSessionId follow)) "grandchild")
+                   (equal (cdr (assq 'kind follow)) "subagent")
+                   (equal (dsh-protocol-session-address-json "ordinary")
+                          '((kind . "session") (sessionId . "ordinary"))))
+  (dsh-test-assert "subagent-prompt-fields"
+                   (equal prompt '((requestId . "req") (parentSessionId . "direct")
+                                   (childSessionId . "grandchild") (mode . "continuable")
+                                   (delivery . "steer")
+                                   (content . [((type . "text") (text . "hello"))])
+                                   (clientTimeZone . "UTC")))
+                   (equal (dsh-protocol-subagent-stop-request address)
+                          '((parentSessionId . "direct") (childSessionId . "grandchild")
+                            (mode . "continuable")))))
+
+(let ((dsh-emacs--subagent-catalogs (make-hash-table :test #'equal)))
+  (cl-letf (((symbol-function 'dsh-emacs-subagent--changed) #'ignore))
+    (dsh-emacs-subagent-apply
+     "child" (dsh-protocol-subagent-baseline--from-alist
+              '((asOfSeq . 5) (values (subagentCatalog . [])
+                                      (tokenUsage (uncachedInputTokens . 10) (outputTokens . 2))))))
+    (dsh-emacs-subagent-apply
+     "child" (list (dsh-protocol-subagent-cell--from-alist
+                    '((key . "tokenUsage") (seq . 9)
+                      (value (uncachedInputTokens . 20) (outputTokens . 4))))))
+    (dsh-emacs-subagent-apply
+     "child" (dsh-protocol-subagent-baseline--from-alist
+              '((asOfSeq . 7) (values (tokenUsage (uncachedInputTokens . 999))))))
+    (dsh-test-assert "subagent-cells-ignore-stale-cold-read-without-chat"
+                     (= (dsh-emacs-subagent-token-total
+                         (dsh-emacs-subagent--value "child" 'tokenUsage)) 24)
+                     (eq 'ready (plist-get (gethash "child" dsh-emacs--subagent-catalogs) :state)))
+    (let (callbacks (requests 0))
+      (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (_method _args callback)
+                   (cl-incf requests) (push callback callbacks))))
+        (dsh-emacs-subagent-refresh "cold")
+        (dsh-emacs-subagent-apply
+         "cold" (dsh-protocol-subagent-baseline--from-alist
+                 '((asOfSeq . 3) (values (subagentCatalog . [])))))
+        (dsh-emacs-subagent-refresh "cold")
+        (dsh-test-assert "subagent-cold-read-deduplicated-after-live-update"
+                         (= requests 1)
+                         (eq 'loading (plist-get (gethash "cold" dsh-emacs--subagent-catalogs) :state)))
+        (funcall (pop callbacks) nil '((message . "unavailable")))
+        (dsh-test-assert "subagent-cold-error-visible"
+                         (eq 'error (plist-get (gethash "cold" dsh-emacs--subagent-catalogs) :state)))
+        (dsh-emacs-subagent-refresh "cold")
+        (funcall (pop callbacks) t '((asOfSeq . 8) (values (subagentCatalog . []))))
+        (dsh-test-assert "subagent-cold-retry-ready-empty"
+                         (= requests 2)
+                         (eq 'ready (plist-get (gethash "cold" dsh-emacs--subagent-catalogs) :state))
+                         (dsh-protocol-subagent-cell-present
+                          (dsh-emacs-subagent--cell "cold" 'subagentCatalog)))))))
+
+(let* ((parent (dsh-protocol-session--from-alist
+                '((sessionId . "p") (agentAvailable . t) (running . :json-false))))
+       (dsh-emacs--sessions (list parent))
+       (dsh-emacs--subagent-host-live t)
+       (dsh-emacs--subagent-catalogs (make-hash-table :test #'equal))
+       (address (dsh-protocol-subagent-address-create "p" "c" "continuable")))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (setq dsh-emacs--buffer-subagent address)
+    (dsh-emacs--subagent-input-update)
+    (dsh-test-assert "subagent-idle-parent-allows-input" (not buffer-read-only))
+    (setf (dsh-protocol-session-agent-available parent) :unavailable)
+    (dsh-emacs--subagent-input-update)
+    (dsh-test-assert "subagent-offline-parent-locks-input" buffer-read-only
+                     (string-match-p "unavailable" (buffer-string)))
+    (dsh-test-assert "subagent-read-only-insertion-boundary"
+                     (condition-case nil (progn (goto-char dsh-emacs--input-marker) (insert "no") nil)
+                       (buffer-read-only t)))
+    (let (calls)
+      (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (&rest args) (push args calls))))
+        (dolist (fn '(dsh-emacs-select-model dsh-emacs-set-permission
+                                             dsh-emacs-answer-question dsh-emacs-attach-clipboard-image))
+          (dsh-test-assert (format "subagent-local-refusal-%s" fn)
+                           (condition-case nil (progn (funcall fn) nil) (user-error t))))
+        (dsh-test-assert "subagent-deferred-refuses-before-rpc"
+                         (condition-case nil (progn (dsh-emacs--submit-deferred "test" nil 'queue) nil)
+                           (user-error t))
+                         (null calls))))
+    (setf (dsh-protocol-session-agent-available parent) t)
+    (dsh-emacs--subagent-input-update)
+    (dsh-test-assert "subagent-reactivation-unlocks-input" (not buffer-read-only))
+    (let (method request)
+      (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (m p _callback) (setq method m request p))))
+        (dsh-emacs--submit-prompt "follow up" nil 'steer))
+      (dsh-test-assert "subagent-submit-routes-to-parent-not-session"
+                       (equal method "subagents/prompt")
+                       (equal (cdr (assq 'parentSessionId (cdr (assq 'request request)))) "p")
+                       (equal (cdr (assq 'delivery (cdr (assq 'request request)))) "steer")))
+    (setq dsh-emacs--subagent-host-live nil)
+    (dsh-emacs--subagent-input-update)
+    (dsh-test-assert "subagent-disconnected-input-closed" buffer-read-only)))
+
+(with-temp-buffer
+  (let ((dsh-emacs--sessions nil))
+    (dsh-emacs-mode)
+    (setq dsh-emacs--buffer-session "child"
+          dsh-emacs--buffer-subagent
+          (dsh-protocol-subagent-address-create "direct" "child" "one-shot")
+          dsh-emacs--history-earliest-seq 10
+          dsh-emacs--history-cursor 40
+          dsh-emacs--history-has-more t)
+    (let (method request)
+      (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (m p _callback) (setq method m request p))))
+        (dsh-emacs-load-older-history))
+      (let* ((args (cdr (assq 'request request)))
+             (address (cdr (assq 'address args))))
+        (dsh-test-assert "subagent-older-page-uses-durable-address"
+                         (equal method "session/page")
+                         (equal (cdr (assq 'parentSessionId address)) "direct")
+                         (equal (cdr (assq 'kind address)) "subagent")
+                         (= (cdr (assq 'throughSeq args)) 40)
+                         (= (cdr (assq 'beforeSeq args)) 10))))))
+
+(let ((dsh-emacs--subagent-catalogs (make-hash-table :test #'equal))
+      (dsh-emacs--sessions nil)
+      (dsh-emacs--subagent-host-live nil)
+      opened reads)
+  (cl-letf (((symbol-function 'dsh-emacs-subagent--changed) #'ignore)
+            ((symbol-function 'dsh-emacs--rpc-request)
+             (lambda (method args)
+               (push (cons method args) reads)
+               '(t (asOfSeq . 1)
+                   (values (subagentCatalog . [((id . "a") (mode . "one-shot") (label . "Same"))
+                                               ((id . "b") (mode . "continuable") (label . "Same"))])))))
+            ((symbol-function 'dsh-emacs-subagent-refresh) #'ignore)
+            ((symbol-function 'dsh-emacs-open-subagent)
+             (lambda (parent entry &optional other-window)
+               (setq opened (list parent (dsh-protocol-subagent-entry-id entry) other-window))))
+            ((symbol-function 'completing-read)
+             (lambda (_prompt table &rest _args)
+               (let ((candidates (all-completions "" table)))
+                 (dsh-test-assert "subagent-picker-distinguishes-duplicate-labels"
+                                  (equal candidates '("Same [a]" "Same [b]")))
+                 (dsh-test-assert "subagent-picker-annotation-shows-mode-and-activity"
+                                  (equal (funcall (plist-get completion-extra-properties :annotation-function)
+                                                  "Same [b]")
+                                         "  continuable  unknown"))
+                 "Same [b]"))))
+    (with-temp-buffer
+      (setq-local dsh-emacs--buffer-session "direct-parent")
+      (let ((before (buffer-list)))
+        (dsh-emacs-list-subagents t)
+        (dsh-test-assert "subagent-picker-opens-direct-child-without-browser"
+                         (equal opened '("direct-parent" "b" t))
+                         (equal before (buffer-list))
+                         (= (length reads) 1)
+                         (equal (caar reads) "session/projections")))
+      (dsh-emacs-list-subagents)
+      (dsh-test-assert "subagent-picker-reuses-catalog" (= (length reads) 1))
+      (setq opened nil)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) (signal 'quit nil))))
+        (condition-case nil (dsh-emacs-list-subagents) (quit nil)))
+      (dsh-test-assert "subagent-picker-cancel-does-not-navigate" (null opened))
+      (setq-local dsh-emacs--buffer-session "b")
+      (cl-letf (((symbol-function 'dsh-emacs--rpc-request)
+                 (lambda (&rest _)
+                   '(t (asOfSeq . 1)
+                       (values (subagentCatalog . [((id . "grandchild")
+                                                    (mode . "one-shot")
+                                                    (label . "Nested"))])))))
+                ((symbol-function 'completing-read)
+                 (lambda (_prompt table &rest _args)
+                   (dsh-test-assert "subagent-picker-lists-only-current-parents-children"
+                                    (equal (all-completions "" table) '("Nested [grandchild]")))
+                   "Nested [grandchild]")))
+        (dsh-emacs-list-subagents))
+      (dsh-test-assert "subagent-picker-nested-child-keeps-direct-parent"
+                       (equal opened '("b" "grandchild" nil))))))
+
+(let ((dsh-emacs--subagent-catalogs (make-hash-table :test #'equal))
+      (dsh-emacs--subagent-host-live nil))
+  (with-temp-buffer
+    (setq-local dsh-emacs--buffer-session "unread")
+    (cl-letf (((symbol-function 'dsh-emacs--rpc-request)
+               (lambda (&rest _) '(nil (message . "cold failed")))))
+      (dsh-test-assert "subagent-picker-cold-error-is-not-empty-catalog"
+                       (condition-case err (progn (dsh-emacs-list-subagents) nil)
+                         (user-error (string-match-p "cold failed" (error-message-string err))))))
+    (cl-letf (((symbol-function 'dsh-emacs--rpc-request)
+               (lambda (&rest _) '(t (asOfSeq . 1) (values (subagentCatalog . []))))))
+      (dsh-test-assert "subagent-picker-empty-catalog-reports-no-children"
+                       (condition-case err (progn (dsh-emacs-list-subagents) nil)
+                         (user-error (string-match-p "No subagents" (error-message-string err))))))))
+
+;; Reordering workspaces must not diff the entire list or lose xref markers.
+(let* ((dsh-emacs--sessions
+        (cl-loop for i below 20 collect
+                 (dsh-protocol-session--from-alist
+                  `((sessionId . ,(format "row-%d" i))
+                    (updatedAt . ,i)
+                    (projections (values (title . ,(format "会话 %d" i))))))))
+       (dsh-emacs--workspaces
+        (cl-loop for w below 4 collect
+                 (dsh-protocol-workspace--from-alist
+                  `((workspaceId . ,(format "workspace-%d" w))
+                    (title . ,(format "Workspace %d" w))
+                    (sessionIds . ,(vconcat
+                                    (cl-loop for i from (* w 5) below (* (1+ w) 5)
+                                             collect (format "row-%d" i))))))))
+       (dsh-emacs--subagent-catalogs (make-hash-table :test #'equal))
+       (dsh-emacs--archived-sessions nil)
+       (dsh-emacs--current-session nil)
+       (diff (symbol-function 'replace-buffer-contents))
+       (largest-diff 0))
+  (with-temp-buffer
+    (setq-local dsh-emacs-session--workspace-fold-default nil)
+    (dsh-emacs-session--render)
+    (dsh-test-assert "session-unknown-catalog-has-no-disclosure"
+                     (not (string-match-p "[▸▾] .*会话" (buffer-string))))
+    (let ((first (copy-marker (dsh-emacs-session--row-pos
+                              'dsh-emacs-session-id "row-3")))
+          (last (copy-marker (+ 8 (dsh-emacs-session--row-pos
+                                  'dsh-emacs-session-id "row-17")))))
+      (setq dsh-emacs--workspaces (reverse dsh-emacs--workspaces))
+      (setf (dsh-protocol-session-title-value (nth 9 dsh-emacs--sessions))
+            "Changed title")
+      (cl-letf (((symbol-function 'replace-buffer-contents)
+                 (lambda (&rest args)
+                   (setq largest-diff (max largest-diff (- (point-max) (point-min))))
+                   (apply diff args))))
+        (dsh-emacs-session--render))
+      (dsh-test-assert "session-regroup-only-diffs-individual-rows"
+                       (< largest-diff 150))
+      (dsh-test-assert "session-regroup-preserves-xref-row-identities"
+                       (equal (get-text-property first 'dsh-emacs-session-id) "row-3")
+                       (equal (get-text-property last 'dsh-emacs-session-id) "row-17")
+                       (< last first))
+      (dsh-test-assert "session-regroup-updates-title-and-workspace-order"
+                       (string-match-p "Changed title" (buffer-string))
+                       (< (dsh-emacs-session--row-pos
+                           'dsh-emacs-workspace-group-id "workspace-3")
+                          (dsh-emacs-session--row-pos
+                           'dsh-emacs-workspace-group-id "workspace-0")))
+      ;; A new row inserted exactly at a departure marker must move that
+      ;; marker along with the original row, even with insertion type nil.
+      (push (dsh-protocol-session--from-alist
+             '((sessionId . "inserted") (updatedAt . 3.5)
+               (projections (values (title . "Inserted")))))
+            dsh-emacs--sessions)
+      (push "inserted" (dsh-protocol-workspace-session-ids
+                        (car (last dsh-emacs--workspaces))))
+      (dsh-emacs-session--render)
+      (dsh-test-assert "session-insert-before-departure-keeps-original-row"
+                       (equal (get-text-property first 'dsh-emacs-session-id) "row-3"))
+      (let ((transpose (symbol-function 'transpose-regions))
+            (moves 0))
+        (goto-char (dsh-emacs-session--row-pos
+                    'dsh-emacs-workspace-group-id "workspace-3"))
+        (cl-letf (((symbol-function 'transpose-regions)
+                   (lambda (&rest args)
+                     (cl-incf moves)
+                     (apply transpose args))))
+          (dsh-emacs-session-toggle-workspace))
+        (dsh-test-assert "session-collapse-deletes-hidden-rows-without-moving-survivors"
+                         (= moves 0)
+                         (null (dsh-emacs-session--row-pos
+                                'dsh-emacs-session-id "row-17"))
+                         (equal (get-text-property first 'dsh-emacs-session-id) "row-3")
+                         (equal (get-text-property (point) 'dsh-emacs-workspace-group-id)
+                                "workspace-3"))
+        (dsh-emacs-session-toggle-workspace)
+        (dsh-test-assert "session-expand-restores-hidden-rows-with-survivor-markers"
+                         (dsh-emacs-session--row-pos 'dsh-emacs-session-id "row-17")
+                         (equal (get-text-property first 'dsh-emacs-session-id) "row-3")))
+      (set-marker first nil)
+      (set-marker last nil))
+    (let ((cell (dsh-protocol-subagent-cell--from-alist
+                 '((key . subagentCatalog) (seq . 1)
+                   (value . [((id . "child") (label . "Child")
+                              (mode . "one-shot"))])))))
+      (puthash "row-0" (list :cells (list (cons 'subagentCatalog cell)))
+               dsh-emacs--subagent-catalogs)
+      (dsh-emacs-session--render)
+      (goto-char (dsh-emacs-session--row-pos 'dsh-emacs-session-id "row-0"))
+      (dsh-test-assert "session-known-children-show-disclosure"
+                       (string-match-p "▸" (buffer-substring (point) (line-end-position))))
+      (setq dsh-emacs-session--expanded-subagents '("row-0"))
+      (setf (dsh-protocol-subagent-cell-value cell) nil)
+      (dsh-emacs-session--render)
+      (dsh-test-assert "session-empty-catalog-has-no-disclosure-even-if-expanded"
+                       (not (string-match-p "[▸▾]" (buffer-substring
+                                                       (point) (line-end-position))))))))
+
+;; A host baseline is one UI update, regardless of the number of sessions.
+(let* ((dsh-emacs-sessions-buffer (generate-new-buffer-name " *dsh-list-batch*"))
+       (buffer (get-buffer-create dsh-emacs-sessions-buffer))
+       (dsh-emacs--subagent-catalogs (make-hash-table :test #'equal))
+       (dsh-emacs--chat-buffers (make-hash-table :test #'equal))
+       (dsh-emacs--workspaces nil)
+       (dsh-emacs--archived-sessions nil)
+       (dsh-emacs--current-session nil)
+       (dsh-emacs--sessions
+        (cl-loop for i below 32 collect
+                 (dsh-protocol-session--from-alist
+                  `((sessionId . ,(format "batch-%d" i))))))
+       (baseline
+        `((projections .
+           ,(cl-loop for i below 32 collect
+                     (cons (intern (format "batch-%d" i))
+                           `((asOfSeq . 1)
+                             (values (subagentCatalog . [])
+                                     (title . ,(format "Title %d" i)))))))))
+       snapshots)
+  (unwind-protect
+      (with-current-buffer buffer
+        (setq major-mode 'dsh-emacs-session-mode)
+        (cl-letf (((symbol-function 'dsh-emacs-session--render)
+                   (lambda ()
+                     (push (list (hash-table-count dsh-emacs--subagent-catalogs)
+                                 (dsh-protocol-session-title-value
+                                  (car (last dsh-emacs--sessions))))
+                           snapshots))))
+          (dsh-emacs-events--host-control-baseline nil baseline)
+          (dsh-test-assert "session-baseline-repaints-once-after-all-caches"
+                           (equal snapshots '((32 "Title 31"))))
+          (setq snapshots nil)
+          (dsh-emacs-events--apply-title nil "batch-31" "Live title")
+          (dsh-test-assert "session-title-increment-still-repaints-immediately"
+                           (equal snapshots '((32 "Live title"))))
+          (setq snapshots nil)
+          (dsh-emacs-subagent-apply
+           "new-parent"
+           (dsh-protocol-subagent-baseline--from-alist
+            '((asOfSeq . 2) (values (subagentCatalog . [])))))
+          (dsh-test-assert "session-catalog-increment-still-repaints-immediately"
+                           (equal snapshots '((33 "Live title")))))
+        (dsh-emacs-session--render)
+        (goto-char (dsh-emacs-session--row-pos 'dsh-emacs-session-id "batch-0"))
+        (let ((departure (point-marker))
+              (diff (symbol-function 'replace-buffer-contents))
+              (diffs 0))
+          ;; Equal text can still carry stale command targets; refresh props.
+          (let ((inhibit-read-only t))
+            (put-text-property (point) (1+ (point))
+                               'dsh-emacs-subagent 'stale))
+          (cl-letf (((symbol-function 'replace-buffer-contents)
+                     (lambda (&rest args)
+                       (cl-incf diffs)
+                       (apply diff args))))
+            (dsh-emacs-session--render))
+          (dsh-test-assert "session-unchanged-text-skips-diff-keeps-current-metadata"
+                           (= diffs 0)
+                           (equal (get-text-property departure 'dsh-emacs-session-id)
+                                  "batch-0")
+                           (null (get-text-property departure 'dsh-emacs-subagent)))
+          (set-marker departure nil)))
+    (kill-buffer buffer)))
+
+;; Inline child rows use the same catalog and direct-parent navigation as chats.
+(let* ((dsh-emacs-sessions-buffer (generate-new-buffer-name " *dsh-child-list*"))
+       (buffer (get-buffer-create dsh-emacs-sessions-buffer))
+       (dsh-emacs--subagent-catalogs (make-hash-table :test #'equal))
+       (dsh-emacs--chat-buffers (make-hash-table :test #'equal))
+       (dsh-emacs--subagent-host-live nil)
+       (dsh-emacs--current-session nil)
+       (dsh-emacs--archived-sessions nil)
+       (dsh-emacs-workspaces-collapsed-by-default nil)
+       (dsh-emacs--sessions
+        (dsh-emacs-test--session-items
+         '(((sessionId . "root") (projections (values (title . "Parent"))))
+           ((sessionId . "branch") (origin . "subagent")
+            (parentSessionId . "root") (running . t)))))
+       (dsh-emacs--workspaces
+        (list (dsh-protocol-workspace--from-alist
+               '((workspaceId . "ws") (title . "Workspace")
+                 (sessionIds . ["root" "branch"])))))
+       (root-value
+        '((asOfSeq . 1)
+          (values (subagentCatalog . [((id . "leaf") (label . "Read only")
+                                       (mode . "one-shot"))
+                                      ((id . "branch") (label . "Worker")
+                                       (mode . "continuable"))]))))
+       requests callback opened)
+  (unwind-protect
+      (with-current-buffer buffer
+        (cl-letf (((symbol-function 'dsh-emacs-events-host-connect) #'ignore)
+                  ((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method args cb)
+                     (push (cons method args) requests)
+                     (setq callback cb))))
+          (dsh-emacs-session-mode)
+          (dsh-test-assert "session-children-start-collapsed"
+                           (null (dsh-emacs-session--row-pos
+                                  'dsh-emacs-session-id "branch")))
+          (goto-char (dsh-emacs-session--row-pos 'dsh-emacs-session-id "root"))
+          (call-interactively (key-binding (kbd "TAB")))
+          (dsh-test-assert "session-children-cold-expansion-shows-loading"
+                           (string-match-p "Loading subagents" (buffer-string))
+                           (equal (dsh-emacs-session-id-at-point) "root")
+                           (equal (car requests)
+                                  '("session/projections"
+                                    (request (sessionId . "root")))))
+          (funcall callback t root-value)
+          (dsh-test-assert "session-children-callback-renders-without-refetch"
+                           (= (length requests) 1)
+                           (string-match-p "one-shot · unknown" (buffer-string))
+                           (string-match-p "continuable · running" (buffer-string))
+                           (equal (dsh-emacs-session-id-at-point) "root"))
+          (goto-char (dsh-emacs-session--row-pos 'dsh-emacs-session-id "branch"))
+          (dsh-test-assert "session-child-inherits-workspace"
+                           (equal (dsh-emacs-workspace-id-at-point) "ws")
+                           (equal (car (get-text-property
+                                        (point) 'dsh-emacs-subagent)) "root"))
+          (call-interactively (key-binding (kbd "TAB")))
+          (funcall callback t
+                   '((asOfSeq . 2)
+                     (values (subagentCatalog . [((id . "grandchild")
+                                                  (label . "Nested")
+                                                  (mode . "one-shot"))]))))
+          (goto-char (dsh-emacs-session--row-pos
+                      'dsh-emacs-session-id "grandchild"))
+          (cl-letf (((symbol-function 'dsh-emacs-open-subagent)
+                     (lambda (parent entry &optional _other-window)
+                       (setq opened
+                             (list parent (dsh-protocol-subagent-entry-id entry)))))
+                    ((symbol-function 'dsh-emacs-open-session)
+                     (lambda (&rest _) (error "Ordinary child address"))))
+            (call-interactively (key-binding (kbd "RET"))))
+          (dsh-test-assert "session-nested-ret-uses-direct-parent"
+                           (equal opened '("branch" "grandchild")))
+          (cl-letf (((symbol-function 'dsh-emacs-server-ensure)
+                     (lambda () (error "Child mutation reached server"))))
+            (dolist (command '(dsh-emacs-rename-session-at-point
+                               dsh-emacs-archive-session-at-point
+                               dsh-emacs-fork-session-at-point))
+              (dsh-test-assert (format "session-cold-child-refuses-%s" command)
+                               (condition-case nil
+                                   (progn (funcall command) nil)
+                                 (user-error t)))))
+          (dsh-emacs-session--render)
+          (dsh-test-assert "session-child-refresh-preserves-focus-and-folds"
+                           (equal (dsh-emacs-session-id-at-point) "grandchild")
+                           (member "branch" dsh-emacs-session--expanded-subagents)
+                           (= (length requests) 2))
+          (save-window-excursion
+            (switch-to-buffer buffer)
+            (delete-other-windows)
+            (goto-char (dsh-emacs-session--row-pos
+                        'dsh-emacs-session-id "grandchild"))
+            (let ((other (split-window-right))
+                  (departure (point-marker)))
+              (set-window-point other (dsh-emacs-session--row-pos
+                                       'dsh-emacs-session-id "leaf"))
+              (dsh-emacs-subagent-apply
+               "root"
+               (dsh-protocol-subagent-baseline--from-alist
+                '((asOfSeq . 4)
+                  (values
+                   (subagentCatalog . [((id . "new") (mode . "one-shot"))
+                                        ((id . "leaf") (label . "Read only")
+                                         (mode . "one-shot"))
+                                        ((id . "branch") (label . "Worker")
+                                         (mode . "continuable"))])))))
+              (dsh-test-assert "session-live-child-arrival-keeps-each-window-row"
+                               (dsh-emacs-session--row-pos
+                                'dsh-emacs-session-id "new")
+                               (equal (dsh-emacs-session-id-at-point) "grandchild")
+                               (equal (get-text-property (window-point other)
+                                                         'dsh-emacs-session-id)
+                                      "leaf")
+                               (= (length requests) 2))
+              (dsh-test-assert "session-child-xref-marker-survives-refresh"
+                               (equal (get-text-property departure
+                                                         'dsh-emacs-session-id)
+                                      "grandchild"))
+              (set-marker departure nil)))
+          (goto-char (dsh-emacs-session--row-pos 'dsh-emacs-session-id "root"))
+          (dsh-emacs-session-toggle)
+          (dsh-test-assert "session-parent-collapse-hides-descendants"
+                           (null (dsh-emacs-session--row-pos
+                                  'dsh-emacs-session-id "grandchild"))
+                           (equal (dsh-emacs-session-id-at-point) "root"))
+          (dsh-emacs-subagent-apply
+           "root" (dsh-protocol-subagent-baseline--from-alist root-value))
+          (dsh-test-assert "session-live-projections-respect-collapse"
+                           (null (dsh-emacs-session--row-pos
+                                  'dsh-emacs-session-id "leaf")))
+          (dsh-emacs-session-toggle)
+          (dsh-test-assert "session-expand-restores-nested-folds-without-rpc"
+                           (dsh-emacs-session--row-pos
+                            'dsh-emacs-session-id "grandchild")
+                           (= (length requests) 2))
+          (setq dsh-emacs-session--expanded-subagents nil
+                dsh-emacs-session--workspace-fold-default t
+                dsh-emacs-session--workspace-fold-overrides nil
+                dsh-emacs-session--auto-jump-session "grandchild")
+          (dsh-emacs-session--render)
+          (dsh-test-assert "session-child-jump-reveals-workspace-and-ancestors"
+                           (equal (dsh-emacs-session-id-at-point) "grandchild")
+                           (null dsh-emacs-session--auto-jump-session))
+          (goto-char (dsh-emacs-session--row-pos 'dsh-emacs-session-id "leaf"))
+          (dsh-emacs-session-toggle)
+          (funcall callback nil '((message . "cold failed")))
+          (dsh-test-assert "session-child-read-error-visible"
+                           (string-match-p "Cannot load subagents" (buffer-string))
+                           (equal (dsh-emacs-session-id-at-point) "leaf"))
+          (dsh-emacs-session-toggle)
+          (dsh-emacs-session-toggle)
+          (dsh-test-assert "session-child-expansion-retries-failed-read"
+                           (= (length requests) 4)
+                           (string-match-p "Loading subagents" (buffer-string)))
+          (funcall callback t
+                   '((asOfSeq . 3) (values (subagentCatalog . []))))
+          (dsh-test-assert "session-child-empty-catalog-distinct-from-error"
+                           (string-match-p "No subagents" (buffer-string))
+                           (not (string-match-p "Cannot load" (buffer-string))))))
+    (kill-buffer buffer)))
+
+(let* ((dsh-emacs-sessions-buffer (generate-new-buffer-name " *dsh-child-reveal*"))
+       (buffer (get-buffer-create dsh-emacs-sessions-buffer))
+       (dsh-emacs--subagent-catalogs (make-hash-table :test #'equal))
+       (dsh-emacs--chat-buffers (make-hash-table :test #'equal))
+       (dsh-emacs--current-session "child")
+       (dsh-emacs--workspaces nil)
+       (dsh-emacs--archived-sessions nil)
+       (dsh-emacs--sessions
+        (dsh-emacs-test--session-items
+         '(((sessionId . "root"))
+           ((sessionId . "child") (origin . "subagent")
+            (parentSessionId . "root")))))
+       request callback)
+  (unwind-protect
+      (cl-letf (((symbol-function 'dsh-emacs-events-host-connect) #'ignore)
+                ((symbol-function 'pop-to-buffer) #'ignore)
+                ((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (method args cb)
+                   (setq request (cons method args) callback cb))))
+        (dsh-emacs-list-sessions-display)
+        (with-current-buffer buffer
+          (dsh-test-assert "session-child-open-fetches-missing-ancestor-catalog"
+                           (equal request '("session/projections"
+                                            (request (sessionId . "root"))))
+                           (string-match-p "Loading subagents" (buffer-string))
+                           (equal dsh-emacs-session--auto-jump-session "child"))
+          (funcall callback t
+                   '((asOfSeq . 1)
+                     (values (subagentCatalog . [((id . "child")
+                                                  (mode . "one-shot"))]))))
+          (dsh-test-assert "session-child-cold-reveal-completes-pending-jump"
+                           (equal (dsh-emacs-session-id-at-point) "child")
+                           (null dsh-emacs-session--auto-jump-session))))
+    (kill-buffer buffer)))
+
+(dolist (event '(status summary removed disconnected))
+  (let* ((parent (dsh-protocol-session--from-alist
+                  '((sessionId . "parent") (agentAvailable . t))))
+         (dsh-emacs--sessions (list parent))
+         (dsh-emacs--chat-buffers (make-hash-table :test #'equal))
+         (dsh-emacs--subagent-catalogs (make-hash-table :test #'equal))
+         (dsh-emacs--subagent-generation 0)
+         (dsh-emacs--subagent-host-live nil)
+         (dsh-emacs--subagent-summary-request nil)
+         callback)
+    (with-temp-buffer
+      (dsh-emacs-mode)
+      (setq dsh-emacs--buffer-session "child"
+            dsh-emacs--buffer-subagent
+            (dsh-protocol-subagent-address-create
+             "parent" "child" "continuable"))
+      (puthash "child" (current-buffer) dsh-emacs--chat-buffers)
+      (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (_method _args cb) (setq callback cb)))
+                ((symbol-function 'dsh-emacs-events--host-repaint) #'ignore))
+        (dsh-emacs-subagent-host-reset t)
+        (dsh-test-assert (format "subagent-reconnect-pending-%s" event)
+                         buffer-read-only
+                         (null (dsh-protocol-session-agent-available parent)))
+        (pcase event
+          ('status (dsh-emacs-events--host-session-status "parent" t))
+          ('summary
+           (dsh-emacs-events--host-session-added
+            '((sessionId . "parent") (agentAvailable . :json-false)
+              (running . t))))
+          ('removed (dsh-emacs-events--host-session-removed "parent"))
+          ('disconnected (dsh-emacs-subagent-host-reset)))
+        (funcall callback t
+                 '((items . [((sessionId . "parent") (agentAvailable . t)
+                              (running . :json-false))]))))
+      (pcase event
+        ('status
+         (dsh-test-assert "subagent-status-race-restores-parent-availability"
+                          (eq t (dsh-protocol-session-agent-available parent))
+                          (dsh-protocol-session-running parent)
+                          (not buffer-read-only)))
+        ('summary
+         (dsh-test-assert "subagent-refresh-preserves-newer-full-summary"
+                          (eq :unavailable
+                              (dsh-protocol-session-agent-available parent))
+                          (dsh-protocol-session-running parent)
+                          buffer-read-only))
+        ('removed
+         (dsh-test-assert "subagent-refresh-does-not-resurrect-removed-parent"
+                          (null (dsh-emacs--chat-session-item "parent"))
+                          buffer-read-only))
+        ('disconnected
+         (dsh-test-assert "subagent-summary-refresh-ignores-old-generation"
+                          (null (dsh-protocol-session-agent-available parent))
+                          buffer-read-only))))))
+
+(let ((dsh-emacs--subagent-host-live t)
+      (dsh-emacs--subagent-summary-request nil)
+      (dsh-emacs--subagent-catalogs (make-hash-table :test #'equal))
+      request)
+  (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+             (lambda (_method args _callback) (setq request args))))
+    (dsh-emacs-subagent--refresh-summaries))
+  (dsh-test-assert "subagent-summary-refresh-sends-required-request-argument"
+                   (assq '_request request)))
+
+(let ((dsh-emacs--subagent-catalogs (make-hash-table :test #'equal))
+      (dsh-emacs--subagent-generation 10)
+      (dsh-emacs--subagent-host-live t)
+      (dsh-emacs--sessions nil)
+      owner callback)
+  (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+             (lambda (_method _args cb) (setq owner (current-buffer) callback cb)))
+            ((symbol-function 'dsh-emacs-subagent--changed) #'ignore))
+    (with-temp-buffer (dsh-emacs-subagent-refresh "closed-view"))
+    (dsh-test-assert "subagent-cold-request-outlives-view" (buffer-live-p owner))
+    (funcall callback t '((asOfSeq . 5) (values (subagentCatalog . []))))
+    (dsh-test-assert "subagent-closed-view-request-settles"
+                     (eq 'ready (plist-get (gethash "closed-view" dsh-emacs--subagent-catalogs) :state)))
+    (dsh-emacs-subagent-refresh "stale-generation")
+    (dsh-emacs-subagent-host-reset)
+    (funcall callback t '((asOfSeq . 100) (values (subagentCatalog . []))))
+    (dsh-test-assert "subagent-old-generation-response-ignored"
+                     (null (dsh-emacs-subagent--cell "stale-generation" 'subagentCatalog)))))
+
+(let* ((dsh-emacs--subagent-catalogs (make-hash-table :test #'equal))
+       (child (dsh-protocol-session--from-alist '((sessionId . "timed") (running . t))))
+       (dsh-emacs--sessions (list child))
+       (dsh-emacs--subagent-host-live t))
+  (cl-letf (((symbol-function 'dsh-emacs-subagent--changed) #'ignore))
+    (dsh-emacs-subagent-apply
+     "root" (dsh-protocol-subagent-baseline--from-alist
+             '((asOfSeq . 1) (values (subagentCatalog . [((id . "timed"))])))))
+    (dsh-emacs-subagent-apply
+     "timed" (dsh-protocol-subagent-baseline--from-alist
+              '((asOfSeq . 1) (values (subagentCatalog . [])
+                                      (subagentTiming (settledMs . 10000)
+                                                      (active (since . 20000) (through . 22000))))))))
+  (let ((entry (car (dsh-emacs-subagent--value "root" 'subagentCatalog))))
+    (cl-letf (((symbol-function 'float-time) (lambda (&optional _time) 27.0)))
+      (dsh-test-assert "subagent-duration-adds-settled-and-live-segments"
+                       (string-match-p "running  17.0s" (dsh-emacs-subagent--annotation "root" entry)))
+      (setf (dsh-protocol-session-running child) nil)
+      (dsh-test-assert "subagent-idle-duration-stops-at-through"
+                       (string-match-p "idle  12.0s" (dsh-emacs-subagent--annotation "root" entry)))
+      (setf (dsh-protocol-session-running child) t)
+      (setq dsh-emacs--subagent-host-live nil)
+      (dsh-test-assert "subagent-offline-duration-stops-at-through"
+                       (string-match-p "12.0s" (dsh-emacs-subagent--annotation "root" entry))))))
+
+(let ((dsh-emacs--subagent-catalogs (make-hash-table :test #'equal))
+      (dsh-emacs--buffer-session "indicator-parent")
+      (dsh-emacs--buffer-subagent nil)
+      (dsh-emacs--sessions
+       (list (dsh-protocol-session--from-alist '((sessionId . "a") (running . t))))))
+  (puthash "indicator-parent"
+           (list :cells (list (cons 'subagentCatalog
+                                   (dsh-protocol-subagent-cell--from-alist
+                                    '((key . "subagentCatalog") (seq . 1)
+                                      (value . [((id . "a")) ((id . "b")) ((id . "c"))]))))))
+           dsh-emacs--subagent-catalogs)
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&optional _) nil))
+            ((symbol-function 'char-displayable-p) (lambda (_) nil)))
+    (let ((indicator (dsh-emacs-subagent-indicator)))
+      (dsh-test-assert "subagent-indicator-keeps-total-and-running-details"
+                       (equal (substring-no-properties indicator) " Sub3")
+                       (equal (get-text-property 1 'help-echo indicator)
+                              "3 subagents, 1 running; mouse-1 to choose")
+                       (eq (get-text-property 1 'face indicator) 'dsh-emacs-modeline-face)
+                       (eq (get-text-property 1 'local-map indicator) dsh-emacs-subagent-map)))))
 
 (princ "\n===== test summary =====\n")
 (let ((pass (cl-count-if (lambda (r) (cdr r)) dsh-test-results))

@@ -1004,6 +1004,10 @@ value    SessionProjectionBaseline | null        // { asOfSeq, values } ; null =
 A cold, non-activating read of **all** registered projection cells for one
 Session — the unary counterpart of the `session/control` baseline block and of
 `session/follow`'s snapshot `projections`, for a client that holds no stream.
+Unlike ordinary session mutations, this read accepts subagent ids directly.
+Verified against installed dsh 0.2.0-rc.2 on 2026-10-05 for running and settled
+children; a settled child's `agentAvailable` remained false before and after
+reading its own identity, catalog, timing and usage cells.
 An empty `sessionId` is `gateway/bad-request`; when the Session exists but its
 projection registry is unavailable the error is
 `session/projections-unavailable`; a cancelled observation is
@@ -1280,7 +1284,7 @@ still fall back to the session id.
 | Endpoint | args | value | Notes |
 |---|---|---|---|
 | `subagents/list` | `{ parentSessionId }` | `SubagentCatalog` (`{ entries, parentAvailable }`) | entries elements: `{kind:'child', id, mode:'one-shot'\|'continuable', activity:'running'\|'inactive', hasChildren, label?}` (label optional for one-shot, required for continuable) or `{kind:'diagnostic', id, reason:'corrupt'\|'unsupported'\|'unavailable'}` |
-| `subagents/prompt` | `{ request: { requestId, parentSessionId, childSessionId, mode:'continuable', content: PromptContentPart[], clientTimeZone? } }` | `{ messageId }` | delivered to the child session's FIFO inbox via the **exact live direct parent session** (delivery=queue; receipt on acceptance, independent of later execution); images are accepted and promoted first; time-zone/image validation as on the session surface |
+| `subagents/prompt` | `{ request: { requestId, parentSessionId, childSessionId, mode:'continuable', delivery:'queue'\|'steer', content: PromptContentPart[], clientTimeZone? } }` | `{ messageId }` | delivered to the child session's inbox via the **exact live direct parent Agent** (`queue` schedules a turn; `steer` targets the nearest step; receipt on acceptance, independent of later execution); images are accepted and promoted first; time-zone/image validation as on the session surface |
 | `subagents/interruptByParent` | `{ childSessionId, parentSessionId, mode: 'continuable' }` | `{ accepted: true }` | fire-and-return; target missing/idle/already finished = accepted |
 
 Deep reads of `subagents/list` (history/follow/page) all go through the `address`

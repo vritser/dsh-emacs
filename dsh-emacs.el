@@ -97,6 +97,8 @@
 (require 'dsh-emacs-reference)
 (require 'dsh-emacs-shell)
 (require 'dsh-emacs-session)
+(declare-function dsh-emacs-session--ancestors "dsh-emacs-session" (id))
+(declare-function dsh-emacs-subagent--cell "dsh-emacs-subagent" (id key))
 
 ;;; ---------------------------------------------------------------------------
 ;;;  Customization options
@@ -359,6 +361,14 @@ An alist of (TEXT START-MARKER . END-MARKER) recorded by
 canonical `user/message' consumes the pending text (the echo stays on
 screen), or deleted from the buffer when the submit's RPC fails, so a
 rejected prompt never lingers as a phantom message.")
+
+(defvar-local dsh-emacs--buffer-subagent nil
+  "Durable direct-parent address, or nil for an ordinary conversation.")
+(put 'dsh-emacs--buffer-subagent 'permanent-local t)
+(defvar-local dsh-emacs--subagent-input-read-only nil
+  "Non-nil when the addressed child cannot accept input.")
+(defvar-local dsh-emacs--subagent-departure nil
+  "Source marker awaiting successful child follow before entering xref history.")
 
 (defvar-local dsh-emacs--buffer-session nil
   "Session ID owned by this chat buffer (buffer-local).
@@ -705,7 +715,15 @@ A numeric suffix is appended when another buffer already holds the name."
                (equal session-id
                       (buffer-local-value 'dsh-emacs--buffer-session buf)))
       (with-current-buffer buf
-        (let ((name (dsh-emacs--chat-buffer-name session-id)))
+        (let ((name (if dsh-emacs--buffer-subagent
+                        (format "dsh-%s/%s"
+                                (dsh-emacs--sanitize-buffer-name
+                                 (or (dsh-emacs--chat-title
+                                      (dsh-protocol-subagent-address-parent dsh-emacs--buffer-subagent))
+                                     (dsh-protocol-subagent-address-parent dsh-emacs--buffer-subagent)))
+                                (dsh-emacs--sanitize-buffer-name
+                                 (dsh-emacs-subagent-label dsh-emacs--buffer-subagent)))
+                      (dsh-emacs--chat-buffer-name session-id))))
           (unless (equal (buffer-name) name)
             (rename-buffer name t)))
         (let ((cwd (dsh-emacs--chat-cwd session-id)))
@@ -1370,8 +1388,8 @@ always reached through advice."
 
 
 ;;;###autoload
-(defun dsh-emacs-open-session (session-id)
-  "Open session SESSION-ID.
+(defun dsh-emacs-open-session (session-id &optional address other-window)
+  "Open SESSION-ID, optionally with subagent ADDRESS in OTHER-WINDOW.
 Connects a per-session mux stream for the chat buffer WITHOUT touching
 other open sessions' streams: with several chats live, each buffer keeps
 its own realtime stream (tearing the previous one down here used to
@@ -1392,7 +1410,8 @@ realtime)."
     (puthash session-id buf dsh-emacs--chat-buffers)
     (setq dsh-emacs--current-buffer buf)
     (with-current-buffer buf
-      (setq-local dsh-emacs--buffer-session session-id)
+      (setq-local dsh-emacs--buffer-session session-id
+                  dsh-emacs--buffer-subagent (or address dsh-emacs--buffer-subagent))
       ;; The cache may have drifted (auto summary/rename/workspace
       ;; move): align the list title and point the buffer's
       ;; default-directory at the session workspace (magit etc.
@@ -1420,30 +1439,53 @@ realtime)."
       (dsh-emacs--chat-buffer-context-sync session-id buf)
       ;; The agent preset (agentPreset) comes from the session
       ;; list cache; fetch session/list once when it is missing.
-      (dsh-emacs--link-session-preset session-id)
+      (unless dsh-emacs--buffer-subagent
+        (dsh-emacs--link-session-preset session-id))
       ;; Reopening an already-live chat buffer resumes its realtime stream
       ;; without re-rendering what is on screen: the follow snapshot is the
       ;; catch-up (its records carry original seqs, so the
       ;; `dsh-emacs--anchor-seq' gate drops everything already rendered);
       ;; fresh buffers start at anchor 0 and the snapshot seeds the whole
       ;; window.  No separate history fetch precedes the connect.
-      (dsh-emacs-command-catalog-prefetch session-id)
+      (unless dsh-emacs--buffer-subagent
+        (dsh-emacs-command-catalog-prefetch session-id))
       ;; Pre-warm the skill catalog (`skills/list') too: the same "/" popup
       ;; lists commands and skills, so its first trigger should not block on
       ;; two synchronous round trips (see dsh-emacs-skill.el).
-      (dsh-emacs-skill-prefetch session-id)
+      (unless dsh-emacs--buffer-subagent
+        (dsh-emacs-skill-prefetch session-id))
       ;; Pre-warm the @ reference candidate cache (files + session roster) so
       ;; the first "@" popup reads warm cache.  Buffer-local cache, so it must
       ;; run in the chat buffer (see dsh-emacs-reference.el).
-      (dsh-emacs-reference-prefetch session-id)
+      (unless dsh-emacs--buffer-subagent
+        (dsh-emacs-reference-prefetch session-id))
       ;; Mode-line setup appends its anchor newline at point-max.  Return point
       ;; to the editable prompt so the cursor stays on the `❯' line.
       (goto-char dsh-emacs--input-marker)
       ;; Connect: the first `session/follow' item is the snapshot that seeds
       ;; the transcript (see `dsh-emacs-events--follow-snapshot'), followed by
       ;; gapless live event frames — no history/stream hand-off gap exists.
+      (dsh-emacs--subagent-input-update)
       (dsh-emacs-events-connect dsh-emacs--current-buffer))
-    (pop-to-buffer dsh-emacs--current-buffer)))
+    (pop-to-buffer dsh-emacs--current-buffer
+                   (when other-window '(display-buffer-pop-up-window)))))
+
+(defun dsh-emacs-open-subagent (parent entry &optional other-window)
+  "Open catalog ENTRY through its direct PARENT, optionally in OTHER-WINDOW."
+  (let ((marker (point-marker))
+        (address (dsh-emacs-subagent-address parent entry)))
+    (dsh-emacs-open-session (dsh-protocol-subagent-entry-id entry) address other-window)
+    (with-current-buffer dsh-emacs--current-buffer
+      (setq dsh-emacs--subagent-departure marker))
+    (dsh-emacs-subagent--refresh-summaries)))
+
+(defun dsh-emacs--subagent-input-update ()
+  "Apply child input presentation; command guards independently enforce policy."
+  (when dsh-emacs--buffer-subagent
+    (setq dsh-emacs--subagent-input-read-only
+          (and (dsh-emacs-subagent-input-reason dsh-emacs--buffer-subagent) t)
+          buffer-read-only dsh-emacs--subagent-input-read-only)
+    (dsh-emacs-composer-render)))
 
 ;; ---------------------------------------------------------------------------
 ;;  Switch session within the same workspace (directly from a chat buffer)
@@ -1795,6 +1837,7 @@ The child starts from the session's latest state (`session/fork' without
 an explicit seq); after the RPC confirms, the list refreshes and the child
 buffer opens with the same workspace path."
   (interactive (list (dsh-emacs--completing-session-id "Fork session: ")))
+  (dsh-emacs-subagent-require 'mutate session-id)
   (dsh-emacs-server-ensure)
   (dsh-emacs--rpc-async "session/fork"
                         `((request . ((sessionId . ,session-id))))
@@ -1853,6 +1896,7 @@ preset, context snapshot, title and workspace in one round trip."
 no `session.delete'); `dsh-emacs-unarchive-session' is its dsh 0.1.6
 inverse.  Refreshes the archived set and the session list on success."
   (interactive (list (dsh-emacs--completing-session-id "Archive session: ")))
+  (dsh-emacs-subagent-require 'mutate session-id)
   (dsh-emacs-server-ensure)
   (dsh-emacs--rpc-async "workspace/archiveSession"
                         `((request . ((sessionId . ,session-id))))
@@ -1883,6 +1927,7 @@ and the session list."
   (interactive (list (dsh-emacs--completing-session-id
                       "Unarchive session: " #'dsh-emacs--archived-session-p
                       "No archived session can be restored")))
+  (dsh-emacs-subagent-require 'mutate session-id)
   (dsh-emacs-server-ensure)
   (dsh-emacs--rpc-async "workspace/unarchiveSession"
                         `((request . ((sessionId . ,session-id))))
@@ -1910,6 +1955,7 @@ title prompt is prefilled with the session's current title."
      (list sid
            (read-string "New title: "
                         (or (and item (dsh-emacs-session--title item)) "")))))
+  (dsh-emacs-subagent-require 'mutate session-id)
   (dsh-emacs-server-ensure)
   (dsh-emacs--rpc-async "session/rename"
                         `((request . ((sessionId . ,session-id)
@@ -2542,7 +2588,8 @@ the erase discards any history an earlier layout left behind."
     (setq dsh-emacs--input-marker (point-marker)))
   ;; The erase above invalidated any record an earlier layout left behind.
   (setq buffer-undo-list nil)
-  (setq dsh-emacs--undo-stale nil))
+  (setq dsh-emacs--undo-stale nil)
+  (dsh-emacs--subagent-input-update))
 
 (defun dsh-emacs--ensure-input-area ()
   "Ensure the input area exists and point is at the right position."
@@ -2582,19 +2629,27 @@ The server stops the agent mid-flight; the partial reply stays in the
 transcript and `turn/end' arrives normally, which clears the spinner.
 The pending-input queue is kept host-side: parked items stay parked
 until the next wake (see `dsh-emacs-list-queue')."
+
+  (dsh-emacs-subagent-require 'stop)
   (let ((session-id (dsh-emacs--active-session-id)))
     (when (null session-id)
       (user-error "No session is open"))
-    (dsh-emacs--rpc-async "session/cancel"
-                          `((request . ((sessionId . ,session-id))))
+    (dsh-emacs--rpc-async (if dsh-emacs--buffer-subagent
+                              "subagents/interruptByParent" "session/cancel")
+                          (if dsh-emacs--buffer-subagent
+                              (dsh-protocol-subagent-stop-request dsh-emacs--buffer-subagent)
+                            `((request . ((sessionId . ,session-id)))))
                           (lambda (ok value)
                             (if ok
                                 (progn
                                   ;; User-initiated stop: suppress the
                                   ;; finished-run notification.
                                   (setq dsh-emacs--turn-awaiting nil)
-                                  (dsh-emacs--ml-busy-set nil)
-                                  (message "⏸ Turn interrupted"))
+                                  (unless dsh-emacs--buffer-subagent
+                                    (dsh-emacs--ml-busy-set nil))
+                                  (message (if dsh-emacs--buffer-subagent
+                                               "⏸ Stop requested"
+                                             "⏸ Turn interrupted")))
                               (message "Failed to interrupt: %S" value))))))
 
 (defun dsh-emacs-send-or-stop ()
@@ -2619,6 +2674,16 @@ model, as `dsh-emacs--submit-prompt' documents).  A prompt carrying
 attachments is never recorded for `M-p' recall — replaying it as text
 would drop the images."
   (interactive)
+  (when dsh-emacs--buffer-subagent
+    (when (or (dsh-emacs-shell-parse (dsh-emacs--get-input))
+              (dsh-emacs-command-parse (dsh-emacs--get-input)))
+      (user-error "Commands are unavailable in subagent conversations"))
+    (unless (and (dsh-emacs--busy-p)
+                 (or (string-empty-p (string-trim (dsh-emacs--get-input)))
+                     (and (null current-prefix-arg)
+                          (eq dsh-emacs-busy-enter-behavior 'stop))))
+      (dsh-emacs-subagent-require 'send)))
+
   (let* ((input (dsh-emacs--get-input))
          (attachments (dsh-emacs-pending-attachments)))
     (if-let* ((command (and (null attachments)
@@ -2850,8 +2915,16 @@ of wire-ready attachment alists
 `content' array of `session/prompt' as `{type: \"image\"}' parts so
 the model sees them immediately.  A prompt carrying attachments is not
 recorded for `M-p' recall: every submit path skips it."
+
+  (dsh-emacs-subagent-require 'send)
+  (when (and dsh-emacs--buffer-subagent attachments)
+    (user-error "Attachments are unavailable in subagent conversations"))
   (let ((command (and (null attachments) (dsh-emacs-shell-parse message))))
     (cond
+     (dsh-emacs--buffer-subagent
+      (when (or command (dsh-emacs-command-parse message))
+        (user-error "Commands are unavailable in subagent conversations"))
+      (dsh-emacs--submit-deferred message attachments (or mode 'queue)))
      ;; A `!' line with no attachments is a local action;
      ;; attachment captions do not go to the shell.
      (command
@@ -2937,18 +3010,26 @@ With nothing already pending in the mirror, the submit arms
 `dsh-emacs-queue--mark-submit-suppress': the splice+claim transient of
 this own message gets no `queued:' / `running:' echo (nothing to order
 against); genuinely parked items keep their feedback."
+
+  (dsh-emacs-subagent-require 'send)
+  (when (and dsh-emacs--buffer-subagent attachments)
+    (user-error "Attachments are unavailable in subagent conversations"))
   (let* ((mode (pcase mode
+                 ((or "queue" "steer") mode)
                  ((or 'queue 'steer) (symbol-name mode))
                  ('stop "queue")
-                 (_ (symbol-name dsh-emacs-busy-enter-behavior))))
+                 (_ (if (eq dsh-emacs-busy-enter-behavior 'steer) "steer" "queue"))))
          (session-id (dsh-emacs--active-session-id))
          (input-buffer (current-buffer))
          (content (dsh-emacs--attachments-prompt-content message attachments))
-         (payload `((request . ((requestId . ,(dsh-emacs--rpc-id))
-                                (sessionId . ,session-id)
-                                (mode . ,mode)
-                                (content . ,content)
-                                (clientTimeZone . ,(dsh-emacs--client-time-zone)))))))
+         (payload (if dsh-emacs--buffer-subagent
+                      (dsh-protocol-subagent-prompt-request
+                       dsh-emacs--buffer-subagent (dsh-emacs--rpc-id) mode message
+                       (dsh-emacs--client-time-zone))
+                    `((request . ((requestId . ,(dsh-emacs--rpc-id))
+                                  (sessionId . ,session-id) (mode . ,mode)
+                                  (content . ,content)
+                                  (clientTimeZone . ,(dsh-emacs--client-time-zone))))))))
     ;; Same web-style feel as the immediate path: the draft leaves the
     ;; input area and lands in history right away, before the RPC settles.
     (unless attachments
@@ -2969,7 +3050,8 @@ against); genuinely parked items keep their feedback."
     ;; round trip away; show it in the Next Message row now so the send does
     ;; not feel sticky.  The host's frame or the failure branch clears it.
     (dsh-emacs-queue--optimistic-submit-show message)
-    (dsh-emacs--rpc-async "session/prompt" payload
+    (dsh-emacs--rpc-async (if dsh-emacs--buffer-subagent
+                              "subagents/prompt" "session/prompt") payload
                           (lambda (ok value)
                             (if ok
                                 ;; Enqueue/steer feedback arrives via the
@@ -3014,6 +3096,8 @@ as the command and deferred paths — so a second submit keypress during
 the RPC round-trip reads an empty input instead of sending the message
 twice; on a transport failure the draft is restored only when both the
 input and staged images are empty (a newer draft is left alone)."
+
+  (dsh-emacs-subagent-require 'mutate)
   (let* ((session-id (dsh-emacs--active-session-id))
          (chat-buffer (and (boundp 'dsh-emacs--buffer-session)
                            dsh-emacs--buffer-session
@@ -3312,6 +3396,8 @@ source of truth for the row, never a copy."
 
 (defun dsh-emacs--stage-attachments (attachments)
   "Append ATTACHMENTS to this buffer's staged set and repaint the row."
+
+  (dsh-emacs-subagent-require 'mutate)
   (when attachments
     (setq dsh-emacs--pending-attachments
           (append dsh-emacs--pending-attachments attachments))
@@ -3358,6 +3444,7 @@ types in `dsh-emacs-attach-media-types' are accepted; a macOS TIFF
 pasteboard image is converted to PNG when PNG is accepted.  Plain
 `yank' is unaffected."
   (interactive)
+  (dsh-emacs-subagent-require 'mutate)
   (dsh-emacs--ensure-chat-buffer)
   (let ((image (dsh-emacs--clipboard-image)))
     (unless image
@@ -3428,6 +3515,7 @@ Only the media types in `dsh-emacs-attach-media-types' are sent."
   (interactive
    (list (read-file-name "Image to attach: " default-directory)
          (read-string "Caption (optional): ")))
+  (dsh-emacs-subagent-require 'mutate)
   (dsh-emacs-server-ensure)
   (let ((attachment (dsh-emacs--file-attachment file)))
     (unless attachment
@@ -3733,6 +3821,7 @@ group-aware UI, header rows plus a per-row provider suffix on
 colliding ids are shown.  The mode-line model segment updates
 immediately."
   (interactive)
+  (dsh-emacs-subagent-require 'mutate)
   (dsh-emacs-server-ensure)
   (let ((session-id (dsh-emacs--active-session-id)))
     (unless session-id (user-error "Open or select a session first"))
@@ -3935,6 +4024,7 @@ mode-line `permission' segment exactly as it does for any other client.
 The derived `custom' state is never offered: it is what the projection
 reports when the effective knobs match no preset, not a switch target."
   (interactive)
+  (dsh-emacs-subagent-require 'mutate)
   (dsh-emacs-server-ensure)
   (let ((session-id (dsh-emacs--active-session-id)))
     (unless session-id (user-error "Open or select a session first"))
@@ -4218,8 +4308,8 @@ beginning of the session."
       (message "Loading older messages…")
       (dsh-emacs--rpc-async
        "session/page"
-       `((request . ((address . ((kind . "session")
-                                 (sessionId . ,session-id)))
+       `((request . ((address . ,(dsh-protocol-session-address-json
+                                  session-id dsh-emacs--buffer-subagent))
                      ;; `throughSeq' must be a real seq: the wire's -1 reads an
                      ;; empty page because the server slices
                      ;; events[0 .. min(throughSeq + 1, beforeSeq)).
@@ -4267,12 +4357,13 @@ stays pending until it is; if it sits in a folded group, that group is
 expanded to show the row.  An active `w' workspace filter is cleared when
 it would hide the row.
 
-Opening does not fetch: the session list is kept live by the core
+Opening reuses the cache: the session list is kept live by the core
 `$events' stream (added/removed/title/archive frames) and by the local
 cache update session creation already does, so a warm list is already
-current and re-opening it costs no round trip (and no `workspace/follow'
-re-baseline).  Only a cold cache (nothing fetched yet) is fetched as
-before; `g' and `dsh-emacs-list-sessions' remain the explicit refresh."
+current and re-opening it needs no session-list round trip or
+`workspace/follow' re-baseline.  Opening from a child expands its ancestors
+and fetches any missing catalogs.  A cold session cache is fetched as before;
+`g' and `dsh-emacs-list-sessions' remain the explicit refresh."
   (interactive)
   (let ((buf (get-buffer-create dsh-emacs-sessions-buffer)))
     ;; Re-opening a live list must not re-run the major mode: that runs
@@ -4297,7 +4388,13 @@ before; `g' and `dsh-emacs-list-sessions' remain the explicit refresh."
       ;; may be on screen, so the jump must not wait for the snapshot's own
       ;; repaint (which is a round-trip away).  A cold cache finds no row and
       ;; keeps the target armed for that repaint.
-      (dsh-emacs-session--render))
+      (dsh-emacs-session--render)
+      ;; A child opened elsewhere may have only summary lineage cached.
+      ;; Fetch its ancestors' catalogs here; rendering itself stays read-only.
+      (dolist (parent (dsh-emacs-session--ancestors dsh-emacs--current-session))
+        (let ((cell (dsh-emacs-subagent--cell parent 'subagentCatalog)))
+          (unless (and cell (dsh-protocol-subagent-cell-present cell))
+            (dsh-emacs-subagent-refresh parent)))))
     (pop-to-buffer buf)))
 
 (defun dsh-emacs--code-block-region-at (pos)
@@ -5275,6 +5372,7 @@ host steers it into the agent as a late reply.  With several calls waiting,
 one is chosen by its first question, and the batch must cover every question
 of that call.  Reports instead of prompting when nothing is waiting."
   (interactive)
+  (dsh-emacs-subagent-require 'mutate)
   (let ((session-id (and (boundp 'dsh-emacs--buffer-session)
                          dsh-emacs--buffer-session))
         (pending (dsh-emacs--question-continued)))

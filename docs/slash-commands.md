@@ -1,5 +1,10 @@
 # Slash Commands
 
+Child conversations do not execute slash commands or skill gestures. Their
+text input uses `subagents/prompt`; unsupported commands fail locally. Open
+`M-x dsh-emacs-list-subagents` to choose children through minibuffer completion and
+`M-,` return navigation; see [subagent controls](../README.md#subagent-conversations).
+
 dsh exposes a **host-side command registry** — slash commands are real server
 features, not client-side tricks. dsh-emacs dispatches `/name` lines typed
 after the `❯ ` prompt through the same `commands.execute` RPC the web UI uses:

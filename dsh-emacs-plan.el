@@ -12,6 +12,8 @@
 ;; independently.  All decisions use the existing question waterfall.
 
 ;;; Code:
+(declare-function dsh-emacs-subagent-require "dsh-emacs-subagent"
+                  (action &optional session-id))
 
 (require 'cl-lib)
 (require 'button)
@@ -266,6 +268,7 @@ its own outcome answers the waterfall."
                  (memq review (buffer-local-value 'dsh-emacs-plan--pending chat))
                  client (equal client dsh-emacs-events--client-id))
       (user-error "This plan review is no longer pending"))
+    (with-current-buffer chat (dsh-emacs-subagent-require 'mutate))
     (when (plist-get review :busy)
       (user-error "A plan decision is already being sent"))
     (setf (plist-get review :busy) t
