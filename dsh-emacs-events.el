@@ -1213,9 +1213,17 @@ reconnect is re-armed and another connect scheduled."
 ;;; ---------------------------------------------------------------------------
 
 (defun dsh-emacs-events--host-repaint ()
-  "Repaint the session list buffer, if it is live."
+  "Repaint the session list buffer, if it is live.
+Gated on the session list having been read: a repaint driven by workspace
+frames arriving before the first `session/list' response would render
+every group with its \"New Session\" row and a zero count, then be
+replaced once the rows landed — the groups flashed in while the sessions
+waited for the round trip.  Until the list is read the window keeps the
+empty state, and the fetch paints groups and rows together.  An empty
+host paints its empty state from `dsh-emacs-list-sessions-display' and
+the fetch's own drain, which are not gated."
   (when (and (not dsh-emacs-events--defer-host-repaint)
-             (listp dsh-emacs--sessions)
+             (consp dsh-emacs--sessions)
              dsh-emacs-sessions-buffer
              (get-buffer dsh-emacs-sessions-buffer))
     (with-current-buffer (get-buffer dsh-emacs-sessions-buffer)
@@ -1238,34 +1246,56 @@ drained through recorded frames before being installed."
   (when (= dsh-emacs--host-refresh-depth 1)
     (setq dsh-emacs--host-refresh-frames nil)))
 
+(defun dsh-emacs-events--host-replay-frame (frame)
+  "Apply one recorded refresh FRAME to the caches.
+FRAME is a handler description recorded by
+`dsh-emacs-events--host-frame-record'.  The incremental mutations do not
+repaint themselves here; the drain batches them and repaints once."
+  (pcase (car frame)
+    (:upsert-workspace
+     (dsh-emacs-events--host-upsert-workspace (cadr frame)))
+    (:remove-workspace
+     (dsh-emacs-events--host-remove-workspace (cadr frame)))
+    (:reorder-workspaces
+     (dsh-emacs-events--host-reorder-workspaces (cadr frame)))
+    (:set-archived
+     (dsh-emacs-events--host-set-archived (cadr frame)))
+    (:session-added
+     (dsh-emacs-events--host-session-added (cadr frame)))
+    (:session-removed
+     (dsh-emacs-events--host-session-removed (cadr frame)))
+    (:session-status
+     (dsh-emacs-events--host-session-status
+      (cadr frame) (car (cddr frame))))
+    (:apply-title
+     (dsh-emacs-events--apply-title
+      nil (cadr frame) (car (cddr frame))))))
+
 (defun dsh-emacs-events--host-refresh-drain ()
-  "End a refresh span; when the last one ends, replay recorded frames."
+  "End a refresh span; when the last one ends, replay recorded frames.
+The replay is batched: the recorded frames mutate the caches with the
+repaint deferred, then the list is repainted once.  A `session/control'
+baseline that lands mid-refresh records one `:apply-title' frame per
+session (hundreds on a large host), and repainting per frame is what made
+the first open block for seconds before any row appeared."
   (when (> dsh-emacs--host-refresh-depth 0)
     (setq dsh-emacs--host-refresh-depth
           (1- dsh-emacs--host-refresh-depth)))
   (when (= dsh-emacs--host-refresh-depth 0)
-    (let ((frames (nreverse dsh-emacs--host-refresh-frames)))
+    ;; Defer repaints for the whole replay: a `session/control' baseline that
+    ;; lands mid-refresh records one `:apply-title' frame per session, and
+    ;; repainting per frame is what made the first open block for seconds.
+    ;; The flag is cleared before the trailing repaint so the batched result
+    ;; actually reaches the list, and a caller's own defer state (a control
+    ;; baseline may already be deferring) is restored either way.
+    (let* ((deferred dsh-emacs-events--defer-host-repaint)
+           (frames (nreverse dsh-emacs--host-refresh-frames))
+           (dsh-emacs-events--defer-host-repaint t))
       (setq dsh-emacs--host-refresh-frames nil)
       (dolist (frame frames)
-        (pcase (car frame)
-          (:upsert-workspace
-           (dsh-emacs-events--host-upsert-workspace (cadr frame)))
-          (:remove-workspace
-           (dsh-emacs-events--host-remove-workspace (cadr frame)))
-          (:reorder-workspaces
-           (dsh-emacs-events--host-reorder-workspaces (cadr frame)))
-          (:set-archived
-           (dsh-emacs-events--host-set-archived (cadr frame)))
-          (:session-added
-           (dsh-emacs-events--host-session-added (cadr frame)))
-          (:session-removed
-           (dsh-emacs-events--host-session-removed (cadr frame)))
-          (:session-status
-           (dsh-emacs-events--host-session-status
-            (cadr frame) (car (cddr frame))))
-          (:apply-title
-           (dsh-emacs-events--apply-title
-            nil (cadr frame) (car (cddr frame)))))))))
+        (dsh-emacs-events--host-replay-frame frame))
+      (setq dsh-emacs-events--defer-host-repaint deferred)
+      (dsh-emacs-events--host-repaint))))
 
 (defun dsh-emacs-events--host-upsert-workspace (workspace)
   "Insert or replace WORKSPACE (a protocol struct) in the cache.

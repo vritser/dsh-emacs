@@ -129,6 +129,15 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Session list paints as soon as its data arrives**: frames recorded during
+  a list refresh are replayed with repainting batched, and workspace frames
+  arriving before the first `session/list` response no longer paint a list of
+  empty groups. On a host with hundreds of sessions the first open previously
+  showed group headers with `(0)` counts and a "New Session" row each, then
+  replaced them with the real rows half a second later — and could block for
+  several seconds while the frames replayed. Groups and rows now appear
+  together, as soon as the list is read. (rationale: postmortem/081)
+
 - **Consistent mode-line spacing**: status indicators and model details use one
   separating space in native and Doom mode lines; SVG icons and click targets
   stay intact. Chat buffers also remove Doom's duplicate padding around the

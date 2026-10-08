@@ -9113,7 +9113,10 @@ Lets a test drive a malformed content value through the result path."
        (list-buf (get-buffer-create " *dsh-host-test-list*")))
   (unwind-protect
       (progn
-        (setq dsh-emacs--sessions nil)
+        (setq dsh-emacs--sessions
+              (dsh-emacs-test--session-items
+               (list (list (cons 'sessionId "s-live")
+                           (cons 'blank :json-false)))))
         (setq dsh-emacs--workspaces nil)
         (setq dsh-emacs--archived-sessions nil)
         (with-current-buffer list-buf
@@ -9508,6 +9511,39 @@ Lets a test drive a malformed content value through the result path."
         (dsh-emacs-events--host-refresh-drain)
         (when (= dsh-emacs--host-refresh-depth 0)
           (dsh-test-pass "refresh-drain-always-restores-depth")))
+        ;; Scenario 5: replaying a batch of recorded frames renders the list
+        ;; ONCE, not once per frame.  A `session/control' baseline that lands
+        ;; during a session-list refresh records one `:apply-title' frame per
+        ;; session (hundreds on a large host); replaying them repainted the
+        ;; whole list per frame, which is what made the first open block for
+        ;; seconds before any row appeared.  The list buffer must be live:
+        ;; without one `--host-repaint' is a no-op and this proves nothing.
+        (setq dsh-emacs--host-refresh-depth 0
+              dsh-emacs--host-refresh-frames nil)
+        (dsh-emacs-events--host-refresh-begin)
+        (let ((n 0))
+          (while (< n 200)
+            (dsh-emacs-events--host-frame-record
+             (list :apply-title "s-a" (format "title-%d" n)))
+            (setq n (1+ n))))
+        (setq dsh-emacs--sessions
+              (dsh-emacs-test--session-items
+               (list (list (cons 'sessionId "s-a") (cons 'blank :json-false)))))
+        (let ((buf (get-buffer-create dsh-emacs-sessions-buffer))
+              (renders 0))
+          (unwind-protect
+              (progn
+                (with-current-buffer buf (dsh-emacs-session-mode))
+                (cl-letf (((symbol-function 'dsh-emacs-session--render)
+                           (lambda (&rest _) (setq renders (1+ renders)))))
+                  (dsh-emacs-events--host-refresh-drain)
+                  (when (= renders 1)
+                    (dsh-test-pass "refresh-drain-renders-once"))
+                  (when (/= renders 1)
+                    (dsh-test-fail
+                     "refresh-drain-renders-once"
+                     (format "replayed 200 frames with %d renders" renders)))))
+            (when (buffer-live-p buf) (kill-buffer buf))))
     (setq dsh-emacs--sessions old-sessions)
     (setq dsh-emacs--workspaces old-workspaces)
     (setq dsh-emacs--archived-sessions old-archived)

@@ -301,7 +301,9 @@ original reason.  Only translations supplied by the host are displayed."
 ;;; ---------------------------------------------------------------------------
 
 (defvar dsh-emacs--sessions nil
-  "Cache of the session list.")
+  "Cache of the session list.
+Nil until the first `session/list' read; the list stays the only
+non-nil value, so readers may iterate it directly.")
 
 (defvar dsh-emacs--chat-buffers (make-hash-table :test 'equal)
   "Registry of session id -> live chat buffer.
