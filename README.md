@@ -112,11 +112,20 @@ See [subagent integration](docs/subagents.md) for protocol and test details.
 | `C-c C-r` | Refresh |
 | `C-c C-o` | Load older messages above the current transcript |
 | `C-c C-w` | Copy (region → code block → message at point → last reply) |
+| `C-c C-y` | Fork into a new conversation through the assistant reply at point |
 | `C-c C-f` | Toggle mode-line stats |
 | `C-c C-!` | Stop the tracked local shell process |
 | `M-p` / `M-n` | Previous / next input |
 | `C-/` / `C-_` / `C-x u` | Undo input editing; redo with `C-g C-/`, or `undo-redo` on Emacs 28+ (the transcript is never undone) |
 | `TAB` | Complete a slash command or skill |
+
+**Branching a conversation:** place point in a committed assistant reply
+(including its code blocks) and press `C-c C-y`, or run
+`M-x dsh-emacs-fork-message-at-point`. The new conversation includes that
+reply and its preceding history, excluding later events, and opens
+automatically. Replies still streaming and subagent conversations cannot
+be forked this way. In the session list, `f` forks through the latest
+completed turn instead. See [fork controls](docs/customization.md#forking-conversations).
 
 **Sending during a running turn:** by default, `C-c C-c` queues a non-empty
 message for the next turn. `C-u C-c C-c` steers the running turn instead;

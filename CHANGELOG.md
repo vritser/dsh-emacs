@@ -10,6 +10,12 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Branch from a reply**: `C-c C-y` (`dsh-emacs-fork-message-at-point`)
+  opens a new conversation inheriting history through the assistant reply
+  at point, including replies loaded from older history. Streaming replies
+  become selectable once committed; session-list `f` still branches through
+  the latest completed turn. (rationale: postmortem/083)
+
 - **Add providers from the minibuffer**: `M-x dsh-emacs-add-provider` sets up
   a pi-ai catalog provider or custom API endpoint through ordinary completion
   and password prompts. Settings and API keys are saved separately on the

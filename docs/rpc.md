@@ -865,6 +865,12 @@ cwd, the latest model target, the `parentSessionId` lineage, and the seed prefix
 The client may increment the new session's title to "(n+1)" on its own (pure
 client behavior).
 
+**Emacs entry points**: session-list `f` and `M-x dsh-emacs-fork-session`
+omit `atSeq`. In a chat buffer, `C-c C-y`
+(`dsh-emacs-fork-message-at-point`) sends the durable `assistant/message`
+sequence attached to the reply at point as `atSeq`, then opens the child.
+Uncommitted streamed bodies and subagent conversations are rejected locally.
+
 #### session.prompt
 ```
 args     { request: { requestId: string, sessionId,

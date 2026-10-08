@@ -74,7 +74,7 @@
 (declare-function dsh-emacs-rename-session "dsh-emacs" (session-id new-title))
 (declare-function dsh-emacs-archive-session "dsh-emacs" (session-id))
 (declare-function dsh-emacs-unarchive-session "dsh-emacs" (session-id))
-(declare-function dsh-emacs-fork-session "dsh-emacs" (session-id))
+(declare-function dsh-emacs-fork-session "dsh-emacs" (session-id &optional at-seq))
 (declare-function dsh-emacs-server-ensure "dsh-emacs-server" ())
 (declare-function dsh-emacs-create-workspace "dsh-emacs" (path))
 (declare-function dsh-emacs-rename-workspace "dsh-emacs" (workspace-id new-title))

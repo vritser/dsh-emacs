@@ -76,6 +76,7 @@ These default keys apply in the session list opened by `M-x dsh-emacs`:
 | `RET` | Open the session or subagent under point; on a group header, toggle folding |
 | `c` / `C` | Create a session / create with a chosen agent preset |
 | `r` | Rename the session under point |
+| `f` | Fork the session through its latest completed turn |
 | `d` | Archive the session without deleting it |
 | `u` | Restore an archived session (pick from the archive set) |
 | `/` | Search |
@@ -86,6 +87,26 @@ These default keys apply in the session list opened by `M-x dsh-emacs`:
 | `D` | Delete the workspace under point |
 | `M` | Move the session under point to another workspace |
 | `w` | Filter by workspace; empty input clears the filter |
+
+### Forking conversations
+
+In a chat buffer, `C-c C-y` (`dsh-emacs-fork-message-at-point`) creates and
+opens a new conversation through the assistant reply at point. Place point
+in its text or a rendered code block; replies loaded through older-history
+paging work too. The child inherits the selected reply and preceding
+events, without later conversation. The original conversation is unchanged.
+
+The reply must have been committed by the server. Live partial replies,
+user messages, thinking/tool cards and the input area are not selectable
+boundaries. Subagent conversations cannot be forked. This command uses
+the exact inclusive `atSeq` semantics documented for dsh 0.1.7 and newer;
+the server closes any open turn/step in the inherited prefix.
+
+Session-list `f` and `M-x dsh-emacs-fork-session` select the latest completed
+turn instead. Lisp callers can pass an optional event sequence as the second
+argument to `dsh-emacs-fork-session` (zero is valid).
+
+### Renaming and grouping
 
 The same `session/rename` RPC is available without leaving a chat buffer:
 `M-x dsh-emacs-rename-session` there names the session you are in (no session

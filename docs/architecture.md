@@ -444,7 +444,7 @@ is the `client-request` envelope with `payload = {args: {...}}`:
 | `session/page` | Read one message-aligned history page before a cursor (feeds `C-c C-o`) |
 | `session/updateQueue` | Manage pending inbox items (`edit` text / `remove` / `steer` by itemId) |
 | `session/cancel` | Interrupt the running turn (partial reply is kept, inbox preserved) |
-| `session/fork` | Branch a session into a child inheriting its history |
+| `session/fork` | Branch through the latest completed turn, or the reply at point (`C-c C-y`, inclusive `atSeq`) |
 | `session/modelCatalog` | List the routable model catalog for a session |
 | `session/selectModel` | Switch the session's model |
 | `session/rename` | Rename a session (its display title) |

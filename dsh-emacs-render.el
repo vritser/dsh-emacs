@@ -1161,6 +1161,8 @@ assistant message body for the copy commands."
                ;; The event id doubles as the message identity here, so two
                ;; adjacent replies stay separate property runs.
                (list 'dsh-emacs-assistant-message (or event-id t))
+               (when (plist-get state :seq)
+                 (list 'dsh-emacs-message-seq (plist-get state :seq)))
                (when event-id (list 'dsh-emacs-event-block event-id)))))))
 
 (defun dsh-emacs-render--schedule-markdown ()
@@ -1472,7 +1474,7 @@ would rewrite that block's text and the final repair would delete it."
           (setq state (list :key key :index index
                             :start (copy-marker start nil)
                             :end end
-                            :event-id event-id
+                            :event-id event-id :seq nil
                             :chunks (list text)
                             :pending nil
                             :markdown (list :scan nil :pending nil :kind nil
@@ -1544,6 +1546,14 @@ rendered in full."
                  state start (plist-get state :end))
                 (dsh-emacs-render--stream-render-region state t t)
                 (dsh-emacs-render--follow-stream windows))))))
+      ;; Only the durable message supplies a fork boundary.  Keep it in the
+      ;; state too, so a deferred Markdown pass preserves the same identity.
+      (setf (plist-get state :seq) (dsh-emacs-render--event-seq event))
+      (when (plist-get state :seq)
+        (let ((inhibit-read-only t)
+              (buffer-undo-list t))
+          (put-text-property (plist-get state :start) (plist-get state :end)
+                             'dsh-emacs-message-seq (plist-get state :seq))))
       (unless (memq state dsh-emacs--markdown-pending)
         (set-marker (plist-get state :start) nil)
         (set-marker (plist-get state :end) nil))
@@ -2061,11 +2071,15 @@ session chips; see `dsh-emacs-reference-fontify'.  Returns the event seq."
                          body 'dsh-emacs-assistant-body-face
                          (dsh-emacs-render--input-insert-point) event-id
                          'assistant)))
+            (let ((inhibit-read-only t)
+                  (buffer-undo-list t))
+              (put-text-property (car range) (cdr range)
+                                 'dsh-emacs-message-seq seq))
             (when defer
               (dsh-emacs-render--stream-render-region
                (list :start (copy-marker (car range))
                      :end (copy-marker (cdr range) t)
-                     :event-id event-id :render-final nil
+                     :event-id event-id :seq seq :render-final nil
                      :markdown (list :scan nil :pending nil :kind nil :watermark nil))
                nil t))))))
     ;; Finish text before replacing earlier fragments: removing a Think row
@@ -2082,6 +2096,12 @@ session chips; see `dsh-emacs-reference-fontify'.  Returns the event seq."
     (when reasoning-position (set-marker reasoning-position nil))
     ;; Deferred jobs retain their markers until their idle render completes.
     (dolist (state (plist-get step :text-regions))
+      (setf (plist-get state :seq) seq)
+      (when seq
+        (let ((inhibit-read-only t)
+              (buffer-undo-list t))
+          (put-text-property (plist-get state :start) (plist-get state :end)
+                             'dsh-emacs-message-seq seq)))
       (unless (memq state dsh-emacs--markdown-pending)
         (dsh-emacs-render--reset-markdown-state state)
         (set-marker (plist-get state :start) nil)

@@ -7288,17 +7288,112 @@ Lets a test drive a malformed content value through the result path."
             ((symbol-function 'dsh-emacs-list-sessions)
              (lambda () (setq listed t))))
     (dsh-emacs-fork-session "parent-1")
-    (let* ((call (car calls))
-           (params (cadr call)))
-      (when (and (string= "session/fork" (car call))
-                 (string= "parent-1"
-                          (cdr (assq 'sessionId
-                                     (cdr (assq 'request params))))))
-        (dsh-test-pass "fork-passes-session-id")))
-    (when (string= "child-1" opened)
-      (dsh-test-pass "fork-opens-child"))
-    (when listed
-      (dsh-test-pass "fork-refreshes-list"))))
+    (dsh-test-assert "fork-default-omits-event-boundary"
+      (equal (car calls)
+             '("session/fork" ((request . ((sessionId . "parent-1")))))))
+    (dsh-test-assert "fork-opens-child" (equal "child-1" opened))
+    (dsh-test-assert "fork-refreshes-list" listed)
+    (dsh-emacs-fork-session "parent-1" 0)
+    (dsh-test-assert "fork-accepts-zero-boundary"
+      (equal (car calls)
+             '("session/fork"
+               ((request . ((sessionId . "parent-1") (atSeq . 0)))))))))
+
+;; Fork uses the selected durable reply, even inside a code block, never
+;; the newest reply or the globally selected session.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (setq dsh-emacs--buffer-session "parent-at-point")
+  (let ((dsh-emacs--current-session "another-session")
+        (calls nil))
+    (cl-letf (((symbol-function 'dsh-emacs-server-ensure) #'ignore)
+              ((symbol-function 'dsh-emacs--rpc-async)
+               (lambda (method params _cb) (push (list method params) calls))))
+      (dolist (entry '((17 . "```elisp\nchosen-reply\n```")
+                       (29 . "newest-reply")))
+        (dsh-emacs-render-event
+         `((type . "assistant/message") (seq . ,(car entry))
+           (data . ((turn . ,(car entry)) (step . 1)
+                    (message . ((content . [((type . "text")
+                                             (text . ,(cdr entry)))]))))))))
+      (goto-char (point-min))
+      (search-forward "chosen-reply")
+      (call-interactively (lookup-key dsh-emacs-mode-map (kbd "C-c C-y")))
+      (dsh-test-assert "fork-message-selects-exact-reply-and-buffer-session"
+        (equal calls
+               '(("session/fork"
+                  ((request . ((sessionId . "parent-at-point")
+                               (atSeq . 17))))))))
+      (dsh-emacs-render-user-message
+       '((type . "user/message") (seq . 30)
+         (data . ((content . [((type . "text") (text . "user-input"))])))))
+      (goto-char (point-min))
+      (search-forward "user-input")
+      (dsh-test-assert "fork-rejects-user-message-without-rpc"
+        (condition-case err (progn (dsh-emacs-fork-message-at-point) nil)
+          (user-error (equal (cadr err)
+                             "Point is not on a committed assistant reply")))
+        (= (length calls) 1))
+      (goto-char (point-max))
+      (dsh-test-assert "fork-rejects-composer-without-rpc"
+        (condition-case nil (progn (dsh-emacs-fork-message-at-point) nil)
+          (user-error t))
+        (= (length calls) 1)))))
+
+;; Settled live blocks and idle Markdown must retain the durable seq;
+;; the same visible text is not forkable before assistant/message arrives.
+(dolist (defer '(nil 1))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (setq dsh-emacs--buffer-session "stream-parent")
+    (let ((dsh-emacs-stream-markdown-limit defer)
+          (calls nil))
+      (cl-letf (((symbol-function 'dsh-emacs-server-ensure) #'ignore)
+                ((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (_method params _cb) (push params calls))))
+        (dsh-emacs-render--start-assistant-stream
+         '((data . ((turn . 1) (step . 1)))) "**settled-prefix**")
+        (dsh-emacs-render--start-thinking-stream
+         '((data . ((turn . 1) (step . 1)))) "thinking")
+        (dsh-emacs-render--start-assistant-stream
+         '((data . ((turn . 1) (step . 1)))) "streamed-answer")
+        (goto-char (point-min))
+        (search-forward "streamed-answer")
+        (backward-char)
+        (dsh-test-assert "fork-rejects-uncommitted-stream"
+          (condition-case nil (progn (dsh-emacs-fork-message-at-point) nil)
+            (user-error t))
+          (null calls))
+        (dsh-emacs-render-event
+         '((type . "assistant/message") (seq . 43)
+           (data . ((turn . 1) (step . 1)
+                    (message . ((content . [((type . "text")
+                                             (text . "**settled-prefix**"))
+                                            ((type . "reasoning")
+                                             (text . "thinking"))
+                                            ((type . "text")
+                                             (text . "streamed-answer"))])))))))
+        (while dsh-emacs--markdown-pending
+          (dsh-emacs-render--run-markdown (current-buffer)))
+        (dolist (body '("settled-prefix" "streamed-answer"))
+          (goto-char (point-min))
+          (search-forward body)
+          (backward-char)
+          (dsh-emacs-fork-message-at-point))
+        (dsh-test-assert "fork-settled-stream-keeps-durable-boundary"
+          (equal calls
+                 '(((request . ((sessionId . "stream-parent")
+                                (atSeq . 43))))
+                   ((request . ((sessionId . "stream-parent")
+                                (atSeq . 43)))))))
+        (setq dsh-emacs--buffer-subagent
+              (dsh-protocol-subagent-address-create
+               "parent" "child" "continuable"))
+        (dsh-test-assert "fork-message-rejects-subagent-without-rpc"
+          (condition-case err (progn (dsh-emacs-fork-message-at-point) nil)
+            (user-error (equal (cadr err)
+                               "This command is unavailable in a subagent conversation")))
+          (= (length calls) 2))))))
 
 ;; --- Test 51: session list workspace filtering ---
 (let* ((sessions (list (list (cons 'sessionId "s1") (cons 'updatedAt 100)

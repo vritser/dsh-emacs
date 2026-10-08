@@ -1404,6 +1404,11 @@ alist; CONSTRUCTOR converts the wire alist."
   "Cold-read request for SESSION-ID."
   `((request . ((sessionId . ,session-id)))))
 
+(defun dsh-protocol-session-fork-request (session-id &optional at-seq)
+  "Serialize a fork of SESSION-ID, optionally through inclusive AT-SEQ."
+  `((request . ((sessionId . ,session-id)
+                ,@(when at-seq `((atSeq . ,at-seq)))))))
+
 (defun dsh-protocol-subagent-prompt-request (address id delivery text zone)
   "Serialize ADDRESS, caller ID, DELIVERY, TEXT and ZONE for follow-up."
   `((request . ((requestId . ,id)

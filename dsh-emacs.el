@@ -1834,25 +1834,43 @@ that leaves nothing to choose, signal EMPTY-MESSAGE instead of letting
     (cdr (assoc (completing-read prompt entries nil t) entries))))
 
 ;;;###autoload
-(defun dsh-emacs-fork-session (session-id)
+(defun dsh-emacs-fork-session (session-id &optional at-seq)
   "Fork SESSION-ID into a new child session that inherits its history.
-The child starts from the session's latest state (`session/fork' without
-an explicit seq); after the RPC confirms, the list refreshes and the child
-buffer opens with the same workspace path."
+AT-SEQ selects an exact inclusive event boundary.  When omitted, the child
+inherits through the latest completed turn.  After the RPC confirms, the
+list refreshes and the child buffer opens with the same workspace path."
   (interactive (list (dsh-emacs--completing-session-id "Fork session: ")))
+  (unless (or (null at-seq) (and (integerp at-seq) (>= at-seq 0)))
+    (user-error "Invalid fork event sequence: %S" at-seq))
   (dsh-emacs-subagent-require 'mutate session-id)
   (dsh-emacs-server-ensure)
   (dsh-emacs--rpc-async "session/fork"
-                        `((request . ((sessionId . ,session-id))))
+                        (dsh-protocol-session-fork-request session-id at-seq)
                         (lambda (ok value)
                           (if (not ok)
                               (message "Failed to fork session: %S" value)
-                            (let ((child-id (cdr (assq 'sessionId value))))
+                            (let ((child-id
+                                   (dsh-protocol-session-session-id
+                                    (dsh-protocol-session--from-alist value))))
                               (unless child-id
                                 (user-error "session/fork returned no sessionId"))
                               (dsh-emacs-list-sessions)
                               (message "Forked %s -> %s" session-id child-id)
                               (dsh-emacs-open-session child-id))))))
+
+(defun dsh-emacs-fork-message-at-point ()
+  "Fork this conversation through the committed assistant reply at point.
+The new session includes this reply and excludes later events.  Uncommitted
+streams, user messages and transcript controls are not fork boundaries."
+  (interactive)
+  (unless (and (derived-mode-p 'dsh-emacs-mode) dsh-emacs--buffer-session)
+    (user-error "No chat session in this buffer"))
+  (let* ((region (dsh-emacs--assistant-message-region-at (point)))
+         (seq (and region (get-text-property (car region)
+                                             'dsh-emacs-message-seq))))
+    (unless (and (integerp seq) (>= seq 0))
+      (user-error "Point is not on a committed assistant reply"))
+    (dsh-emacs-fork-session dsh-emacs--buffer-session seq)))
 
 (defun dsh-emacs--session-preset (session-id)
   "Return the agentPreset cached for SESSION-ID, or nil when unknown."
@@ -2114,6 +2132,7 @@ repaints)."
     (define-key map (kbd "C-c C-s") #'dsh-emacs-switch-workspace-session)
     (define-key map (kbd "C-c M-s") #'dsh-emacs-switch-session)
     (define-key map (kbd "C-c C-w") #'dsh-emacs-copy-dwim)
+    (define-key map (kbd "C-c C-y") #'dsh-emacs-fork-message-at-point)
     (define-key map (kbd "C-c C-f") #'dsh-emacs-modeline-toggle)
     (define-key map (kbd "C-c C-a") #'dsh-emacs-attach-file)
     (define-key map (kbd "C-c C-v") #'dsh-emacs-attach-clipboard-image)
