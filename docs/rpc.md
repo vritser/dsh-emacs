@@ -2115,9 +2115,9 @@ from the packed records of `data.stream`
 (`reasoning-chunks`/`tool-call-chunks`/`text-chunks`) (reasoning is subject to
 `dsh-emacs-show-reasoning`); if that attempt still has a live streaming body when
 it settles, the live body is taken over by the card rather than drawn twice;
-`session/end-seed` renders as a single `── seed boundary` line (a fork/resume seed
-carries `inherited: true` and is labeled `inherited history`; a brand-new session
-does not append this event); `deliverables/presented` renders after `turn/end` as
+`session/end-seed` advances the event sequence anchor without rendering a row;
+the restore boundary is internal bookkeeping, not conversation content.
+`deliverables/presented` renders after `turn/end` as
 a single `Deliverables · N files` line, collapsed by default (turnTail position;
 expanded, it lists one indented line per path, click to open, with no body
 background; the same path takes the latest description, and `write`/`edit` changes

@@ -140,6 +140,12 @@ minor) and stay undated until the release is cut.
   every other completion in the buffer is untouched.  (rationale:
   postmortem/069)
 
+### Changed
+
+- **Hide seed boundaries**: restored and forked histories no longer display
+  `── seed boundary` rows. Event sequence tracking is preserved.
+  (rationale: postmortem/085)
+
 ### Fixed
 
 - **Session list keeps its focused row after updates**: reordering or

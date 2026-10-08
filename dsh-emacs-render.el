@@ -3741,16 +3741,15 @@ DATA.REASON.ERROR ({code, message, ...})."
      :insert-before insert-point)))
 
 ;;; ---------------------------------------------------------------------------
-;;; Renderer: step / attempt / seed boundaries (V3 vocabulary completion)
+;;; Renderer: step boundaries and attempts (V3 vocabulary completion)
 ;;; ---------------------------------------------------------------------------
 ;;; `step/start' / `step/end' (a step = one model call plus the tool executions
 ;;; it requested) are turn-internal boundaries, not conversation content: they
 ;;; go to the modeline step badge (see `dsh-emacs-modeline-note-step') and take
 ;;; no transcript space.
 ;;; `assistant/attempt' (a failed/retried/cancelled attempt that submitted no
-;;; surface message, with content only in data.stream) and `session/end-seed'
-;;; (the resume/fork/replay seed boundary) do carry body meaning, so each
-;;; renders a row/card.
+;;; surface message, with content only in data.stream) carries body meaning
+;;; and renders a card.  `session/end-seed' only advances the event anchor.
 
 (defun dsh-emacs-render-step-event (event)
   "Feed a `step/start' / `step/end' EVENT to the mode-line step badge.
@@ -3869,30 +3868,6 @@ a visible live body, collapsed when replayed from history."
       :non-foldable empty)
      :create-new t
      :expanded (and live (not empty))
-     :insert-before (dsh-emacs-render--input-insert-point)))
-  (dsh-emacs-render--event-seq event))
-
-(defun dsh-emacs-render-seed-end (event)
-  "Render the `session/end-seed' boundary EVENT as one muted divider row.
-The event marks where restored seed history ends (resume, fork, replay); a
-fresh session never appends one."
-  (let* ((data (dsh-emacs-render--event-data event))
-         (inherited (dsh-emacs-render--json-bool
-                     (dsh-emacs-render--aget "inherited" data))))
-    (dsh-emacs-ui-update-fragment
-     (dsh-emacs-ui-make-fragment
-      :namespace-id (dsh-emacs-render--make-namespace)
-      :block-id (format "seed-%s"
-                        (or (dsh-emacs-render--event-seq event) "?"))
-      :label-left (propertize "── seed boundary" 'face 'dsh-emacs-muted-face)
-      :label-right (and inherited
-                        (propertize "inherited history"
-                                    'face 'dsh-emacs-muted-face))
-      :style 'minimal
-      :status 'seed
-      :header-face 'dsh-emacs-muted-face
-      :non-foldable t)
-     :create-new t
      :insert-before (dsh-emacs-render--input-insert-point)))
   (dsh-emacs-render--event-seq event))
 
@@ -4446,7 +4421,7 @@ source filter, so without this check the same tool card is painted twice."
                    (dsh-emacs-render-step-event event))))
       ("assistant/attempt"
        (setq seq (dsh-emacs-render-assistant-attempt event)))
-      ("session/end-seed" (setq seq (dsh-emacs-render-seed-end event)))
+      ("session/end-seed" (setq seq (dsh-emacs-render--event-seq event)))
       ("deliverables/presented"
        (setq seq (dsh-emacs-render-deliverables event)))
       (_ nil))

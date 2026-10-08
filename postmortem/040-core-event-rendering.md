@@ -1,5 +1,7 @@
 # 040 — Consuming the remaining V3 core events
 
+_Seed boundary rendering is superseded by [085](085-hidden-seed-boundaries.md)._
+
 _Live attempt cleanup is superseded by [060](060-stream-settlement.md)._
 
 _The retry and compaction lifecycle consumption gap is superseded by

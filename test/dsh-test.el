@@ -3323,28 +3323,20 @@ candidates as the UI would via `all-completions', not by destructuring."
                        (= (how-many "retry-only" (point-min) (point-max)) 1)
                        (equal (plist-get dsh-emacs--streaming-thinking :all) '("retry-only"))))))
 
-;; session/end-seed: the restore boundary, marked when inherited.
-(with-temp-buffer
-  (dsh-emacs-mode)
-  (dsh-emacs-modeline-setup)
-  (dsh-emacs-render-event
-   (json-read-from-string
-    "{\"type\":\"session/end-seed\",\"seq\":7,\"data\":{\"inherited\":true}}"))
-  (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-    (dsh-test-assert "seed-boundary-renders-divider"
-      (string-match-p "seed boundary" text)
-      (string-match-p "inherited history" text))))
-
-(with-temp-buffer
-  (dsh-emacs-mode)
-  (dsh-emacs-modeline-setup)
-  (dsh-emacs-render-event
-   (json-read-from-string
-    "{\"type\":\"session/end-seed\",\"seq\":7,\"data\":{}}"))
-  (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-    (dsh-test-assert "seed-boundary-marks-replay-without-inheritance"
-      (string-match-p "seed boundary" text)
-      (not (string-match-p "inherited history" text)))))
+;; Seed boundaries advance the anchor without changing the transcript.
+(dolist (data '("{\"inherited\":true}" "{}"))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (dsh-emacs-modeline-setup)
+    (let ((before (buffer-string)))
+      (dsh-test-assert "seed-boundary-consumed-without-divider"
+        (= (dsh-emacs-render-event
+            (json-read-from-string
+             (format "{\"type\":\"session/end-seed\",\"seq\":7,\"data\":%s}"
+                     data)))
+           7)
+        (= dsh-emacs--anchor-seq 7)
+        (equal (buffer-string) before)))))
 
 ;; deliverables/presented: collected, rendered once at the turn's tail.
 (with-temp-buffer
