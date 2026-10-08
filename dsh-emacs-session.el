@@ -539,11 +539,13 @@ baselines regroup hundreds of multibyte rows."
         ;; scrolls only when the current session is genuinely off screen, not
         ;; on every repaint.
         (setq dsh-emacs-session--auto-jump-session nil))
-      ;; Row transposition preserves markers, but not hl-line's overlay.
-      ;; Async repaints have no post-command hook to realign it.  Move only
-      ;; the existing overlay, preserving its window and visibility policy.
+      ;; Row edits can stretch both local and global hl-line overlays.
+      ;; Async repaints have no post-command hook to realign them.  Move only
+      ;; existing overlays, preserving their window and visibility policy.
       (when (and hl-line-mode (overlayp hl-line-overlay))
-        (hl-line-move hl-line-overlay)))))
+        (hl-line-move hl-line-overlay))
+      (when (and global-hl-line-mode (overlayp global-hl-line-overlay))
+        (hl-line-move global-hl-line-overlay)))))
 
 (defun dsh-emacs-session--visible-p (session &optional current-session-id)
   "Non-nil when SESSION passes dsh web's visible-session rule.

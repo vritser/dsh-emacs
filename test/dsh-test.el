@@ -7885,6 +7885,44 @@ Lets a test drive a malformed content value through the result path."
           (= (overlay-end overlay) (line-beginning-position 2))
           (eq (overlay-get overlay 'window) window))))))
 
+;; A partial first paint can already have the user's global line highlight.
+;; Inserting later rows at its end stretches that second overlay until the
+;; next command, even when the list's own local overlay has been corrected.
+(let* ((sessions
+        (cl-loop for i below 3 collect
+                 (dsh-protocol-session--from-alist
+                  `((sessionId . ,(format "initial-%d" i))
+                    (updatedAt . ,(- 100 i))
+                    (projections (values (title . ,(format "Initial %d" i))))))))
+       (dsh-emacs--sessions (list (car sessions)))
+       (dsh-emacs--workspaces nil)
+       (dsh-emacs--archived-sessions nil)
+       (global-hl-line-mode t)
+       (global-hl-line-overlays nil)
+       (global-hl-line-sticky-flag nil)
+       (hl-line-overlay-buffer nil))
+  (save-window-excursion
+    (with-temp-buffer
+      ;; Emacs 31 excludes space-prefixed internal buffers from global hl-line.
+      (rename-buffer "*dsh-initial-highlight-test*" t)
+      (switch-to-buffer (current-buffer))
+      (cl-letf (((symbol-function 'dsh-emacs-events-host-connect) #'ignore)
+                ((symbol-function 'dsh-emacs-session--auto-refresh-start) #'ignore))
+        (dsh-emacs-session-mode))
+      (global-hl-line-highlight)
+      (let ((overlay global-hl-line-overlay)
+            (window (overlay-get global-hl-line-overlay 'window)))
+        (setq dsh-emacs--sessions sessions)
+        (dsh-emacs-session--render)
+        (dsh-test-assert "session-first-load-keeps-both-highlights-on-one-row"
+          (equal (dsh-emacs-session-id-at-point) "initial-0")
+          (eq overlay global-hl-line-overlay)
+          (eq (overlay-get overlay 'window) window)
+          (= (overlay-start overlay) (line-beginning-position))
+          (= (overlay-end overlay) (line-beginning-position 2))
+          (= (overlay-start hl-line-overlay) (line-beginning-position))
+          (= (overlay-end hl-line-overlay) (line-beginning-position 2)))))))
+
 ;; Removing the focused row must not send every view to workspace one.
 ;; Include middle/end removals and a workspace with no session rows.
 (dolist (scenario '(("b1" "b2" session)

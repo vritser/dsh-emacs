@@ -151,6 +151,10 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Session list highlights only the focused row on first load**: when
+  global line highlighting is enabled, asynchronously inserted rows no
+  longer stretch the highlight over the rest of the list.
+
 - **Session list keeps its focused row after updates**: reordering or
   refreshing rows no longer moves the cursor to the middle of the old
   viewport. The row highlight follows the restored focus immediately,
