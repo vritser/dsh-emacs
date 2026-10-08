@@ -2919,6 +2919,73 @@ candidates as the UI would via `all-completions', not by destructuring."
                            (null dsh-emacs--streaming-thinking)
                            (null dsh-emacs--streaming-assistant)))))))
 
+;; Deltas may alternate between still-open protocol blocks.  An earlier
+;; reasoning block must keep its identity after the answer starts.
+(dolist (limit '(nil 8))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (let ((dsh-emacs-stream-markdown-limit limit)
+          (dsh-emacs-thinking-expand-by-default t)
+          (dsh-emacs-thinking-preview-max 0))
+      (dolist (chunk '(((type . "reasoning-delta") (index . 0)
+                        (text . "The test confirms the expected failure."))
+                       ((type . "text-delta") (index . 1) (text . "RED"))
+                       ((type . "reasoning-delta") (index . 0)
+                        (text . " Check the test file."))
+                       ((type . "text-delta") (index . 1)
+                        (text . " confirmed (200 frames → 200 repaints)."))))
+        (dsh-emacs-render-event
+         `((type . "assistant/chunk")
+           (data . ((turn . 1) (step . 1) (chunk . ,chunk))))))
+      (dsh-emacs-render--flush-stream)
+      (dsh-test-assert "overlapping-blocks-keep-live-answer-together"
+        (= (how-many "Think" (point-min) (point-max)) 1)
+        (string-match-p "RED confirmed (200 frames → 200 repaints)."
+                        (buffer-string))
+        (string-match-p "failure. Check the test file." (buffer-string)))
+      (dsh-emacs-render-event
+       '((type . "assistant/message")
+         (data . ((turn . 1) (step . 1)
+                  (message . ((content . [((type . "reasoning")
+                                           (text . "The test confirms the expected failure. Check the test file."))
+                                          ((type . "text")
+                                           (text . "RED confirmed (200 frames → 200 repaints)."))])))))))
+      (while dsh-emacs--markdown-pending
+        (dsh-emacs-render--run-markdown (current-buffer)))
+      (dsh-test-assert "overlapping-blocks-settle-without-duplicates"
+        (= (how-many "Think" (point-min) (point-max)) 1)
+        (= (how-many "RED confirmed" (point-min) (point-max)) 1)
+        (string-match-p "failure. Check the test file." (buffer-string))))))
+
+;; The default collapsed row also updates in place, keeping the user's fold
+;; choice and the draft while another reasoning block is still live.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (dsh-emacs--setup-input-area)
+  (dsh-emacs--replace-input "unsent draft")
+  (let ((dsh-emacs-thinking-expand-by-default nil))
+    (dolist (chunk '(((type . "reasoning-delta") (index . 0) (text . "first"))
+                     ((type . "text-delta") (index . 1) (text . "answer"))
+                     ((type . "reasoning-delta") (index . 2) (text . "second"))
+                     ((type . "reasoning-delta") (index . 0) (text . " tail"))))
+      (dsh-emacs-render-event
+       `((type . "assistant/chunk")
+         (data . ((turn . 1) (step . 1) (chunk . ,chunk))))))
+    (let* ((block (car (plist-get dsh-emacs--streamed-step :thinking-blocks)))
+           (range (dsh-emacs-ui-find-block (car block) (cdr block)))
+           (state (get-text-property (car range) 'dsh-emacs-ui-state)))
+      (dsh-test-assert "late-reasoning-preserves-fold-draft-and-live-block"
+        (map-elt state :collapsed)
+        (equal (map-elt state :body) "first tail")
+        (equal (plist-get dsh-emacs--streamed-step :reasoning) "first tail")
+        (= (plist-get dsh-emacs--streaming-thinking :index) 2)
+        (= (how-many "Think" (point-min) (point-max)) 2)
+        (equal (dsh-emacs--get-input) "unsent draft")))
+    (dsh-emacs-render--close-live-thinking-block)
+    (dsh-test-assert "late-reasoning-keeps-final-block-separators"
+      (equal (plist-get dsh-emacs--streamed-step :reasoning)
+             "first tail\nsecond"))))
+
 ;; Final reasoning corrections replace or remove both live and folded blocks.
 (dolist (final '("corrected reasoning" ""))
   (dolist (answer '("reply" ""))

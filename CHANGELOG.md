@@ -129,6 +129,10 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Late thinking updates keep replies intact**: reasoning deltas received
+  after answer text starts update their original Think row. They no longer
+  insert another Think row in the middle of a sentence or split the answer.
+
 - **Session list paints as soon as its data arrives**: frames recorded during
   a list refresh are replayed with repainting batched, and workspace frames
   arriving before the first `session/list` response no longer paint a list of

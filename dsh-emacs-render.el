@@ -747,7 +747,8 @@ the record lets the authoritative `assistant/message' render only what is
 missing instead of rewriting blocks the user has already read.  :blocks lists
 the indices that supplied content, including blocks that are no longer live,
 so a delayed `block-end' cannot render them again.  :thinking-blocks keeps the
-folded fragments' (NAMESPACE . BLOCK-ID) identities for repair or discard.")
+folded fragments' (NAMESPACE . BLOCK-ID) identities for repair or discard;
+:thinking-regions retains their indexed stream states for later deltas.")
 
 (defun dsh-emacs-render--step-record (key)
   "Return the live step's record for KEY, creating it when needed.
@@ -755,7 +756,7 @@ A new KEY (turn/step) starts a fresh record."
   (unless (equal (plist-get dsh-emacs--streamed-step :key) key)
     (setq dsh-emacs--streamed-step
           (list :key key :text "" :reasoning "" :text-regions nil
-                :thinking-blocks nil :blocks nil)))
+                :thinking-blocks nil :thinking-regions nil :blocks nil)))
   dsh-emacs--streamed-step)
 
 (defun dsh-emacs-render--commit-text-segment (state)
@@ -806,6 +807,7 @@ wrong text above the repaired one.  The caller binds `inhibit-read-only'."
         (setq first (min (or first (car range)) (car range)))
         (dsh-emacs-ui-delete-fragment (car block) (cdr block))))
     (plist-put step :thinking-blocks nil)
+    (plist-put step :thinking-regions nil)
     (plist-put step :reasoning "")
     first))
 
@@ -1572,7 +1574,7 @@ rendered in full."
   (and dsh-emacs--streaming-thinking
        (equal key (plist-get dsh-emacs--streaming-thinking :key))))
 
-(defun dsh-emacs-render--start-thinking-stream (event text)
+(cl-defun dsh-emacs-render--start-thinking-stream (event text)
   "Create or extend the live Thinking stream with reasoning TEXT.
 The stream is a raw body under a dsh-web \"IconThink…\" header (see
 `dsh-emacs-render--think-icon') inserted at the transcript's input point, so
@@ -1587,6 +1589,25 @@ text arrives."
                             "chunk" (dsh-emacs-render--event-data event))))
            (state dsh-emacs--streaming-thinking)
            (new-state nil))
+      ;; A later block can start before this reasoning block finishes.
+      ;; Its index still owns the folded row: reopening it at the input
+      ;; would split the answer and create a second Think fragment.
+      (when-let* ((step (and (integerp index)
+                            (equal key (plist-get dsh-emacs--streamed-step :key))
+                            dsh-emacs--streamed-step))
+                  (closed (cl-find index (plist-get step :thinking-regions)
+                                   :key (lambda (entry) (plist-get entry :index)))))
+        (push text (plist-get closed :all))
+        (dsh-emacs-render--render-thinking-block
+         (plist-get closed :ns) (plist-get closed :block-id)
+         (apply #'concat (reverse (plist-get closed :all)))
+         (plist-get closed :timestamp) nil t)
+        (setf (plist-get step :reasoning)
+              (mapconcat
+               (lambda (entry)
+                 (apply #'concat (reverse (plist-get entry :all))))
+               (reverse (plist-get step :thinking-regions)) "\n"))
+        (cl-return-from dsh-emacs-render--start-thinking-stream closed))
       ;; Consecutive reasoning blocks have distinct indices even when no
       ;; text delta separates them. Keep their regions and separators apart.
       (when (and state
@@ -1622,6 +1643,7 @@ text arrives."
                             :start (copy-marker start nil)
                             :end end :chunks nil :timer nil
                             :all (list text)
+                            :timestamp (format-time-string "%H:%M:%S")
                             :ns (dsh-emacs-render--make-namespace)
                             :block-id (dsh-emacs-render--make-block-id event))
                 dsh-emacs--streaming-thinking state
@@ -1653,7 +1675,7 @@ when a live stream existed and was replaced."
             (setq dsh-emacs--streaming-thinking nil)
             (dsh-emacs-render--render-thinking-block
              ns block-id final-text
-             (format-time-string "%H:%M:%S") start)))
+             (plist-get state :timestamp) start)))
         (set-marker (plist-get state :start) nil)
         (set-marker (plist-get state :end) nil)
         (setq dsh-emacs--streaming-thinking nil))
@@ -1675,6 +1697,7 @@ follows and be deleted when the stream is finalized."
                    (concat committed "\n" streamed)))
       (dsh-emacs-render--replace-live-thinking-text
        (plist-get state :ns) (plist-get state :block-id) streamed)
+      (push state (plist-get step :thinking-regions))
       (push (cons (plist-get state :ns) (plist-get state :block-id))
             (plist-get step :thinking-blocks)))))
 
@@ -2066,8 +2089,10 @@ session chips; see `dsh-emacs-reference-fontify'.  Returns the event seq."
     (setq dsh-emacs--streamed-step nil)
     seq))
 
-(defun dsh-emacs-render--render-thinking-block (namespace-id block-id text timestamp insert-point)
-  "Render a collapsible <details>-style thinking block."
+(defun dsh-emacs-render--render-thinking-block
+    (namespace-id block-id text timestamp insert-point &optional update)
+  "Render a collapsible <details>-style thinking block.
+UPDATE refreshes the existing block while preserving its fold state."
   (dsh-emacs-ui-update-fragment
    (dsh-emacs-ui-make-fragment
     :namespace-id namespace-id
@@ -2084,7 +2109,7 @@ session chips; see `dsh-emacs-reference-fontify'.  Returns the event seq."
     ;; own face is embedded above, so it wins over the header face.
     :header-face 'dsh-emacs-thinking-body-face
     :body-face 'dsh-emacs-thinking-body-face)
-   :create-new t :expanded dsh-emacs-thinking-expand-by-default
+   :create-new (not update) :expanded dsh-emacs-thinking-expand-by-default
    :insert-before insert-point))
 
 ;;; ---------------------------------------------------------------------------

@@ -662,7 +662,10 @@ so the authoritative message recognizes it too.
 Distinct block indices separate consecutive blocks of the same kind.
 Folded Think fragments retain their identities until settlement: corrected
 reasoning replaces them at their original position, and failed attempts move
-all live/folded blocks into the attempt card. Text reconciliation completes
+all live/folded blocks into the attempt card. Their indexed stream states also
+remain available: a late reasoning delta updates its original fragment and
+the committed reasoning text, preserving the fold state and leaving the
+current answer stream open. Text reconciliation completes
 before an earlier Think fragment is replaced, preserving text-region bounds.
 `dsh-emacs-render--discard-stream` owns that transient cleanup for both failed
 attempts and reconnect snapshots (see [060](../postmortem/060-stream-settlement.md)).
