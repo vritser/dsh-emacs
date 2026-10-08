@@ -18,6 +18,7 @@ dsh-emacs/
 ├── dsh-emacs-jobs.el         # Background jobs: job/list + job/follow streams, stop
 ├── dsh-emacs-plan.el         # Plan documents, asynchronous review and decisions
 ├── dsh-emacs-server.el       # Server bootstrap, browser-session auth, configuration file entry
+├── dsh-emacs-provider.el     # Minibuffer provider setup through settings and credential RPCs
 ├── dsh-emacs-command.el      # Slash surface: commands/list + commands/execute, "/" completion and menu
 ├── dsh-emacs-skill.el        # Skill catalog (skills/list) and /name gestures
 ├── dsh-emacs-shell.el        # Client-side `!command` shell commands (local execution)
@@ -25,6 +26,24 @@ dsh-emacs/
 ├── dsh-emacs-composer.el     # Composer chrome: Goal and Next Message rows above the input
 └── dsh-emacs-session.el      # Session list card view
 ```
+
+## Provider setup (`dsh-emacs-provider.el`)
+
+`dsh-emacs-add-provider` reads `settings/describe`, the configurable provider
+directory and credential status asynchronously. Protocol constructors decode
+Schemastery's reference envelope, provider addresses, existing endpoint/key
+references and strict booleans. The command offers catalog routes owned by a
+compatible provider dictionary or a new custom route. Multiple compatible
+namespaces require an explicit owner choice; namespace ids are not hardcoded.
+
+Minibuffer readers gather the required fields. A new route is written at its
+own dictionary entry; existing routes receive only explicitly changed fields.
+Every `settings/mutate` uses the captured namespace revision. Credential
+storage follows a successful settings write and partial success is reported
+without rollback or automatic retries. Each asynchronous stage checks the
+captured server URL. No model selection is changed and no catalog cache is
+added: the existing model picker reads the current catalog when opened.
+See [decision record 080](../postmortem/080-provider-minibuffer-setup.md).
 
 ## Configuration file entry (`dsh-emacs-server.el`)
 

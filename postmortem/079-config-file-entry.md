@@ -1,5 +1,8 @@
 # 079 — Open configuration as an ordinary file
 
+_Superseded as the primary provider-setup workflow by 080; the file entry
+remains available for advanced configuration._
+
 ## Background
 
 At `3dd9f7d`, dsh-emacs offered `dsh-emacs-open-web` for configuration and

@@ -292,6 +292,46 @@ single-select, and an option-less free-text question — so it also shows the
 `Question N/M` framing. It honors the display setting, sends no RPC, and
 prints the whole batch's answers when you finish.
 
+## Adding providers
+
+`M-x dsh-emacs-add-provider` configures the connected dsh server without
+opening a settings buffer or requiring an active chat session:
+
+1. Select a catalog provider with completion, or type a new route name such
+   as `my-gateway` (lowercase letters, digits and hyphens; start with a letter).
+2. Enter the base URL. For a catalog provider, empty input keeps its default.
+3. For a new custom route, select a protocol from the server's supported
+   choices and enter one or more comma-separated model IDs. For a new catalog
+   provider, leave model IDs empty to keep its built-in catalog.
+4. Enter the API key in the password minibuffer. Empty input keeps an existing
+   credential, or leaves provider-native authentication in use when none is
+   configured. The prompt identifies the credential being replaced.
+
+Completing the prompts saves the provider. `C-g` before submission cancels
+without writing. `C-c C-m` in a chat buffer fetches the model catalog afresh,
+so newly added models are available without restarting Emacs. This does not
+automatically change any session's selected model.
+
+Re-selecting an existing provider edits only its endpoint and API key; its
+model definitions, protocols, custom headers and other fields are preserved.
+An empty endpoint keeps the current value. Use the configuration-file or Web
+entry for those advanced fields, including model capabilities and reasoning.
+
+This command supports the pi-ai provider configuration shape, including
+renamed settings namespaces. Other provider families and OAuth/account login
+flows continue through `M-x dsh-emacs-open-web`. It uses the server's settings,
+provider-directory and credential APIs; a read-only or unsupported server
+reports an error instead of writing local configuration files.
+
+API keys go to dsh's credential store; provider settings contain only the
+credential reference. Settings are saved with the revision read at command
+start: a concurrent change is rejected, and the key is not written. The
+profile is saved before its key. If that second write fails, the command
+reports partial success; re-run it, select the saved provider and enter the
+key again. A changed server URL stops subsequent writes. Transport failures
+can leave a write's outcome uncertain; inspect the original server before
+retrying. Neither profiles nor credentials are automatically rolled back.
+
 ## Editing dsh configuration
 
 Run `M-x dsh-emacs-edit-config` and select the existing configuration file

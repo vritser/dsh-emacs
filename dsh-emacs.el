@@ -92,6 +92,7 @@
 (require 'dsh-emacs-queue)
 (require 'dsh-emacs-jobs)
 (require 'dsh-emacs-server)
+(require 'dsh-emacs-provider)
 (require 'dsh-emacs-command)
 (require 'dsh-emacs-skill)
 (require 'dsh-emacs-reference)

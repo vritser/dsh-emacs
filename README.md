@@ -277,10 +277,15 @@ image file and sends it immediately. Only the media types in
 
 ### Models & presets
 
-Configure providers, models and agent presets in dsh through
-`M-x dsh-emacs-open-web` or its configuration files. Use `C-c C-m` to
-select a session's model.
+Use `M-x dsh-emacs-add-provider` to select a pi-ai catalog provider or enter
+a custom provider name. Minibuffer prompts collect the endpoint, protocol
+and model IDs as needed, then the API key through a password reader. Settings
+and credentials are saved on the connected dsh server; `C-c C-m` then selects
+a model. Selecting an existing provider updates its endpoint/key while
+preserving its model definitions and other settings. See
+[Adding providers](docs/customization.md#adding-providers).
 
+Other provider families and account sign-in use `M-x dsh-emacs-open-web`.
 For advanced configuration and agent presets, edit dsh's configuration files.
 `M-x dsh-emacs-edit-config` asks for an existing configuration file and opens
 it for ordinary editing and `C-x C-s` saving. It remembers the choice per

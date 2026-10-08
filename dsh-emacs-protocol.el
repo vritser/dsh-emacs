@@ -105,6 +105,106 @@ struct never hands a caller `:json-false'."
   (and value (not (eq value :json-false))))
 
 ;; ---------------------------------------------------------------------------
+;; Provider configuration (settings, llm directory and credentials)
+;; ---------------------------------------------------------------------------
+
+(cl-defstruct (dsh-protocol-provider-profile
+               (:constructor dsh-protocol-provider-profile--from-alist
+                             (alist &aux
+                                    (endpoint (dsh-protocol--field 'baseURL alist))
+                                    (key-ref (dsh-protocol--field 'apiKeyEnv alist)))))
+  endpoint key-ref)
+
+(cl-defstruct (dsh-protocol-provider-settings
+               (:constructor dsh-protocol-provider-settings--from-alist
+                             (alist &aux
+                                    (name (dsh-protocol--field 'ns alist))
+                                    (revision (dsh-protocol--field 'revision alist))
+                                    (protocols
+                                     (let* ((schema (dsh-protocol--field 'schema alist))
+                                            (refs (dsh-protocol--field 'refs schema)))
+                                       ;; Schemastery serializes children as numeric
+                                       ;; references, not inline JSON Schema nodes.
+                                       (cl-labels
+                                           ((node (value)
+                                              (if (numberp value)
+                                                  (dsh-protocol--field
+                                                   (number-to-string value) refs)
+                                                value)))
+                                         (let* ((root (if refs
+                                                          (node (dsh-protocol--field
+                                                                 'uid schema))
+                                                        schema))
+                                                (dict (dsh-protocol--field 'dict root))
+                                                (providers (node (dsh-protocol--field
+                                                                  'providers dict)))
+                                                (profile (node (dsh-protocol--field
+                                                                'inner providers)))
+                                                (fields (dsh-protocol--field
+                                                         'dict profile))
+                                                (api (node (dsh-protocol--field
+                                                            'api fields))))
+                                           (delq nil
+                                                 (mapcar
+                                                  (lambda (entry)
+                                                    (let ((value (dsh-protocol--field
+                                                                  'value (node entry))))
+                                                      (and (stringp value) value)))
+                                                  (dsh-protocol--list
+                                                   (dsh-protocol--field 'list api))))))))
+                                    (profiles
+                                     (mapcar
+                                      (lambda (entry)
+                                        (cons (if (symbolp (car entry))
+                                                  (symbol-name (car entry))
+                                                (car entry))
+                                              (dsh-protocol-provider-profile--from-alist
+                                               (cdr entry))))
+                                      (dsh-protocol--field
+                                       'providers (dsh-protocol--field 'value alist)))))))
+  name revision protocols profiles)
+
+(cl-defstruct (dsh-protocol-provider-settings-catalog
+               (:constructor dsh-protocol-provider-settings-catalog--from-alist
+                             (alist &aux
+                                    (writable (dsh-protocol--boolean
+                                               (dsh-protocol--field 'writable alist)))
+                                    (sections
+                                     (mapcar
+                                      #'dsh-protocol-provider-settings--from-alist
+                                      (dsh-protocol--objects
+                                       (dsh-protocol--field 'namespaces alist)))))))
+  writable sections)
+
+(cl-defstruct (dsh-protocol-configurable-provider
+               (:constructor dsh-protocol-configurable-provider--from-alist
+                             (alist &aux
+                                    (id (dsh-protocol--field 'provider alist))
+                                    (namespace (dsh-protocol--field 'settingsNs alist))
+                                    (path (dsh-protocol--list
+                                           (dsh-protocol--field 'settingsPath alist)))
+                                    (declared (dsh-protocol--boolean
+                                               (dsh-protocol--field 'declared alist))))))
+  id namespace path declared)
+
+(cl-defstruct (dsh-protocol-provider-credential
+               (:constructor dsh-protocol-provider-credential--from-alist
+                             (alist ref &aux
+                                    (info (dsh-protocol--field ref alist))
+                                    (configured (dsh-protocol--boolean
+                                                 (dsh-protocol--field 'configured info)))
+                                    (writable (dsh-protocol--boolean
+                                               (dsh-protocol--field 'writable info))))))
+  configured writable)
+
+(cl-defstruct (dsh-protocol-rpc-error
+               (:constructor dsh-protocol-rpc-error--from-alist
+                             (alist &aux
+                                    (code (dsh-protocol--field 'code alist))
+                                    (message (dsh-protocol--field 'message alist)))))
+  code message)
+
+;; ---------------------------------------------------------------------------
 ;; session/list / workspace/follow baseline
 ;; ---------------------------------------------------------------------------
 

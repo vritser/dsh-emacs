@@ -10,6 +10,12 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Add providers from the minibuffer**: `M-x dsh-emacs-add-provider` sets up
+  a pi-ai catalog provider or custom API endpoint through ordinary completion
+  and password prompts. Settings and API keys are saved separately on the
+  connected server; existing providers can update their endpoint/key without
+  replacing other settings. (rationale: postmortem/080)
+
 - **Edit dsh configuration in Emacs**: `M-x dsh-emacs-edit-config` opens a
   user-chosen existing configuration file, including explicit TRAMP paths,
   for ordinary editing and saving. Choices are remembered per server URL
