@@ -221,6 +221,19 @@ parks on the first session row rather than on the first header."
           (throw 'dsh-first-row (point)))
         (forward-line 1)))))
 
+(defun dsh-emacs-session--focus-position (id row-order)
+  "Restore ID, or a surviving neighbor from the previous ROW-ORDER.
+Prefer following rows, then preceding rows from nearest to farthest.
+Only use the first new row when none of the old candidates survive."
+  (or (dsh-emacs-session--row-pos 'dsh-emacs-row-id id)
+      (let* ((tail (member id row-order))
+             (before (cl-subseq row-order 0 (- (length row-order)
+                                              (length tail)))))
+        (cl-loop for candidate in (append (cdr tail) (reverse before))
+                 thereis (dsh-emacs-session--row-pos
+                          'dsh-emacs-row-id candidate)))
+      (dsh-emacs-session--first-row-pos)))
+
 (defun dsh-emacs-session--window-points ()
   "Capture the view of every window displaying the current buffer.
 Returns a list of (WINDOW ID START-ID . START-OFFSET), where ID is the id of
@@ -258,10 +271,11 @@ that survive unchanged."
                     points))))))
     points))
 
-(defun dsh-emacs-session--restore-window-points (points)
+(defun dsh-emacs-session--restore-window-points (points row-order)
   "Put each window in POINTS back on its captured row and scroll position.
 POINTS comes from `dsh-emacs-session--window-points'; a row that is gone
-(collapsed, archived, no longer listed) falls back to the first list row.
+(collapsed, archived, no longer listed) uses a surviving neighbor from
+the previous ROW-ORDER.
 The selected window's row is written with `goto-char', because the buffer's
 point (what commands read, and what the list uses as its focus) does not
 follow `set-window-point'.
@@ -269,19 +283,16 @@ follow `set-window-point'.
 Every window also gets its viewport back — the row that was at its top, at
 the same offset — so a refresh leaves the scroll position exactly where it
 was: the user picked that part of the list, and a background repaint must
-not move it under them.  The start is set without FORCE, so a window whose
-point ended up outside the restored viewport still scrolls the minimum
-needed to show it instead of hiding it."
+not move it under them.  Set NOFORCE so redisplay can adjust the viewport
+when its restored row no longer contains point; forcing that start would
+instead move point to the middle of the window."
   (dolist (entry points)
     (let ((win (nth 0 entry))
           (id (nth 1 entry))
           (start-id (nth 2 entry))
           (offset (nth 3 entry)))
       (when (window-live-p win)
-        (let ((pos (or (dsh-emacs-session--row-pos 'dsh-emacs-row-id id)
-                       ;; The captured row is gone (collapsed, archived): fall
-                       ;; back to the top row, like a lost buffer focus.
-                       (dsh-emacs-session--first-row-pos)))
+        (let ((pos (dsh-emacs-session--focus-position id row-order))
               (start (and start-id
                           (dsh-emacs-session--row-pos
                            'dsh-emacs-row-id start-id))))
@@ -290,7 +301,7 @@ needed to show it instead of hiding it."
            ((eq win (selected-window)) (goto-char pos))
            (t (set-window-point win pos)))
           (when start
-            (set-window-start win (min (point-max) (+ start offset)))))))))
+            (set-window-start win (min (point-max) (+ start offset)) t)))))))
 
 (defun dsh-emacs-session--ancestors (id)
   "Return ID's direct parent through root, using cached lineage only."
@@ -410,6 +421,14 @@ baselines regroup hundreds of multibyte rows."
         ;; screen (batch render, daemon, background repaint) would otherwise
         ;; lose the focus entirely.
         (buffer-id (get-text-property (point) 'dsh-emacs-row-id))
+        ;; Preserve neighbors before deletion or regrouping changes their
+        ;; order.  Buffer focus and every displayed window share this view.
+        (row-order (save-excursion
+                     (goto-char (point-min))
+                     (cl-loop until (eobp)
+                              for id = (get-text-property (point) 'dsh-emacs-row-id)
+                              when id collect id
+                              do (forward-line 1))))
         ;; An auto-jump target (opening the list) outranks that row restore;
         ;; the row restore is dropped while the jump is pending so the two
         ;; cannot fight over point (see below).
@@ -494,14 +513,12 @@ baselines regroup hundreds of multibyte rows."
                         (dsh-emacs-session--row-pos 'dsh-emacs-session-id
                                                     jump-id)))
            ;; Without a pending jump the buffer's captured row decides point:
-           ;; the row itself when it survived the redraw, the top of the list
+           ;; the row itself when it survived the redraw, a surviving neighbor
            ;; when it is gone (collapsed, archived), and the first session row
            ;; on a fresh buffer (the inserts above left point at the end).
            (focus (and (null jump-id)
                        (if buffer-id
-                           (or (dsh-emacs-session--row-pos
-                                'dsh-emacs-row-id buffer-id)
-                               (dsh-emacs-session--first-row-pos))
+                           (dsh-emacs-session--focus-position buffer-id row-order)
                          (dsh-emacs-session--first-row-pos t)))))
       (when-let* ((pos (or jumped focus)))
         (goto-char pos))
@@ -512,15 +529,21 @@ baselines regroup hundreds of multibyte rows."
        (if jump-id
            (cl-remove-if (lambda (entry) (eq (car entry) (selected-window)))
                          window-points)
-         window-points))
+         window-points)
+       row-order)
       (when jumped
         ;; The target is consumed: later repaints keep point where the user
         ;; left it.  A jump does not center anything itself: the scroll
-        ;; restore above keeps the viewport put, and Emacs shows a point that
-        ;; fell outside it with the minimum scroll — so opening the list
+        ;; restore above keeps the viewport put when possible, and Emacs
+        ;; scrolls to reveal a point that fell outside it — so opening the list
         ;; scrolls only when the current session is genuinely off screen, not
         ;; on every repaint.
-        (setq dsh-emacs-session--auto-jump-session nil)))))
+        (setq dsh-emacs-session--auto-jump-session nil))
+      ;; Row transposition preserves markers, but not hl-line's overlay.
+      ;; Async repaints have no post-command hook to realign it.  Move only
+      ;; the existing overlay, preserving its window and visibility policy.
+      (when (and hl-line-mode (overlayp hl-line-overlay))
+        (hl-line-move hl-line-overlay)))))
 
 (defun dsh-emacs-session--visible-p (session &optional current-session-id)
   "Non-nil when SESSION passes dsh web's visible-session rule.

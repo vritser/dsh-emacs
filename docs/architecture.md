@@ -982,6 +982,13 @@ list owns buffer-local child expansion, indented rows and ancestor reveal.
 Rows carry the same direct-parent catalog entry used by the picker. Rendering
 reads cached state; expansion requests missing catalogs and projection changes
 repaint the list. Existing row identities preserve focus and viewport position.
+Viewport restoration allows redisplay to scroll when the focused row moves
+off screen, instead of forcing point into the old viewport. After row updates,
+the existing `hl-line` overlay is realigned without changing its window scope.
+If the focused row disappears, both buffer and window focus use the previous
+row order to find the next surviving row, then the preceding row. Only a list
+with no surviving candidate falls back to its first new row. See
+[082](../postmortem/082-session-list-focus.md).
 The list renders into a temporary buffer, deletes rows that are no longer visible,
 moves surviving rows by identity with
 `transpose-regions`, and diffs only individual changed lines. This preserves

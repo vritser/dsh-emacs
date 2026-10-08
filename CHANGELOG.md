@@ -129,6 +129,14 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Session list keeps its focused row after updates**: reordering or
+  refreshing rows no longer moves the cursor to the middle of the old
+  viewport. The row highlight follows the restored focus immediately,
+  including updates received between commands. Archiving or deleting the
+  focused row selects the next surviving row, or the preceding row when
+  none follows, instead of jumping to the first workspace.
+  (rationale: postmortem/082)
+
 - **Late thinking updates keep replies intact**: reasoning deltas received
   after answer text starts update their original Think row. They no longer
   insert another Think row in the middle of a sentence or split the answer.

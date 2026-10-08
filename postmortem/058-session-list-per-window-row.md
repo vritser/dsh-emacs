@@ -2,6 +2,7 @@
 
 Erase-and-rebuild rendering superseded by [077](077-session-list-subagents.md).
 Per-window row identity and viewport restoration remain in use.
+Removed-row fallback and redisplay forcing superseded by [082](082-session-list-focus.md).
 
 ## Background
 

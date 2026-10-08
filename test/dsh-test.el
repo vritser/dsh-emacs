@@ -7618,8 +7618,8 @@ Lets a test drive a malformed content value through the result path."
           (dsh-emacs-session--render)
           (let ((p10 (dsh-emacs-session--row-pos 'dsh-emacs-session-id "s10"))
                 (p45 (dsh-emacs-session--row-pos 'dsh-emacs-session-id "s45")))
-            ;; FORCE: the window is not redisplayed in batch, so an unforced
-            ;; `set-window-start' would not read back.
+            ;; NOFORCE: redisplay may adjust this start to keep point visible.
+            ;; Batch checks only the requested start, before any redisplay.
             (set-window-point (selected-window) p10)
             (set-window-start (selected-window) p45 t)
             (let ((before-start (window-start (selected-window)))
@@ -7633,6 +7633,95 @@ Lets a test drive a malformed content value through the result path."
                        (get-text-property (window-start (selected-window))
                                           'dsh-emacs-row-id)))))))
     (kill-buffer buf)))
+
+;; A reordered focus can leave the old viewport.  Forcing that viewport
+;; makes GUI redisplay move point to its middle; a batch window does not
+;; redisplay, so also check the NOFORCE contract at the Emacs boundary.
+(let ((dsh-emacs--sessions
+       (cl-loop for i below 70 collect
+                (dsh-protocol-session--from-alist
+                 `((sessionId . ,(format "focus-%d" i))
+                   (updatedAt . ,(- 1000 i))
+                   (projections (values (title . ,(format "Focus %d" i))))))))
+      (dsh-emacs--workspaces nil)
+      (dsh-emacs--archived-sessions nil)
+      (hl-line-overlay-buffer nil)
+      (hl-line-sticky-flag nil))
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (cl-letf (((symbol-function 'dsh-emacs-events-host-connect) #'ignore))
+        (dsh-emacs-session-mode))
+      (goto-char (dsh-emacs-session--row-pos 'dsh-emacs-session-id "focus-55"))
+      (set-window-start
+       (selected-window)
+       (dsh-emacs-session--row-pos 'dsh-emacs-session-id "focus-50") t)
+      (hl-line-highlight)
+      (let ((overlay hl-line-overlay)
+            (window (overlay-get hl-line-overlay 'window))
+            (set-start (symbol-function 'set-window-start))
+            starts)
+        (setf (dsh-protocol-session-updated-at (nth 55 dsh-emacs--sessions)) 2000)
+        (cl-letf (((symbol-function 'set-window-start)
+                   (lambda (win pos &optional noforce)
+                     (push noforce starts)
+                     (funcall set-start win pos noforce))))
+          (dsh-emacs-session--render))
+        (dsh-test-assert "session-reorder-preserves-point-over-forced-viewport"
+          (equal (dsh-emacs-session-id-at-point) "focus-55")
+          (equal starts '(t)))
+        (dsh-test-assert "session-reorder-refreshes-existing-line-highlight"
+          (eq overlay hl-line-overlay)
+          (= (overlay-start overlay) (line-beginning-position))
+          (= (overlay-end overlay) (line-beginning-position 2))
+          (eq (overlay-get overlay 'window) window))))))
+
+;; Removing the focused row must not send every view to workspace one.
+;; Include middle/end removals and a workspace with no session rows.
+(dolist (scenario '(("b1" "b2" session)
+                    ("c2" "c1" session)
+                    ("empty" "wc" workspace)))
+  (let* ((dsh-emacs--sessions
+          (cl-loop for id in '("a1" "b1" "b2" "c1" "c2")
+                   for time downfrom 100 collect
+                   (dsh-protocol-session--from-alist
+                    `((sessionId . ,id) (updatedAt . ,time)))))
+         (dsh-emacs--workspaces
+          (mapcar #'dsh-protocol-workspace--from-alist
+                  '(((workspaceId . "wa") (title . "A") (sessionIds . ["a1"]))
+                    ((workspaceId . "wb") (title . "B") (sessionIds . ["b1" "b2"]))
+                    ((workspaceId . "empty") (title . "Empty") (sessionIds . []))
+                    ((workspaceId . "wc") (title . "C") (sessionIds . ["c1" "c2"])))))
+         (dsh-emacs--archived-sessions (make-hash-table :test #'equal))
+         (removed (nth 0 scenario))
+         (expected (nth 1 scenario)))
+    (save-window-excursion
+      (with-temp-buffer
+        (switch-to-buffer (current-buffer))
+        (cl-letf (((symbol-function 'dsh-emacs-events-host-connect) #'ignore))
+          (dsh-emacs-session-mode))
+        (setq-local dsh-emacs-session--workspace-fold-default nil)
+        (dsh-emacs-session--render)
+        (goto-char (dsh-emacs-session--row-pos 'dsh-emacs-row-id removed))
+        (hl-line-highlight)
+        (let ((other (split-window-below)))
+          (set-window-point other
+                            (dsh-emacs-session--row-pos 'dsh-emacs-row-id "b2"))
+          (if (eq (nth 2 scenario) 'session)
+              (puthash removed t dsh-emacs--archived-sessions)
+            (setq dsh-emacs--workspaces
+                  (cl-remove removed dsh-emacs--workspaces
+                             :key #'dsh-protocol-workspace-workspace-id :test #'equal)))
+          (dsh-emacs-session--render)
+          (dsh-test-assert (format "removed-row-keeps-nearby-focus-%s" removed)
+            (equal (get-text-property (point) 'dsh-emacs-row-id) expected)
+            (equal (get-text-property (overlay-start hl-line-overlay)
+                                      'dsh-emacs-row-id) expected)
+            (equal (get-text-property (window-point other) 'dsh-emacs-row-id) "b2"))
+          ;; A second projection/refresh must retain the fallback choice.
+          (dsh-emacs-session--render)
+          (dsh-test-assert (format "removed-row-fallback-survives-refresh-%s" removed)
+            (equal (get-text-property (point) 'dsh-emacs-row-id) expected)))))))
 
 ;; --- Test 51g: opening a warm list costs no RPC; a cold one fetches ---
 ;; The list is kept live by the core `$events' stream and by the cache

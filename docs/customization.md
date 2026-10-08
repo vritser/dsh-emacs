@@ -115,7 +115,9 @@ session's row and scrolls it into view; for a subagent, its ancestors and
 workspace are expanded. When a session sits in a folded group, the group
 is unfolded to show it, and a `w` workspace filter that
 would hide the row is cleared. Refreshing the list in place (`g`, events,
-auto-refresh) instead keeps the row you are on. Opening a list that is
+auto-refresh) instead keeps the row you are on. If archiving or deleting removes
+that row, focus moves to the next surviving row in the previous list order,
+or the preceding row when none follows. Opening a list that is
 already live reuses the cached rows — the server's event stream keeps them
 current — and makes no session-list request. Missing ancestor catalogs are
 fetched when opening the list from a child. A cold list (nothing fetched yet) is
