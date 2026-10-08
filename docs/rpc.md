@@ -870,6 +870,8 @@ omit `atSeq`. In a chat buffer, `C-c C-y`
 (`dsh-emacs-fork-message-at-point`) sends the durable `assistant/message`
 sequence attached to the reply at point as `atSeq`, then opens the child.
 Uncommitted streamed bodies and subagent conversations are rejected locally.
+The configurable reply footer offers the same fork action on the last
+committed text reply of a completed turn.
 
 #### session.prompt
 ```

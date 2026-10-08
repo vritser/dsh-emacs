@@ -122,6 +122,23 @@ See [decision record 022](../postmortem/022-fragment-snapshots.md); the
 region-scoped face contract is [decision record
 039](../postmortem/039-region-scoped-fragment-faces.md).
 
+## Reply footers (`dsh-emacs-render.el`)
+
+`dsh-protocol-reply-event--from-alist` decodes turn boundaries and assistant
+settlements into footer facts. The renderer merges usage by event sequence
+and selects the last committed text reply in each turn. This summary stays
+independent of the mode-line accumulator, survives reconnects and merges
+older pages; full reload clears it and transcript trimming discards summaries
+whose completed replies are gone.
+
+History batches collect facts before painting, so a page cannot attach a
+footer to an intermediate reply. A non-foldable minimal fragment follows
+the last text segment; stock text buttons retain the selected reply's source
+Markdown and sequence for Copy/Fork. Pending Markdown states close their end
+markers against insertion so their idle replacement cannot absorb the footer.
+The row never carries assistant-body or message-sequence properties. See
+[decision record 084](../postmortem/084-reply-footer.md).
+
 ## Composer (`dsh-emacs-composer.el`)
 
 The bottom of a chat buffer is a **Composer**: a persistent, non-transcript UI

@@ -25,6 +25,7 @@
 (require 'json)
 (require 'cl-lib)
 (require 'subr-x)
+(require 'button)
 (require 'dsh-emacs-ui)
 (require 'dsh-emacs-faces)
 (require 'dsh-emacs-protocol)
@@ -68,6 +69,9 @@
 (declare-function dsh-emacs--active-session-id "dsh-emacs" ())
 (declare-function dsh-emacs--rpc-async "dsh-emacs" (method params callback))
 (declare-function dsh-emacs--forget-user-message-echo "dsh-emacs" (message))
+(declare-function dsh-emacs-fork-session "dsh-emacs" (session-id &optional at-seq))
+(defvar dsh-emacs--buffer-session)
+(defvar dsh-emacs--buffer-subagent)
 ;; Notification backends are built into their respective Emacs ports.
 (declare-function dsh-emacs--chat-title "dsh-emacs" (session-id))
 (declare-function notifications-notify "notifications" (&rest params))
@@ -157,6 +161,16 @@ default); the error kind turns the node red."
 Off by default to reduce visual noise."
   :type 'boolean
   :group 'dsh-emacs-render)
+
+(defcustom dsh-emacs-reply-footer-items '(copy fork usage duration)
+  "Items shown below the last reply of each finished turn, in this order.
+Use nil to hide the row.  `copy' copies the reply's original Markdown;
+`fork' branches through that reply.  `usage' sums reported tokens for the
+turn, including cache reads/writes; `duration' uses server turn timestamps.
+Refresh existing conversations after changing this option."
+  :type '(repeat (choice (const copy) (const fork)
+                         (const usage) (const duration)))
+  :group 'dsh-emacs)
 
 (defcustom dsh-emacs-max-tool-result-chars 80
   "Maximum number of characters in the tool-result preview."
@@ -1041,6 +1055,16 @@ FILES is a list of (PATH . DESCRIPTION) cells.  The row is rendered by
 `turn/end' (`dsh-emacs-render--flush-deliverables'), so a turn's deliveries
 sit after its closing message, mirroring dsh web's turnTail placement.")
 
+(defvar-local dsh-emacs-render--reply-turns nil
+  "Turn summaries for reply footers, keyed by turn number.
+Retain per-message usage by seq so reconnects and older pages can merge.")
+
+(defvar dsh-emacs-render--footer-batch nil
+  "Non-nil while collecting a bounded history batch before painting footers.")
+
+(defvar dsh-emacs-render--footer-dirty nil
+  "Turn numbers changed during the current history batch.")
+
 (defvar-local dsh-emacs--command-blocks (make-hash-table :test 'equal)
   "Map from node id -> (NS BLOCK-ID LABEL ICON) of rendered bash-command rows.
 Serverside slash commands are keyed by their `command/run' commandId;
@@ -1073,7 +1097,8 @@ miss the entry is cleaned up.")
         dsh-emacs--current-group-id nil
         dsh-emacs--current-group-count 0
         dsh-emacs--current-group-completed 0
-        dsh-emacs-render--turn-deliverables nil)
+        dsh-emacs-render--turn-deliverables nil
+        dsh-emacs-render--reply-turns nil)
   ;; Todo strip folds its snapshot from replayed `tool/call' events, so clear
   ;; the state and the fragment; the replay rebuilds it.
   (when (boundp 'dsh-emacs--todo-namespace)
@@ -1548,6 +1573,7 @@ rendered in full."
                 (dsh-emacs-render--follow-stream windows))))))
       ;; Only the durable message supplies a fork boundary.  Keep it in the
       ;; state too, so a deferred Markdown pass preserves the same identity.
+      (set-marker-insertion-type (plist-get state :end) nil)
       (setf (plist-get state :seq) (dsh-emacs-render--event-seq event))
       (when (plist-get state :seq)
         (let ((inhibit-read-only t)
@@ -2078,7 +2104,7 @@ session chips; see `dsh-emacs-reference-fontify'.  Returns the event seq."
             (when defer
               (dsh-emacs-render--stream-render-region
                (list :start (copy-marker (car range))
-                     :end (copy-marker (cdr range) t)
+                     :end (copy-marker (cdr range) nil)
                      :event-id event-id :seq seq :render-final nil
                      :markdown (list :scan nil :pending nil :kind nil :watermark nil))
                nil t))))))
@@ -3454,6 +3480,129 @@ buffer still tracks CALL-ID's row and that row is showing the pending result."
           (setq dsh-emacs--current-group-completed completed))))))
 
 ;;; ---------------------------------------------------------------------------
+;;; Reply footer: actions and per-turn statistics
+;;; ---------------------------------------------------------------------------
+
+(defun dsh-emacs-render--reply-action (button)
+  "Perform the reply action attached to BUTTON."
+  (pcase (button-get button 'dsh-emacs-reply-action)
+    ('copy
+     (kill-new (button-get button 'dsh-emacs-reply-text))
+     (message "Reply copied"))
+    ('fork
+     (unless dsh-emacs--buffer-session
+       (user-error "No chat session in this buffer"))
+     (dsh-emacs-fork-session dsh-emacs--buffer-session
+                             (button-get button 'dsh-emacs-reply-seq)))))
+
+(defun dsh-emacs-render--reply-footer (turn state)
+  "Paint TURN's completed footer from STATE, beside its last visible reply."
+  (when (and (plist-get state :end-seq) (plist-get state :reply-seq))
+    (let ((pos (point-min))
+          (seq (plist-get state :reply-seq))
+          (usage (list :input 0 :output 0 :cache-read 0 :cache-write 0))
+          (complete (plist-get state :start-seq))
+          (reported nil)
+          end parts)
+      ;; A reply may have several text segments separated by Think cards.
+      ;; Find its final segment without treating the toolbar as reply text.
+      (while (setq pos (text-property-any pos (point-max)
+                                          'dsh-emacs-message-seq seq))
+        (setq end (next-single-property-change pos 'dsh-emacs-message-seq
+                                               nil (point-max))
+              pos end))
+      (when end
+        (dolist (entry (plist-get state :messages))
+          (if (null (cdr entry))
+              (setq complete nil)
+            (setq reported t)
+            (dolist (key '(:input :output :cache-read :cache-write))
+              (cl-incf (plist-get usage key) (plist-get (cdr entry) key)))))
+        (dolist (item (delete-dups (copy-sequence dsh-emacs-reply-footer-items)))
+          (pcase item
+            ((or 'copy 'fork)
+             (unless (and (eq item 'fork) (bound-and-true-p dsh-emacs--buffer-subagent))
+               (push (make-text-button
+                      (if (eq item 'copy) "Copy" "Fork") nil
+                      'follow-link t
+                      'mouse-face 'highlight 'action #'dsh-emacs-render--reply-action
+                      'help-echo (if (eq item 'copy) "Copy this reply as Markdown"
+                                   "Branch through this reply")
+                      'dsh-emacs-reply-action item 'dsh-emacs-reply-seq seq
+                      'dsh-emacs-reply-text (plist-get state :text)) parts)))
+            ('usage
+             (push (propertize
+                    (if reported
+                        (format "Tokens %s%s" (if complete "" "≥")
+                                (dsh-emacs-format-tokens
+                                 (apply #'+ (cl-loop for (_key value) on usage by #'cddr
+                                                     collect value))))
+                      "Tokens —")
+                    'help-echo
+                    (format "Turn %s: input %d, output %d, cache read %d, cache write %d%s"
+                            turn (plist-get usage :input) (plist-get usage :output)
+                            (plist-get usage :cache-read) (plist-get usage :cache-write)
+                            (if (and complete reported) ""
+                              "; incomplete history or missing reported usage"))) parts))
+            ('duration
+             (let ((start (plist-get state :start-time))
+                   (finish (plist-get state :end-time)))
+               (push (propertize
+                      (if (and (numberp start) (numberp finish) (>= finish start))
+                          (let ((seconds (/ (- finish start) 1000.0)))
+                            (if (< seconds 60) (format "Time %.1fs" seconds)
+                              (format "Time %dm%02ds" (/ (floor seconds) 60)
+                                      (% (floor seconds) 60))))
+                        "Time —")
+                      'help-echo "Turn elapsed time, including tools and waits; server timestamps")
+                     parts)))))
+        (when parts
+          (dsh-emacs-ui-update-fragment
+           (dsh-emacs-ui-make-fragment
+            :namespace-id (dsh-emacs-render--make-namespace)
+            :block-id (format "reply-footer-%s" turn)
+            :label-left (concat "\n" (mapconcat #'identity (nreverse parts) "  ·  "))
+            :style 'minimal :status 'reply-footer :non-foldable t
+            :header-face 'dsh-emacs-muted-face)
+           :insert-before (save-excursion
+                            (goto-char end)
+                            (unless (bolp) (forward-line 1))
+                            (point))))))))
+
+(defun dsh-emacs-render--note-reply-event (event)
+  "Merge decoded EVENT into its turn's footer facts without double counting."
+  (when (and event (integerp (dsh-protocol-reply-event-turn event))
+             (integerp (dsh-protocol-reply-event-seq event)))
+    (unless dsh-emacs-render--reply-turns
+      (setq dsh-emacs-render--reply-turns (make-hash-table :test 'eql)))
+    (let* ((turn (dsh-protocol-reply-event-turn event))
+           (seq (dsh-protocol-reply-event-seq event))
+           (type (dsh-protocol-reply-event-type event))
+           (state (or (gethash turn dsh-emacs-render--reply-turns)
+                      (list :start-seq nil :start-time nil :end-seq nil
+                            :end-time nil :reply-seq nil :text nil :messages nil))))
+      (pcase type
+        ("turn/start"
+         (setf (plist-get state :start-seq) seq
+               (plist-get state :start-time) (dsh-protocol-reply-event-time event)))
+        ("turn/end"
+         (setf (plist-get state :end-seq) seq
+               (plist-get state :end-time) (dsh-protocol-reply-event-time event)))
+        (_
+         (unless (assq seq (plist-get state :messages))
+           (push (cons seq (dsh-protocol-reply-event-usage event))
+                 (plist-get state :messages)))
+         (when (and (equal type "assistant/message")
+                    (not (string-empty-p (dsh-protocol-reply-event-text event)))
+                    (> seq (or (plist-get state :reply-seq) -1)))
+           (setf (plist-get state :reply-seq) seq
+                 (plist-get state :text) (dsh-protocol-reply-event-text event)))))
+      (puthash turn state dsh-emacs-render--reply-turns)
+      (if dsh-emacs-render--footer-batch
+          (cl-pushnew turn dsh-emacs-render--footer-dirty)
+        (dsh-emacs-render--reply-footer turn state)))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Renderer: turn start / end / interrupt / error
 ;;; ---------------------------------------------------------------------------
 
@@ -4301,6 +4450,9 @@ source filter, so without this check the same tool card is painted twice."
       ("deliverables/presented"
        (setq seq (dsh-emacs-render-deliverables event)))
       (_ nil))
+    (when (and dsh-emacs-reply-footer-items (not replacement))
+      (dsh-emacs-render--note-reply-event
+       (dsh-protocol-reply-event--from-alist event)))
     (when (and (integerp seq)
                (boundp 'dsh-emacs--anchor-seq)
                (> seq (or dsh-emacs--anchor-seq 0)))
@@ -4351,7 +4503,17 @@ Deletes the earliest content while preserving the input prompt area."
       (when (> trim-to (point-min))
         (let ((inhibit-read-only t)
               (buffer-undo-list t))
-          (delete-region (point-min) trim-to))))))
+          (delete-region (point-min) trim-to))
+        (when dsh-emacs-render--reply-turns
+          (maphash
+           (lambda (turn state)
+             (when (and (plist-get state :end-seq)
+                        (or (null (plist-get state :reply-seq))
+                            (not (text-property-any
+                                  (point-min) (point-max) 'dsh-emacs-message-seq
+                                  (plist-get state :reply-seq)))))
+               (remhash turn dsh-emacs-render--reply-turns)))
+           dsh-emacs-render--reply-turns))))))
 
 (defun dsh-emacs-render--json-boolean (value)
   "Return VALUE as a Lisp boolean, mapping JSON `false' to nil.
@@ -4453,6 +4615,8 @@ spinner: the snapshot caller advances `dsh-emacs--anchor-seq' to the snapshot
 cursor once the render returns, so a dropped trailing `turn/end' was never
 re-delivered and the running animation had no later event to stop it."
   (let* ((entries (if (vectorp events) (append events nil) events))
+         (dsh-emacs-render--footer-batch t)
+         (dsh-emacs-render--footer-dirty nil)
          (refs-map (and (null stream)
                         (dsh-emacs-render--recall-refs-by-message-seq entries)))
          (cap (and (integerp bound) bound))
@@ -4535,6 +4699,9 @@ re-delivered and the running animation had no later event to stop it."
     ;; batch end is then the turn's tail, so nothing stays buffered.
     (unless prepend-p
       (dsh-emacs-render--flush-deliverables))
+    (dolist (turn dsh-emacs-render--footer-dirty)
+      (dsh-emacs-render--reply-footer
+       turn (gethash turn dsh-emacs-render--reply-turns)))
     ;; A prepend is a settled history page: no viewport follow.
     (when (and (> rendered 0) follow-p (not prepend-p))
       (dsh-emacs-render--follow-stream))

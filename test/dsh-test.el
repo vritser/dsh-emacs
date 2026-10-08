@@ -3382,6 +3382,7 @@ candidates as the UI would via `all-completions', not by destructuring."
                    (ensure-list (get-text-property title 'face full))))))
     ;; Expanding shows the file lines in the bash-card panel surface.
     (goto-char (point-min))
+    (search-forward "Deliverables")
     (dsh-emacs-ui-toggle-fragment)
     (setq full (buffer-string)
           text (buffer-substring-no-properties (point-min) (point-max)))
@@ -7394,6 +7395,127 @@ Lets a test drive a malformed content value through the result path."
             (user-error (equal (cadr err)
                                "This command is unavailable in a subagent conversation")))
           (= (length calls) 2))))))
+
+;; Reply footers summarize a turn, not the session or just its last step.
+(let* ((start '((type . "turn/start") (seq . 100) (time . 1000)
+                (data . ((turn . 7)))))
+       (first '((type . "assistant/message") (seq . 101)
+                (data . ((turn . 7) (step . 1)
+                         (usage . ((inputTokens . 10) (outputTokens . 20)
+                                   (cacheReadTokens . 30) (cacheWriteTokens . 40)))
+                         (message . ((content . [((type . "text")
+                                                  (text . "earlier reply"))])))))))
+       (last '((type . "assistant/message") (seq . 102)
+               (data . ((turn . 7) (step . 2)
+                        (usage . ((inputTokens . 1) (outputTokens . 2)
+                                  (cacheReadTokens . 3) (cacheWriteTokens . 4)))
+                        (message . ((content . [((type . "text")
+                                                 (text . "**final reply**"))])))))))
+       (end '((type . "turn/end") (seq . 103) (time . 3500)
+              (data . ((turn . 7)))))
+       (events (mapcar (lambda (event) (list (cons 'event event)))
+                       (list start first last end))))
+  (dolist (items '(nil (duration copy) (copy fork usage duration)))
+    (with-temp-buffer
+      (dsh-emacs-mode)
+      (setq dsh-emacs--buffer-session "footer-parent")
+      (let ((dsh-emacs-reply-footer-items items)
+            (dsh-emacs-stream-markdown-limit 1)
+            forked)
+        (dsh-emacs-render-history-events events)
+        (while dsh-emacs--markdown-pending
+          (dsh-emacs-render--run-markdown (current-buffer)))
+        (let ((row (dsh-emacs-ui-find-block "sess-global" "reply-footer-7")))
+          (dsh-test-assert "footer-option-can-disable-row" (eq (null row) (null items)))
+          (when row
+            (let ((text (buffer-substring-no-properties (car row) (cdr row))))
+              (dsh-test-assert "footer-order-and-per-turn-statistics"
+                               (string-match-p
+                                (if (eq (car items) 'duration) "Time 2.5s  ·  Copy"
+                                  "Copy  ·  Fork  ·  Tokens 110  ·  Time 2.5s") text)
+                               (= (how-many "Copy" (point-min) (point-max)) 1)
+                               (not (get-text-property (car row) 'dsh-emacs-assistant-message))
+                               (not (get-text-property (car row) 'dsh-emacs-message-seq)))
+              (goto-char (car row))
+              (search-forward "Copy")
+              (button-activate (button-at (1- (point))))
+              (dsh-test-assert "footer-copy-keeps-markdown-and-excludes-chrome"
+                               (equal (current-kill 0) "**final reply**"))
+              (when (memq 'fork items)
+                (goto-char (car row))
+                (search-forward "Fork")
+                (cl-letf (((symbol-function 'dsh-emacs-fork-session)
+                           (lambda (session seq) (setq forked (list session seq)))))
+                         (button-activate (button-at (1- (point)))))
+                (dsh-test-assert "footer-fork-targets-the-final-reply"
+                                 (equal forked '("footer-parent" 102))))))))))
+  ;; A tail with no turn/start must not claim to contain all turn usage.
+  ;; Prepending the older page updates the existing footer in place.
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (let ((dsh-emacs-reply-footer-items '(usage duration)))
+      (dsh-emacs-render-history-events (nthcdr 2 events))
+      (dsh-test-assert "footer-partial-history-is-explicit"
+                       (string-match-p "Tokens ≥10  ·  Time —" (buffer-string)))
+      (let* ((dsh-emacs--history-insert-marker
+              (dsh-emacs-render--history-prepend-marker))
+             (position (marker-position dsh-emacs--history-insert-marker)))
+        (dsh-emacs-render-history-events (cl-subseq events 0 2) nil 102
+                                         :insert-before position :follow-p nil)
+        (set-marker dsh-emacs--history-insert-marker nil))
+      (dsh-test-assert "footer-older-page-completes-stats-without-duplicates"
+                       (string-match-p "Tokens 110  ·  Time 2.5s" (buffer-string))
+                       (= (how-many "Tokens" (point-min) (point-max)) 1))
+      (dsh-emacs-render-history-events events)
+      (dsh-test-assert "footer-reconnect-does-not-double-count"
+                       (string-match-p "Tokens 110  ·  Time 2.5s" (buffer-string))
+                       (= (how-many "Tokens" (point-min) (point-max)) 1))))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (setq dsh-emacs--buffer-subagent
+          (dsh-protocol-subagent-address-create "parent" "child" "continuable"))
+    (dsh-emacs-render-history-events events)
+    (dsh-test-assert "footer-subagent-hides-fork-but-keeps-copy"
+                     (string-match-p "Copy" (buffer-string))
+                     (not (string-match-p "Fork" (buffer-string))))))
+
+;; A live completed reply may still be waiting for idle Markdown. The footer
+;; must survive that replacement and must not become part of the message.
+(with-temp-buffer
+  (dsh-emacs-mode)
+  (let ((dsh-emacs-stream-markdown-limit 1))
+    (dsh-emacs-render-event
+     '((type . "turn/start") (seq . 1) (time . 5000) (data . ((turn . 1)))))
+    (dsh-emacs-render--start-assistant-stream
+     '((data . ((turn . 1) (step . 1)))) "**stream answer**\n")
+    (dsh-test-assert "footer-absent-during-live-stream"
+                     (not (string-match-p "Tokens" (buffer-string))))
+    (dsh-emacs-render-event
+     '((type . "assistant/message") (seq . 2)
+       (data . ((turn . 1) (step . 1)
+                (message . ((content . [((type . "text")
+                                         (text . "**stream answer**\n"))])))))))
+    (dsh-emacs-render-event
+     '((type . "turn/end") (seq . 3) (time . 67000) (data . ((turn . 1)))))
+    (while dsh-emacs--markdown-pending
+      (dsh-emacs-render--run-markdown (current-buffer)))
+    (dsh-test-assert "footer-live-idle-formatting-keeps-row-and-unknown-usage"
+                     (string-match-p "stream answer" (buffer-string))
+                     (string-match-p "Tokens —  ·  Time 1m02s" (buffer-string))
+                     (= (how-many "Copy" (point-min) (point-max)) 1))
+    (dsh-emacs-copy-last-assistant-message)
+    (dsh-test-assert "footer-never-enters-copy-last-reply"
+                     (equal (current-kill 0) "stream answer"))
+    (dsh-emacs-render--reset-tool-tracking)
+    (dsh-test-assert "footer-state-clears-on-full-reload"
+                     (null dsh-emacs-render--reply-turns))))
+
+;; Synthetic fork endings must not turn old timestamps into a huge duration.
+(let ((event (dsh-protocol-reply-event--from-alist
+              '((type . "turn/end") (seq . 9) (time . 999999)
+                (data . ((turn . 1) (reason . ((kind . "forked")))))))))
+  (dsh-test-assert "footer-fork-end-has-no-elapsed-endpoint"
+                   (null (dsh-protocol-reply-event-time event))))
 
 ;; --- Test 51: session list workspace filtering ---
 (let* ((sessions (list (list (cons 'sessionId "s1") (cons 'updatedAt 100)

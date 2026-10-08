@@ -10,6 +10,13 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Configurable reply footer**: completed turns show Copy, Fork, per-turn
+  token usage and elapsed time below their last reply, separated by a blank
+  line. Customize
+  `dsh-emacs-reply-footer-items` to reorder or hide items, or disable the row.
+  Copy preserves Markdown; partial history and unavailable statistics are
+  marked explicitly. (rationale: postmortem/084)
+
 - **Branch from a reply**: `C-c C-y` (`dsh-emacs-fork-message-at-point`)
   opens a new conversation inheriting history through the assistant reply
   at point, including replies loaded from older history. Streaming replies

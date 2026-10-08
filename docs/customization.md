@@ -67,6 +67,48 @@ The most commonly used options, straight in your config:
 (setq dsh-emacs-jobs-kill-arm-seconds 3)           ; how long the `k' press in the `C-c C-j' background-job menu stays armed before a second press stops the job (matches dsh web's two-press stop)
 ```
 
+## Reply footer
+
+`dsh-emacs-reply-footer-items` controls the row below the final visible
+assistant reply of each finished turn, with one blank line between them.
+The default is `(copy fork usage
+duration)`; list order is display order, omitted items are hidden, and nil
+disables the whole row. Refresh an existing conversation (`C-c C-r`) after
+changing the option.
+
+```emacs-lisp
+(setq dsh-emacs-reply-footer-items '(copy fork usage duration))
+;; Actions only:
+;; (setq dsh-emacs-reply-footer-items '(copy fork))
+;; Statistics first:
+;; (setq dsh-emacs-reply-footer-items '(usage duration copy fork))
+;; Hide:
+;; (setq dsh-emacs-reply-footer-items nil)
+```
+
+- `copy`: copy that last reply's original Markdown, without tool cards or
+  footer text. Click or press `RET` on the button; `TAB`/`S-TAB` from a button
+  navigate buttons. Existing copy keybindings retain their behavior.
+- `fork`: create and open a child through that reply's durable event sequence.
+  Hidden in subagent conversations; the existing command also enforces that
+  restriction. The current session is unaffected.
+- `usage`: sum reported input, output, cache-read and cache-write tokens
+  across this turn's assistant messages/attempts, with a hover breakdown.
+  These are per-turn counts, separate from the mode line's cumulative usage;
+  they do not add separate compaction or delegated-child usage. If the loaded
+  history lacks the turn start, or an attempt/message has no usage, the
+  reported subtotal is marked `≥`. No reported counts shows `—`. Loading
+  older history completes the same row without counting an event twice.
+- `duration`: server `turn/end.time - turn/start.time`, including model work,
+  tools, retries and user waits. Missing timestamps, reversed timestamps or
+  synthetic fork endings show `—`. Historical replay never uses the current
+  wall clock to invent a duration.
+
+There is one row per completed turn, including interrupted/failed turns
+that have a committed text reply. Streaming, unfinished turns and turns
+without visible committed assistant text have no row. The footer precedes
+any subsequent deliverables or error card and stays outside copied replies.
+
 ## Session and workspace controls
 
 These default keys apply in the session list opened by `M-x dsh-emacs`:

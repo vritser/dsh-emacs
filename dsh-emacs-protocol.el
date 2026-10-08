@@ -1320,6 +1320,41 @@ alist; CONSTRUCTOR converts the wire alist."
                 (dsh-protocol--objects
                  (dsh-protocol--field 'records snapshot)))))
 
+;; Turn footer facts are independent of the cumulative session projections.
+(cl-defstruct (dsh-protocol-reply-event
+               (:constructor dsh-protocol--make-reply-event))
+  type seq turn time text usage)
+
+(defun dsh-protocol-reply-event--from-alist (event)
+  "Decode a turn boundary or assistant settlement from wire EVENT.
+USAGE is a normalized plist, or nil when no token counts were reported.
+Synthetic fork endings have no usable elapsed-time endpoint."
+  (let ((type (dsh-protocol--field 'type event)))
+    (when (member type '("turn/start" "turn/end"
+                         "assistant/message" "assistant/attempt"))
+      (let* ((data (dsh-protocol--field 'data event))
+             (raw (dsh-protocol--field 'usage data))
+             (counts (mapcar (lambda (key) (dsh-protocol--field key raw))
+                             '(inputTokens outputTokens cacheReadTokens
+                                           cacheWriteTokens)))
+             (content (dsh-protocol--field
+                       'content (dsh-protocol--field 'message data))))
+        (dsh-protocol--make-reply-event
+         :type type :seq (dsh-protocol--field 'seq event)
+         :turn (dsh-protocol--field 'turn data)
+         :time (unless (equal (dsh-protocol--field
+                              'kind (dsh-protocol--field 'reason data)) "forked")
+                 (dsh-protocol--field 'time event))
+         :text (mapconcat
+                (lambda (block) (or (dsh-protocol--field 'text block) ""))
+                (cl-remove-if-not
+                 (lambda (block) (equal (dsh-protocol--field 'type block) "text"))
+                 (dsh-protocol--objects content)) "\n")
+         :usage (when (cl-some #'numberp counts)
+                  (cl-loop for key in '(:input :output :cache-read :cache-write)
+                           for count in counts
+                           append (list key (if (numberp count) count 0)))))))))
+
 ;;; Subagent wire boundaries.
 (cl-defstruct (dsh-protocol-subagent-address
                (:constructor dsh-protocol-subagent-address-create

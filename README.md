@@ -127,6 +127,24 @@ automatically. Replies still streaming and subagent conversations cannot
 be forked this way. In the session list, `f` forks through the latest
 completed turn instead. See [fork controls](docs/customization.md#forking-conversations).
 
+Finished turns show a small row below their last reply:
+`Copy · Fork · Tokens 12.3k · Time 8.2s`. Click an action or press `RET`
+on it (`TAB` moves between buttons). Copy preserves the reply's original
+Markdown. Tokens include the turn's reported input, output and cache usage;
+hover for the breakdown. Time includes tools and waits. Incomplete history
+shows a token lower bound (`≥`), and unavailable values show `—`.
+
+Choose the items and their order, or hide the row entirely:
+
+```emacs-lisp
+(setq dsh-emacs-reply-footer-items '(copy fork usage duration)) ; default
+;; (setq dsh-emacs-reply-footer-items '(copy usage duration))  ; omit Fork
+;; (setq dsh-emacs-reply-footer-items nil)                     ; hide the row
+```
+
+Refresh existing chats after changing the option. See
+[reply footer settings](docs/customization.md#reply-footer) for statistics scope.
+
 **Sending during a running turn:** by default, `C-c C-c` queues a non-empty
 message for the next turn. `C-u C-c C-c` steers the running turn instead;
 `C-c C-c` with empty input interrupts it. Configure this with

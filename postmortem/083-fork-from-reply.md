@@ -1,5 +1,7 @@
 # 083 — Fork through the reply at point
 
+_The missing mouse footer entry is superseded by [084](084-reply-footer.md)._
+
 ## Background
 
 At `763e6a6`, session-list `f` sent `session/fork` without `atSeq`, so users
