@@ -17,7 +17,7 @@ dsh-emacs/
 ├── dsh-emacs-subagent.el     # Durable child catalogs, completion, availability and navigation
 ├── dsh-emacs-jobs.el         # Background jobs: job/list + job/follow streams, stop
 ├── dsh-emacs-plan.el         # Plan documents, asynchronous review and decisions
-├── dsh-emacs-server.el       # Server bootstrap: probe / auto-start / install / browser-session auth
+├── dsh-emacs-server.el       # Server bootstrap, browser-session auth, configuration file entry
 ├── dsh-emacs-command.el      # Slash surface: commands/list + commands/execute, "/" completion and menu
 ├── dsh-emacs-skill.el        # Skill catalog (skills/list) and /name gestures
 ├── dsh-emacs-shell.el        # Client-side `!command` shell commands (local execution)
@@ -25,6 +25,17 @@ dsh-emacs/
 ├── dsh-emacs-composer.el     # Composer chrome: Goal and Next Message rows above the input
 └── dsh-emacs-session.el      # Session list card view
 ```
+
+## Configuration file entry (`dsh-emacs-server.el`)
+
+`dsh-emacs-edit-config` visits an explicitly selected existing file with
+`find-file`, without requiring a running server. Successful selections are
+held in a private alist keyed by the normalized server base URL (launch-token
+queries excluded), for this Emacs session only. A prefix argument selects a
+replacement; failed or cancelled opens leave the previous choice intact.
+TRAMP paths pass through ordinary Emacs file handling. Configuration loading,
+validation and activation remain owned by dsh; there is no save hook or
+settings RPC path. See [decision record 079](../postmortem/079-config-file-entry.md).
 
 ## Transcript fragments (`dsh-emacs-ui.el`)
 

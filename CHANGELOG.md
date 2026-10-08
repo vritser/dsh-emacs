@@ -10,6 +10,12 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Edit dsh configuration in Emacs**: `M-x dsh-emacs-edit-config` opens a
+  user-chosen existing configuration file, including explicit TRAMP paths,
+  for ordinary editing and saving. Choices are remembered per server URL
+  during the Emacs session; a prefix argument chooses again.
+  (rationale: postmortem/079)
+
 - **Whale mode label**: graphical Emacs with SVG support shows the
   DeepSeek Harness whale in place of `DSH`, blue on dark themes and black
   on light themes, with its visible height matching the permission shield.

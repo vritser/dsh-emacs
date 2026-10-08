@@ -277,9 +277,17 @@ image file and sends it immediately. Only the media types in
 
 ### Models & presets
 
-Configure providers, models and agent presets in dsh, through
-`M-x dsh-emacs-open-web` or dsh's own configuration files. Use `C-c C-m` to
-select a session's model and reasoning effort.
+Configure providers, models and agent presets in dsh through
+`M-x dsh-emacs-open-web` or its configuration files. Use `C-c C-m` to
+select a session's model.
+
+For advanced configuration and agent presets, edit dsh's configuration files.
+`M-x dsh-emacs-edit-config` asks for an existing configuration file and opens
+it for ordinary editing and `C-x C-s` saving. It remembers the choice per
+server URL for this Emacs session; use `C-u M-x dsh-emacs-edit-config` to
+choose again. Remote files use an explicit TRAMP path. See
+[Editing dsh configuration](docs/customization.md#editing-dsh-configuration).
+`C-c C-m` also selects the session's reasoning effort where supported.
 
 `dsh-emacs-default-preset` selects the preset for new sessions; nil uses the
 host default. `dsh-emacs-default-model` is a display fallback for the mode

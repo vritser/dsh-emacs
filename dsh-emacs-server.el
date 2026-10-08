@@ -26,6 +26,7 @@
 ;;   (dsh-emacs-server-start)    ;; start managed server (skip when ready)
 ;;   (dsh-emacs-server-stop)     ;; stop the managed server process
 ;;   (dsh-emacs-server-restart)  ;; restart the managed server
+;;   (dsh-emacs-edit-config)    ;; visit a user-chosen configuration file
 ;;   (dsh-emacs-open-web)        ;; open dsh web in a browser
 ;;   (dsh-emacs--server-alive-p) ;; whether the server is ready (short cache)
 ;;
@@ -837,13 +838,40 @@ touched."
   (dsh-emacs-server-stop)
   (dsh-emacs-server-start))
 
+(defvar dsh-emacs--config-files nil
+  "Configuration files chosen per server base URL in this Emacs session.
+Each entry is (BASE-URL . FILE), recorded only after opening FILE.")
+
+;;;###autoload
+(defun dsh-emacs-edit-config (&optional choose-file)
+  "Open a chosen dsh configuration file with `find-file'.
+Ask for an existing file on first use for the current server URL.
+With prefix argument CHOOSE-FILE, choose again.  Successful choices are
+remembered per server URL for this Emacs session only.
+
+Choose the file actually used by dsh; its location is not discovered.
+Explicit TRAMP file names are supported.  Saving uses ordinary Emacs
+file handling; dsh owns configuration loading and validation."
+  (interactive "P")
+  (let* ((server (dsh-emacs--server-base-url))
+         (previous (alist-get server dsh-emacs--config-files nil nil #'equal))
+         (file (expand-file-name
+                (if (and previous (not choose-file))
+                    previous
+                  (read-file-name "dsh configuration file: "
+                                  nil previous t)))))
+    (unless (file-regular-p file)
+      (user-error "Not a regular configuration file: %s" file))
+    (find-file file)
+    (setf (alist-get server dsh-emacs--config-files nil nil #'equal) file)))
+
 ;;;###autoload
 (defun dsh-emacs-open-web ()
   "Open the dsh web UI in the default browser.
 Provider/model configuration lives in dsh itself — the web UI (Settings
-opens as a modal there) or `~/.dsh/settings.yaml' plus
-`.credentials.yaml' (this package has no provider-editing surface and
-reads the catalog via `session/modelCatalog').  This command is the bridge:
+opens as a modal there) or its configuration files, which can be visited
+with `dsh-emacs-edit-config'.  The model picker reads the catalog via
+`session/modelCatalog'.  This command is the browser bridge:
 changes made in the browser show up in dsh-emacs after a refresh (`g' in
 the session list, `C-c C-r' in a chat buffer).
 

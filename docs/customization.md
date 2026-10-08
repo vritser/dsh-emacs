@@ -292,6 +292,27 @@ single-select, and an option-less free-text question — so it also shows the
 `Question N/M` framing. It honors the display setting, sends no RPC, and
 prints the whole batch's answers when you finish.
 
+## Editing dsh configuration
+
+Run `M-x dsh-emacs-edit-config` and select the existing configuration file
+actually used by your dsh service. The command opens it with `find-file`,
+using your normal major mode, completion, undo and save behavior. Save with
+`C-x C-s`; dsh owns loading and validation, including when edits take effect.
+The command does not install save hooks, send configuration RPCs or restart
+the service, and works while the service is offline.
+
+The selected path is remembered separately for each server base URL during
+this Emacs session. `C-u M-x dsh-emacs-edit-config` chooses another file,
+including when the remembered file has moved or the same server address now
+uses a different configuration. Cancelling or failing to open a replacement
+keeps the previous choice. No choice is written to your Emacs configuration.
+
+The file location is not discovered or assumed to be `~/.dsh/settings.yaml`.
+For a remote service, enter the actual TRAMP path, for example
+`/ssh:user@host:/path/to/settings.yaml`; an HTTP address is not an SSH mapping.
+Without filesystem access, use `M-x dsh-emacs-open-web` instead.
+There is no default keybinding or additional package dependency.
+
 ## Server options
 
 The full server bootstrap behavior lives in `dsh-emacs-server.el`:
