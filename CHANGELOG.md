@@ -142,6 +142,9 @@ minor) and stay undated until the release is cut.
 
 ### Changed
 
+- **Simpler chat header**: remove the permanent shortcut hint row from chat
+  buffers. Existing keybindings remain available through `C-h m`.
+
 - **Hide seed boundaries**: restored and forked histories no longer display
   `── seed boundary` rows. Event sequence tracking is preserved.
   (rationale: postmortem/085)

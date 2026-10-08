@@ -2581,12 +2581,10 @@ the erase discards any history an earlier layout left behind."
         (buffer-undo-list t))
     ;; Clear the buffer
     (erase-buffer)
-    ;; Add a minimal chat header and operation hints
+    ;; Add a minimal chat header
     (let ((welcome-start (point)))
       (insert (propertize "dsh  " 'face 'dsh-emacs-accent-face))
-      (insert (propertize "DeepSeek Harness\n" 'face 'dsh-emacs-header-face))
-      (insert (propertize "C-c C-c send   ·   C-c C-q queue   ·   C-c C-r refresh   ·   C-c C-l session list\n\n"
-                          'face 'dsh-emacs-hint-face))
+      (insert (propertize "DeepSeek Harness\n\n" 'face 'dsh-emacs-header-face))
       ;; Input prompt
       (insert (propertize "❯ " 'face 'dsh-emacs-input-prompt-face))
       ;; Mark the whole welcome area read-only (via a text property,
