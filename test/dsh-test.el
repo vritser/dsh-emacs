@@ -24662,7 +24662,10 @@ messages (e.g. `command/done')."
       (dsh-emacs-session--render)
       (dsh-test-assert "session-empty-catalog-has-no-disclosure-even-if-expanded"
                        (not (string-match-p "[▸▾]" (buffer-substring
-                                                       (point) (line-end-position))))))))
+                                                       (point) (line-end-position))))
+                       (not (string-match-p "No subagents" (buffer-string)))
+                       (null (dsh-emacs-session--row-pos
+                              'dsh-emacs-session-id "child"))))))
 
 ;; A host baseline is one UI update, regardless of the number of sessions.
 (let* ((dsh-emacs-sessions-buffer (generate-new-buffer-name " *dsh-list-batch*"))
@@ -24767,13 +24770,20 @@ messages (e.g. `command/done')."
                                   'dsh-emacs-session-id "branch")))
           (goto-char (dsh-emacs-session--row-pos 'dsh-emacs-session-id "root"))
           (call-interactively (key-binding (kbd "TAB")))
-          (dsh-test-assert "session-children-cold-expansion-shows-loading"
-                           (string-match-p "Loading subagents" (buffer-string))
+          (dsh-test-assert "session-unknown-catalog-tab-does-not-expand-or-fetch"
+                           (null dsh-emacs-session--expanded-subagents)
+                           (null requests)
+                           (not (string-match-p "Loading subagents" (buffer-string)))
+                           (equal (dsh-emacs-session-id-at-point) "root"))
+          (dsh-emacs-subagent-refresh "root")
+          (funcall callback t root-value)
+          (dsh-test-assert "session-catalog-arrival-does-not-auto-expand"
+                           (null dsh-emacs-session--expanded-subagents)
                            (equal (dsh-emacs-session-id-at-point) "root")
                            (equal (car requests)
                                   '("session/projections"
                                     (request (sessionId . "root")))))
-          (funcall callback t root-value)
+          (call-interactively (key-binding (kbd "TAB")))
           (dsh-test-assert "session-children-callback-renders-without-refetch"
                            (= (length requests) 1)
                            (string-match-p "one-shot · unknown" (buffer-string))
@@ -24784,12 +24794,13 @@ messages (e.g. `command/done')."
                            (equal (dsh-emacs-workspace-id-at-point) "ws")
                            (equal (car (get-text-property
                                         (point) 'dsh-emacs-subagent)) "root"))
-          (call-interactively (key-binding (kbd "TAB")))
+          (dsh-emacs-subagent-refresh "branch")
           (funcall callback t
                    '((asOfSeq . 2)
                      (values (subagentCatalog . [((id . "grandchild")
                                                   (label . "Nested")
                                                   (mode . "one-shot"))]))))
+          (call-interactively (key-binding (kbd "TAB")))
           (goto-char (dsh-emacs-session--row-pos
                       'dsh-emacs-session-id "grandchild"))
           (cl-letf (((symbol-function 'dsh-emacs-open-subagent)
@@ -24872,21 +24883,20 @@ messages (e.g. `command/done')."
                            (equal (dsh-emacs-session-id-at-point) "grandchild")
                            (null dsh-emacs-session--auto-jump-session))
           (goto-char (dsh-emacs-session--row-pos 'dsh-emacs-session-id "leaf"))
-          (dsh-emacs-session-toggle)
-          (funcall callback nil '((message . "cold failed")))
-          (dsh-test-assert "session-child-read-error-visible"
-                           (string-match-p "Cannot load subagents" (buffer-string))
-                           (equal (dsh-emacs-session-id-at-point) "leaf"))
-          (dsh-emacs-session-toggle)
-          (dsh-emacs-session-toggle)
-          (dsh-test-assert "session-child-expansion-retries-failed-read"
-                           (= (length requests) 4)
-                           (string-match-p "Loading subagents" (buffer-string)))
-          (funcall callback t
-                   '((asOfSeq . 3) (values (subagentCatalog . []))))
-          (dsh-test-assert "session-child-empty-catalog-distinct-from-error"
-                           (string-match-p "No subagents" (buffer-string))
-                           (not (string-match-p "Cannot load" (buffer-string))))))
+          (dolist (state '(nil (:state loading) (:state error)
+                              (:state ready)))
+            (puthash "leaf" state dsh-emacs--subagent-catalogs)
+            (when (eq (plist-get state :state) 'ready)
+              (dsh-emacs-subagent-apply
+               "leaf" (dsh-protocol-subagent-baseline--from-alist
+                       '((asOfSeq . 3) (values (subagentCatalog . []))))))
+            (let ((before (buffer-string)))
+              (call-interactively (key-binding (kbd "TAB")))
+              (dsh-test-assert "session-leaf-tab-preserves-list-without-rpc"
+                               (equal before (buffer-string))
+                               (not (member "leaf" dsh-emacs-session--expanded-subagents))
+                               (equal (dsh-emacs-session-id-at-point) "leaf")
+                               (= (length requests) 2))))))
     (kill-buffer buffer)))
 
 (let* ((dsh-emacs-sessions-buffer (generate-new-buffer-name " *dsh-child-reveal*"))

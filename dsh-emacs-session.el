@@ -69,7 +69,6 @@
 (declare-function dsh-emacs-subagent--activity "dsh-emacs-subagent" (id))
 (declare-function dsh-emacs-subagent--annotation "dsh-emacs-subagent" (parent entry))
 (declare-function dsh-emacs-subagent-address "dsh-emacs-subagent" (parent entry))
-(declare-function dsh-emacs-subagent-refresh "dsh-emacs-subagent" (&optional id))
 (defvar dsh-emacs--subagent-catalogs)
 (declare-function dsh-emacs-rename-session "dsh-emacs" (session-id new-title))
 (declare-function dsh-emacs-archive-session "dsh-emacs" (session-id))
@@ -474,6 +473,7 @@ baselines regroup hundreds of multibyte rows."
           (dolist (variable '(dsh-emacs-session--workspace-fold-default
                               dsh-emacs-session--workspace-fold-overrides
                               dsh-emacs-session--expanded-subagents
+                              dsh-emacs-session--auto-jump-session
                               dsh-emacs-session--filter-ws-title))
             (set (make-local-variable variable)
                  (buffer-local-value variable target)))
@@ -704,22 +704,17 @@ Real workspaces use their server ids; Ungrouped uses `:ungrouped'.")
       dsh-emacs-session--workspace-fold-default)))
 
 (defun dsh-emacs-session-toggle ()
-  "Toggle the workspace header or session's direct children at point."
+  "Toggle the workspace header or known direct children at point.
+Sessions without a nonempty child catalog are left unchanged."
   (interactive)
   (if-let* ((id (dsh-emacs-session-id-at-point)))
-      (progn
+      (when (dsh-emacs-subagent--value id 'subagentCatalog)
         ;; A user fold takes precedence over an unfinished open-time jump.
         (setq dsh-emacs-session--auto-jump-session nil)
         (if (member id dsh-emacs-session--expanded-subagents)
             (setq dsh-emacs-session--expanded-subagents
                   (delete id dsh-emacs-session--expanded-subagents))
-          (push id dsh-emacs-session--expanded-subagents)
-          (let ((cell (dsh-emacs-subagent--cell id 'subagentCatalog))
-                (state (gethash id dsh-emacs--subagent-catalogs)))
-            (when (or (null cell)
-                      (not (dsh-protocol-subagent-cell-present cell))
-                      (eq (plist-get state :state) 'error))
-              (dsh-emacs-subagent-refresh id))))
+          (push id dsh-emacs-session--expanded-subagents))
         (dsh-emacs-session--render))
     (dsh-emacs-session-toggle-workspace)))
 
@@ -902,15 +897,20 @@ CHILD is (DIRECT-PARENT . CATALOG-ENTRY); SESSION may be nil for a cold child."
         (put-text-property start (point)
                            'dsh-emacs-workspace-title workspace-title))
       (insert "\n"))
-    (when expanded
+    ;; Only the current child's automatic reveal may wait for an unknown
+    ;; ancestor catalog.  An empty catalog never adds a placeholder row.
+    (when (and expanded
+               (or catalog (and dsh-emacs-session--auto-jump-session
+                                (member session-id
+                                        (dsh-emacs-session--ancestors
+                                         dsh-emacs-session--auto-jump-session)))))
       (let ((notice
              (cond
               ((eq (plist-get state :state) 'loading) "Loading subagents…")
               ((eq (plist-get state :state) 'error)
-               "Cannot load subagents; collapse and expand to retry")
+               "Cannot load subagents")
               ((or (null cell) (not (dsh-protocol-subagent-cell-present cell)))
-               "Subagent catalog unavailable; collapse and expand to retry")
-              ((null catalog) "No subagents"))))
+               "Subagent catalog unavailable"))))
         (when notice
           (insert (propertize
                    (concat (make-string (+ (or indent 0) 2) ?\s) notice)

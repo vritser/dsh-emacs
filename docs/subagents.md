@@ -20,18 +20,20 @@ for inline session-list expansion and
 ## User workflow
 
 In the session list, `TAB` expands or collapses a session's direct children.
-Only known nonempty catalogs show an expansion arrow; unknown and empty
-catalogs have none. `TAB` can explicitly load an unknown catalog.
+Only known nonempty catalogs show an expansion arrow and respond to `TAB`.
+Unknown and empty catalogs stay unchanged; `TAB` does not fetch them.
 Child rows are indented and show mode and activity; `TAB` on a child expands
 another level, and `RET` opens through that child's exact direct parent.
 `TAB` on workspace headers retains its existing workspace-folding behavior.
 Opening the list from a child reveals its ancestors and focuses its row.
 Refreshing preserves child expansion and each window's selected row.
 
-Missing catalogs load only when expanded or needed to reveal the current child.
-Loading, empty catalogs and errors have distinct rows. Collapse and expand to
-retry a failed read. Cold children remain navigable without a session summary;
-rename, archive and fork are refused locally. `i` shows child details.
+Missing ancestor catalogs still load when needed to reveal the current child,
+with loading and error feedback. To discover other unknown catalogs, open the
+parent chat and use the subagent picker or `dsh-emacs-subagent-refresh`.
+Empty catalogs add no placeholder row. Cold children remain navigable without
+a session summary; rename, archive and fork are refused locally. `i` shows
+child details.
 
 From a chat, run `M-x dsh-emacs-list-subagents` or click the mode-line child
 count. Standard `completing-read` lists the conversation's **direct children**:

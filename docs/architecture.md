@@ -1004,8 +1004,11 @@ strand requests. The picker reads a missing root catalog at command time and
 uses standard completion with status/metric annotations. The existing session
 list owns buffer-local child expansion, indented rows and ancestor reveal.
 Rows carry the same direct-parent catalog entry used by the picker. Rendering
-reads cached state; expansion requests missing catalogs and projection changes
-repaint the list. Existing row identities preserve focus and viewport position.
+reads cached state; TAB expands only known nonempty catalogs and projection
+changes repaint the list. Existing row identities preserve focus and viewport
+position.
+Opening the list from a child still loads missing ancestor catalogs; the
+temporary render buffer retains that pending jump to show loading feedback.
 Viewport restoration allows redisplay to scroll when the focused row moves
 off screen, instead of forcing point into the old viewport. After row updates,
 the existing `hl-line` overlay is realigned without changing its window scope.
@@ -1019,7 +1022,7 @@ moves surviving rows by identity with
 xref departure markers even when workspaces reorder, without a whole-list diff.
 It reapplies all row properties afterward because matching text may otherwise
 retain an old child's address. Unknown and empty catalogs have no disclosure
-arrow; only confirmed children display one.
+arrow and do not respond to TAB; only confirmed children can be expanded.
 There is no separate browser mode or display timer. Xref owns return history to the actual
 originating chat position. See [decision record 075](../postmortem/075-subagent-conversations.md)
 and navigation revisions [076](../postmortem/076-subagent-minibuffer.md) and

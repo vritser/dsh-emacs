@@ -1,5 +1,7 @@
 # 078 — Bound session-list updates to individual rows
 
+_Unknown-catalog TAB discovery is superseded by [087](087-confirmed-child-expansion.md)._
+
 ## Background
 
 The uncommitted session-list work after `68da9c6` (077) used a whole-buffer

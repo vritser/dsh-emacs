@@ -1,6 +1,7 @@
 # 077 — Expand subagents within the session list
 
 Whole-buffer text diff superseded by [078](078-session-list-row-updates.md).
+Unknown-catalog TAB discovery superseded by [087](087-confirmed-child-expansion.md).
 
 ## Background
 

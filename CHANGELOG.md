@@ -151,6 +151,11 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Expand only sessions with subagents**: session-list `TAB` now acts only
+  on sessions with confirmed children. Empty and unknown catalogs no longer
+  expand into placeholder rows or trigger a fetch. Workspace folding and
+  automatic ancestor reveal remain available. (rationale: postmortem/087)
+
 - **Error messages have breathing room**: standalone model and automatic
   compaction errors keep a blank line above and below their cards, including
   when collapsed, instead of touching the preceding footer or input line.

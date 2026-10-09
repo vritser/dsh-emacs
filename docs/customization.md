@@ -165,15 +165,18 @@ groups collapsed. `M-x dsh-emacs-collapse-workspaces` and
 Subagents start collapsed beneath their parent session. `TAB` on a session
 row expands its direct children; repeat on a child to reveal nested children.
 Only sessions with a known nonempty child catalog show an expansion arrow;
-unknown and empty catalogs show none. `TAB` can still request an unknown catalog.
+unknown and empty catalogs show none and `TAB` leaves them unchanged without
+requesting data.
 `RET` opens the child through its direct parent, and `M-,` returns to the
 departing list row. Child rows show mode and activity; `i` adds their id and
 available metrics. `r`, `d` and `f` are unavailable on child rows.
 
-Missing catalogs load asynchronously on expansion. Loading, empty and failed
-reads have distinct inline feedback; collapse and expand again to retry a
-failure. Workspace context, child expansion and per-window cursor positions
-survive refreshes. Collapsing a parent retains its children's expansion choices.
+Missing ancestor catalogs load asynchronously when revealing the current child,
+with loading and error feedback. Other unknown catalogs can be discovered from
+the parent chat using the subagent picker or `dsh-emacs-subagent-refresh`.
+Empty catalogs add no placeholder row. Workspace context, child expansion and
+per-window cursor positions survive refreshes. Collapsing a parent retains its
+children's expansion choices.
 
 Opening the list (`M-x dsh-emacs`, `C-c C-l`) puts the cursor on the current
 session's row and scrolls it into view; for a subagent, its ancestors and

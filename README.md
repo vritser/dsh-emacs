@@ -54,10 +54,10 @@ standard Emacs major-mode menu. See [Mode-line status](docs/modeline.md).
 
 `M-x dsh-emacs` opens your sessions, grouped by workspace. Press `c` to
 create a session or `RET` to open one. `TAB` folds a workspace header or
-expands a session's subagents beneath it. Expansion arrows appear only when
-children are confirmed; unknown or empty catalogs have none. Child rows show
-their mode and activity; use `TAB` for nested children and `RET` to open a child
-conversation.
+expands a session's subagents beneath it. Only sessions with confirmed children
+show an expansion arrow and respond to `TAB`; unknown or empty catalogs remain
+unchanged. Child rows show their mode and activity; use `TAB` for nested
+children and `RET` to open a child conversation.
 Expansion and cursor position survive refreshes. See
 [Session and workspace controls](docs/customization.md#session-and-workspace-controls)
 for list management and navigation.
