@@ -1538,7 +1538,7 @@ completeness.
 `session/control` `jobs` record and `jobs` frames that 0.1.6 carried (§0.4), so it
 is the **only** background-job surface at 0.1.7. dsh-emacs consumes all three
 verbs (`dsh-emacs-jobs.el`, shipped in 0.6.0): a `job/list` stream per followed
-chat buffer drives its roster mirror and the mode line's `[J2]` badge, `C-c C-j`
+chat buffer drives its roster mirror, `C-c C-j`
 lists the roster, `RET` opens a job's `job/follow` output in a read-only buffer,
 and `k` sends `job/kill` (armed by a second press).
 

@@ -26,8 +26,6 @@
 ;;
 ;; Emacs-native interaction (no panels, no overlays, same shape as the pending
 ;; queue in `dsh-emacs-queue.el'):
-;;   - the mode line shows `[J2]' while the session can see live jobs, so a
-;;     background command the model started stays visible without a command;
 ;;   - `dsh-emacs-list-jobs' (`C-c C-j') opens the roster as a minibuffer
 ;;     candidate list and acts on the CURRENTLY highlighted entry with single
 ;;     keys (vertico up/down picks the row — no numbering): RET shows the
@@ -46,7 +44,7 @@
 (require 'dsh-emacs-protocol)
 
 ;; Lazy boundary with same-package modules (see AGENTS.md): dsh-emacs.el
-;; assembles this module; the event layer and the modeline call back into its
+;; assembles this module; the event layer calls back into its
 ;; symbols through `declare-function'/runtime guards, so this module needs no
 ;; top-level require of them.
 (declare-function dsh-emacs--rpc-async "dsh-emacs" (method params callback))
@@ -61,12 +59,6 @@
 ;; declare-only so the byte-compiler stays quiet — always read under `boundp'.
 (defvar vertico--index)
 (defvar vertico--candidates)
-
-(defvar dsh-emacs-jobs-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map [mode-line mouse-1] #'dsh-emacs-list-jobs)
-    map)
-  "Mouse binding shared by mode-line background-job indicators.")
 
 (defvar-local dsh-emacs-jobs--roster nil
   "Background jobs this chat's session can see, newest frame wins.
@@ -112,11 +104,6 @@ this window kills, and the control resets on its own."
   :type 'number
   :group 'dsh-emacs)
 
-(defface dsh-emacs-jobs-modeline-face
-  '((t :inherit dsh-emacs-modeline-queue-face))
-  "Face for the mode-line background-job indicator."
-  :group 'dsh-emacs)
-
 ;;; ---------------------------------------------------------------------------
 ;;; Roster mirror (chat-buffer-local, replaced wholesale by job/list frames)
 ;;; ---------------------------------------------------------------------------
@@ -127,8 +114,7 @@ this window kills, and the control resets on its own."
 
 (defun dsh-emacs-jobs-counts ()
   "Return (LIVE . SETTLED) job counts for this chat's session.
-LIVE counts running and stopping jobs — what the mode line shows, since a
-finished job is history the list command can still reach."
+LIVE counts running and stopping jobs; SETTLED counts retained finished jobs."
   (let ((live 0))
     (dolist (job dsh-emacs-jobs--roster)
       (when (dsh-emacs-jobs--live-p job) (setq live (1+ live))))
@@ -141,15 +127,7 @@ frame that drops a job (settled and reclaimed, or no longer visible to the
 session) removes it here too."
   (when (buffer-live-p chat)
     (with-current-buffer chat
-      (setq dsh-emacs-jobs--roster (dsh-protocol-job-list-jobs frame))
-      (dsh-emacs-jobs--refresh))))
-
-(defun dsh-emacs-jobs--refresh ()
-  "Repaint this chat's job-dependent chrome.
-The mode-line indicator is a cache derived from the roster, so a roster
-change must force the line to redraw; a popup following this job updates
-its own header when the next frame arrives."
-  (force-mode-line-update))
+      (setq dsh-emacs-jobs--roster (dsh-protocol-job-list-jobs frame)))))
 
 (defun dsh-emacs-jobs--session-id-maybe ()
   "Session id of the current chat buffer, or nil.
@@ -168,7 +146,7 @@ must no-op rather than error when the connection has no session."
 A nil VALUE is the stream's teardown signal (server `end', socket drop, or
 an explicit close): the roster is kept as last seen rather than blanked —
 a reconnect re-opens the stream and the host's first frame is the truth,
-so a transient gap must not flash the mode line empty."
+so a transient gap does not empty the job chooser."
   (lambda (value)
     (when (and value (buffer-live-p chat))
       (dsh-emacs-jobs--apply
@@ -509,7 +487,7 @@ for the confirming press rather than exiting on the armed one)."
 
 (defun dsh-emacs-jobs--table (jobs)
   "Return ((LABEL . JOB) ...) for JOBS with unique LABELs.
-Live jobs lead (they are what the mode line counts), each group in the
+Live jobs lead, each group in the
 host's own order; colliding labels get a numeric suffix so a label maps
 back to exactly one job however the minibuffer picked it."
   (let ((live (cl-remove-if-not #'dsh-emacs-jobs--live-p jobs))
@@ -533,7 +511,7 @@ act on through this table — the same pattern as the queue chooser.")
   "The JOB the next menu key acts on.
 Uses the vertico-highlighted candidate when vertico renders the list, else
 the typed input as an exact/prefix match on the labels, else the first
-entry (the one the mode line's count points at).  Reads `vertico--index' /
+entry.  Reads `vertico--index' /
 `vertico--candidates' directly rather than through an accessor, exactly as
 the queue chooser does; `equal' ignores text properties, so the face
 vertico puts on a candidate does not break the lookup."
@@ -622,7 +600,7 @@ last in the setup-hook chain so the keys win."
   "Job-menu minibuffer setup: stable order, first entry preselected.
 Mirrors the queue chooser: pins the frontend's own sort variables (the
 candidates carry no completion metadata to pin) and preselects the first
-row, which is the live job the mode-line count refers to.  Returns nil
+row, with live jobs ordered before settled jobs.  Returns nil
 explicitly — `minibuffer-with-setup-hook' funcalls the setup value."
   (when (boundp 'vertico-sort-function)
     (setq-local vertico-sort-function nil))

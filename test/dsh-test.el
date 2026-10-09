@@ -18016,32 +18016,6 @@ input-area draft (which carries no such property) is not counted."
     (setq dsh-emacs-jobs--roster old-roster)
     (kill-buffer chat)))
 
-;; The mode-line indicator shows the live count and disappears when nothing
-;; is live — a settled job is history, not a running indicator.
-(let* ((chat (get-buffer-create " *dsh-test-jobs-ml*"))
-       (old-roster dsh-emacs-jobs--roster))
-  (unwind-protect
-      (progn
-        (with-current-buffer chat
-          (dsh-emacs-mode)
-          (setq-local dsh-emacs-modeline--jobs-cache nil)
-          (setq-local dsh-emacs-jobs--roster
-                      (dsh-protocol-job-list-jobs
-                       (dsh-protocol-job-list--from-alist
-                        (json-read-from-string
-                         (concat "{\"type\":\"rows\",\"jobs\":["
-                                 "{\"id\":\"b1\",\"status\":\"running\"},"
-                                 "{\"id\":\"b2\",\"status\":\"stopping\"},"
-                                 "{\"id\":\"b3\",\"status\":\"completed\"}]}")))))
-          (when (equal (dsh-emacs-modeline--jobs-indicator) " [J2]")
-            (dsh-test-pass "modeline-jobs-indicator-counts-live"))
-          (setq-local dsh-emacs-jobs--roster nil)
-          (setq-local dsh-emacs-modeline--jobs-cache nil)
-          (when (equal (dsh-emacs-modeline--jobs-indicator) "")
-            (dsh-test-pass "modeline-jobs-indicator-clears"))))
-    (setq dsh-emacs-jobs--roster old-roster)
-    (kill-buffer chat)))
-
 ;; The stop control is two-press: the first press only arms it, the second
 ;; kills.  This is dsh web's armed-stop semantics, and it is what keeps a
 ;; single stray `k' from killing the model's background work.
@@ -18068,7 +18042,7 @@ input-area draft (which carries no such property) is not counted."
     (kill-buffer chat)))
 
 ;; A stream teardown leaves the roster as last seen, so a reconnect (whose
-;; first frame is the whole truth) cannot flash the mode line empty.
+;; first frame is the whole truth) does not empty the job chooser.
 (let ((kept (dsh-protocol-job-list--from-alist
              (json-read-from-string
               (concat "{\"type\":\"rows\",\"jobs\":["
@@ -25067,7 +25041,10 @@ messages (e.g. `command/done')."
 
 (with-temp-buffer
   (dsh-emacs-mode)
-  (let* ((image '(image :type svg :data "test-svg"))
+  (let* ((dsh-emacs-jobs--roster
+          (list (dsh-protocol-job--from-alist
+                 '((id . "running-job") (status . "running")))))
+         (image '(image :type svg :data "test-svg"))
          (map (make-sparse-keymap))
          (children (propertize (concat " " (propertize " " 'display image) "3")
                                'local-map map 'help-echo "3 children")))
@@ -25076,14 +25053,13 @@ messages (e.g. `command/done')."
               ((symbol-function 'dsh-emacs-modeline--plan-indicator) (lambda () " Plan "))
               ((symbol-function 'dsh-emacs-modeline--execution-indicator) (lambda () " Retry 1/3 "))
               ((symbol-function 'dsh-emacs-modeline--queue-indicator) (lambda () " [Q1 S1]"))
-              ((symbol-function 'dsh-emacs-modeline--jobs-indicator) (lambda () " [J2]"))
               ((symbol-function 'dsh-emacs-subagent-indicator) (lambda () children))
               ((symbol-function 'dsh-emacs-modeline--modeinline) (lambda () "(model CH24%%) ")))
       (let* ((text (dsh-emacs-modeline--doom-segment))
              (icon-pos (string-match " 3" text)))
         (dsh-test-assert "modeline-joins-status-pieces-with-one-space"
                          (equal (substring-no-properties text)
-                                " █ Plan Retry 1/3 [Q1 S1] [J2]  3 (model CH24%%) "))
+                                " █ Plan Retry 1/3 [Q1 S1]  3 (model CH24%%) "))
         (dsh-test-assert "modeline-spacing-preserves-svg-and-mouse-properties"
                          icon-pos
                          (equal (get-text-property icon-pos 'display text) image)
@@ -25095,7 +25071,6 @@ messages (e.g. `command/done')."
                                 (:eval (dsh-emacs-modeline--doom-segment)) "right")))
       (cl-letf (((symbol-function 'dsh-emacs-modeline--ml-indicator) (lambda () ""))
                 ((symbol-function 'dsh-emacs-modeline--queue-indicator) (lambda () ""))
-                ((symbol-function 'dsh-emacs-modeline--jobs-indicator) (lambda () ""))
                 ((symbol-function 'dsh-emacs-subagent-indicator) (lambda () "")))
         (dsh-test-assert "modeline-empty-indicators-add-no-extra-gaps"
                          (equal (dsh-emacs-modeline--doom-segment) " (model CH24%%) "))

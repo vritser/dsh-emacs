@@ -119,6 +119,9 @@ See [subagent integration](docs/subagents.md) for protocol and test details.
 | `C-/` / `C-_` / `C-x u` | Undo input editing; redo with `C-g C-/`, or `undo-redo` on Emacs 28+ (the transcript is never undone) |
 | `TAB` | Complete a slash command or skill |
 
+Background-job status appears in the tool rows. Use `C-c C-j` to inspect
+retained output or stop a job; the mode line has no separate job count.
+
 **Branching a conversation:** place point in a committed assistant reply
 (including its code blocks) and press `C-c C-y`, or run
 `M-x dsh-emacs-fork-message-at-point`. The new conversation includes that

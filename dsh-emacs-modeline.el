@@ -57,12 +57,6 @@
 (declare-function dsh-emacs-queue-counts "dsh-emacs-queue" ())
 (declare-function dsh-emacs-list-queue "dsh-emacs-queue" ())
 
-;; Background-job indicator (dsh-emacs assembles dsh-emacs-jobs and reads it
-;; back at runtime).
-(declare-function dsh-emacs-jobs-counts "dsh-emacs-jobs" ())
-(declare-function dsh-emacs-list-jobs "dsh-emacs-jobs" ())
-(defvar dsh-emacs-jobs-map)
-
 ;; The renderer's pending text refresh can also redraw the running indicator.
 (defvar dsh-emacs--streaming-assistant)
 (defvar dsh-emacs--streaming-thinking)
@@ -1101,30 +1095,6 @@ Only queued and steering placements count.  Mouse-1 opens the queue."
                         "")))))
       (cdr dsh-emacs-modeline--queue-cache))))
 
-(defvar-local dsh-emacs-modeline--jobs-cache nil
-  "Last (COUNTS . TEXT) for this buffer's background-job indicator.")
-
-(defun dsh-emacs-modeline--jobs-indicator ()
-  "Return the live background-job count, e.g. \" [J2]\"; empty when none.
-Only jobs that have not settled count: a finished job is history the job
-list (`dsh-emacs-list-jobs') still reaches, not something to keep in the
-mode line.  Mouse-1 opens the job list."
-  (if (not (derived-mode-p 'dsh-emacs-mode))
-      ""
-    (let ((counts (car (dsh-emacs-jobs-counts))))
-      (unless (equal counts (car dsh-emacs-modeline--jobs-cache))
-        (setq dsh-emacs-modeline--jobs-cache
-              (cons counts
-                    (if (> counts 0)
-                        (propertize
-                         (format " [J%d]" counts)
-                         'face 'dsh-emacs-jobs-modeline-face
-                         'help-echo "Running background jobs; mouse-1 to manage"
-                         'mouse-face 'mode-line-highlight
-                         'local-map dsh-emacs-jobs-map)
-                      ""))))
-      (cdr dsh-emacs-modeline--jobs-cache))))
-
 (defun dsh-emacs-modeline--escape-percent (txt)
   "Escape `%' in TXT for mode-line display, keeping text properties.
 Mode-line strings undergo `%'-sequence expansion, so a literal `%' must be
@@ -1286,7 +1256,6 @@ mode name and protects the final column on right-aligned mode lines."
     (let ((text (dsh-emacs-modeline--join
                  (dsh-emacs-modeline--ml-indicator)
                  (dsh-emacs-modeline--queue-indicator)
-                 (dsh-emacs-modeline--jobs-indicator)
                  (dsh-emacs-modeline--escape-percent (dsh-emacs-subagent-indicator))
                  (dsh-emacs-modeline--modeinline))))
       (if (string-empty-p text) "" (concat " " text " ")))))

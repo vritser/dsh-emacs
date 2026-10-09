@@ -8,6 +8,13 @@ minor) and stay undated until the release is cut.
 
 ## 0.6.0 - Unreleased
 
+### Breaking Changes
+
+- **Remove the mode-line job indicator**: job status stays in the tool rows;
+  the duplicate `[Jn]` count and its mouse shortcut are removed, along with
+  `dsh-emacs-jobs-modeline-face` and `dsh-emacs-jobs-map`. Use `C-c C-j` to
+  view output or stop background jobs. (rationale: postmortem/088)
+
 ### Added
 
 - **Configurable reply footer**: completed turns show Copy, Fork, per-turn
@@ -92,7 +99,7 @@ minor) and stay undated until the release is cut.
   (rationale: postmortem/070)
 - **Background jobs are visible and controllable**: while a session can see
   running work — a bash command the model left in the background, a subagent
-  delegation, a workflow — the mode line shows `[J2]`, and `C-c C-j` opens the
+  delegation, a workflow — `C-c C-j` opens the
   roster as a picker: `RET` shows a job's retained output in a read-only
   buffer, `k` stops it (two presses within 3s; see
   `dsh-emacs-jobs-kill-arm-seconds`), `r` re-subscribes.  dsh 0.1.7 removed

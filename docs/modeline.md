@@ -10,7 +10,7 @@ parameter on each redraw. Changing themes updates the color automatically.
 
 The stats use `dsh-emacs-modeline-format-spec` to choose segments and their
 separator (one space by default). Status indicators—animation, Plan/retry,
-queue, jobs and subagents—and the parenthesized stats have one separating
+queue and subagents—and the parenthesized stats have one separating
 space in both native and Doom mode lines. Empty indicators add no gaps; SVG
 placeholders retain their display and click properties. Doom's extra padding
 around the major-mode label is removed in chat buffers so adjacent segments
@@ -196,16 +196,8 @@ QueueDock.  The counts come from the `inbox` session projection mirrored by
 `dsh-emacs-queue.el` (delivered as `session/control` `projection` frames), so the
 segment is live without any polling.
 
-### Background-job indicator
-
-While the session can see jobs that have not settled, a `[J2]` indicator sits
-after the queue indicator, colored with `dsh-emacs-jobs-modeline-face` and
-clickable (`mouse-1` opens `dsh-emacs-list-jobs`).  Settled jobs are omitted —
-they are history the `C-c C-j` menu still reaches, so they do not keep a
-running indicator alive.  The count comes from the `job/list` stream mirrored
-by `dsh-emacs-jobs.el` on the chat buffer's own socket (dsh 0.1.7 moved the
-roster off `session/control`), so it is live without polling and is re-read
-from the host after a reconnect.
+Background jobs use their transcript tool rows for status. `C-c C-j`
+(`dsh-emacs-list-jobs`) opens the job manager; they have no mode-line segment.
 
 ### Why the branch segment is cached
 

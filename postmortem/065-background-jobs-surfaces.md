@@ -1,5 +1,7 @@
 # 065 — Background jobs: subscribe to the `job` namespace streams
 
+_The mode-line indicator is superseded by [088](088-remove-job-modeline.md)._
+
 ## Background
 
 Background work the model starts — a bash command left running, a subagent

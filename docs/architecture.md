@@ -601,17 +601,19 @@ Because the chat socket now multiplexes more than the follow stream,
 `dsh-emacs-events--close-streams`) retires it, invoking the handler once
 with nil so no mirror outlives its stream.  A teardown keeps the last
 roster rather than blanking it — a reconnect re-reads the whole set, so
-clearing would only flash the mode line empty.
+clearing would temporarily empty the job chooser.
 
 The wire views are normalized in `dsh-emacs-protocol.el`
 (`dsh-protocol-job` with symbol `status`, `dsh-protocol-job-list`,
 `dsh-protocol-job-frame`/`-chunk`), and the namespace's CLI surface is
-Emacs-native: the mode line carries `[Jn]` while jobs are live (settled
-jobs are history, not an indicator), and `C-c C-j` opens the roster as a
+Emacs-native: `C-c C-j` opens the roster as a
 minibuffer menu whose single keys show output (`RET`), stop a job (`k`,
 two presses within `dsh-emacs-jobs-kill-arm-seconds`) and re-subscribe
 (`r`).  A kill is a human action: the host records `cancelled by the
 user` and the owning agent still receives its completion notice.
+
+Job status stays in transcript tool rows. The mode line does not consume the
+job roster, and roster updates do not request a mode-line redraw.
 
 ## Event rendering flow
 
