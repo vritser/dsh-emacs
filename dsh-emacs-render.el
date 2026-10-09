@@ -3573,7 +3573,13 @@ buffer still tracks CALL-ID's row and that row is showing the pending result."
            (dsh-emacs-ui-make-fragment
             :namespace-id (dsh-emacs-render--make-namespace)
             :block-id (format "reply-footer-%s" turn)
-            :label-left (concat "\n" (mapconcat #'identity (nreverse parts) "  ·  "))
+            :label-left (concat
+                         (unless (and (get-text-property
+                                       (1- end) 'dsh-emacs-ui-state)
+                                      (eq (char-before end) ?\n)
+                                      (eq (char-before (1- end)) ?\n))
+                           "\n")
+                         (mapconcat #'identity (nreverse parts) "  ·  "))
             :style 'minimal :status 'reply-footer :non-foldable t
             :header-face 'dsh-emacs-muted-face)
            :insert-before (save-excursion
@@ -3763,7 +3769,7 @@ DATA.REASON.ERROR ({code, message, ...})."
       :label-left (propertize label 'face 'dsh-emacs-error-face)
       :body text
       :style 'minimal
-      :status 'info)
+      :status 'info :padding t)
      :create-new t :expanded t
      :insert-before insert-point)))
 

@@ -111,7 +111,7 @@ two-space gap."
 (cl-defun dsh-emacs-ui-make-fragment (&key (namespace-id "global") (block-id "1")
                                            label-left label-right body
                                            (style 'rounded) status
-                                           header-face body-face non-foldable)
+                                           header-face body-face non-foldable padding)
   "Create a complete fragment snapshot as an alist.
 NAMESPACE-ID and BLOCK-ID identify the block.  LABEL-LEFT, LABEL-RIGHT
 and BODY may be nil to clear their content on update.  STYLE is rounded,
@@ -120,7 +120,8 @@ HEADER-FACE styles the header row only (icon, title, summary, fold
 indicator); BODY-FACE styles the expanded body only.  There is no
 whole-block face.  Both merge after embedded text faces, preserving icon
 and body styling.  NON-FOLDABLE disables folding.  Updates preserve the
-user's fold state."
+user's fold state.  PADDING adds a blank line above and below the fragment,
+including when collapsed."
   (list (cons :namespace-id namespace-id)
         (cons :block-id block-id)
         (cons :label-left (dsh-emacs-ui--string-or-nil label-left))
@@ -130,7 +131,8 @@ user's fold state."
         (cons :status status)
         (cons :header-face header-face)
         (cons :body-face body-face)
-        (cons :non-foldable non-foldable)))
+        (cons :non-foldable non-foldable)
+        (cons :padding padding)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Internal helpers
@@ -353,9 +355,12 @@ WIDTH, when supplied, is the body width already measured by the caller."
                  ((or body (not (eq style 'minimal)))
                   (dsh-emacs-ui--body-region body width style))))
          (body-text (when lines (concat (mapconcat #'identity lines "\n") "\n")))
-         (text (concat header body-text
+         (padding (if (map-elt model :padding) "\n" ""))
+         (offset (length padding))
+         (text (concat padding header body-text
                        (unless (eq style 'minimal)
-                         (concat (dsh-emacs-ui--bottom-border style width) "\n"))))
+                         (concat (dsh-emacs-ui--bottom-border style width) "\n"))
+                       padding))
          (state (copy-tree model)))
     ;; Snapshots must not alias mutable strings owned by the caller.
     (dolist (key '(:namespace-id :block-id :label-left :label-right :body))
@@ -373,10 +378,10 @@ WIDTH, when supplied, is the body width already measured by the caller."
     ;; Region-scoped: header row and body lines are disjoint spans, and neither
     ;; face touches the border chrome — a row/status face cannot reach the body.
     (when-let* ((face (map-elt model :header-face)))
-      (add-face-text-property 0 (length header) face t text))
+      (add-face-text-property offset (+ offset (length header)) face t text))
     (when-let* ((face (map-elt model :body-face)))
-      (add-face-text-property (length header)
-                              (+ (length header) (length body-text))
+      (add-face-text-property (+ offset (length header))
+                              (+ offset (length header) (length body-text))
                               face t text))
     text))
 
@@ -478,7 +483,8 @@ Rendering completes before editing; failed replacements roll back and signal."
                                      (goto-char insert-before)
                                      (beginning-of-line)
                                      (dsh-emacs-ui--consume-blanks-above
-                                      (dsh-emacs-ui--blank-above-preserve)))
+                                      (unless (map-elt model :padding)
+                                        (dsh-emacs-ui--blank-above-preserve))))
                                  (goto-char (point-max))
                                  (unless (or (bobp)
                                              (get-text-property (1- (point)) 'dsh-emacs-ui-state))

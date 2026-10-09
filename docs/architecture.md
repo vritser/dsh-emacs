@@ -59,7 +59,10 @@ settings RPC path. See [decision record 079](../postmortem/079-config-file-entry
 ## Transcript fragments (`dsh-emacs-ui.el`)
 
 The renderer supplies a complete alist snapshot: identity, labels, body,
-border style, optional header/body faces, and the non-foldable flag.
+border style, optional header/body faces, and the non-foldable flag. Optional
+`padding` adds a blank line above and below the fragment; standalone
+diagnostics use it to retain their spacing when folded or replaced. Padding
+belongs to the fragment bounds but carries neither header nor body faces.
 `dsh-emacs-ui-update-fragment` replaces that snapshot while preserving the
 user's fold state. Nil fields clear previous values; this is not a patch API.
 It returns the exact `(START . END)` range, excluding surrounding spacing.

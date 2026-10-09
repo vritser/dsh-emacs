@@ -151,6 +151,10 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Error messages have breathing room**: standalone model and automatic
+  compaction errors keep a blank line above and below their cards, including
+  when collapsed, instead of touching the preceding footer or input line.
+
 - **Reply footer stays at the turn's end**: Copy, Fork, token usage and
   elapsed time follow all of the turn's content, including deliveries,
   tool and thinking cards, failed attempts and error diagnostics. Placement

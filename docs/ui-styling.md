@@ -231,6 +231,11 @@ extra blank lines), and adjacent tool rows stack tightly; pressing `RET` on a
 tool row expands/collapses the body (the body is stored inside the block, so
 expanding always restores it).
 
+Standalone model and automatic compaction errors have one blank line above
+and below their cards, including when collapsed. Their title and error detail
+remain adjacent. A reply footer following an error reuses its bottom blank
+line, keeping the actions separated without doubling the gap.
+
 Summary key precedence matches dsh web's `SUMMARY_KEYS`, keyed by tool name
 first and by variant second: bash→`description|command`,
 read→`path|file_path|url`, search→`query|pattern|url`,
