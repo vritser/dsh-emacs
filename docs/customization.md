@@ -69,8 +69,10 @@ The most commonly used options, straight in your config:
 
 ## Reply footer
 
-`dsh-emacs-reply-footer-items` controls the row below the final visible
-assistant reply of each finished turn, with one blank line between them.
+`dsh-emacs-reply-footer-items` controls the row at the end of each finished
+turn, below its replies, tool/thinking cards, Deliverables and diagnostics,
+with one blank line above the row. Copy and Fork target the last visible
+text reply, even when other content follows it.
 The default is `(copy fork usage
 duration)`; list order is display order, omitted items are hidden, and nil
 disables the whole row. Refresh an existing conversation (`C-c C-r`) after

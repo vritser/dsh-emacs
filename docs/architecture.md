@@ -132,12 +132,16 @@ older pages; full reload clears it and transcript trimming discards summaries
 whose completed replies are gone.
 
 History batches collect facts before painting, so a page cannot attach a
-footer to an intermediate reply. A non-foldable minimal fragment follows
-the last text segment; stock text buttons retain the selected reply's source
+footer to an intermediate reply. After rendering `turn/end`, the summary
+retains the identity of the last transcript fragment or message at the
+live/history insertion boundary. The footer resolves that identity's current
+end, so tools, thinking, deliveries and diagnostics remain above it, even
+after folding or deferred Markdown. Stock text buttons retain the reply's source
 Markdown and sequence for Copy/Fork. Pending Markdown states close their end
 markers against insertion so their idle replacement cannot absorb the footer.
 The row never carries assistant-body or message-sequence properties. See
-[decision record 084](../postmortem/084-reply-footer.md).
+[decision record 084](../postmortem/084-reply-footer.md) and the placement
+correction in [086](../postmortem/086-reply-footer-turn-tail.md).
 
 ## Composer (`dsh-emacs-composer.el`)
 

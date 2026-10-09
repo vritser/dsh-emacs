@@ -1,5 +1,7 @@
 # 084 — Actions and statistics below the final reply
 
+_Footer placement is superseded by [086](086-reply-footer-turn-tail.md)._
+
 ## Background
 
 `5fb6674` exposed exact reply branching through `C-c C-y`, but its

@@ -151,6 +151,12 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Reply footer stays at the turn's end**: Copy, Fork, token usage and
+  elapsed time follow all of the turn's content, including deliveries,
+  tool and thinking cards, failed attempts and error diagnostics. Placement
+  survives historical paging, reconnects and deferred Markdown rendering;
+  actions still target the last text reply. (rationale: postmortem/086)
+
 - **Session list highlights only the focused row on first load**: when
   global line highlighting is enabled, asynchronously inserted rows no
   longer stretch the highlight over the rest of the list.

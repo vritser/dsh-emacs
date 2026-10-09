@@ -7471,6 +7471,122 @@ Lets a test drive a malformed content value through the result path."
                      (string-match-p "Copy" (buffer-string))
                      (not (string-match-p "Fork" (buffer-string))))))
 
+;; Deliverables belong above the footer, including expanded file lists.
+(dolist (history '(nil t))
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (let ((dsh-emacs-stream-markdown-limit 1)
+          (events
+           '(((type . "turn/start") (seq . 1) (data . ((turn . 1))))
+             ((type . "deliverables/presented") (seq . 2)
+              (data . ((turn . 1) (callId . "present-1")
+                       (files . [((path . "report.md"))]))))
+             ((type . "assistant/message") (seq . 3)
+              (data . ((turn . 1) (step . 1)
+                       (message . ((content . [((type . "text")
+                                                (text . "**final answer**"))]))))))
+             ((type . "turn/end") (seq . 4) (data . ((turn . 1))))
+             ((type . "user/message") (seq . 5)
+              (data . ((content . [((type . "text")
+                                   (text . "next question"))])))))))
+      (if history
+          (dsh-emacs-render-history-events
+           (mapcar (lambda (event) (list (cons 'event event))) events))
+        (dolist (event events)
+          (dsh-emacs-render-event event)))
+      (while dsh-emacs--markdown-pending
+        (dsh-emacs-render--run-markdown (current-buffer)))
+      (dotimes (expanded 2)
+        (when (= expanded 1)
+          (goto-char (point-min))
+          (search-forward "Deliverables")
+          (dsh-emacs-ui-toggle-fragment)
+          (dsh-emacs-render--reply-footer
+           1 (gethash 1 dsh-emacs-render--reply-turns)))
+        (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
+               (reply (string-match "final answer" text))
+               (delivery (string-match "Deliverables" text))
+               (footer (string-match "Copy" text))
+               (next (string-match "next question" text)))
+          (dsh-test-assert
+           (format "footer-after-deliverables-%s-%s"
+                   (if history "history" "live")
+                   (if (= expanded 1) "expanded" "collapsed"))
+           (and reply delivery footer next (< reply delivery footer next))
+           (or (= expanded 0)
+               (let ((file (string-match "report.md" text)))
+                 (and file (< delivery file footer))))
+           (= (how-many "Copy" (point-min) (point-max)) 1)))))))
+
+;; A turn may end after diagnostics or tools, without another text reply.
+(dolist (history '(nil t prepend reconnect))
+  (dolist (case
+           '(("tool" "tail.txt"
+              ((type . "tool/call") (seq . 3)
+               (data . ((turn . 1) (step . 1) (callId . "tail-tool")
+                        (name . "read") (arguments . "{\"path\":\"tail.txt\"}")))))
+             ("attempt" "Attempt (no committed reply)"
+              ((type . "assistant/attempt") (seq . 3)
+               (data . ((turn . 1) (step . 2) (stream . [])))))
+             ("compaction" "Context compaction failed"
+              ((type . "compaction/end") (seq . 3)
+               (data . ((turn . 1) (compactionId . "tail-compaction")
+                        (error . "compression failed")))))
+             ("thinking" "Think"
+              ((type . "assistant/message") (seq . 3)
+               (data . ((turn . 1) (step . 2)
+                        (message . ((content . [((type . "reasoning")
+                                                 (text . "unfinished reasoning"))])))))))
+             ("error" "Model error")))
+    (with-temp-buffer
+      (dsh-emacs-mode)
+      (pcase-let* ((`(,name ,label . ,tail) case)
+                   (dsh-emacs-stream-markdown-limit 1)
+                   (events
+                    (append
+                     '(((type . "turn/start") (seq . 1) (data . ((turn . 1))))
+                       ((type . "assistant/message") (seq . 2)
+                        (data . ((turn . 1) (step . 1)
+                                 (message . ((content . [((type . "text")
+                                                          (text . "**last text**"))])))))))
+                     tail
+                     `(((type . "turn/end") (seq . 4)
+                        (data . ((turn . 1)
+                                 (reason . ,(if (equal name "error")
+                                                '((kind . "error") (error . "provider failed"))
+                                              '((kind . "completed")))))))
+                       ((type . "user/message") (seq . 5)
+                        (data . ((content . [((type . "text")
+                                              (text . "next question"))]))))))))
+        (let ((entries (mapcar (lambda (event) (list (cons 'event event))) events)))
+          (pcase history
+            ('nil (dolist (event events) (dsh-emacs-render-event event)))
+            ('prepend
+             (dsh-emacs-render-history-events (nthcdr 2 entries))
+             (let* ((dsh-emacs--history-insert-marker
+                     (dsh-emacs-render--history-prepend-marker))
+                    (position (marker-position dsh-emacs--history-insert-marker)))
+               (dsh-emacs-render-history-events
+                (cl-subseq entries 0 2) nil 3 :insert-before position :follow-p nil)
+               (set-marker dsh-emacs--history-insert-marker nil)))
+            (_ (dsh-emacs-render-history-events entries)
+               (when (eq history 'reconnect)
+                 (dsh-emacs-render-history-events entries)))))
+        (while dsh-emacs--markdown-pending
+          (dsh-emacs-render--run-markdown (current-buffer)))
+        (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
+               (tail-pos (string-match (regexp-quote label) text))
+               (footer (string-match "Copy" text))
+               (next (string-match "next question" text)))
+          (dsh-test-assert (format "footer-after-turn-tail-%s-%s" name history)
+                           (and tail-pos footer next (< tail-pos footer next))
+                           (= (how-many "Copy" (point-min) (point-max)) 1))
+          (goto-char (point-min))
+          (search-forward "Copy")
+          (button-activate (button-at (1- (point))))
+          (dsh-test-assert "footer-tail-keeps-last-text-copy-target"
+                           (equal (current-kill 0) "**last text**")))))))
+
 ;; A live completed reply may still be waiting for idle Markdown. The footer
 ;; must survive that replacement and must not become part of the message.
 (with-temp-buffer

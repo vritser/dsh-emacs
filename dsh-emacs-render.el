@@ -163,7 +163,7 @@ Off by default to reduce visual noise."
   :group 'dsh-emacs-render)
 
 (defcustom dsh-emacs-reply-footer-items '(copy fork usage duration)
-  "Items shown below the last reply of each finished turn, in this order.
+  "Items shown after all transcript content of each finished turn, in order.
 Use nil to hide the row.  `copy' copies the reply's original Markdown;
 `fork' branches through that reply.  `usage' sums reported tokens for the
 turn, including cache reads/writes; `duration' uses server turn timestamps.
@@ -3496,7 +3496,7 @@ buffer still tracks CALL-ID's row and that row is showing the pending result."
                              (button-get button 'dsh-emacs-reply-seq)))))
 
 (defun dsh-emacs-render--reply-footer (turn state)
-  "Paint TURN's completed footer from STATE, beside its last visible reply."
+  "Paint TURN's footer from STATE, after its final transcript content."
   (when (and (plist-get state :end-seq) (plist-get state :reply-seq))
     (let ((pos (point-min))
           (seq (plist-get state :reply-seq))
@@ -3512,6 +3512,18 @@ buffer still tracks CALL-ID's row and that row is showing the pending result."
                                                nil (point-max))
               pos end))
       (when end
+        ;; The last text reply is the action target, but tools, reasoning
+        ;; and diagnostics can follow it before the turn actually ends.
+        (when-let* ((tail
+                    (if-let* ((id (plist-get state :tail-fragment)))
+                        (cdr (dsh-emacs-ui-find-block (car id) (cdr id)))
+                      (when-let* ((id (plist-get state :tail-message)))
+                        (save-excursion
+                          (goto-char (point-max))
+                          (when-let* ((match (text-property-search-backward
+                                             'dsh-emacs-event-block id #'equal)))
+                            (prop-match-end match)))))))
+          (setq end (max end tail)))
         (dolist (entry (plist-get state :messages))
           (if (null (cdr entry))
               (setq complete nil)
@@ -3587,7 +3599,22 @@ buffer still tracks CALL-ID's row and that row is showing the pending result."
                (plist-get state :start-time) (dsh-protocol-reply-event-time event)))
         ("turn/end"
          (setf (plist-get state :end-seq) seq
-               (plist-get state :end-time) (dsh-protocol-reply-event-time event)))
+               (plist-get state :end-time) (dsh-protocol-reply-event-time event))
+         ;; Capture content identity, not a position that later insertions or
+         ;; deferred Markdown could move.  Turn-end diagnostics are already
+         ;; rendered, and the history insertion point bounds an older page.
+         (save-excursion
+           (goto-char (or (dsh-emacs-render--input-insert-point) (point-max)))
+           (skip-chars-backward " \t\n")
+           (when (> (point) (point-min))
+             (let ((fragment (get-text-property (1- (point)) 'dsh-emacs-ui-state)))
+               (setf (plist-get state :tail-fragment)
+                     (when fragment
+                       (cons (map-elt fragment :namespace-id)
+                             (map-elt fragment :block-id)))
+                     (plist-get state :tail-message)
+                     (unless fragment
+                       (get-text-property (1- (point)) 'dsh-emacs-event-block)))))))
         (_
          (unless (assq seq (plist-get state :messages))
            (push (cons seq (dsh-protocol-reply-event-usage event))

@@ -127,7 +127,8 @@ automatically. Replies still streaming and subagent conversations cannot
 be forked this way. In the session list, `f` forks through the latest
 completed turn instead. See [fork controls](docs/customization.md#forking-conversations).
 
-Finished turns show a small row below their last reply:
+Finished turns show a small row after all their content, including
+Deliverables, tool cards and error messages:
 `Copy · Fork · Tokens 12.3k · Time 8.2s`. Click an action or press `RET`
 on it (`TAB` moves between buttons). Copy preserves the reply's original
 Markdown. Tokens include the turn's reported input, output and cache usage;
