@@ -17,6 +17,13 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Locate the current project's workspace**: `M-x dsh-emacs` from a local
+  project file or directory expands its existing workspace and centers the
+  header in the selected window when space permits, including when workspace
+  data arrives after opening. A user command in the list cancels pending
+  navigation. Chat buffers retain active-session navigation.
+  (rationale: postmortem/089, postmortem/090)
+
 - **Configurable reply footer**: completed turns show Copy, Fork, per-turn
   token usage and elapsed time below their last reply, separated by a blank
   line. Customize

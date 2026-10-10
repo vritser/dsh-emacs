@@ -939,12 +939,12 @@ matches the workspace registered for it under any spelling."
         (directory-file-name (file-truename (expand-file-name path)))
       (error nil))))
 
-(defun dsh-emacs--workspace-id-by-path (dir)
-  "Workspace-id whose canonical path equals DIR, or nil."
+(defun dsh-emacs--workspace-id-by-path (dir workspaces)
+  "Id from WORKSPACES whose canonical path equals DIR, or nil."
   (let ((want (dsh-emacs--workspace-canonical-path dir)))
     (and want
          (catch 'found
-           (dolist (ws dsh-emacs--workspaces)
+           (dolist (ws workspaces)
              (when (equal want
                           (dsh-emacs--workspace-canonical-path
                            (dsh-protocol-workspace-path ws)))
@@ -988,7 +988,7 @@ Else nil (the session keeps plain cwd semantics)."
              (dsh-emacs--server-local-host-p))
     (let ((root (dsh-emacs--project-root dir)))
       (when root
-        (or (dsh-emacs--workspace-id-by-path root)
+        (or (dsh-emacs--workspace-id-by-path root dsh-emacs--workspaces)
             (let ((ws (dsh-emacs--workspace-create-resolve root)))
               (and ws (dsh-protocol-workspace-workspace-id ws))))))))
 
@@ -4367,8 +4367,13 @@ always pointing at the last-opened chat buffer, which mixed sessions)."
    (t
     (message "No session to refresh"))))
 
-(defun dsh-emacs-list-sessions-display ()
+(defun dsh-emacs-list-sessions-display (&optional project-root)
   "Display the session list buffer.
+With PROJECT-ROOT, expand its workspace and center its header when space
+permits, only while the list's window is selected.
+Matching waits for the workspace cache when necessary; no workspace is
+created.  Without a match, retain the active-session navigation below.
+
 The cursor lands on the last active session's row, not on whatever row
 the buffer happened to be showing: opening the list is an explicit
 \"where am I\" request, whereas a plain refresh (`g', events,
@@ -4401,10 +4406,15 @@ and fetches any missing catalogs.  A cold session cache is fetched as before;
     ;; (nothing fetched yet) has to be fetched.
     (unless (consp dsh-emacs--sessions)
       (dsh-emacs-list-sessions))
+    ;; Select before arming/rendering: the jump excludes this window from
+    ;; row restoration, and centering must operate on the window just opened.
+    ;; Without a jump, the render restores this window's existing row.
+    (pop-to-buffer buf)
     (with-current-buffer buf
       ;; Arm the target after the mode/connect step: entering a major mode
       ;; would erase a buffer-local target armed earlier.
-      (setq dsh-emacs-session--auto-jump-session dsh-emacs--current-session)
+      (setq dsh-emacs-session--auto-jump-session dsh-emacs--current-session
+            dsh-emacs-session--auto-jump-project project-root)
       ;; Repaint now: a warm cache already holds the target row and the list
       ;; may be on screen, so the jump must not wait for the snapshot's own
       ;; repaint (which is a round-trip away).  A cold cache finds no row and
@@ -4416,7 +4426,7 @@ and fetches any missing catalogs.  A cold session cache is fetched as before;
         (let ((cell (dsh-emacs-subagent--cell parent 'subagentCatalog)))
           (unless (and cell (dsh-protocol-subagent-cell-present cell))
             (dsh-emacs-subagent-refresh parent)))))
-    (pop-to-buffer buf)))
+    buf))
 
 (defun dsh-emacs--code-block-region-at (pos)
   "Return (START . END) of the source-block body containing POS, or nil.
@@ -4586,9 +4596,15 @@ assistant message."
 ;;;###autoload
 (defun dsh-emacs ()
   "Open the dsh session list.
-This is the main entry command of dsh-emacs."
+From a local project buffer, locate and expand its existing workspace.
+Chat and session-list buffers retain active-session navigation.  Project
+matching runs only for a local server and a non-remote directory."
   (interactive)
-  (dsh-emacs-list-sessions-display))
+  (dsh-emacs-list-sessions-display
+   (and (not (derived-mode-p 'dsh-emacs-mode 'dsh-emacs-session-mode))
+        (not (file-remote-p default-directory))
+        (dsh-emacs--server-local-host-p)
+        (dsh-emacs--project-root default-directory))))
 
 ;;;###autoload
 (defun dsh-emacs-health ()

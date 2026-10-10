@@ -8124,6 +8124,199 @@ Lets a test drive a malformed content value through the result path."
     (when (get-buffer dsh-emacs-sessions-buffer)
       (kill-buffer dsh-emacs-sessions-buffer))))
 
+;; Project entry captures the caller's directory before displaying the list.
+(let ((seen nil)
+      (detected nil)
+      (dsh-emacs-base-url "http://127.0.0.1:3000"))
+  (cl-letf (((symbol-function 'dsh-emacs-list-sessions-display)
+             (lambda (&optional root) (setq seen root)))
+            ((symbol-function 'dsh-emacs--project-root)
+             (lambda (dir) (setq detected dir) "/tmp/project")))
+    (with-temp-buffer
+      (setq default-directory "/tmp/project/src/")
+      (dsh-emacs)
+      (dsh-test-assert "project-entry-captures-caller-directory"
+        (equal seen "/tmp/project")
+        (equal detected "/tmp/project/src/"))
+      (dolist (mode '(dsh-emacs-mode dsh-emacs-session-mode))
+        (setq major-mode mode detected nil)
+        (dsh-emacs)
+        (dsh-test-assert (format "project-entry-preserves-%s-navigation" mode)
+          (null seen) (null detected)))
+      (setq major-mode 'fundamental-mode detected nil)
+      (let ((dsh-emacs-base-url "https://remote.example"))
+        (dsh-emacs)
+        (dsh-test-assert "project-entry-skips-remote-server"
+          (null seen) (null detected)))
+      (setq default-directory "/ssh:example:/project/")
+      (dsh-emacs)
+      (dsh-test-assert "project-entry-skips-remote-directory"
+        (null seen) (null detected)))))
+
+;; Use the real entry, renderer and canonical matcher with a cold workspace
+;; cache, then deliver its data through the ordinary repaint path.
+(let* ((root (make-temp-file "dsh-entry-project-" t))
+       (dsh-emacs-sessions-buffer " *dsh-project-entry*")
+       (dsh-emacs-base-url "http://127.0.0.1:3000")
+       (dsh-emacs--current-session "previous")
+       (dsh-emacs--archived-sessions nil)
+       (dsh-emacs--workspaces nil)
+       (dsh-emacs--sessions
+        (dsh-emacs-test--session-items
+         '(((sessionId . "previous") (updatedAt . 1)
+            (projections . ((values . ((title . "Previous session"))))))))))
+  (unwind-protect
+      (save-window-excursion
+        (make-directory (expand-file-name ".git" root))
+        (make-directory (expand-file-name "src" root))
+        (cl-letf (((symbol-function 'dsh-emacs-events-host-connect) #'ignore)
+                  ((symbol-function 'dsh-emacs-events-host-disconnect) #'ignore)
+                  ((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (&rest _) (error "Unexpected entry RPC")))
+                  ((symbol-function 'dsh-emacs--rpc-request)
+                   (lambda (&rest _) (error "Unexpected workspace creation"))))
+          (with-temp-buffer
+            (setq default-directory (file-name-as-directory
+                                     (expand-file-name "src" root)))
+            (dsh-emacs))
+          (with-current-buffer dsh-emacs-sessions-buffer
+            (dsh-test-assert "project-entry-missing-workspace-keeps-session"
+              (equal "previous" (dsh-emacs-session-id-at-point)))
+            (dsh-test-assert "project-entry-retains-root-until-workspace-arrives"
+              (equal root dsh-emacs-session--auto-jump-project))
+            (setq dsh-emacs--workspaces
+                  (mapcar #'dsh-protocol-workspace--from-alist
+                          `(((workspaceId . "other") (title . "Other")
+                             (path . "/tmp/unrelated")
+                             (sessionIds . ["previous"]))
+                            ((workspaceId . "project") (title . "Project")
+                             (path . ,(concat root "/src/../"))
+                             (sessionIds . [])))))
+            (setq dsh-emacs-session--workspace-fold-default t
+                  dsh-emacs-session--filter-ws-id "other"
+                  dsh-emacs-session--filter-ws-title "Other")
+            (dsh-emacs-session--render)
+            (dsh-test-assert "project-entry-jumps-to-empty-workspace-header"
+              (equal "project" (dsh-emacs-workspace-id-at-point))
+              (null (dsh-emacs-session-id-at-point))
+              (null dsh-emacs-session--filter-ws-id)
+              (not (dsh-emacs-session--workspace-collapsed-p "project"))
+              (dsh-emacs-session--workspace-collapsed-p "other")
+              (null dsh-emacs-session--auto-jump-project))
+            (goto-char (dsh-emacs-session--row-pos
+                        'dsh-emacs-workspace-group-id "other"))
+            (dsh-emacs-session--render)
+            (dsh-test-assert "project-entry-refresh-keeps-user-focus"
+              (equal "other" (dsh-emacs-workspace-id-at-point))))
+          ;; A warm cache must jump immediately and override the old session.
+          (with-temp-buffer
+            (setq default-directory (file-name-as-directory root))
+            (dsh-emacs))
+          (with-current-buffer dsh-emacs-sessions-buffer
+            (dsh-test-assert "project-entry-warm-cache-prefers-project"
+              (equal "project" (dsh-emacs-workspace-id-at-point))
+              (null dsh-emacs-session--auto-jump-session)))
+          ;; Opening without a project replaces an earlier pending target.
+          (dsh-emacs-list-sessions-display "/tmp/missing-project")
+          (dsh-emacs-list-sessions-display)
+          (with-current-buffer dsh-emacs-sessions-buffer
+            (dsh-test-assert "project-entry-normal-open-clears-pending-project"
+              (null dsh-emacs-session--auto-jump-project)
+              (equal "previous" (dsh-emacs-session-id-at-point))))))
+    (when (get-buffer dsh-emacs-sessions-buffer)
+      (kill-buffer dsh-emacs-sessions-buffer))
+    (delete-directory root t)))
+
+;; Explicit list interaction supersedes an unfinished project/session jump.
+(let* ((dsh-emacs-sessions-buffer " *dsh-project-navigation*")
+       (dsh-emacs--current-session nil)
+       (dsh-emacs--archived-sessions nil)
+       (dsh-emacs--sessions nil)
+       (workspaces
+        (cl-loop for i from 1 to 60
+                 collect (dsh-protocol-workspace--from-alist
+                          `((workspaceId . ,(format "w%d" i))
+                            (title . ,(format "Workspace %d" i))
+                            (path . ,(format "/tmp/dsh-navigation-%d" i))))))
+       (dsh-emacs--workspaces workspaces))
+  (unwind-protect
+      (save-window-excursion
+        (delete-other-windows)
+        (cl-letf (((symbol-function 'dsh-emacs-events-host-connect) #'ignore)
+                  ((symbol-function 'dsh-emacs-events-host-disconnect) #'ignore)
+                  ((symbol-function 'dsh-emacs-list-sessions) #'ignore))
+          (dsh-emacs-list-sessions-display "/tmp/dsh-navigation-45")
+          (dsh-test-assert "project-open-selects-list-before-centering"
+            (eq (window-buffer) (get-buffer dsh-emacs-sessions-buffer))
+            (equal "w45" (dsh-emacs-workspace-id-at-point))
+            (<= (abs (- (count-screen-lines (window-start) (point))
+                        (/ (window-body-height) 2))) 1))
+          ;; Anchor on a header: empty-workspace placeholders share its row
+          ;; id, so the existing row restore cannot distinguish those lines.
+          (set-window-start
+           (selected-window)
+           (dsh-emacs-session--row-pos 'dsh-emacs-workspace-group-id "w44"))
+          (let ((start (window-start)))
+            (dsh-emacs-session--render)
+            (dsh-test-assert "project-refresh-preserves-manual-viewport"
+              (= start (window-start))))
+          (setq dsh-emacs--workspaces nil)
+          (dsh-emacs-list-sessions-display "/tmp/dsh-navigation-45")
+          (setq dsh-emacs--workspaces workspaces)
+          (dsh-emacs-session--render)
+          (dsh-test-assert "project-late-workspace-centers-selected-window"
+            (equal "w45" (dsh-emacs-workspace-id-at-point))
+            (<= (abs (- (count-screen-lines (window-start) (point))
+                        (/ (window-body-height) 2))) 1))
+          (dsh-emacs-list-sessions-display "/tmp/dsh-navigation-1")
+          (dsh-test-assert "project-near-start-centering-clamps"
+            (equal "w1" (dsh-emacs-workspace-id-at-point))
+            (= (window-start) (point-min)))
+          ;; A second view must keep its own row and viewport.
+          (let* ((target (selected-window))
+                 (other (split-window-right)))
+            (set-window-point other (point-min))
+            (set-window-start other (point-min))
+            (dsh-emacs-list-sessions-display "/tmp/dsh-navigation-35")
+            (dsh-test-assert "project-center-preserves-other-window"
+              (eq target (selected-window))
+              (= (window-point other) (point-min))
+              (= (window-start other) (point-min)))
+            ;; A late result must not recenter a list in an unselected window.
+            (select-window other)
+            (switch-to-buffer (get-buffer-create " *dsh-project-other*"))
+            (let ((recenters 0))
+              (cl-letf (((symbol-function 'recenter)
+                         (lambda (&rest _) (setq recenters (1+ recenters)))))
+                (with-current-buffer dsh-emacs-sessions-buffer
+                  (setq dsh-emacs-session--auto-jump-project
+                        "/tmp/dsh-navigation-55")
+                  (dsh-emacs-session--render)))
+              (dsh-test-assert "project-background-result-does-not-recenter"
+                (zerop recenters) (eq other (selected-window))))
+            (select-window target)
+            (delete-other-windows))
+          (dolist (key '("n" "TAB"))
+            (setq dsh-emacs--workspaces (list (car workspaces)))
+            (dsh-emacs-list-sessions-display "/tmp/dsh-navigation-45")
+            (goto-char (dsh-emacs-session--row-pos
+                        'dsh-emacs-workspace-group-id "w1"))
+            (setq dsh-emacs-session--auto-jump-session "missing-session")
+            (execute-kbd-macro (kbd key))
+            (dsh-test-assert (format "project-user-%s-cancels-pending-jumps" key)
+              (null dsh-emacs-session--auto-jump-project)
+              (null dsh-emacs-session--auto-jump-session))
+            (setq dsh-emacs--workspaces workspaces)
+            (dsh-emacs-session--render)
+            (dsh-test-assert (format "project-arrival-after-%s-keeps-focus" key)
+              (equal "w1" (dsh-emacs-workspace-id-at-point))))
+          ;; A plain reopen has neither target and retains the current row.
+          (dsh-emacs-list-sessions-display)
+          (dsh-test-assert "project-no-jump-open-keeps-row"
+            (equal "w1" (dsh-emacs-workspace-id-at-point)))))
+    (dolist (name (list dsh-emacs-sessions-buffer " *dsh-project-other*"))
+      (when (get-buffer name) (kill-buffer name)))))
+
 ;; --- Test 51h: connecting an already-connected host stream is a no-op ---
 (let* ((proc (condition-case nil
                  (start-process "dsh-test-host" nil "sleep" "2")
@@ -10849,15 +11042,18 @@ Lets a test drive a malformed content value through the result path."
                   (cons 'sessionIds [])))))
   (unwind-protect
       (let ((dsh-emacs--workspaces (list ws)))
-        (when (equal (dsh-emacs--workspace-id-by-path (concat root "/"))
+        (when (equal (dsh-emacs--workspace-id-by-path
+                      (concat root "/") dsh-emacs--workspaces)
                      "w-root")
           (dsh-test-pass "workspace-id-by-path-matches-trailing-slash"))
         (when (null (dsh-emacs--workspace-id-by-path
-                     (expand-file-name "elsewhere" root)))
+                     (expand-file-name "elsewhere" root)
+                     dsh-emacs--workspaces))
           (dsh-test-pass "workspace-id-by-path-misses-different-dir"))
         (ignore-errors (delete-file sym))
         (make-symbolic-link root sym)
-        (when (equal (dsh-emacs--workspace-id-by-path sym) "w-root")
+        (when (equal (dsh-emacs--workspace-id-by-path
+                      sym dsh-emacs--workspaces) "w-root")
           (dsh-test-pass "workspace-id-by-path-resolves-symlink")))
     (ignore-errors (delete-file sym))
     (delete-directory root t)))

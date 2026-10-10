@@ -56,6 +56,7 @@
 ;; compilation does not mistake the intentional load order for missing
 ;; functions.
 (declare-function dsh-emacs-list-sessions "dsh-emacs" ())
+(declare-function dsh-emacs--workspace-id-by-path "dsh-emacs" (dir workspaces))
 (declare-function dsh-emacs-new-session "dsh-emacs" (&optional cwd workspace-id preset))
 (declare-function dsh-emacs-new-session-choose-preset "dsh-emacs" ())
 (declare-function dsh-emacs-open-session "dsh-emacs"
@@ -120,6 +121,12 @@ may only exist a few repaints later — and the render clears it once the
 row is reached.  `dsh-emacs-session--render' expands the target's
 collapsed group so the row exists at all.")
 
+(defvar-local dsh-emacs-session--auto-jump-project nil
+  "Project root to locate when its workspace arrives in the list cache.
+Consumed after moving point to the expanded workspace header; an absent
+workspace leaves normal session navigation available.  The next user
+command in the list cancels pending project and session targets.")
+
 (defvar-local dsh-emacs-session--expanded-subagents nil
   "Session ids whose direct children are expanded in this list buffer.")
 
@@ -167,6 +174,11 @@ buffer; `dsh-emacs-collapse-workspaces' and
   :type 'boolean
   :group 'dsh-emacs)
 
+(defun dsh-emacs-session--cancel-auto-jump ()
+  "Let an explicit list command supersede pending automatic navigation."
+  (setq dsh-emacs-session--auto-jump-session nil
+        dsh-emacs-session--auto-jump-project nil))
+
 (define-derived-mode dsh-emacs-session-mode special-mode "DSH Sessions"
   "Major mode for browsing dsh sessions."
   (setq buffer-read-only t)
@@ -176,6 +188,7 @@ buffer; `dsh-emacs-collapse-workspaces' and
   ;; Use the user's theme highlight for the focused row (default `hl-line'
   ;; face); do not impose a custom background.
   (hl-line-mode 1)
+  (add-hook 'pre-command-hook #'dsh-emacs-session--cancel-auto-jump nil t)
   (add-hook 'kill-buffer-hook #'dsh-emacs-session--auto-refresh-stop nil t)
   (dsh-emacs-session--auto-refresh-start)
   (when (fboundp 'dsh-emacs-events-host-connect)
@@ -404,40 +417,45 @@ baselines regroup hundreds of multibyte rows."
 
 (defun dsh-emacs-session--render ()
   "Render the session list, grouped by workspace."
-  (let ((sessions dsh-emacs--sessions)
-        (workspaces dsh-emacs--workspaces)
-        (inhibit-read-only t)
-        ;; Stay on the same session row after a redraw: while the list is
-        ;; rebuilt by events/refreshes/auto-refresh the cursor does not jump
-        ;; back to the top and hl-line keeps its highlight (otherwise the list
-        ;; "jumps away" under navigation, which feels like a stall).  Every
-        ;; window showing the list keeps its own row, not just this buffer's
-        ;; point (see `dsh-emacs-session--window-points').
-        (window-points (dsh-emacs-session--window-points))
-        ;; The buffer's own point is the list focus; capture its row here,
-        ;; before updating the text.  The per-window
-        ;; capture above only sees displayed windows, so a list that is not on
-        ;; screen (batch render, daemon, background repaint) would otherwise
-        ;; lose the focus entirely.
-        (buffer-id (get-text-property (point) 'dsh-emacs-row-id))
-        ;; Preserve neighbors before deletion or regrouping changes their
-        ;; order.  Buffer focus and every displayed window share this view.
-        (row-order (save-excursion
-                     (goto-char (point-min))
-                     (cl-loop until (eobp)
-                              for id = (get-text-property (point) 'dsh-emacs-row-id)
-                              when id collect id
-                              do (forward-line 1))))
-        ;; An auto-jump target (opening the list) outranks that row restore;
-        ;; the row restore is dropped while the jump is pending so the two
-        ;; cannot fight over point (see below).
-        (jump-id dsh-emacs-session--auto-jump-session)
-        (ancestors (and dsh-emacs-session--auto-jump-session
-                        (dsh-emacs-session--ancestors
-                         dsh-emacs-session--auto-jump-session))))
+  (let* ((sessions dsh-emacs--sessions)
+         (workspaces dsh-emacs--workspaces)
+         (jump-workspace
+          (and dsh-emacs-session--auto-jump-project
+               (dsh-emacs--workspace-id-by-path
+                dsh-emacs-session--auto-jump-project workspaces)))
+         (inhibit-read-only t)
+         ;; Stay on the same session row after a redraw: while the list is
+         ;; rebuilt by events/refreshes/auto-refresh the cursor does not jump
+         ;; back to the top and hl-line keeps its highlight (otherwise the list
+         ;; "jumps away" under navigation, which feels like a stall).  Every
+         ;; window showing the list keeps its own row, not just this buffer's
+         ;; point (see `dsh-emacs-session--window-points').
+         (window-points (dsh-emacs-session--window-points))
+         ;; The buffer's own point is the list focus; capture its row here,
+         ;; before updating the text.  The per-window
+         ;; capture above only sees displayed windows, so a list that is not on
+         ;; screen (batch render, daemon, background repaint) would otherwise
+         ;; lose the focus entirely.
+         (buffer-id (get-text-property (point) 'dsh-emacs-row-id))
+         ;; Preserve neighbors before deletion or regrouping changes their
+         ;; order.  Buffer focus and every displayed window share this view.
+         (row-order (save-excursion
+                      (goto-char (point-min))
+                      (cl-loop until (eobp)
+                               for id = (get-text-property (point) 'dsh-emacs-row-id)
+                               when id collect id
+                               do (forward-line 1))))
+         ;; An auto-jump target (opening the list) outranks that row restore;
+         ;; the row restore is dropped while the jump is pending so the two
+         ;; cannot fight over point (see below).
+         (jump-id (unless jump-workspace
+                    dsh-emacs-session--auto-jump-session))
+         (jump-p (or jump-workspace jump-id))
+         (ancestors (and jump-id
+                         (dsh-emacs-session--ancestors jump-id))))
     (dolist (parent ancestors)
       (cl-pushnew parent dsh-emacs-session--expanded-subagents :test #'equal))
-    (when (and jump-id dsh-emacs-session--filter-ws-id)
+    (when (and jump-p dsh-emacs-session--filter-ws-id)
       ;; An active `w' filter hides the target's row when it lives in another
       ;; workspace; a pending jump wins over it.
       (setq dsh-emacs-session--filter-ws-id nil
@@ -445,6 +463,11 @@ baselines regroup hundreds of multibyte rows."
     ;; Groups are decided up front: the jump needs to know which group owns
     ;; its target before rendering, so a folded one can be unfolded below.
     (let ((groups (dsh-emacs-session--group-sessions sessions workspaces)))
+      (when jump-workspace
+        (setf (alist-get jump-workspace
+                         dsh-emacs-session--workspace-fold-overrides
+                         nil nil #'equal)
+              nil))
       (when jump-id
         ;; A folded group does not render its rows, so the target would not
         ;; exist for the jump: unfold just the group that owns it (an
@@ -509,14 +532,18 @@ baselines regroup hundreds of multibyte rows."
     ;; Where point goes now that the list is rebuilt.  The buffer point is
     ;; the list's focus (commands read it); other windows each keep their own
     ;; captured row and are restored separately.
-    (let* ((jumped (and jump-id
-                        (dsh-emacs-session--row-pos 'dsh-emacs-session-id
-                                                    jump-id)))
+    (let* ((jumped (cond
+                    (jump-workspace
+                     (dsh-emacs-session--row-pos
+                      'dsh-emacs-workspace-group-id jump-workspace))
+                    (jump-id
+                     (dsh-emacs-session--row-pos
+                      'dsh-emacs-session-id jump-id))))
            ;; Without a pending jump the buffer's captured row decides point:
            ;; the row itself when it survived the redraw, a surviving neighbor
            ;; when it is gone (collapsed, archived), and the first session row
            ;; on a fresh buffer (the inserts above left point at the end).
-           (focus (and (null jump-id)
+           (focus (and (null jump-p)
                        (if buffer-id
                            (dsh-emacs-session--focus-position buffer-id row-order)
                          (dsh-emacs-session--first-row-pos t)))))
@@ -526,19 +553,22 @@ baselines regroup hundreds of multibyte rows."
        ;; While a jump is pending, the buffer point belongs to the jump (the
        ;; selected window follows it) — restoring it would undo the jump.
        ;; On a plain refresh the selected window restores with the others.
-       (if jump-id
+       (if jump-p
            (cl-remove-if (lambda (entry) (eq (car entry) (selected-window)))
                          window-points)
          window-points)
        row-order)
       (when jumped
         ;; The target is consumed: later repaints keep point where the user
-        ;; left it.  A jump does not center anything itself: the scroll
-        ;; restore above keeps the viewport put when possible, and Emacs
-        ;; scrolls to reveal a point that fell outside it — so opening the list
-        ;; scrolls only when the current session is genuinely off screen, not
-        ;; on every repaint.
-        (setq dsh-emacs-session--auto-jump-session nil))
+        ;; left it.  Only a project workspace jump explicitly centers its
+        ;; header; session jumps retain ordinary Emacs scrolling.
+        (setq dsh-emacs-session--auto-jump-session nil)
+        (when jump-workspace
+          (setq dsh-emacs-session--auto-jump-project nil)
+          ;; A late result must not scroll another window or frame after
+          ;; the user has switched away from the list.
+          (when (eq (window-buffer (selected-window)) (current-buffer))
+            (recenter))))
       ;; Row edits can stretch both local and global hl-line overlays.
       ;; Async repaints have no post-command hook to realign them.  Move only
       ;; existing overlays, preserving their window and visibility policy.
@@ -710,7 +740,7 @@ Sessions without a nonempty child catalog are left unchanged."
   (if-let* ((id (dsh-emacs-session-id-at-point)))
       (when (dsh-emacs-subagent--value id 'subagentCatalog)
         ;; A user fold takes precedence over an unfinished open-time jump.
-        (setq dsh-emacs-session--auto-jump-session nil)
+        (dsh-emacs-session--cancel-auto-jump)
         (if (member id dsh-emacs-session--expanded-subagents)
             (setq dsh-emacs-session--expanded-subagents
                   (delete id dsh-emacs-session--expanded-subagents))

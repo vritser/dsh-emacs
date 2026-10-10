@@ -178,9 +178,23 @@ Empty catalogs add no placeholder row. Workspace context, child expansion and
 per-window cursor positions survive refreshes. Collapsing a parent retains its
 children's expansion choices.
 
-Opening the list (`M-x dsh-emacs`, `C-c C-l`) puts the cursor on the current
-session's row and scrolls it into view; for a subagent, its ancestors and
-workspace are expanded. When a session sits in a folded group, the group
+From a local project file or directory, `M-x dsh-emacs` puts the cursor on
+the matching workspace header, expands that group and centers the header in
+the selected window when space permits, clearing a workspace filter. Near
+the start of the list, the view clamps to the buffer boundary. Ordinary
+refreshes retain the view, and late data does not recenter an unselected
+window. The next user command in the list cancels any pending project or
+session jump, including navigation and folding; automatic updates do not.
+Matching uses the project root's canonical path, including symlinks
+and project subdirectories, and waits for workspace data on a cold list.
+It only runs with a local server and a non-TRAMP directory. No workspace is
+created; without a match, the usual active-session navigation remains
+available. This is independent of `dsh-emacs-new-session-auto-project`,
+which controls new-session creation only.
+
+Opening the list from a chat (`M-x dsh-emacs`, `C-c C-l`) puts the cursor on
+the current session's row and scrolls it into view; for a subagent, its
+ancestors and workspace are expanded. When a session sits in a folded group, the group
 is unfolded to show it, and a `w` workspace filter that
 would hide the row is cleared. Refreshing the list in place (`g`, events,
 auto-refresh) instead keeps the row you are on. If archiving or deleting removes

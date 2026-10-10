@@ -53,7 +53,16 @@ standard Emacs major-mode menu. See [Mode-line status](docs/modeline.md).
 ### Session list
 
 `M-x dsh-emacs` opens your sessions, grouped by workspace. Press `c` to
-create a session or `RET` to open one. `TAB` folds a workspace header or
+create a session or `RET` to open one. From a local project file or directory,
+the command expands the workspace matching the project root and centers its
+header in the selected window when space permits. Near the start of the list,
+the view starts at the buffer boundary instead.
+It waits for workspace data if needed and does not create a workspace. Your
+next command in the list cancels pending automatic navigation, so later data
+does not pull you away from manual navigation or folding.
+From a chat buffer, it still locates the active session; remote servers and
+TRAMP directories keep the usual session navigation.
+`TAB` folds a workspace header or
 expands a session's subagents beneath it. Only sessions with confirmed children
 show an expansion arrow and respond to `TAB`; unknown or empty catalogs remain
 unchanged. Child rows show their mode and activity; use `TAB` for nested
