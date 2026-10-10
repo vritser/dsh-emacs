@@ -14411,9 +14411,10 @@ received, RESULT is FN's return value."
             (memq timer timer-list))
           (process-send-string proc "after")
           (process-send-eof proc)
+          ;; Exit status can change before the sentinel releases resources.
           (let ((deadline (+ (float-time) 5)))
-            (while (and (process-live-p proc) (< (float-time) deadline))
-              (accept-process-output proc 0.1)))
+            (while (and (null done) (< (float-time) deadline))
+              (accept-process-output nil 0.1)))
           (dsh-test-assert "shell-resumed-process-finishes-once"
             (equal done '(("id-stop-resume" t 0 nil "beforeafter")))
             (null dsh-emacs--shell-procs)
@@ -14507,9 +14508,10 @@ received, RESULT is FN's return value."
           (if (eq action 'interrupt)
               (with-current-buffer buf (dsh-emacs-shell-process-kill))
             (kill-buffer buf))
+          ;; Dispatch pending sentinels even when PROC has already died.
           (let ((deadline (+ (float-time) 3)))
             (while (and (null done) (< (float-time) deadline))
-              (accept-process-output proc 0.1)))
+              (accept-process-output nil 0.1)))
           (dsh-test-assert
            (format "shell-process-cleanup-%s" action)
            (not (process-live-p proc))
