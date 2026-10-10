@@ -25229,7 +25229,7 @@ messages (e.g. `command/done')."
             ((symbol-function 'char-displayable-p) (lambda (_) nil)))
     (let ((indicator (dsh-emacs-subagent-indicator)))
       (dsh-test-assert "subagent-indicator-keeps-total-and-running-details"
-                       (equal (substring-no-properties indicator) " Sub3")
+                       (equal (substring-no-properties indicator) " Sub 3")
                        (equal (get-text-property 1 'help-echo indicator)
                               "3 subagents, 1 running; mouse-1 to choose")
                        (eq (get-text-property 1 'face indicator) 'dsh-emacs-modeline-face)

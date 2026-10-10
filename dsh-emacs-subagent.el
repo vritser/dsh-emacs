@@ -427,8 +427,13 @@ Run this command in a child conversation to choose from its own children."
                  (nerd-icons-mdicon "nf-md-source_branch" :height 1.0 :v-adjust 0
                                     :face 'dsh-emacs-modeline-face))
                "Sub")))
-         (propertize (format " %s%d" label (length catalog))
-                     'face 'dsh-emacs-modeline-face
+         (propertize (concat
+                      (propertize (concat " " label)
+                                  'face 'dsh-emacs-modeline-face)
+                      (propertize " " 'display '(space :relative-width 0.5))
+                      (propertize (number-to-string (length catalog))
+                                  'face '(:inherit dsh-emacs-modeline-face
+                                          :weight bold)))
                      'local-map dsh-emacs-subagent-map 'mouse-face 'mode-line-highlight
                      'help-echo (format "%d subagents, %d running; mouse-1 to choose"
                                         (length catalog) running)))))))

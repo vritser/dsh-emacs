@@ -85,7 +85,8 @@ completion frontend and keys apply; no separate browser buffer is created.
 The count uses a thin brain-and-circuit SVG, with the brain above three
 downward branches, in the existing muted status-text color.
 Without SVG support it falls back to Nerd Font `source_branch`, then `Sub`.
-Only the total appears (for example `Sub3`); hover for the running count.
+The total is bold, with a thin gap after the icon (text fallback: `Sub 3`);
+hover for the running count.
 Candidates show mode, activity and available duration/token metrics.
 `M-x dsh-emacs-subagent-refresh`
 refreshes the current conversation's catalog and parent availability.

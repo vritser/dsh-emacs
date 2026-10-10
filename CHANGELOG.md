@@ -156,6 +156,9 @@ minor) and stay undated until the release is cut.
 
 ### Changed
 
+- **Clearer subagent count**: bold mode-line digits and a thin gap after the
+  icon follow Flycheck's compact layout, retaining the muted status color.
+
 - **Simpler chat header**: remove the permanent shortcut hint row from chat
   buffers. Existing keybindings remain available through `C-h m`.
 

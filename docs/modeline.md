@@ -213,8 +213,11 @@ The child count uses a 1px SVG with a brain above three downward branches,
 inheriting
 `dsh-emacs-modeline-face` like the existing status text. Without SVG support it
 uses `nerd-icons`' `nf-md-source_branch` when available, then `Sub`.
-`Sub3` means three direct children. Only the total is shown; the tooltip
-includes the running count. Mouse-1 opens `dsh-emacs-list-subagents` in the
+The total uses bold digits and a half-character gap after the icon, like
+Flycheck's mode-line counts, while keeping the muted status-text color.
+`Sub 3` means three direct children in the text fallback. Only the total is
+shown; the tooltip includes the running count. Mouse-1 opens
+`dsh-emacs-list-subagents` in the
 minibuffer. `S` remains reserved for steering messages.
 Child chats show their direct parent, label and mode. A child that has
 descendants can also have its own child-count indicator.
