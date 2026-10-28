@@ -1991,6 +1991,37 @@
           (dsh-emacs-events--cancel-read-timer process)
           (delete-process process))))))
 
+;; A dispatch can write (pong, rebaseline) after the peer already closed the
+;; socket; that expected teardown race must not surface as a frame error.
+(ert-deftest dsh-emacs-test-events-frame-error-after-close-is-silent ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (let* ((process (make-pipe-process :name "dsh-frame-closed-test"
+                                       :buffer (current-buffer) :noquery t))
+           (messages nil)
+           (lost 0))
+      (unwind-protect
+          (progn
+            (process-put process 'dsh-emacs-event-ready t)
+            (cl-letf (((symbol-function 'dsh-emacs-events--dispatch-json)
+                       (lambda (proc _json)
+                         (delete-process proc)
+                         (error "Process %s no longer connected to pipe; closed it"
+                                (process-name proc))))
+                      ((symbol-function 'dsh-emacs-events--lost)
+                       (lambda (_process) (cl-incf lost)))
+                      ((symbol-function 'message)
+                       (lambda (format-string &rest args)
+                         (push (apply #'format format-string args) messages))))
+              (process-put process 'dsh-emacs-event-input
+                           (dsh-emacs-events--frame 1 "{}"))
+              (dsh-emacs-events--consume-frames process))
+            (ert-info ((format "%s" "frame-error-after-close-is-silent"))
+              (should (= lost 1))
+              (should-not messages)
+              (should-not (process-live-p process))))
+        (delete-process process)))))
+
 (ert-deftest dsh-emacs-test-events-follow-snapshot-serializes-reentrant-input ()
   :tags '(dsh-unit)
   (dolist (arrival '(snapshot tail newer))

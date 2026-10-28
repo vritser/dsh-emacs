@@ -40,6 +40,11 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Quiet socket-loss teardown**: a buffered frame whose dispatch tried to
+  write after the peer closed the connection (a pong or a follow rebaseline)
+  no longer reports `dsh WebSocket frame error: ... no longer connected to
+  pipe`; the disconnect path cleans up and reconnects as before.
+
 - **Session list honours `dsh-emacs-server-auto-start'**: opening a cold
   session list now refuses with startup instructions when the option is nil
   and the server is unreachable, instead of offering to install the CLI or

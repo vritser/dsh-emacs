@@ -833,7 +833,14 @@ input, but leave draining to the original consumer until it returns."
                                process (decode-coding-string
                                         (apply #'concat (nreverse fragment)) 'utf-8)))
                           (process-put process 'dsh-emacs-event-fragment fragment))))))))
-            (error (message "dsh WebSocket frame error: %S" err)))
+            (error
+             ;; Dispatching buffered frames can write (pong, rebaseline)
+             ;; after the peer already closed the socket.  That race is
+             ;; ordinary teardown: let `dsh-emacs-events--lost' clean up
+             ;; instead of reporting a frame error the disconnect owns.
+             (if (process-live-p process)
+                 (message "dsh WebSocket frame error: %S" err)
+               (dsh-emacs-events--lost process))))
         (process-put process 'dsh-emacs-event-input
                      (substring (or (process-get process 'dsh-emacs-event-input) "")
                                 offset))
