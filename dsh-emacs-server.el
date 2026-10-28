@@ -1086,6 +1086,17 @@ of missing tooling.  Only loopback hosts (127.0.0.1, localhost, ::1) are
     (member (downcase host)
             '("127.0.0.1" "localhost" "::1" "0.0.0.0"))))
 
+(defun dsh-emacs--server-unreachable-error ()
+  "Signal a `user-error' for an unreachable dsh server.
+Local and remote `dsh-emacs-base-url' values get tailored instructions:
+a local address can be started here, a remote one only points at the
+address or network path.  Startup is never attempted."
+  (if (dsh-emacs--server-local-host-p)
+      (user-error "dsh server not reachable at %s.  Start it with M-x dsh-emacs-server-start (or `dsh web --no-open'), or set `dsh-emacs-server-auto-start' to t"
+                  (dsh-emacs--server-base-url))
+    (user-error "dsh server at %s is not reachable.  Check `dsh-emacs-base-url' and the network path to the remote server (the CLI would only start a local server, so it is not used here)"
+                (dsh-emacs--server-base-url))))
+
 (defun dsh-emacs-server-ensure ()
   "Ensure the dsh server is reachable before a server-touching command.
 With `dsh-emacs-server-auto-start' non-nil and no server answering at a
@@ -1109,13 +1120,10 @@ the unauthenticated request pop `url''s Basic username/password box."
   (when (not noninteractive)
     (if (dsh-emacs--server-alive-p)
         (dsh-emacs--server-auth-ensure-interactive)
-      (if (dsh-emacs--server-local-host-p)
-          (if dsh-emacs-server-auto-start
-              (dsh-emacs-server-start t)
-            (user-error "dsh server not reachable at %s.  Start it with M-x dsh-emacs-server-start (or `dsh web --no-open'), or set `dsh-emacs-server-auto-start' to t"
-                        (dsh-emacs--server-base-url)))
-        (user-error "dsh server at %s is not reachable.  Check `dsh-emacs-base-url' and the network path to the remote server (the CLI would only start a local server, so it is not used here)"
-                    (dsh-emacs--server-base-url))))))
+      (if (and (dsh-emacs--server-local-host-p)
+               dsh-emacs-server-auto-start)
+          (dsh-emacs-server-start t)
+        (dsh-emacs--server-unreachable-error)))))
 
 (declare-function url-retrieve "url"
                   (url callback &optional cbargs silent inhibit-cookies))

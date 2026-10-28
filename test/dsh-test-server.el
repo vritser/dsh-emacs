@@ -695,6 +695,43 @@
     (ert-info ((format "%s" "list-sessions-waits-the-configured-grace-period"))
       (should (equal deadline 1030.0)))))
 
+;; --- Test 89d: auto-start nil refuses the automatic list path instead of
+;; launching or offering to install anything ---
+(ert-deftest dsh-emacs-test-server-list-sessions-honours-auto-start-nil ()
+  :tags '(dsh-unit)
+  (let ((dsh-emacs-server-auto-start nil)
+        (dsh-emacs--server-process nil)
+        (fetched nil))
+    (cl-letf (((symbol-function 'dsh-emacs--server-alive-p) (lambda () nil))
+              ((symbol-function 'dsh-emacs--server-bin) (lambda () nil))
+              ((symbol-function 'y-or-n-p)
+               (lambda (&rest _) (error "PROMPTED")))
+              ((symbol-function 'dsh-emacs-list-sessions--fetch)
+               (lambda () (setq fetched t)))
+              ((symbol-function 'dsh-emacs-list-sessions--fetch-when-ready)
+               (lambda (&rest _) (setq fetched t))))
+      (let ((err (should-error (dsh-emacs-list-sessions) :type 'user-error)))
+        (ert-info ((format "%s" "list-sessions-honours-auto-start-nil"))
+          (should-not fetched)
+          (should (string-match-p "not reachable" (error-message-string err)))
+          (should (string-match-p "M-x dsh-emacs-server-start"
+                                  (error-message-string err))))))))
+
+;; --- Test 89e: a reachable server still serves the list with auto-start nil ---
+(ert-deftest dsh-emacs-test-server-list-sessions-fetches-when-alive-with-auto-start-nil ()
+  :tags '(dsh-unit)
+  (let ((dsh-emacs-server-auto-start nil)
+        (dsh-emacs--server-process nil)
+        (fetched nil))
+    (cl-letf (((symbol-function 'dsh-emacs--server-alive-p) (lambda () t))
+              ((symbol-function 'dsh-emacs--server-auth-ensure-interactive)
+               #'ignore)
+              ((symbol-function 'dsh-emacs-list-sessions--fetch)
+               (lambda () (setq fetched t))))
+      (dsh-emacs-list-sessions))
+    (ert-info ((format "%s" "list-sessions-fetches-when-alive-with-auto-start-nil"))
+      (should fetched))))
+
 ;; --- Test 89c: the non-blocking poll keeps retrying while the deadline
 ;; remains, and reports the timeout instead of scheduling once it passed ---
 (ert-deftest dsh-emacs-test-server-server-ready-poll-keeps-waiting-past-five-seconds ()
@@ -733,10 +770,9 @@
 
 ;; --- Test 91: command-body guardrail -- error with guidance when the server is
 ;; unreachable ---
-;; The guardrail is in `dsh-emacs-server-ensure' (the entry point of commands such as
-;; switch-session): list-sessions takes `dsh-emacs-server-start's auto-start path and
-;; does not error, so this tests ensure's real behavior (it previously tested
-;; list-sessions and never triggered).
+;; The guardrail is in `dsh-emacs-server-ensure' (the entry point of commands such
+;; as switch-session).  `dsh-emacs-list-sessions' has its own guard for its
+;; non-blocking auto-start path; see test 89d.
 (ert-deftest dsh-emacs-test-server-list-sessions-guard-fails-with-guidance ()
   :tags '(dsh-unit)
   (let ((dsh-emacs-server-auto-start nil)

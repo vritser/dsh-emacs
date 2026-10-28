@@ -663,11 +663,21 @@ loads the plugin tree, which does not fit in a fixed few seconds."
                  " (see `*dsh-server*')")))))
 
 (defun dsh-emacs-list-sessions ()
-  "Fetch the session list and refresh workspaces."
+  "Fetch the session list and refresh workspaces.
+With `dsh-emacs-server-auto-start' nil this never starts or installs a
+server: an unreachable server signals a `user-error' with startup
+instructions instead.  A managed process already being started by the
+user is still awaited; an explicit `dsh-emacs-server-start' is
+unaffected."
   (interactive)
-  ;; Non-blocking: launch the server in the background if needed.
-  ;; When the server was just started, poll until it's ready before
+  ;; Non-blocking: launch the server in the background if auto-start is
+  ;; allowed.  When the server is starting, poll until it is ready before
   ;; firing the RPC to avoid a 404 race.
+  (when (and (not dsh-emacs-server-auto-start)
+             (not (dsh-emacs--server-alive-p))
+             (not (and dsh-emacs--server-process
+                       (process-live-p dsh-emacs--server-process))))
+    (dsh-emacs--server-unreachable-error))
   (let ((alive (dsh-emacs-server-start)))
     (if alive
         (dsh-emacs-list-sessions--fetch)

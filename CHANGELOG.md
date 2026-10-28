@@ -40,6 +40,12 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Session list honours `dsh-emacs-server-auto-start'**: opening a cold
+  session list now refuses with startup instructions when the option is nil
+  and the server is unreachable, instead of offering to install the CLI or
+  launching a local server behind the user's back.  An explicit
+  `M-x dsh-emacs-server-start` is unchanged.
+
 - **Attribute subagent- and event-driven turns**: a host-injected notice that
   the inbox claim wakes (a child `send_message`, a settled subagent, or a
   team, webhook, schedule, job or plugin event) now renders dsh web's
