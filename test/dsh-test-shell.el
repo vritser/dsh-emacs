@@ -374,6 +374,67 @@
                 (should (string-match-p "✗ exit 1" text))))))
       (kill-buffer buf))))
 
+;; The same row under `simple': one state-colored dot, muted label and header,
+;; with the dot carrying success/failure instead of the header tint.
+(ert-deftest dsh-emacs-test-shell-simple-style-row-uses-dot-and-muted-text ()
+  :tags '(dsh-unit)
+  (let ((buf (generate-new-buffer " *dsh-shell-simple*"))
+        (dsh-emacs-render-style 'simple))
+    (unwind-protect
+        (with-current-buffer buf
+          (dsh-emacs-mode)
+          (let* ((id (dsh-emacs-render-shell-start "echo hello"))
+                 (entry (gethash id dsh-emacs--command-blocks))
+                 (block (and entry (dsh-emacs-ui-find-block (nth 0 entry)
+                                                            (nth 1 entry))))
+                 (start (car block))
+                 (text (and block (buffer-substring-no-properties
+                                   start (cdr block)))))
+            (ert-info ((format "%s" "simple-shell-row-uses-one-dot"))
+              (should (string-match-p "● echo hello" text))
+              (should (memq 'dsh-emacs-tool-icon-face
+                            (dsh-test--faces-at start)))
+              (should-not (memq 'dsh-emacs-tool-pending-face
+                                (dsh-test--faces-at start)))
+              ;; Label is muted in `simple', not the tool-title accent.
+              (should (memq 'dsh-emacs-event-row-face
+                            (dsh-test--faces-at (+ start 2))))
+              (should-not (memq 'dsh-emacs-tool-title-face
+                                (dsh-test--faces-at (+ start 2))))
+              ;; No header tint in `simple': the dot alone carries pending.
+              (should-not (seq-some (lambda (pos)
+                                      (memq 'dsh-emacs-tool-pending-face
+                                            (dsh-test--faces-at pos)))
+                                    (number-sequence start (1- (cdr block))))))
+            (dsh-emacs-render-shell-done id t 0 nil "nested output")
+            (let* ((done-block (dsh-emacs-ui-find-block (nth 0 entry)
+                                                        (nth 1 entry)))
+                   (done-text (buffer-substring-no-properties
+                               (car done-block) (cdr done-block)))
+                   (status (+ (car done-block)
+                              (string-match "✓ exit 0" done-text))))
+              (ert-info ((format "%s" "simple-shell-row-dot-carries-success"))
+                (should (string-match-p "● echo hello · ✓ exit 0"
+                                        done-text))
+                (should (memq 'dsh-emacs-tool-success-face
+                              (dsh-test--faces-at (car done-block))))
+                (should (memq 'dsh-emacs-timestamp-face
+                              (dsh-test--faces-at status)))
+                (should-not (memq 'dsh-emacs-tool-success-face
+                                  (dsh-test--faces-at status)))
+                ;; The outcome body keeps the muted label face, not success.
+                (should-not (seq-some
+                             (lambda (pos)
+                               (memq 'dsh-emacs-tool-success-face
+                                     (dsh-test--faces-at pos)))
+                             (number-sequence
+                              (save-excursion
+                                (goto-char (car done-block))
+                                (forward-line 1)
+                                (point))
+                              (1- (cdr done-block)))))))))
+      (kill-buffer buf))))
+
 ;; Both an explicit cancel command and kill-buffer after explicitly installing
 ;; cleanup hooks release the process resources.
 (ert-deftest dsh-emacs-test-shell-shell-process-cleanup-case ()
