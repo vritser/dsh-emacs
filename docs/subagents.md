@@ -104,7 +104,12 @@ of adding a separate spinner.  The pulse is a motion-line clip in the
 `dsh-subagents` slot (about 1.2s per cycle), so motion-line must be installed;
 without it the icon and count keep their static tint.  It stops when the last
 child settles or the connection drops; a stale running flag on a disconnected
-connection never animates.  Only an SVG-capable display repaints the icon (the
+connection never animates.  While a direct child still runs after the parent
+turn ends, the parent chat's whale animation and activity clock also continue.
+The whale requires both the host and chat connections: disconnecting the chat
+clears its child activity, and the next follow snapshot restores it from the
+current catalog even when the projection watermarks have not changed.
+Only an SVG-capable display repaints the icon (the
 `nerd-icons` and `Sub` fallbacks stay static), and the slot is buffer-local,
 so a child conversation's own indicator animates independently.
 Empty catalogs have no count

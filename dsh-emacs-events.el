@@ -779,6 +779,7 @@ in the current chat.  Inbox is owned by the control stream."
                 #'dsh-protocol-follow-projections-p
                 #'dsh-protocol-follow-projections--from-alist projections)))
     (dsh-emacs-subagent-apply session-id subagents)
+    (dsh-emacs-subagent--sync-animation)
     (when (and title (not (string-empty-p title)))
       (dsh-emacs-events--apply-title nil session-id title)
       (dsh-emacs-events--host-frame-record (list :apply-title session-id title)))
@@ -957,6 +958,7 @@ never stack parallel reconnect timers."
         (with-current-buffer chat
           (setq dsh-emacs--event-process nil
                 dsh-emacs--event-ready nil)
+          (dsh-emacs-subagent--sync-animation)
           (dsh-emacs-modeline-reset-execution)
           ;; The connection carried every logical stream; tell each feature
           ;; handler its stream is gone so no mirror outlives it.

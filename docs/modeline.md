@@ -62,7 +62,13 @@ details instead.
 The clock starts at `0s` when this buffer enters the running state. It measures
 local observed running time, including tools and waits; it is independent of
 the three-second animation loop and does not reset on repeated running
-snapshots. Turn completion and disconnect clear it. A reconnect — or opening
+snapshots. Turn completion clears it unless one of the chat's direct children
+is still running; the last child settling then clears it. Disconnect always
+clears the whale's child activity and clock, and host updates cannot restart
+them in a detached chat. Child activity does not mark the session busy, so
+input submission and stop keep their turn semantics. A follow snapshot
+restores child activity even when its cached projection has not changed.
+A reconnect — or opening
 the session again after its buffer was killed — starts a new local
 observation interval; switching back to an already-open chat keeps its
 running clock. Neither claims an exact server turn duration. For completed

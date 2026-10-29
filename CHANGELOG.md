@@ -40,6 +40,14 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Running subagent keeps the mode-line animation alive**: when a parent turn
+  ends while one of its direct children is still running, the parent chat's
+  whale and elapsed activity clock keep going until the last child settles.
+  The session itself stays non-busy, so submission, steering and stop keep
+  their normal turn semantics. Opening or reconnecting a chat restores this
+  activity from cached child state; disconnecting clears it and prevents
+  host updates from restarting it in the detached chat.
+
 - **Quiet socket-loss teardown**: a buffered frame whose dispatch tried to
   write after the peer closed the connection (a pong or a follow rebaseline)
   no longer reports `dsh WebSocket frame error: ... no longer connected to

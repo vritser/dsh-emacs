@@ -1650,5 +1650,48 @@
                      (eq (dsh-emacs-modeline--doom-major-mode padded)
                          padded)))))))
 
+;; A running direct child keeps the whale and its clock alive after the
+;; parent turn ends, without marking the session busy.
+(ert-deftest dsh-emacs-test-modeline-running-child-keeps-whale-alive ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (let ((dsh-emacs--ml-busy nil)
+          (dsh-emacs--modeline-subagent-active nil)
+          (dsh-emacs--modeline-run-start nil)
+          (dsh-emacs--modeline-compaction nil))
+      (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 100.0)))
+        (dsh-emacs-modeline-set-subagent-activity t)
+        (ert-info ((format "%s" "running-child-lights-the-whale"))
+          (should dsh-emacs--modeline-subagent-active)
+          (should (= dsh-emacs--modeline-run-start 100.0))
+          (should-not dsh-emacs--ml-busy)
+          (should (string-match-p "Deep diving"
+                                  (dsh-emacs--ml-busy-indicator))))
+        ;; The parent turn ending must not stop a child's activity.
+        (dsh-emacs--ml-busy-set nil)
+        (ert-info ((format "%s" "parent-turn-end-keeps-child-animation"))
+          (should (= dsh-emacs--modeline-run-start 100.0))
+          (should (string-match-p "Deep diving"
+                                  (dsh-emacs--ml-busy-indicator))))
+        (dsh-emacs-modeline-set-subagent-activity nil)
+        (ert-info ((format "%s" "last-child-settles-stops-the-whale"))
+          (should-not dsh-emacs--modeline-subagent-active)
+          (should-not dsh-emacs--modeline-run-start)
+          (should (equal (dsh-emacs--ml-busy-indicator) "")))))))
+
+(ert-deftest dsh-emacs-test-modeline-disconnect-clears-child-activity ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (dsh-emacs-modeline-set-subagent-activity t)
+    (should dsh-emacs--modeline-run-start)
+    (dsh-emacs-events-disconnect)
+    (should-not dsh-emacs--modeline-subagent-active)
+    (should-not dsh-emacs--modeline-run-start)
+    (should (equal (dsh-emacs--ml-busy-indicator) ""))
+    (when (featurep 'motion-line)
+      (should-not (motion-line-playing-p 'dsh-running)))))
+
 (provide 'dsh-test-modeline)
 ;;; dsh-test-modeline.el ends here

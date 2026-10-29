@@ -29,8 +29,10 @@
 (defvar dsh-emacs--chat-buffers)
 (defvar dsh-emacs--buffer-session)
 (defvar dsh-emacs--buffer-subagent)
+(defvar dsh-emacs--event-ready)
 (defvar dsh-emacs-sessions-buffer)
 (declare-function dsh-emacs-events--host-repaint "dsh-emacs-events" ())
+(declare-function dsh-emacs-modeline-set-subagent-activity "dsh-emacs-modeline" (active))
 (declare-function dsh-emacs--completing-read-ordered "dsh-emacs" (prompt collection &rest args))
 (declare-function dsh-emacs--chat-session-item "dsh-emacs" (session-id))
 (declare-function dsh-emacs--chat-title "dsh-emacs" (session-id))
@@ -383,11 +385,17 @@ same phase, so icon and number always agree."
     (motion-line-stop dsh-emacs-subagent--animation-slot)))
 
 (defun dsh-emacs-subagent--sync-animation ()
-  "Start or stop this buffer's motion-line icon pulse.
+  "Synchronize this buffer's child activity and motion-line icon pulse.
+The whale also requires the chat's own connection, so host updates cannot
+restart activity in a detached chat.  Snapshot application calls this even
+when the child projection watermarks have not changed.
 Playback runs only when motion-line is installed, the host is live, the
 display can repaint SVG and at least one direct child is running, so a stale
 running flag on a disconnected connection stays still.  While it plays the
 clip re-renders the indicator, so count and title changes need no restart."
+  (dsh-emacs-modeline-set-subagent-activity
+   (and dsh-emacs--event-ready dsh-emacs--subagent-host-live
+        (> (dsh-emacs-subagent--running-count) 0)))
   (if (not (and (dsh-emacs-subagent--animation-available-p)
                 dsh-emacs--subagent-host-live
                 (dsh-emacs-subagent--icon-animation-p)

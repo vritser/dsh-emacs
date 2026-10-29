@@ -811,9 +811,16 @@ PERMISSION is the `permissions' projection's `currentValue'."
 (defvar-local dsh-emacs--ml-busy nil
   "Non-nil while this chat buffer's dsh session is executing a prompt.")
 
+(defvar-local dsh-emacs--modeline-subagent-active nil
+  "Non-nil while a direct child of this chat buffer's session is running.
+This drives the activity animation only; it deliberately does not mark the
+session busy, so input submission and stop commands keep their turn
+semantics.")
+
 (defvar-local dsh-emacs--modeline-run-start nil
   "Local time when this buffer last entered the running state.
-Cleared on turn completion or disconnect; never inferred from old history.")
+Kept while a turn or a direct child is active; cleared when both are idle or
+on disconnect.  Never inferred from old history.")
 
 (defvar-local dsh-emacs--modeline-compaction-start nil
   "Local time when this buffer first observed the active compaction.
@@ -827,10 +834,38 @@ Independent of the turn clock; repeated snapshots preserve this interval.")
                         :timer))
     (force-mode-line-update)))
 
+(defun dsh-emacs-modeline--activity-p ()
+  "Non-nil when this buffer should show the running activity.
+The current turn, standalone compaction, or a running direct child."
+  (or dsh-emacs--ml-busy
+      dsh-emacs--modeline-compaction
+      dsh-emacs--modeline-subagent-active))
+
+(defun dsh-emacs-modeline--sync-run-clock ()
+  "Start or clear the local turn clock for the current activity state.
+Standalone compaction keeps its own clock, so only a turn or a running
+direct child owns this one."
+  (if (or dsh-emacs--ml-busy dsh-emacs--modeline-subagent-active)
+      (unless dsh-emacs--modeline-run-start
+        (setq dsh-emacs--modeline-run-start (float-time)))
+    (setq dsh-emacs--modeline-run-start nil)))
+
+(defun dsh-emacs-modeline-set-subagent-activity (active)
+  "Track ACTIVE direct-child execution for the running animation.
+Called by the subagent owner whenever the child running count changes.  A
+running child keeps the whale and its clock alive after the parent turn
+ends, but leaves `dsh-emacs--ml-busy' alone so `C-c C-c' does not mistake
+the idle parent for a running turn."
+  (setq dsh-emacs--modeline-subagent-active (and active t))
+  (dsh-emacs-modeline--sync-animation dsh-emacs--modeline-compaction))
+
 (defun dsh-emacs-modeline--sync-animation (previous-compaction)
   "Update the shared activity slot after PREVIOUS-COMPACTION changes.
 Turns and standalone compaction share one animation.  A new compaction phase
-restarts its caption sweep and local clock without changing the turn clock."
+restarts its caption sweep and local clock without changing the turn clock.
+The activity clock follows whichever activity is still live, so a parent turn
+ending under a running child keeps it."
+  (dsh-emacs-modeline--sync-run-clock)
   (let ((changed
          (not (equal
                (and previous-compaction
@@ -842,7 +877,7 @@ restarts its caption sweep and local clock without changing the turn clock."
       (setq dsh-emacs--modeline-compaction-start
             (and dsh-emacs--modeline-compaction (float-time))))
     (when (featurep 'motion-line)
-      (if (or dsh-emacs--ml-busy dsh-emacs--modeline-compaction)
+      (if (dsh-emacs-modeline--activity-p)
           (when (or changed (not (motion-line-playing-p 'dsh-running)))
             (setq-local motion-line-redisplay-function
                         #'dsh-emacs-modeline--animation-redisplay)
@@ -857,21 +892,19 @@ restarts its caption sweep and local clock without changing the turn clock."
 Repeated running snapshots preserve playback position.  Clearing the flag
 also drops the finished turn's step badge."
   (setq dsh-emacs--ml-busy (and flag t))
-  (if dsh-emacs--ml-busy
-      (unless dsh-emacs--modeline-run-start
-        (setq dsh-emacs--modeline-run-start (float-time)))
-    (setq dsh-emacs--modeline-step nil
-          dsh-emacs--modeline-run-start nil))
+  (unless dsh-emacs--ml-busy
+    (setq dsh-emacs--modeline-step nil))
   (dsh-emacs-modeline--sync-animation dsh-emacs--modeline-compaction))
 
 (defun dsh-emacs--ml-busy-clear ()
   "Clear execution status and release this buffer's running animation."
+  (setq dsh-emacs--modeline-subagent-active nil)
   (dsh-emacs--ml-busy-set nil)
   (dsh-emacs-modeline-reset-execution))
 
 (defun dsh-emacs--ml-busy-indicator ()
-  "Return the running or compacting activity, empty when both are idle."
-  (if (not (or dsh-emacs--ml-busy dsh-emacs--modeline-compaction))
+  "Return the running, compacting or child activity, empty when all are idle."
+  (if (not (dsh-emacs-modeline--activity-p))
       ""
     (propertize
      (if (featurep 'motion-line)
@@ -1362,7 +1395,7 @@ caption and clock while preserving the enclosing turn's running interval."
 (defun dsh-emacs-modeline--whale-tail-label ()
   "Return the running or idle tail, using a centered 18-pixel display box."
   (cond
-   ((or dsh-emacs--ml-busy dsh-emacs--modeline-compaction)
+   ((dsh-emacs-modeline--activity-p)
     (dsh-emacs--ml-busy-indicator))
    ((and (display-graphic-p) (image-type-available-p 'svg))
     (let ((color (dsh-emacs-modeline--logo-color)))
