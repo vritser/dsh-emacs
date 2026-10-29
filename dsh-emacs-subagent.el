@@ -17,13 +17,8 @@
 (require 'dsh-emacs-protocol)
 (require 'dsh-emacs-server)
 (require 'dsh-emacs-tokens)
-;; Animation is optional, like the mode line's running whale: without
-;; motion-line the icon keeps its static tint.
-(require 'motion-line nil t)
-(declare-function motion-line-playing-p "motion-line" (slot))
-(declare-function motion-line-play "motion-line" (slot clip &rest options))
-(declare-function motion-line-clip "motion-line" (duration renderer))
-(declare-function motion-line-stop "motion-line" (slot))
+;; Icon playback uses the mode-line animation facade, which is optional:
+;; without a backend the icon keeps its static tint.
 
 (defvar dsh-emacs--sessions)
 (defvar dsh-emacs--chat-buffers)
@@ -32,6 +27,12 @@
 (defvar dsh-emacs--event-ready)
 (defvar dsh-emacs-sessions-buffer)
 (declare-function dsh-emacs-events--host-repaint "dsh-emacs-events" ())
+(declare-function dsh-emacs-modeline-animation-available-p "dsh-emacs-modeline" ())
+(declare-function dsh-emacs-modeline-animation-clip "dsh-emacs-modeline" (duration renderer))
+(declare-function dsh-emacs-modeline-animation-playing-p "dsh-emacs-modeline" (slot))
+(declare-function dsh-emacs-modeline-animation-play "dsh-emacs-modeline" (slot clip))
+(declare-function dsh-emacs-modeline-animation-stop "dsh-emacs-modeline" (slot))
+(declare-function dsh-emacs-modeline-animation-text "dsh-emacs-modeline" (slot))
 (declare-function dsh-emacs-modeline-set-subagent-activity "dsh-emacs-modeline" (active))
 (declare-function dsh-emacs--completing-read-ordered "dsh-emacs" (prompt collection &rest args))
 (declare-function dsh-emacs--chat-session-item "dsh-emacs" (session-id))
@@ -56,9 +57,9 @@
   "Seconds of one running-subagent icon pulse cycle.")
 
 (defconst dsh-emacs-subagent--animation-slot 'dsh-subagents
-  "motion-line slot that drives the subagent icon pulse.
-The mode line renders `motion-line-string' for this slot while it plays and
-the plain indicator otherwise, so playback state never leaks into the text.")
+  "Animation slot that drives the subagent icon pulse.
+`dsh-emacs-subagent-animation-text' returns the playing frame and the plain
+indicator is rendered otherwise, so playback state never leaks into the text.")
 
 (defvar dsh-emacs-subagent--icon-frames nil
   "Last (BASE . ACCENT) color pair and the icon pulse frames built for it.
@@ -374,37 +375,40 @@ same phase, so icon and number always agree."
   "Whether this display can animate the SVG subagent icon."
   (and (display-graphic-p) (image-type-available-p 'svg)))
 
-(defun dsh-emacs-subagent--animation-available-p ()
-  "Whether motion-line is installed in this Emacs."
-  (featurep 'motion-line))
-
 (defun dsh-emacs-subagent--stop-animation ()
-  "Stop this buffer's motion-line icon pulse."
-  (when (and (dsh-emacs-subagent--animation-available-p)
-             (motion-line-playing-p dsh-emacs-subagent--animation-slot))
-    (motion-line-stop dsh-emacs-subagent--animation-slot)))
+  "Stop this buffer's mode-line icon pulse."
+  (when (dsh-emacs-modeline-animation-playing-p
+         dsh-emacs-subagent--animation-slot)
+    (dsh-emacs-modeline-animation-stop dsh-emacs-subagent--animation-slot)))
+
+(defun dsh-emacs-subagent-animation-text ()
+  "Return the animated subagent segment, or nil when the pulse is not playing.
+The mode-line renderer falls back to the static, percent-escaped indicator."
+  (dsh-emacs-modeline-animation-text dsh-emacs-subagent--animation-slot))
 
 (defun dsh-emacs-subagent--sync-animation ()
-  "Synchronize this buffer's child activity and motion-line icon pulse.
+  "Synchronize this buffer's child activity and animated icon pulse.
 The whale also requires the chat's own connection, so host updates cannot
 restart activity in a detached chat.  Snapshot application calls this even
 when the child projection watermarks have not changed.
-Playback runs only when motion-line is installed, the host is live, the
-display can repaint SVG and at least one direct child is running, so a stale
-running flag on a disconnected connection stays still.  While it plays the
-clip re-renders the indicator, so count and title changes need no restart."
+Playback runs only when the mode-line animation backend is installed, the
+host is live, the display can repaint SVG and at least one direct child is
+running, so a stale running flag on a disconnected connection stays still.
+While it plays the clip re-renders the indicator, so count and title changes
+need no restart."
   (dsh-emacs-modeline-set-subagent-activity
    (and dsh-emacs--event-ready dsh-emacs--subagent-host-live
         (> (dsh-emacs-subagent--running-count) 0)))
-  (if (not (and (dsh-emacs-subagent--animation-available-p)
+  (if (not (and (dsh-emacs-modeline-animation-available-p)
                 dsh-emacs--subagent-host-live
                 (dsh-emacs-subagent--icon-animation-p)
                 (> (dsh-emacs-subagent--running-count) 0)))
       (dsh-emacs-subagent--stop-animation)
-    (unless (motion-line-playing-p dsh-emacs-subagent--animation-slot)
-      (motion-line-play
+    (unless (dsh-emacs-modeline-animation-playing-p
+             dsh-emacs-subagent--animation-slot)
+      (dsh-emacs-modeline-animation-play
        dsh-emacs-subagent--animation-slot
-       (motion-line-clip
+       (dsh-emacs-modeline-animation-clip
         dsh-emacs-subagent--pulse-duration
         (lambda (elapsed)
           (dsh-emacs-subagent-indicator
@@ -544,8 +548,8 @@ Run this command in a child conversation to choose from its own children."
 (defun dsh-emacs-subagent-indicator (&optional phase)
   "Mode-line child count and lineage for the current chat.
 PHASE (0..1) selects the running pulse frame when the host is live and at
-least one direct child is running; nil renders the idle tint.  motion-line
-supplies PHASE from the elapsed clip time."
+least one direct child is running; nil renders the idle tint.  The mode-line
+animation backend supplies PHASE from the elapsed clip time."
   (let* ((id (bound-and-true-p dsh-emacs--buffer-session))
          (catalog (and id (dsh-emacs-subagent--value id 'subagentCatalog)))
          (address (bound-and-true-p dsh-emacs--buffer-subagent))

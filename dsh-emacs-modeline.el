@@ -37,7 +37,7 @@
 
 ;;; Code:
 (declare-function dsh-emacs-subagent-indicator "dsh-emacs-subagent" (&optional phase))
-(defvar dsh-emacs-subagent--animation-slot)
+(declare-function dsh-emacs-subagent-animation-text "dsh-emacs-subagent" ())
 
 (require 'cl-lib)
 (require 'color)
@@ -52,6 +52,39 @@
 (declare-function motion-line-stop "motion-line" (slot))
 (declare-function motion-line-string "motion-line" (slot))
 (defvar motion-line-redisplay-function)
+
+;; Public animation facade: the only place this package touches motion-line.
+;; Presentation code asks these helpers instead of featurep/playing checks, so
+;; another backend (or no animation at all) changes one layer.
+(defun dsh-emacs-modeline-animation-available-p ()
+  "Whether the optional motion-line animation engine is installed."
+  (featurep 'motion-line))
+
+(defun dsh-emacs-modeline-animation-playing-p (slot)
+  "Whether SLOT is playing in this buffer."
+  (and (dsh-emacs-modeline-animation-available-p)
+       (motion-line-playing-p slot)))
+
+(defun dsh-emacs-modeline-animation-clip (duration renderer)
+  "Build a DURATION clip rendered by RENDERER, or nil without a backend.
+Callers build the clip lazily, so an absent backend must not signal."
+  (when (dsh-emacs-modeline-animation-available-p)
+    (motion-line-clip duration renderer)))
+
+(defun dsh-emacs-modeline-animation-play (slot clip)
+  "Play CLIP in SLOT when the animation engine is installed."
+  (when (dsh-emacs-modeline-animation-available-p)
+    (motion-line-play slot clip)))
+
+(defun dsh-emacs-modeline-animation-stop (slot)
+  "Stop SLOT when the animation engine is installed."
+  (when (dsh-emacs-modeline-animation-available-p)
+    (motion-line-stop slot)))
+
+(defun dsh-emacs-modeline-animation-text (slot)
+  "Return SLOT's cached animated text, or nil when it is not playing."
+  (when (dsh-emacs-modeline-animation-playing-p slot)
+    (motion-line-string slot)))
 
 ;; doom-modeline integration references it without depending on it: when
 ;; present, the official API splices the stats segment into its layout (right
@@ -876,15 +909,17 @@ ending under a running child keeps it."
     (when changed
       (setq dsh-emacs--modeline-compaction-start
             (and dsh-emacs--modeline-compaction (float-time))))
-    (when (featurep 'motion-line)
+    (when (dsh-emacs-modeline-animation-available-p)
       (if (dsh-emacs-modeline--activity-p)
-          (when (or changed (not (motion-line-playing-p 'dsh-running)))
+          (when (or changed
+                    (not (dsh-emacs-modeline-animation-playing-p 'dsh-running)))
             (setq-local motion-line-redisplay-function
                         #'dsh-emacs-modeline--animation-redisplay)
-            (motion-line-play
+            (dsh-emacs-modeline-animation-play
              'dsh-running
-             (motion-line-clip 3 #'dsh-emacs-modeline--running-status)))
-        (motion-line-stop 'dsh-running)))
+             (dsh-emacs-modeline-animation-clip
+              3 #'dsh-emacs-modeline--running-status)))
+        (dsh-emacs-modeline-animation-stop 'dsh-running)))
     (force-mode-line-update)))
 
 (defun dsh-emacs--ml-busy-set (flag)
@@ -907,11 +942,10 @@ also drops the finished turn's step badge."
   (if (not (dsh-emacs-modeline--activity-p))
       ""
     (propertize
-     (if (featurep 'motion-line)
-         (motion-line-string 'dsh-running)
-       (if dsh-emacs--modeline-compaction
-           (propertize "Compacting" 'face 'dsh-emacs-modeline-compacting-face)
-         (propertize "Deep diving" 'face 'dsh-emacs-modeline-running-face)))
+     (or (dsh-emacs-modeline-animation-text 'dsh-running)
+         (if dsh-emacs--modeline-compaction
+             (propertize "Compacting" 'face 'dsh-emacs-modeline-compacting-face)
+           (propertize "Deep diving" 'face 'dsh-emacs-modeline-running-face)))
      'help-echo (if dsh-emacs--modeline-compaction
                     (concat (dsh-emacs-modeline--status-detail)
                             "\n\nClick or M-x dsh-emacs-describe-status")
@@ -1467,13 +1501,11 @@ width-filling renderer.  BASE is the pre-existing mode-line-format list."
       segments))))
 
 (defun dsh-emacs-modeline--subagent-text ()
-  "Return the subagent segment, animated through motion-line while playing.
-`motion-line-string' already escapes percent signs for mode-line expansion;
+  "Return the subagent segment, animated while its pulse is playing.
+The animated string already escapes percent signs for mode-line expansion;
 the static indicator still needs `dsh-emacs-modeline--escape-percent'."
-  (if (and (featurep 'motion-line)
-           (motion-line-playing-p dsh-emacs-subagent--animation-slot))
-      (motion-line-string dsh-emacs-subagent--animation-slot)
-    (dsh-emacs-modeline--escape-percent (dsh-emacs-subagent-indicator))))
+  (or (dsh-emacs-subagent-animation-text)
+      (dsh-emacs-modeline--escape-percent (dsh-emacs-subagent-indicator))))
 
 (defun dsh-emacs-modeline--doom-segment ()
   "Compose dsh status for both Doom and the native mode-line splice.

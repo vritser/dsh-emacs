@@ -916,25 +916,25 @@
              dsh-emacs--subagent-catalogs)
     (with-temp-buffer
       (puthash "anim-parent" (current-buffer) dsh-emacs--chat-buffers)
-      (cl-letf (((symbol-function 'dsh-emacs-subagent--animation-available-p)
-                 (lambda () t))
-                ;; This test owns the subagent slot only; the whale activity
-                ;; integration has its own tests.
-                ((symbol-function 'dsh-emacs-modeline-set-subagent-activity)
+      ;; This test owns the subagent slot only; the whale activity
+      ;; integration has its own tests.
+      (cl-letf (((symbol-function 'dsh-emacs-modeline-set-subagent-activity)
                  #'ignore)
-                ((symbol-function 'motion-line-playing-p)
+                ((symbol-function 'dsh-emacs-modeline-animation-available-p)
+                 (lambda () t))
+                ((symbol-function 'dsh-emacs-modeline-animation-playing-p)
                  (lambda (_slot) playing))
-                ((symbol-function 'motion-line-play)
+                ((symbol-function 'dsh-emacs-modeline-animation-play)
                  (lambda (slot clip)
                    (cl-incf plays)
                    (setq played-slot slot playing t)
                    (setq renderer (plist-get clip :render))
                    clip))
-                ((symbol-function 'motion-line-clip)
+                ((symbol-function 'dsh-emacs-modeline-animation-clip)
                  (lambda (duration render)
                    (setq renderer render)
                    (list :duration duration :render render)))
-                ((symbol-function 'motion-line-stop)
+                ((symbol-function 'dsh-emacs-modeline-animation-stop)
                  (lambda (_slot) (cl-incf stops) (setq playing nil)))
                 ((symbol-function 'display-graphic-p) (lambda (&optional _) t))
                 ((symbol-function 'image-type-available-p) (lambda (_type) t))
@@ -1032,7 +1032,7 @@
                   dsh-emacs--buffer-subagent nil
                   dsh-emacs--event-ready t)
       (puthash "activity-parent" (current-buffer) dsh-emacs--chat-buffers)
-      (cl-letf (((symbol-function 'dsh-emacs-subagent--animation-available-p)
+      (cl-letf (((symbol-function 'dsh-emacs-modeline-animation-available-p)
                  #'ignore)
                 ((symbol-function 'dsh-emacs-modeline-set-subagent-activity)
                  (lambda (active) (setq activity active))))

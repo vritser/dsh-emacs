@@ -372,6 +372,15 @@ The completion annotations' cumulative token projection includes uncached
 input, output, cache read and cache write; it is independent of this mode line's message-based
 usage accumulator and does not estimate cost.
 
+## Animation backend boundary
+
+All `motion-line` access goes through the public
+`dsh-emacs-modeline-animation-*` facade in `dsh-emacs-modeline.el`.  The whale
+and the subagent pulse ask that facade to play, stop, query playback or return
+the cached animated text; `dsh-emacs-subagent.el` no longer calls
+`motion-line` directly.  Rendering still falls back to static text and colors
+when the backend is absent.
+
 ## Testing the optional animation integration
 
 `scripts/verify.sh` works without Motion Line: the suite checks loading and
