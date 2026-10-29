@@ -97,6 +97,12 @@ minor) and stay undated until the release is cut.
 
 ### Changed
 
+- **Static command-row status**: slash-command and local `!` command rows no
+  longer run the `-\|/` timer animation.  The leading dot/icon and pending
+  header tint carry the running state, matching the session list's color
+  language and removing per-command timers, reconnect revival and their
+  redraw paths. (rationale: [postmortem/162](postmortem/162-static-command-rows.md))
+
 - **Preset picker uses server labels**: new-session preset choices show a
   preset's published `name` and fall back to its id. The client-side English
   names for the shipped presets (`Standard mode` …), which the server does not

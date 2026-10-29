@@ -550,10 +550,11 @@ asynchronously (`make-process`) with the chat buffer's `default-directory` —
 the session workspace — as working directory.  The result row is rendered by
 `dsh-emacs-render-shell-start` / `dsh-emacs-render-shell-done` in
 `dsh-emacs-render.el`, reusing the slash-command row machinery (bash icon in
-`full`, one dot in `simple` or on a display that cannot draw SVG, `-\|/`
-spinner, and state color carried by the dot and, in `full`, the header tint):
-a `!` row rides the same `dsh-emacs--command-blocks` / spinner tables under its
-own monotonic `shell-N` id.  Process tracking is buffer-local
+`full`, one dot in `simple` or on a display that cannot draw SVG, and state
+color carried by the dot and, in `full`, the header tint):
+a `!` row rides the same `dsh-emacs--command-blocks` table under its
+own monotonic `shell-N` id.  A running row is marked by that color, with no
+timer-driven spinner.  Process tracking is buffer-local
 \(`dsh-emacs--shell-procs`).
 Killing the chat buffer or resetting its major mode kills the tracked shell
 before its tracking is discarded. `C-c C-!`

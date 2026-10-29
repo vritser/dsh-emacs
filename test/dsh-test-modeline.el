@@ -9,36 +9,6 @@
 (defvar motion-line--timer)
 (defvar motion-line--buffers)
 
-;; A displayed buffer can contain an offscreen running command.
-(ert-deftest dsh-emacs-test-modeline-spinner-offscreen-advances-without-redraw ()
-  :tags '(dsh-unit)
-  (with-temp-buffer
-    (let ((dsh-emacs--command-spinners (make-hash-table :test 'equal))
-          (dsh-emacs--command-blocks (make-hash-table :test 'equal))
-          (window (selected-window))
-          (visible nil)
-          (redraws 0))
-      (puthash "spin" (list (current-buffer) nil 0) dsh-emacs--command-spinners)
-      (puthash "spin" '("ns" "cmd-spin" "goal" "") dsh-emacs--command-blocks)
-      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) window))
-                ((symbol-function 'get-buffer-window-list)
-                 (lambda (&rest _) (list window)))
-                ((symbol-function 'dsh-emacs-ui-find-block)
-                 (lambda (&rest _) '(1 . 10)))
-                ((symbol-function 'pos-visible-in-window-p)
-                 (lambda (&rest _) visible))
-                ((symbol-function 'dsh-emacs-ui-update-fragment)
-                 (lambda (&rest _) (setq redraws (1+ redraws)))))
-        (dsh-emacs--command-spinner-tick (current-buffer) "spin")
-        (ert-info ((format "%s" "spinner-offscreen-advances-without-redraw"))
-          (should (= redraws 0))
-          (should (= (nth 2 (gethash "spin" dsh-emacs--command-spinners)) 1)))
-        (setq visible t)
-        (dsh-emacs--command-spinner-tick (current-buffer) "spin")
-        (ert-info ((format "%s" "spinner-visible-resumes-redraw"))
-          (should (= redraws 1))
-          (should (= (nth 2 (gethash "spin" dsh-emacs--command-spinners)) 2)))))))
-
 ;; --- Test 5c: mode-line event accumulation and rendering ---
 (ert-deftest dsh-emacs-test-modeline-modeline-note-event-accumulates-assistant-message-usage ()
   :tags '(dsh-unit)
@@ -1069,29 +1039,6 @@
               (ert-info ((format "%s" "mode-line-segment-cwd-face"))
                 (should (get-text-property 0 'face seg)))))
         (setq dsh-emacs--modeline-branch-cache old-cache)))))
-
-;; Performance regressions: callbacks must retain their owning buffer.
-(ert-deftest dsh-emacs-test-modeline-spinner-callback-stops-missing-row-from-other-buffer ()
-  :tags '(dsh-unit)
-  (let ((owner (generate-new-buffer " *dsh-spinner-owner*")) timer)
-    (unwind-protect
-        (progn
-          (with-current-buffer owner
-            (dsh-emacs-render--reset-tool-tracking)
-            (dsh-emacs--command-spinner-start "perf" owner)
-            (setq timer (nth 1 (gethash "perf" dsh-emacs--command-spinners))))
-          (with-temp-buffer
-            (apply (timer--function timer) (timer--args timer)))
-          (ert-info ((format "%s" "spinner-callback-stops-missing-row-from-other-buffer"))
-            (should (not (memq timer timer-list))))
-          (with-current-buffer owner
-            (dsh-emacs--command-spinner-start "perf" owner)
-            (setq timer (nth 1 (gethash "perf" dsh-emacs--command-spinners)))
-            (dsh-emacs-render--reset-tool-tracking))
-          (ert-info ((format "%s" "spinner-reset-cancels-old-timer"))
-            (should (not (memq timer timer-list)))))
-      (when timer (cancel-timer timer))
-      (when (buffer-live-p owner) (kill-buffer owner)))))
 
 ;; Pending text paints the shared animation's cached frame without an extra pass.
 ;; Motion Line exposes its clock and visibility as variables (postmortem/002 in

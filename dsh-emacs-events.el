@@ -168,8 +168,6 @@ generation and a new clientId.")
                   (&optional buffer final))
 (declare-function dsh-emacs-render--discard-stream "dsh-emacs-render"
                   (&optional key))
-(declare-function dsh-emacs--command-spinner-clear-all "dsh-emacs-render" ())
-(declare-function dsh-emacs--command-spinner-revive "dsh-emacs-render" ())
 ;; Runtime dependencies defined in dsh-emacs-render.el.
 (declare-function dsh-emacs-render-history-events "dsh-emacs-render" (events &optional stream bound &key insert-before follow-p))
 (declare-function dsh-emacs-render--note-history-window "dsh-emacs-render" (entries has-more))
@@ -1144,14 +1142,7 @@ reconnect is re-armed and another connect scheduled."
               ;; every 2s check that the socket is really being read; a wedged
               ;; socket is killed so `dsh-emacs-events--lost' schedules a
               ;; fresh connect and retries.
-              (dsh-emacs-events--health-start)
-              ;; A mid-command stream drop just ran
-              ;; `dsh-emacs-events-disconnect' (above), which cancels every row
-              ;; spinner so a detached conversation never keeps animating.  If
-              ;; this connect is a reconnect for the same chat buffer while a
-              ;; slash command is still running, re-arm its spinner (a no-op
-              ;; for fresh buffers and already-settled rows).
-              (dsh-emacs--command-spinner-revive))
+              (dsh-emacs-events--health-start))
           (error
            (when (and (processp process) (process-live-p process))
              (delete-process process))
@@ -1185,10 +1176,8 @@ reconnect is re-armed and another connect scheduled."
           (when (process-live-p process)
             (delete-process process)))
         ;; Tearing down the stream: stop the mode-line running spinner so it
-        ;; never keeps ticking in a detached conversation, and cancel any
-        ;; running slash-command row animations.
-        (dsh-emacs--ml-busy-clear)
-        (dsh-emacs--command-spinner-clear-all)))))
+        ;; never keeps ticking in a detached conversation.
+        (dsh-emacs--ml-busy-clear)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Core connection (`session/control' + `workspace/follow' + `$events')

@@ -89,10 +89,6 @@
 ;; Defined in dsh-emacs-command.el; called from the optimistic slash-command
 ;; render path before that module is loaded.
 (declare-function dsh-emacs-command-parse "dsh-emacs-command" (line))
-;; Declare-only forward form: the real `defvar-local' with its initializer
-;; lives further down; this silences the byte-compiler for the earlier reset
-;; path without changing runtime initialization semantics.
-(defvar dsh-emacs--command-spinners)
 (defvar dsh-emacs--input-marker)
 (defvar dsh-emacs--composer-top-marker)
 ;; Latest decoded question projection, owned by dsh-emacs.el.
@@ -1148,9 +1144,8 @@ opener fallback.")
 Serverside slash commands are keyed by their `command/run' commandId;
 client-side `!command' rows (see `dsh-emacs-render-shell-start') use
 their own monotonic `shell-N' ids so the two never collide.  Both share
-the same row machinery — icon, `-\\|/' spinner, pending tint and
-success/error restyle — and both are cleared by
-`dsh-emacs-render--reset-tool-tracking'.")
+the same row machinery — icon, pending tint and success/error restyle —
+and both are cleared by `dsh-emacs-render--reset-tool-tracking'.")
 
 (defvar-local dsh-emacs--pending-command nil
   "When non-nil, an optimistic slash-command row rendered before the RPC round-trip.
@@ -1161,7 +1156,6 @@ miss the entry is cleaned up.")
 
 (defun dsh-emacs-render--reset-tool-tracking ()
   "Reset tool tracking state. Called on full transcript reload."
-  (dsh-emacs--command-spinner-clear-all)
   (dsh-emacs-render--flush-stream nil t)
   (dsh-emacs-render--cancel-markdown)
   (when dsh-emacs-render--reply-turns
@@ -1173,7 +1167,6 @@ miss the entry is cleaned up.")
         dsh-emacs--streamed-step nil
         dsh-emacs--tool-states (make-hash-table :test 'equal)
         dsh-emacs--command-blocks (make-hash-table :test 'equal)
-        dsh-emacs--command-spinners (make-hash-table :test 'equal)
         dsh-emacs--pending-command nil
         dsh-emacs-render--turn-deliverables nil
         dsh-emacs-render--inbox-pending nil
@@ -4786,6 +4779,17 @@ user's input text."
       (substring name 1)
     (or name "")))
 
+(defun dsh-emacs-render--command-label-left (icon label state)
+  "Return the left-hand label for a command row.
+ICON is the leading bash/tool icon (or nil), LABEL the command text, and
+STATE `pending', `success' or `error'.  This is the pure presentation seam:
+a future animation can replace the returned string without touching the
+row/fragment callers."
+  (concat (dsh-emacs-render--tool-leading icon state)
+          (propertize label
+                      'face (dsh-emacs-render--row-label-face
+                             'dsh-emacs-tool-title-face))))
+
 (defun dsh-emacs-render--command-status-text (state)
   "Short status suffix for a slash-command node STATE (success/error)."
   (pcase state
@@ -4794,103 +4798,8 @@ user's input text."
     (_ nil)))
 
 ;;; ---------------------------------------------------------------------------
-;;; Slash-command row styling: bash terminal icon + running `-\|/' spinner
+;;; Slash-command row styling: bash terminal icon + pending tint
 ;;; ---------------------------------------------------------------------------
-
-(defconst dsh-emacs--command-spinner-frames
-  '("-" "\\" "|" "/")
-  "Frames of the running slash-command leading animation.
-The classic shell `-\\|/' spinner (the same frames as slash.sh), so the
-row animates with familiar 4-frame terminal rhythm.")
-
-(defconst dsh-emacs--command-spinner-interval 0.1
-  "Seconds between running-command animation frames (~10fps, like the
-classic shell spinner in slash.sh).")
-
-(defvar-local dsh-emacs--command-spinners (make-hash-table :test 'equal)
-  "Live running-command animations, keyed by COMMAND-ID.
-Each value is (BUFFER TIMER INDEX): BUFFER is the chat buffer the row lives
-in, TIMER the repeating `run-at-time' timer, INDEX the next frame index.
-
-Buffer-local: several chats may run commands concurrently, and the
-optimistic temp ids (`pending-<name>') collide across buffers — a global
-table would let one session's spinner overwrite/cancel another's.  Each
-chat buffer gets its own hash in `dsh-emacs-render--reset-tool-tracking'.")
-
-(defun dsh-emacs--command-spinner-start (command-id buffer)
-  "Start the running `-\\|/' animation for COMMAND-ID in BUFFER.
-Replaces any existing animation for the same command (idempotent)."
-  (dsh-emacs--command-spinner-stop command-id)
-  (let ((timer (run-at-time dsh-emacs--command-spinner-interval
-                            dsh-emacs--command-spinner-interval
-                            #'dsh-emacs--command-spinner-tick
-                            buffer command-id)))
-    (puthash command-id (list buffer timer 0)
-             dsh-emacs--command-spinners)))
-
-(defun dsh-emacs--command-spinner-tick (buffer command-id)
-  "Advance COMMAND-ID's animation in BUFFER, repainting visible rows only."
-  (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (when-let* ((rec (gethash command-id dsh-emacs--command-spinners)))
-        (if-let* ((entry (gethash command-id dsh-emacs--command-blocks)))
-            (let ((next-index (mod (1+ (nth 2 rec))
-                                   (length dsh-emacs--command-spinner-frames))))
-              (setcar (nthcdr 2 rec) next-index)
-              (when-let* ((windows (get-buffer-window-list buffer nil 'visible))
-                          (block (dsh-emacs-ui-find-block
-                                  (nth 0 entry) (nth 1 entry)))
-                          ((cl-some (lambda (window)
-                                      (pos-visible-in-window-p
-                                       (car block) window))
-                                    windows)))
-                (dsh-emacs-ui-update-fragment
-                 (dsh-emacs-ui-make-fragment
-                  :namespace-id (nth 0 entry)
-                  :block-id (nth 1 entry)
-                  :label-left (concat
-                               (dsh-emacs-render--tool-leading
-                                (or (nth 3 entry) "") 'pending)
-                               (propertize (nth 2 entry)
-                                           'face (dsh-emacs-render--row-label-face
-                                                  'dsh-emacs-tool-title-face))
-                               " "
-                               (nth next-index dsh-emacs--command-spinner-frames))
-                  :style 'minimal
-                  :status 'tool-pending
-                  :header-face (dsh-emacs-render--row-chrome-face
-                                'dsh-emacs-tool-pending-face)))))
-          (dsh-emacs--command-spinner-stop command-id))))))
-
-(defun dsh-emacs--command-spinner-stop (command-id)
-  "Cancel COMMAND-ID's running animation and drop its state."
-  (let ((rec (gethash command-id dsh-emacs--command-spinners)))
-    (when rec
-      (let ((timer (nth 1 rec)))
-        (when (timerp timer)
-          (cancel-timer timer))))
-    (remhash command-id dsh-emacs--command-spinners)))
-
-(defun dsh-emacs--command-spinner-clear-all ()
-  "Cancel every running command spinner (event-stream teardown)."
-  (maphash (lambda (command-id _rec)
-             (dsh-emacs--command-spinner-stop command-id))
-           dsh-emacs--command-spinners))
-
-(defun dsh-emacs--command-spinner-revive ()
-  "Re-arm the running-command animation after a stream reconnect.
-`dsh-emacs-events-disconnect' cancels every spinner (so a detached
-conversation never keeps animating); when the same chat buffer reconnects
-mid-command, its rows are still on screen and still pending, so restart the
-animation for each such entry.  No-op when the command already settled
-(`command/done' restyled the row: status is no longer `tool-pending'),
-the row no longer exists, or there is nothing to revive."
-  (dolist (command-id (hash-table-keys dsh-emacs--command-blocks))
-    (when-let* ((entry (gethash command-id dsh-emacs--command-blocks))
-                (block (dsh-emacs-ui-find-block (nth 0 entry) (nth 1 entry)))
-                (state (get-text-property (car block) 'dsh-emacs-ui-state))
-                ((eq (map-elt state :status) 'tool-pending)))
-      (dsh-emacs--command-spinner-start command-id (current-buffer)))))
 
 (defun dsh-emacs-render-command-optimistic (line)
   "Render a slash-command row immediately for LINE (e.g. \"/compact\").
@@ -4915,29 +4824,21 @@ the real `command/run' event when it arrives."
         (dsh-emacs-ui-update-fragment
          (dsh-emacs-ui-make-fragment
           :namespace-id ns :block-id block-id
-          :label-left (concat
-                       (dsh-emacs-render--tool-leading icon 'pending)
-                       (propertize label
-                                   'face (dsh-emacs-render--row-label-face
-                                          'dsh-emacs-tool-title-face))
-                       " "
-                       (car dsh-emacs--command-spinner-frames))
+          :label-left (dsh-emacs-render--command-label-left
+                       icon label 'pending)
           :style 'minimal
           :status 'tool-pending
           :header-face (dsh-emacs-render--row-chrome-face
                         'dsh-emacs-tool-pending-face))
          :create-new t :expanded t
-         :insert-before (dsh-emacs-render--input-insert-point))
-        (dsh-emacs--command-spinner-start temp-id
-                                          (current-buffer))))))
+         :insert-before (dsh-emacs-render--input-insert-point))))))
 
 (defun dsh-emacs-render-command-cleanup-optimistic ()
   "Remove the optimistic slash-command row (if any) on RPC error or miss.
-Stops the spinner, deletes the fragment, and clears `dsh-emacs--pending-command'."
+Deletes the fragment and clears `dsh-emacs--pending-command'."
   (when dsh-emacs--pending-command
     (let* ((temp-id (nth 0 dsh-emacs--pending-command))
            (entry (gethash temp-id dsh-emacs--command-blocks)))
-      (dsh-emacs--command-spinner-stop temp-id)
       (when entry
         (dsh-emacs-ui-delete-fragment (nth 0 entry) (nth 1 entry)))
       (remhash temp-id dsh-emacs--command-blocks))
@@ -4948,9 +4849,9 @@ Stops the spinner, deletes the fragment, and clears `dsh-emacs--pending-command'
 mirroring dsh web's command rows: a leading bash terminal icon (the same
 dsh-web SVG as bash tool rows, or one tool-accent dot on displays without
 SVG) followed
-by the command name and a classic `-\|/' spinner while running (see
-`dsh-emacs--command-spinner-frames');
-on completion the header shows only the command name + a short status
+by the command name; a running row is marked by the pending
+tint and leading icon color, with no timer-driven animation.
+On completion the header shows only the command name + a short status
 (`✓ done' / `✗ failed', green on success, red on error), and the outcome
 text is folded into a collapsible body below, collapsed by default.
 
@@ -4977,26 +4878,15 @@ Returns the event seq."
                 (dsh-emacs-ui-update-fragment
                  (dsh-emacs-ui-make-fragment
                   :namespace-id ns :block-id block-id
-                  :label-left (concat
-                               (dsh-emacs-render--tool-leading icon 'pending)
-                               (propertize label
-                                           'face (dsh-emacs-render--row-label-face
-                                                  'dsh-emacs-tool-title-face))
-                               " "
-                               (car dsh-emacs--command-spinner-frames))
+                  :label-left (dsh-emacs-render--command-label-left
+                               icon label 'pending)
                   :style 'minimal
                   :status 'tool-pending
                   :header-face (dsh-emacs-render--row-chrome-face
                                 'dsh-emacs-tool-pending-face))
                  :create-new t :expanded nil
-                 :insert-before (dsh-emacs-render--input-insert-point))
-                (unless (dsh-emacs-render--history-page-p)
-                  (dsh-emacs--command-spinner-start command-id
-                                                    (current-buffer))))
+                 :insert-before (dsh-emacs-render--input-insert-point)))
             (when-let* ((entry (gethash command-id dsh-emacs--command-blocks)))
-              ;; Historical results leave live animations and submits alone.
-              (unless (dsh-emacs-render--history-page-p)
-                (dsh-emacs--command-spinner-stop command-id))
               (pcase-let* ((`(,ns ,block-id ,label ,icon) entry)
                            (ok (not (equal kind "error")))
                            (state (if ok 'success 'error))
@@ -5007,11 +4897,8 @@ Returns the event seq."
                 (dsh-emacs-ui-update-fragment
                  (dsh-emacs-ui-make-fragment
                   :namespace-id ns :block-id block-id
-                  :label-left (concat
-                               (dsh-emacs-render--tool-leading entry-icon state)
-                               (propertize label
-                                           'face (dsh-emacs-render--row-label-face
-                                                   'dsh-emacs-tool-title-face)))
+                  :label-left (dsh-emacs-render--command-label-left
+                               entry-icon label state)
                   ;; Keep the run's label and a short status in the header;
                   ;; the possibly multi-line result belongs in the folded body.
                   :label-right (propertize
@@ -5033,8 +4920,7 @@ Returns the event seq."
 ;; Renderer: local `!command' command lines (called by dsh-emacs-shell.el)
 ;; ---------------------------------------------------------------------------
 ;; `!<command>' runs locally rather than as a server slash command, but its row
-;; style is exactly that of `command/run': bash icon + `-\|/' spinner + pending
-;; coloring; when it finishes it shows the exit code and collects the output
+;; style is exactly that of `command/run': bash icon + pending coloring; when it finishes it shows the exit code and collects the output
 ;; into a collapsible body.  The two functions are uniquely associated across
 ;; buffers by the id returned from `dsh-emacs-render-shell-start'.
 
@@ -5045,7 +4931,7 @@ consecutive runs can not collide in `dsh-emacs--command-blocks'.")
 
 (defun dsh-emacs-render-shell-start (command)
   "Render the pending row of a local `!command' run; return its id.
-Inserts a row (bash icon + COMMAND + running spinner) above the input,
+Inserts a row (bash icon + COMMAND, pending tinted) above the input,
 exactly like a running slash-command row.  The caller passes the
 returned id back to `dsh-emacs-render-shell-done' once the process
 finishes."
@@ -5058,20 +4944,14 @@ finishes."
     (dsh-emacs-ui-update-fragment
      (dsh-emacs-ui-make-fragment
       :namespace-id ns :block-id block-id
-      :label-left (concat
-                   (dsh-emacs-render--tool-leading icon 'pending)
-                   (propertize command
-                              'face (dsh-emacs-render--row-label-face
-                                     'dsh-emacs-tool-title-face))
-                   " "
-                   (car dsh-emacs--command-spinner-frames))
+      :label-left (dsh-emacs-render--command-label-left
+                   icon command 'pending)
       :style 'minimal
       :status 'tool-pending
       :header-face (dsh-emacs-render--row-chrome-face
                     'dsh-emacs-tool-pending-face))
      :create-new t :expanded t
      :insert-before (dsh-emacs-render--input-insert-point))
-    (dsh-emacs--command-spinner-start id (current-buffer))
     id))
 
 (defun dsh-emacs-render-shell-done (id ok exit-code signal output)
@@ -5079,10 +4959,9 @@ finishes."
 OK / EXIT-CODE / SIGNAL classify the run (success on exit 0); OUTPUT is
 the merged stdout+stderr shown as the row body, expanded and tinted with
 the tool success/error faces — mirroring `command/done' rows.  No-op when
-the row no longer exists (buffer reloaded).  Drops the tracked entry, so
-a finished row never animates again."
+the row no longer exists (buffer reloaded).  Drops the tracked entry once the
+row is settled."
   (when-let* ((entry (gethash id dsh-emacs--command-blocks)))
-    (dsh-emacs--command-spinner-stop id)
     (let* ((state (if ok 'success 'error))
            (face (if ok 'dsh-emacs-tool-success-face
                    'dsh-emacs-tool-error-face))
@@ -5093,11 +4972,8 @@ a finished row never animates again."
       (dsh-emacs-ui-update-fragment
        (dsh-emacs-ui-make-fragment
         :namespace-id (nth 0 entry) :block-id (nth 1 entry)
-        :label-left (concat
-                     (dsh-emacs-render--tool-leading entry-icon state)
-                     (propertize (nth 2 entry)
-                                 'face (dsh-emacs-render--row-label-face
-                                        'dsh-emacs-tool-title-face)))
+        :label-left (dsh-emacs-render--command-label-left
+                     entry-icon (nth 2 entry) state)
         :label-right (propertize
                       (or status "")
                       'face (if (eq dsh-emacs-render-style 'simple)

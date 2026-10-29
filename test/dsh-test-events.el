@@ -1282,13 +1282,6 @@
       (remhash "sess-snapshot-input" dsh-emacs--input-history-by-session)
       (kill-buffer buf))))
 
-;; --- Test 98k: multi-session concurrency --- busy / command spinner
-;; state is per-buffer ---
-;; Regression: the ml-busy timer and command-spinners were once global ---
-;; while session A was generating, session B's turn/end (rendered as usual
-;; in a hidden buffer) cancelled the global timer and cut off A's spinner;
-;; the two buffers' optimistic command rows (pending-<name> with the same
-;; key) also overwrote each other.
 (ert-deftest dsh-emacs-test-events-multi-session-busy-a-lit ()
   :tags '(dsh-unit)
   (let ((buf-a (generate-new-buffer " *dsh-multi-a*"))
@@ -1314,35 +1307,25 @@
             (ert-info ((format "%s" "multi-session-busy-a-survives-b-clear"))
               (should (and dsh-emacs--ml-busy (not (string-empty-p (dsh-emacs--ml-busy-indicator))))))
             (dsh-emacs--ml-busy-clear))
-          ;; command spinner: same-key optimistic rows do not overwrite each other
-          ;; across buffers
+          ;; command rows: same-key optimistic rows stay per-buffer
           (with-current-buffer buf-a
             (setq dsh-emacs--show-commands t
                   dsh-emacs--command-blocks (make-hash-table :test 'equal)
-                  dsh-emacs--pending-command nil
-                  dsh-emacs--command-spinners (make-hash-table :test 'equal))
+                  dsh-emacs--pending-command nil)
             (dsh-emacs-render-command-optimistic "/compact")
-            (ert-info ((format "%s" "multi-session-command-spinner-a"))
-              (should (eq (nth 0 (gethash "pending-compact"
-                                          dsh-emacs--command-spinners))
-                          buf-a))))
+            (ert-info ((format "%s" "multi-session-command-row-a"))
+              (should (gethash "pending-compact" dsh-emacs--command-blocks))))
           (with-current-buffer buf-b
             (setq dsh-emacs--show-commands t
                   dsh-emacs--command-blocks (make-hash-table :test 'equal)
-                  dsh-emacs--pending-command nil
-                  dsh-emacs--command-spinners (make-hash-table :test 'equal))
+                  dsh-emacs--pending-command nil)
             (dsh-emacs-render-command-optimistic "/compact")
-            (ert-info ((format "%s" "multi-session-command-spinner-b"))
-              (should (eq (nth 0 (gethash "pending-compact"
-                                          dsh-emacs--command-spinners))
-                          buf-b)))
-            (dsh-emacs--command-spinner-clear-all))
+            (ert-info ((format "%s" "multi-session-command-row-b"))
+              (should (gethash "pending-compact" dsh-emacs--command-blocks)))
+            (setq dsh-emacs--command-blocks (make-hash-table :test 'equal)))
           (with-current-buffer buf-a
-            (ert-info ((format "%s" "multi-session-command-spinner-a-survives-b"))
-              (should (eq (nth 0 (gethash "pending-compact"
-                                          dsh-emacs--command-spinners))
-                          buf-a)))
-            (dsh-emacs--command-spinner-clear-all)))
+            (ert-info ((format "%s" "multi-session-command-row-a-survives-b"))
+              (should (gethash "pending-compact" dsh-emacs--command-blocks)))))
       (kill-buffer buf-a)
       (kill-buffer buf-b))))
 

@@ -46,7 +46,8 @@ printf 'done\n'
   input; it never reaches `session/prompt` or `commands.execute`.
 - **Rendering**: a transcript row appears instantly — the bash terminal icon
   in `full` (one dot in `simple` or where Emacs cannot draw SVG) followed by
-  the command and a classic `-\|/` spinner.  On completion the header shows
+  the command, with the pending tint carrying the running state.  On
+  completion the header shows
   the exit status (`✓ exit 0` / `✗ exit N` / `✗ signal N`), green/red in
   `full` and muted in `simple`, where the dot carries the state color.  The
   merged stdout+stderr becomes a collapsible body below, expanded by default

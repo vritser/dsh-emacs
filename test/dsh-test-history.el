@@ -468,8 +468,7 @@ messages (e.g. `command/done')."
         (should dsh-emacs--markdown-timer))
       (dsh-emacs-render--cancel-markdown))))
 
-;; A page stops no spinner and leaves the optimistic pending-command alone.
-(ert-deftest dsh-emacs-test-history-history-page-command-not-animated ()
+(ert-deftest dsh-emacs-test-history-history-page-command-keeps-pending ()
   :tags '(dsh-unit)
   (with-temp-buffer
     (dsh-emacs-mode)
@@ -477,26 +476,22 @@ messages (e.g. `command/done')."
     (setq-local dsh-emacs--history-earliest-seq 5)
     (let* ((block-id "cmd-old-cmd")
            (ns (dsh-emacs-render--make-namespace))
-           (stopped nil)
            (pending '(("cmd-temp-local" "compile"))))
       (puthash "old-cmd" (list ns block-id "compile" nil)
                dsh-emacs--command-blocks)
       (setq dsh-emacs--pending-command pending)
-      (cl-letf (((symbol-function 'dsh-emacs--command-spinner-stop)
-                 (lambda (&rest _) (setq stopped t))))
-        (dsh-emacs--load-older-history-page
-         (current-buffer)
-         (list (cons "hasMore" :json-false)
-               (cons "records"
-                     (vector
-                      (dsh-test--history-event-record
-                       "command/done" 4
-                       '((commandId . "old-cmd")
-                         (name . "compile")
-                         (kind . "success")
-                         (text . "COMPILE-DONE"))))))))
-      (ert-info ((format "%s" "history-page-command-not-animated"))
-        (should (not stopped))
+      (dsh-emacs--load-older-history-page
+       (current-buffer)
+       (list (cons "hasMore" :json-false)
+             (cons "records"
+                   (vector
+                    (dsh-test--history-event-record
+                     "command/done" 4
+                     '((commandId . "old-cmd")
+                       (name . "compile")
+                       (kind . "success")
+                       (text . "COMPILE-DONE")))))))
+      (ert-info ((format "%s" "history-page-command-keeps-pending"))
         (should (equal dsh-emacs--pending-command pending))
         (should (string-match-p "compile" (buffer-string)))
         (should (string-match-p "✓ done" (buffer-string)))))))

@@ -1811,20 +1811,15 @@
   :tags '(dsh-unit)
   (with-temp-buffer
     (dsh-emacs-mode)
-    (let ((event '((data . ((turn . 1) (step . 1)))))
-          spinner formatting)
+    (let ((event '((data . ((turn . 1) (step . 1))))) formatting)
       (unwind-protect
           (progn
-            (dsh-emacs--command-spinner-start "mode-reset" (current-buffer))
-            (setq spinner (nth 1 (gethash "mode-reset" dsh-emacs--command-spinners)))
             (dsh-emacs-render--start-assistant-stream event "hello ")
             (dsh-emacs-render--start-assistant-stream event "world")
             (setq formatting (plist-get dsh-emacs--streaming-assistant :timer))
             (dsh-emacs-mode)
             (ert-info ((format "%s" "mode-reinitialization-cancels-owned-timers"))
-              (should (not (memq spinner timer-list)))
               (should (not (memq formatting timer-list)))))
-        (when spinner (cancel-timer spinner))
         (when formatting (cancel-timer formatting))))))
 
 (provide 'dsh-test-stream)
