@@ -4590,6 +4590,23 @@ assistant message."
           (kill-new transcript)
           (message "Transcript copied to clipboard"))))))
 
+(defun dsh-emacs-copy-session-id ()
+  "Copy the current session id to the kill ring.
+In a chat buffer this is the chat's session id.  In the session list it is
+the session on the current row; a subagent row copies the child's own id."
+  (interactive)
+  (let ((session-id
+         (cond
+          ((derived-mode-p 'dsh-emacs-session-mode)
+           (or (dsh-emacs-session-id-at-point)
+               (user-error "No session at point")))
+          ((derived-mode-p 'dsh-emacs-mode)
+           (or dsh-emacs--buffer-session
+               (user-error "No session is open")))
+          (t (user-error "Not in a dsh chat or session list")))))
+    (kill-new session-id)
+    (message "Copied session id: %s" session-id)))
+
 (defun dsh-emacs-modeline-toggle ()
   "Toggle the mode-line stats display."
   (interactive)

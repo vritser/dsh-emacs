@@ -190,5 +190,44 @@
               (should (equal (car kill-ring) "Hello world")))))
       (kill-buffer buf))))
 
+;; The command resolves the session from the current context: the chat's
+;; buffer-local owner, or the session-list row under point.
+(ert-deftest dsh-emacs-test-copy-copy-session-id-from-chat ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (setq-local dsh-emacs--buffer-session "sess-chat")
+    (let ((kill-ring nil))
+      (dsh-emacs-copy-session-id)
+      (ert-info ((format "%s" "copy-session-id-from-chat"))
+        (should (equal (car kill-ring) "sess-chat"))))))
+
+(ert-deftest dsh-emacs-test-copy-copy-session-id-from-session-list ()
+  :tags '(dsh-unit)
+  (let ((dsh-emacs--sessions
+         (list (dsh-protocol-session--from-alist
+                '((sessionId . "sess-list")
+                  (updatedAt . 100)
+                  (projections (values (title . "List session")))))))
+        (dsh-emacs--workspaces nil)
+        (dsh-emacs--archived-sessions nil)
+        (kill-ring nil))
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'dsh-emacs-events-host-connect) #'ignore))
+        (dsh-emacs-session-mode))
+      (goto-char (dsh-emacs-session--row-pos 'dsh-emacs-session-id "sess-list"))
+      (dsh-emacs-copy-session-id)
+      (ert-info ((format "%s" "copy-session-id-from-session-list"))
+        (should (equal (car kill-ring) "sess-list"))))))
+
+(ert-deftest dsh-emacs-test-copy-copy-session-id-errors-outside-dsh ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (ert-info ((format "%s" "copy-session-id-errors-outside-dsh"))
+      (should (equal "Not in a dsh chat or session list"
+                     (condition-case err
+                         (progn (dsh-emacs-copy-session-id) nil)
+                       (user-error (error-message-string err))))))))
+
 (provide 'dsh-test-copy)
 ;;; dsh-test-copy.el ends here

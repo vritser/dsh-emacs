@@ -18,6 +18,10 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Copy session id**: `M-x dsh-emacs-copy-session-id` copies the current
+  chat's session id, or the session-list row at point, to the kill ring.
+  Subagent rows copy the child session id.
+
 - **Inline Think rows**: `dsh-emacs-thinking-style` chooses how live reasoning
   appears. The default `expand` keeps the existing behavior (body streams
   visibly, then folds); `inline` renders dsh web's compact collapsed Think row
