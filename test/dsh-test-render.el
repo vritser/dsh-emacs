@@ -118,8 +118,7 @@
   (dolist (types '(("reasoning") ("reasoning" "text" "reasoning" "text")))
     (with-temp-buffer
       (dsh-emacs-mode)
-      (let ((dsh-emacs-thinking-expand-by-default t)
-            (dsh-emacs-thinking-preview-max 0)
+      (let ((dsh-emacs-thinking-preview-max 0)
             records)
         (cl-loop for type in types for index from 0
                  for body = (format "failed-%s-%d" type index)

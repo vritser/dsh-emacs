@@ -1573,6 +1573,19 @@ Non-reasoning events, step changes and stream teardown flush pending text
 before continuing. This keeps transport delivery immediate while limiting
 reasoning-driven buffer invalidation. See [027](../postmortem/027-thinking-refresh.md).
 
+`dsh-emacs-thinking-style` selects the streamed shape. `expand` (the default)
+appends the reasoning body raw under the Think header and folds it into a
+fragment when the following text block starts. `inline` renders dsh web's
+compact disclosure from the first delta: a collapsed minimal fragment whose
+body is a deferred closure (so a collapsed row never lays out the growing
+text), and whose right-hand preview is the first line of the latest completed
+paragraph (`dsh-emacs-render--thinking-live-preview`), settling to the first
+sentence when the block closes. Inline rows keep the block id from their first
+delta, so later deltas and the authoritative message update the same row
+instead of moving it; the final repair reconciles one row per streamed block
+in place (`dsh-emacs-render--reconcile-inline-thinking`) and falls back to the
+folded row only when the correction adds or removes a block.
+
 ## GUI display regression tests
 
 Run the optional display suite from the repository root in a separate graphical

@@ -104,6 +104,7 @@ The most commonly used options, straight in your config:
 (setq dsh-emacs-history-window 30)                  ; maximum messages per opening or older-history network batch
 (setq dsh-emacs-history-rounds 3)                  ; complete earlier user+assistant rounds per C-c C-o; opening always completes only one
 (setq dsh-emacs-show-reasoning t)                  ; show reasoning content (on by default; nil = hide, unlike dsh web)
+(setq dsh-emacs-thinking-style 'expand)            ; live reasoning: expand = stream the body then fold (default); inline = dsh web's compact collapsed row with a running paragraph preview
 (setq dsh-emacs-show-tool-calls t)                 ; show tool calls
 (setq dsh-emacs-stream-markdown-limit 8192)        ; pending characters before idle formatting; nil = synchronous
 (setq dsh-emacs-default-cwd default-directory)     ; fallback working directory for new sessions (interactive ones use the current buffer's default-directory first)

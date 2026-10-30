@@ -211,7 +211,6 @@
     (with-temp-buffer
       (dsh-emacs-mode)
       (let* ((dsh-emacs-stream-markdown-limit 8)
-             (dsh-emacs-thinking-expand-by-default t)
              (event '((data . ((turn . 1) (step . 1)))))
              (old (dsh-emacs-render--start-assistant-stream event "**wrong**\n")))
         (dsh-emacs-render--start-thinking-stream event "keep thinking")
@@ -1150,8 +1149,7 @@
   (dolist (deltas '(t nil))
     (with-temp-buffer
       (dsh-emacs-mode)
-      (let ((dsh-emacs-thinking-expand-by-default t)
-            (dsh-emacs-thinking-preview-max 0))
+      (let ((dsh-emacs-thinking-preview-max 0))
         ;; Block indices are reused by the next step.
         (dotimes (step 2)
           (let ((content
@@ -1179,6 +1177,7 @@
              `((type . "assistant/message")
                (data . ((turn . 1) (step . ,step)
                         (message . ((role . "assistant") (content . ,content)))))))
+            (dsh-emacs-ui-expand-all)
             (let ((previous (point-min)))
               (cl-loop for block across content
                        for body = (cdr (assq 'text block))
@@ -1202,7 +1201,6 @@
     (with-temp-buffer
       (dsh-emacs-mode)
       (let ((dsh-emacs-stream-markdown-limit limit)
-            (dsh-emacs-thinking-expand-by-default t)
             (dsh-emacs-thinking-preview-max 0))
         (dolist (chunk '(((type . "reasoning-delta") (index . 0)
                           (text . "The test confirms the expected failure."))
@@ -1215,6 +1213,7 @@
            `((type . "assistant/chunk")
              (data . ((turn . 1) (step . 1) (chunk . ,chunk))))))
         (dsh-emacs-render--flush-stream)
+        (dsh-emacs-ui-expand-all)
         (ert-info ((format "%s" "overlapping-blocks-keep-live-answer-together"))
           (should (= (how-many "Think" (point-min) (point-max)) 1))
           (should (string-match-p "RED confirmed (200 frames → 200 repaints)."
@@ -1242,7 +1241,7 @@
     (dsh-emacs-mode)
     (dsh-emacs--setup-input-area)
     (dsh-emacs--replace-input "unsent draft")
-    (let ((dsh-emacs-thinking-expand-by-default nil))
+    (let ((dsh-emacs-thinking-style 'expand))
       (dolist (chunk '(((type . "reasoning-delta") (index . 0) (text . "first"))
                        ((type . "text-delta") (index . 1) (text . "answer"))
                        ((type . "reasoning-delta") (index . 2) (text . "second"))
@@ -1274,7 +1273,6 @@
         (with-temp-buffer
           (dsh-emacs-mode)
           (let ((dsh-emacs-stream-markdown-limit limit)
-                (dsh-emacs-thinking-expand-by-default t)
                 (dsh-emacs-thinking-preview-max 0)
                 (final-answer (if (string-empty-p answer) "" "finished reply"))
                 (event '((data . ((turn . 1) (step . 1))))))
@@ -1287,6 +1285,7 @@
             (dotimes (_ 5)
               (when dsh-emacs--markdown-pending
                 (dsh-emacs-render--run-markdown (current-buffer))))
+            (dsh-emacs-ui-expand-all)
             (let ((text (buffer-string)))
               (ert-info ((format "%s" "thinking-final-corrects-or-removes-old-content"))
                 (should (not (string-match-p "obsolete reasoning" text)))
@@ -1312,7 +1311,6 @@
       (with-temp-buffer
         (dsh-emacs-mode)
         (let ((dsh-emacs-stream-markdown-limit limit)
-              (dsh-emacs-thinking-expand-by-default t)
               (dsh-emacs-thinking-preview-max 0)
               (seq 0)
               content)
@@ -1334,6 +1332,7 @@
           (dotimes (_ 6)
             (when dsh-emacs--markdown-pending
               (dsh-emacs-render--run-markdown (current-buffer))))
+          (dsh-emacs-ui-expand-all)
           (let ((text (buffer-substring-no-properties (point-min) (point-max)))
                 (previous 0))
             (ert-info ((format "%s" "stream-final-keeps-one-think-per-block"))
@@ -1356,7 +1355,7 @@
   (with-temp-buffer
     (dsh-emacs-mode)
     (dsh-emacs-modeline-setup)
-    (let ((dsh-emacs-thinking-expand-by-default t))
+    (let ((dsh-emacs-thinking-style 'expand))
       (dsh-emacs-render-event
        (json-read-from-string
         "{\"type\":\"assistant/chunk\",\"seq\":1,\"data\":{\"turn\":1,\"step\":1,\"chunk\":{\"type\":\"text-delta\",\"index\":0,\"text\":\"first answer\\n\"}}}"))
@@ -1369,6 +1368,7 @@
        (json-read-from-string
         "{\"type\":\"assistant/chunk\",\"seq\":3,\"data\":{\"turn\":1,\"step\":1,\"chunk\":{\"type\":\"text-delta\",\"index\":2,\"text\":\"second answer\\n\"}}}"))
       (dsh-emacs-render--flush-stream)
+      (dsh-emacs-ui-expand-all)
       (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
              (first (string-match "first answer" text))
              (think (string-match "✶ Think" text))
@@ -1395,7 +1395,7 @@
   (with-temp-buffer
     (dsh-emacs-mode)
     (dsh-emacs-modeline-setup)
-    (let ((dsh-emacs-thinking-expand-by-default t))
+    (let ((dsh-emacs-thinking-style 'expand))
       (dsh-emacs-render-event
        (json-read-from-string
         "{\"type\":\"assistant/chunk\",\"seq\":1,\"data\":{\"turn\":1,\"step\":1,\"chunk\":{\"type\":\"text-delta\",\"index\":0,\"text\":\"only answer\\n\"}}}"))
@@ -1425,7 +1425,7 @@
   (with-temp-buffer
     (dsh-emacs-mode)
     (dsh-emacs-modeline-setup)
-    (let ((dsh-emacs-thinking-expand-by-default t))
+    (let ((dsh-emacs-thinking-style 'expand))
       (dsh-emacs-render-event
        (json-read-from-string
         "{\"type\":\"assistant/chunk\",\"seq\":1,\"data\":{\"turn\":1,\"step\":1,\"chunk\":{\"type\":\"reasoning-delta\",\"index\":0,\"text\":\"think A\\n\"}}}"))
@@ -1507,13 +1507,13 @@
 ;; preview / body inherited the label's orange bold) ---
 (ert-deftest dsh-emacs-test-stream-thinking-label-gets-thinking-face ()
   :tags '(dsh-unit)
-  (let ((buf (generate-new-buffer " *dsh-think-face*"))
-        (dsh-emacs-thinking-expand-by-default t))
+  (let ((buf (generate-new-buffer " *dsh-think-face*")))
     (unwind-protect
         (with-current-buffer buf
           (insert "###HEAD\n")
           (dsh-emacs-render--render-thinking-block
            "t" "b1" "first body line\nsecond body line" 1 (point-max))
+          (dsh-emacs-ui-expand-all)
           (goto-char (point-min))
           (ert-info ((format "%s" "thinking-label-gets-thinking-face"))
             (should (and (search-forward "Think" nil t)
@@ -1821,6 +1821,187 @@
             (ert-info ((format "%s" "mode-reinitialization-cancels-owned-timers"))
               (should (not (memq formatting timer-list)))))
         (when formatting (cancel-timer formatting))))))
+
+;; `inline' style keeps one collapsed Think row from the first delta and
+;; settles the preview in place.
+(ert-deftest dsh-emacs-test-stream-thinking-inline-live-row-is-collapsed ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (let ((dsh-emacs-thinking-style 'inline))
+      (dsh-emacs-render--start-thinking-stream
+       '((data . ((turn . 1) (step . 1) (chunk . ((index . 0))))))
+       "First sentence. More text\n\nSecond paragraph")
+      (dsh-emacs-render--flush-thinking)
+      (let ((state (cl-loop for pos from (point-min) to (point-max)
+                            for s = (get-text-property
+                                     pos 'dsh-emacs-ui-state)
+                            when s return s))
+            (text (buffer-substring-no-properties (point-min) (point-max))))
+        (ert-info ((format "%s" "inline-live-row-is-one-collapsed-row"))
+          (should (= 1 (cl-count ?✶ text)))
+          (should (map-elt state :collapsed))
+          ;; Running preview: first line of the latest *completed* paragraph;
+          ;; the unfinished tail paragraph contributes nothing (dsh web).
+          (should (equal (map-elt state :label-right)
+                         "First sentence. More text"))))
+      (dsh-emacs-render--close-live-thinking-block)
+      (let ((state (cl-loop for pos from (point-min) to (point-max)
+                            for s = (get-text-property
+                                     pos 'dsh-emacs-ui-state)
+                            when s return s)))
+        (ert-info ((format "%s" "inline-settled-preview-uses-first-sentence"))
+          (should (equal (map-elt state :label-right) "First sentence."))
+          (should (map-elt state :collapsed)))))))
+
+;; The running preview must not depend on match data: whitespace around blank
+;; lines used to leave a `string-match' loop stuck and froze Emacs while a Think
+;; row streamed.  One linear split now finds the newest completed paragraph.
+(ert-deftest dsh-emacs-test-stream-thinking-inline-preview-whitespace-separators ()
+  :tags '(dsh-unit)
+  (ert-info ((format "%s" "inline-live-preview-whitespace-separators"))
+    (should (equal (dsh-emacs-render--thinking-live-preview
+                    "a\n\nb  \n\n  **c**\n\n")
+                   "c"))
+    (should (equal (dsh-emacs-render--thinking-live-preview
+                    "a\n\n\nb")
+                   "a"))
+    (should (equal (dsh-emacs-render--thinking-live-preview "tail only")
+                   nil))))
+
+;; A Think row never falls back to a clock: without a preview it is the label
+;; alone, both while running and after it settles.
+(ert-deftest dsh-emacs-test-stream-thinking-inline-rows-have-no-clock ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (let ((dsh-emacs-thinking-style 'inline)
+          (dsh-emacs-thinking-preview-max 0))
+      (dsh-emacs-render--start-thinking-stream
+       '((data . ((turn . 1) (step . 1) (chunk . ((index . 0))))))
+       "still streaming")
+      (goto-char (point-min))
+      (search-forward "Think")
+      (ert-info ((format "%s" "inline-running-row-has-no-clock"))
+        (should-not (map-elt (get-text-property
+                              (1- (point)) 'dsh-emacs-ui-state)
+                             :label-right)))
+      (dsh-emacs-render--close-live-thinking-block)
+      (ert-info ((format "%s" "inline-settled-row-has-no-clock"))
+        (should-not (map-elt (get-text-property
+                              (1- (point)) 'dsh-emacs-ui-state)
+                             :label-right))))))
+
+;; The option picks how a stream opens.  Changing it while reasoning runs must
+;; not route the next delta into the other shape's accumulator and lose it.
+(ert-deftest dsh-emacs-test-stream-thinking-style-switch-keeps-live-shape ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (let ((dsh-emacs-thinking-style 'inline))
+      (dsh-emacs-render--start-thinking-stream
+       '((data . ((turn . 1) (step . 1) (chunk . ((index . 0))))))
+       "first\n\n")
+      (dsh-emacs-render--flush-thinking)
+      (setq dsh-emacs-thinking-style 'expand)
+      (dsh-emacs-render--start-thinking-stream
+       '((data . ((turn . 1) (step . 1) (chunk . ((index . 0))))))
+       "second\n\n")
+      (dsh-emacs-render--flush-thinking)
+      (let ((state (cl-loop for pos from (point-min) to (point-max)
+                            for s = (get-text-property
+                                     pos 'dsh-emacs-ui-state)
+                            when s return s)))
+        (ert-info ((format "%s" "style-switch-keeps-the-live-inline-row"))
+          (should (plist-get dsh-emacs--streaming-thinking :inline))
+          (should (= 1 (cl-count ?✶ (buffer-string))))
+          ;; The second paragraph completed, so the running preview advanced.
+          (should (equal (map-elt state :label-right) "second")))))))
+
+;; A correction keeps each inline row at its own position instead of folding
+;; every reasoning block into one row above the answer.
+(ert-deftest dsh-emacs-test-stream-thinking-inline-correction-stays-in-place ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (dsh-emacs-modeline-setup)
+    (let ((dsh-emacs-thinking-style 'inline))
+      (dsh-emacs-render-event
+       `((type . "assistant/chunk") (seq . 1)
+         (data . ((turn . 1) (step . 1)
+                  (chunk . ((type . "reasoning-delta") (index . 0)
+                            (text . "think A\n")))))))
+      (dsh-emacs-render--flush-thinking)
+      ;; Open row A now: reconciliation must preserve this fold state.
+      (goto-char (point-min))
+      (search-forward "Think")
+      (dsh-emacs-ui-toggle-fragment)
+      (dsh-emacs-render-event
+       `((type . "assistant/chunk") (seq . 2)
+         (data . ((turn . 1) (step . 1)
+                  (chunk . ((type . "text-delta") (index . 1)
+                            (text . "answer one\n")))))))
+      (dsh-emacs-render--flush-stream)
+      (dsh-emacs-render-event
+       `((type . "assistant/chunk") (seq . 3)
+         (data . ((turn . 1) (step . 1)
+                  (chunk . ((type . "reasoning-delta") (index . 2)
+                            (text . "think B\n")))))))
+      (dsh-emacs-render--flush-thinking)
+      (dsh-emacs-render-event
+       `((type . "assistant/message") (seq . 4)
+         (data . ((turn . 1) (step . 1)
+                  (message . ((role . "assistant")
+                              (content . [((type . "reasoning")
+                                           (text . "think A fixed\nbody A two\n"))
+                                          ((type . "text")
+                                           (text . "answer one\n"))
+                                          ((type . "reasoning")
+                                           (text . "think B fixed\nbody B two\n"))])))))))
+      (dotimes (_ 4)
+        (when dsh-emacs--markdown-pending
+          (dsh-emacs-render--run-markdown (current-buffer))))
+      (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
+             (states (cl-loop for pos = (point-min) then
+                              (next-single-property-change
+                               pos 'dsh-emacs-ui-state nil (point-max))
+                              while (< pos (point-max))
+                              for state = (get-text-property
+                                           pos 'dsh-emacs-ui-state)
+                              when state collect state))
+             (a (string-match "think A fixed" text))
+             (one (string-match "answer one" text))
+             (b (string-match "think B fixed" text)))
+        (ert-info ((format "%s" "inline-correction-keeps-row-order"))
+          (should (= 2 (cl-count ?✶ text)))
+          (should (and a one b))
+          (should (< a one))
+          (should (< one b)))
+        (ert-info ((format "%s" "inline-correction-preserves-fold-state"))
+          (should (equal (mapcar (lambda (state)
+                                   (map-elt state :collapsed))
+                                 states)
+                         '(nil t))))
+        (ert-info ((format "%s" "inline-correction-updates-body-in-place"))
+          (should (string-match-p "body A two" text))
+          (should-not (string-match-p "body B two" text)))))))
+
+;; Discarding a live inline row removes its fragment instead of the raw region
+;; markers the `expand' style uses.
+(ert-deftest dsh-emacs-test-stream-thinking-inline-discard-removes-row ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (let ((dsh-emacs-thinking-style 'inline))
+      (dsh-emacs-render--start-thinking-stream
+       '((data . ((turn . 1) (step . 1) (chunk . ((index . 0))))))
+       "obsolete")
+      (dsh-emacs-render--flush-thinking)
+      (should (string-match-p "Think" (buffer-string)))
+      (dsh-emacs-render--discard-stream)
+      (ert-info ((format "%s" "inline-discard-removes-row"))
+        (should-not (string-match-p "Think" (buffer-string)))
+        (should-not dsh-emacs--streaming-thinking)))))
 
 (provide 'dsh-test-stream)
 ;;; dsh-test-stream.el ends here

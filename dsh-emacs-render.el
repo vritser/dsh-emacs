@@ -147,10 +147,17 @@ approval request arrives while its chat is not visible."
   :type 'boolean
   :group 'dsh-emacs-render)
 
-(defcustom dsh-emacs-thinking-expand-by-default nil
-  "Whether thinking blocks are expanded by default.
-nil = collapsed by default (the collapsed row shows a first-line preview)."
-  :type 'boolean
+(defcustom dsh-emacs-thinking-style 'expand
+  "How live reasoning is rendered in the transcript.
+`expand' (default) streams the reasoning body under the Think header and folds
+it into a collapsible row when the answer text starts, like earlier releases.
+`inline' renders dsh web's compact disclosure from the first delta: one
+collapsed Think row whose preview advances with the latest completed
+paragraph, expandable in place; the finished row keeps its position and is
+updated rather than folded above the answer.  Every Think row starts collapsed;
+open it in place to read the body, and that fold state survives updates."
+  :type '(choice (const :tag "Expanded live body" expand)
+                 (const :tag "Inline collapsed row" inline))
   :group 'dsh-emacs-render)
 
 (defcustom dsh-emacs-thinking-preview-max 48
@@ -620,6 +627,31 @@ space.  Empty/whitespace-only TEXT yields nil."
            (first (string-trim first)))
       (and (not (string-empty-p first)) first))))
 
+(defun dsh-emacs-render--thinking-live-preview (text)
+  "Return the running preview for reasoning TEXT, or nil.
+Mirrors dsh web: the first line of the latest paragraph completed so far, so
+the collapsed row advances as the model thinks.  A tail paragraph without a
+closing blank line is still in flight and contributes nothing; bold markers
+(`**') are dropped and `dsh-emacs-thinking-preview-max' bounds the width."
+  (let ((latest nil)
+        ;; The last element is the still-streaming tail unless TEXT ends with
+        ;; a blank line: `butlast' drops it, and a trailing empty element has
+        ;; no first line to show anyway.  Splitting in one pass (instead of a
+        ;; `string-match' loop) keeps this linear and independent of match data
+        ;; that helpers such as `string-trim' may overwrite.
+        (paragraphs (butlast (split-string
+                              (replace-regexp-in-string "\r" "" text)
+                              "\n\\(?:[ \t]*\n\\)+"))))
+    (dolist (paragraph paragraphs)
+      (let* ((line (car (split-string paragraph "\n")))
+             (line (string-trim
+                    (replace-regexp-in-string "\*\*" "" (or line "")))))
+        (unless (string-empty-p line)
+          (setq latest line))))
+    (when (and latest (> dsh-emacs-thinking-preview-max 0))
+      (truncate-string-to-width latest dsh-emacs-thinking-preview-max
+                                nil nil "..."))))
+
 (defun dsh-emacs-render--thinking-preview (text)
   "Return the collapse-time preview for reasoning TEXT.
 The preview is the first sentence, truncated to `dsh-emacs-thinking-preview-max'
@@ -683,6 +715,28 @@ row states its outcome instead of showing a bare title."
                 (equal (dsh-protocol-content-block-kind block) "reasoning"))
               content)
              "\n"))
+
+(defun dsh-emacs-render--reconcile-inline-thinking (step content)
+  "Update STEP's inline Think rows from final CONTENT in place.
+Returns non-nil when the streamed rows cover every final non-empty reasoning
+block one-to-one, so the rows can keep their positions; nil asks the caller to
+fall back to the single folded row (a block was added or removed by the
+correction)."
+  (let ((blocks (cl-loop for block in content
+                         for kind = (dsh-protocol-content-block-kind block)
+                         for text = (dsh-protocol-content-block-text block)
+                         when (and (equal kind "reasoning")
+                                   (stringp text) (not (string-empty-p text)))
+                         collect text))
+        (regions (reverse (plist-get step :thinking-regions))))
+    (when (and regions (= (length blocks) (length regions)))
+      (cl-loop for text in blocks
+               for region in regions
+               do (dsh-emacs-render--render-thinking-block
+                   (plist-get region :ns) (plist-get region :block-id)
+                   text nil t))
+      (plist-put step :reasoning (mapconcat #'identity blocks "\n"))
+      t)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Timestamps
@@ -1628,15 +1682,20 @@ rendered in full."
                   (timer (plist-get state :timer)))
         (cancel-timer timer)
         (setf (plist-get state :timer) nil)
-        (let ((windows (dsh-emacs-render--following-windows))
-              (text (apply #'concat (reverse (plist-get state :chunks))))
-              (inhibit-read-only t)
-              (buffer-undo-list t))
-          (save-excursion
-            (goto-char (plist-get state :end))
-            (dsh-emacs-render--insert-read-only
-             text 'dsh-emacs-thinking-body-face))
-          (setf (plist-get state :chunks) nil)
+        (let ((windows (dsh-emacs-render--following-windows)))
+          (if (plist-get state :inline)
+              (dsh-emacs-render--render-thinking-block
+               (plist-get state :ns) (plist-get state :block-id)
+               (apply #'concat (reverse (plist-get state :all)))
+               nil t t)
+            (let ((text (apply #'concat (reverse (plist-get state :chunks))))
+                  (inhibit-read-only t)
+                  (buffer-undo-list t))
+              (setf (plist-get state :chunks) nil)
+              (save-excursion
+                (goto-char (plist-get state :end))
+                (dsh-emacs-render--insert-read-only
+                 text 'dsh-emacs-thinking-body-face))))
           (dsh-emacs-render--follow-stream windows))))))
 
 (defun dsh-emacs-render--thinking-stream-alive-for-p (key)
@@ -1644,13 +1703,49 @@ rendered in full."
   (and dsh-emacs--streaming-thinking
        (equal key (plist-get dsh-emacs--streaming-thinking :key))))
 
+(defun dsh-emacs-render--inline-thinking-stream (event text key index state)
+  "Create or extend the inline Think row for TEXT and return its state.
+EVENT names the stream, KEY and INDEX identify the reasoning block, and STATE
+is the current live state or nil.  Mirrors dsh web: one collapsed row that
+advances its paragraph preview while the model thinks."
+  (when (and state
+             (or (not (equal key (plist-get state :key)))
+                 (and index (not (eql index (plist-get state :index))))))
+    (dsh-emacs-render--close-live-thinking-block)
+    (setq state nil))
+  (if state
+      (progn
+        (push text (plist-get state :all))
+        (unless (plist-get state :timer)
+          (setf (plist-get state :timer)
+                (run-at-time 0.1 nil #'dsh-emacs-render--flush-thinking
+                             (current-buffer))))
+        state)
+    ;; A reasoning block starts: close the text above it so the row lands at
+    ;; the block boundary, then render the collapsed disclosure in one edit.
+    (dsh-emacs-render--close-live-text-block)
+    (let* ((insert-point (dsh-emacs-render--input-insert-point))
+           (windows (dsh-emacs-render--following-windows))
+           (ns (dsh-emacs-render--make-namespace))
+           (block-id (dsh-emacs-render--make-block-id event)))
+      (dsh-emacs-render--render-thinking-block
+       ns block-id text insert-point nil t)
+      (setq state (list :key key :index index :inline t
+                        :all (list text) :timer nil
+                        :ns ns :block-id block-id))
+      (setq dsh-emacs--streaming-thinking state)
+      (dsh-emacs-render--follow-stream windows)
+      state)))
+
 (cl-defun dsh-emacs-render--start-thinking-stream (event text)
   "Create or extend the live Thinking stream with reasoning TEXT.
-The stream is a raw body under a dsh-web \"IconThink…\" header (see
-`dsh-emacs-render--think-icon') inserted at the transcript's input point, so
-`reasoning-delta' chunks stay cheap to append.  `dsh-emacs-render-assistant-message'
-swaps it for the collapsible Think fragment once the authoritative reasoning
-text arrives."
+With `dsh-emacs-thinking-style' `expand' the stream is a raw body under a
+dsh-web \"IconThink…\" header (see `dsh-emacs-render--think-icon') inserted at
+the transcript's input point, so `reasoning-delta' chunks stay cheap to append;
+`dsh-emacs-render-assistant-message' folds it into the collapsible Think
+fragment once the authoritative reasoning text arrives.  With `inline' the
+first delta renders the collapsed fragment itself and later deltas refresh
+it."
   (when (and dsh-emacs-show-reasoning
              (stringp text) (not (string-empty-p text)))
     (let* ((key (dsh-protocol-stream-key--from-alist event))
@@ -1669,13 +1764,22 @@ text arrives."
         (dsh-emacs-render--render-thinking-block
          (plist-get closed :ns) (plist-get closed :block-id)
          (apply #'concat (reverse (plist-get closed :all)))
-         (plist-get closed :timestamp) nil t)
+         nil t)
         (setf (plist-get step :reasoning)
               (mapconcat
                (lambda (entry)
                  (apply #'concat (reverse (plist-get entry :all))))
                (reverse (plist-get step :thinking-regions)) "\n"))
         (cl-return-from dsh-emacs-render--start-thinking-stream closed))
+      ;; An active stream keeps the shape it opened with: the option picks
+      ;; how a new stream starts.  Re-reading it here would send a mid-stream
+      ;; change into the other shape's accumulator and drop deltas.
+      (when (if state
+                (plist-get state :inline)
+              (eq dsh-emacs-thinking-style 'inline))
+        (cl-return-from dsh-emacs-render--start-thinking-stream
+          (dsh-emacs-render--inline-thinking-stream
+           event text key index state)))
       ;; Consecutive reasoning blocks have distinct indices even when no
       ;; text delta separates them. Keep their regions and separators apart.
       (when (and state
@@ -1717,7 +1821,6 @@ text arrives."
                             :start (copy-marker start nil)
                             :end end :chunks nil :timer nil
                             :all (list text)
-                            :timestamp (format-time-string "%H:%M:%S")
                             :ns (dsh-emacs-render--make-namespace)
                             :block-id (dsh-emacs-render--make-block-id event))
                 dsh-emacs--streaming-thinking state
@@ -1748,19 +1851,20 @@ when a live stream existed and was replaced."
             (delete-region start end)
             (setq dsh-emacs--streaming-thinking nil)
             (dsh-emacs-render--render-thinking-block
-             ns block-id final-text
-             (plist-get state :timestamp) start)))
+             ns block-id final-text start)))
         (set-marker (plist-get state :start) nil)
         (set-marker (plist-get state :end) nil)
         (setq dsh-emacs--streaming-thinking nil))
       t)))
 
 (defun dsh-emacs-render--close-live-thinking-block ()
-  "Fold the live Think body into its fragment above the next text block.
-The reasoning streamed so far stays on screen, collapsed behind its label, and
-is recorded on the step; a later reasoning block opens a new Think block below
-the text.  Without this the raw reasoning region would span the text that
-follows and be deleted when the stream is finalized."
+  "Close the live Think block at the next text boundary.
+The reasoning streamed so far stays on screen, behind its label, and is
+recorded on the step; a later reasoning block opens a new Think block below
+the text.  `expand' folds the raw body into its fragment here, while `inline'
+settles the preview of the row that already exists.  Without this a raw
+reasoning region would span the text that follows and be deleted when the
+stream is finalized."
   (when-let* ((state dsh-emacs--streaming-thinking))
     (dsh-emacs-render--flush-thinking)
     (let* ((step (dsh-emacs-render--step-record (plist-get state :key)))
@@ -1769,8 +1873,16 @@ follows and be deleted when the stream is finalized."
       (plist-put step :reasoning
                  (if (string-empty-p committed) streamed
                    (concat committed "\n" streamed)))
-      (dsh-emacs-render--replace-live-thinking-text
-       (plist-get state :ns) (plist-get state :block-id) streamed)
+      (if (plist-get state :inline)
+          ;; The row already exists; settle its preview in place instead of
+          ;; folding above the text that follows.
+          (progn
+            (dsh-emacs-render--render-thinking-block
+             (plist-get state :ns) (plist-get state :block-id)
+             streamed nil t)
+            (setq dsh-emacs--streaming-thinking nil))
+        (dsh-emacs-render--replace-live-thinking-text
+         (plist-get state :ns) (plist-get state :block-id) streamed))
       (push state (plist-get step :thinking-regions))
       (push (cons (plist-get state :ns) (plist-get state :block-id))
             (plist-get step :thinking-blocks)))))
@@ -2408,7 +2520,6 @@ submission was pending.  Reply text and per-turn facts remain unchanged."
          (content (dsh-protocol-message-content message))
          (text (dsh-emacs-render--text-from-content content))
          (reasoning (dsh-emacs-render--reasoning-from-content content))
-         (ts (dsh-emacs-render--event-time event))
          (key (dsh-protocol-stream-key--from-alist event))
          (ns (dsh-emacs-render--make-namespace))
          (block-id (dsh-emacs-render--make-block-id event))
@@ -2464,14 +2575,22 @@ submission was pending.  Reply text and per-turn facts remain unchanged."
     ;; Finish text before replacing earlier fragments: removing a Think row
     ;; can put the following text's start at the insertion boundary. Active
     ;; text repair must not mistake the replacement Think for its own body.
-    (unless (equal (plist-get step :reasoning) reasoning)
-      ;; A corrected or removed reasoning body replaces its old fragments
-      ;; where they first appeared, rather than being appended after text.
+    (cond
+     ;; Inline style: keep one row per streamed block where it appeared.  Only
+     ;; a block added or removed by the correction falls back to the folded
+     ;; row, which then still sits before the answer.
+     ((and (eq dsh-emacs-thinking-style 'inline)
+           dsh-emacs-show-reasoning
+           (plist-get step :thinking-regions)
+           (dsh-emacs-render--reconcile-inline-thinking step content)))
+     ((not (equal (plist-get step :reasoning) reasoning))
+      ;; The `expand' style replaces the old fragments where they first
+      ;; appeared, rather than appending the corrected body after text.
       (let ((position (dsh-emacs-render--drop-committed-thinking step)))
         (when (and dsh-emacs-show-reasoning (not (string-empty-p reasoning)))
           (dsh-emacs-render--render-thinking-block
-           ns block-id reasoning ts
-           (or position reasoning-position)))))
+           ns block-id reasoning
+           (or position reasoning-position))))))
     (when reasoning-position (set-marker reasoning-position nil))
     ;; Deferred jobs retain their markers until their idle render completes.
     (dolist (state (plist-get step :text-regions))
@@ -2489,9 +2608,11 @@ submission was pending.  Reply text and per-turn facts remain unchanged."
     seq))
 
 (defun dsh-emacs-render--render-thinking-block
-    (namespace-id block-id text timestamp insert-point &optional update)
+    (namespace-id block-id text insert-point &optional update running)
   "Render a collapsible <details>-style thinking block.
-UPDATE refreshes the existing block while preserving its fold state."
+UPDATE refreshes the existing block while preserving its fold state.
+RUNNING selects the live preview (latest completed paragraph); otherwise the
+settled preview names the first sentence.  A new row starts collapsed."
   (dsh-emacs-ui-update-fragment
    (dsh-emacs-ui-make-fragment
     :namespace-id namespace-id
@@ -2507,9 +2628,16 @@ UPDATE refreshes the existing block while preserving its fold state."
                  (propertize " Think"
                              'face (dsh-emacs-render--row-label-face
                                     'dsh-emacs-thinking-face)))
-    :label-right (or (dsh-emacs-render--thinking-preview text)
-                     (or timestamp ""))
-    :body text
+    ;; No clock fallback: dsh web's row is the label alone without a preview.
+    :label-right (if running
+                    (dsh-emacs-render--thinking-live-preview text)
+                  (dsh-emacs-render--thinking-preview text))
+    ;; A deferred body keeps a collapsed live row cheap: minimal fragments do
+    ;; not render a function body until the reader expands it.
+    :body (if running
+              (let ((running-text text))
+                (lambda () running-text))
+            text)
     :style 'minimal
     :status 'thinking
     ;; Reasoning text is muted in both styles: the header chrome (separator +
@@ -2517,7 +2645,7 @@ UPDATE refreshes the existing block while preserving its fold state."
     ;; the thinking accent above it; `simple' leaves it neutral.
     :header-face 'dsh-emacs-thinking-body-face
     :body-face 'dsh-emacs-thinking-body-face)
-   :create-new (not update) :expanded dsh-emacs-thinking-expand-by-default
+   :create-new (not update)
    :insert-before insert-point))
 
 ;;; ---------------------------------------------------------------------------
@@ -4483,9 +4611,13 @@ when visible content was removed."
             (delq state dsh-emacs--markdown-pending))
       (when (plist-get state :markdown)
         (dsh-emacs-render--reset-markdown-state state))
-      (delete-region (plist-get state :start) (plist-get state :end))
-      (set-marker (plist-get state :start) nil)
-      (set-marker (plist-get state :end) nil)
+      (if (plist-get state :inline)
+          ;; A live inline row is a fragment, not a raw region.
+          (dsh-emacs-ui-delete-fragment (plist-get state :ns)
+                                        (plist-get state :block-id))
+        (delete-region (plist-get state :start) (plist-get state :end))
+        (set-marker (plist-get state :start) nil)
+        (set-marker (plist-get state :end) nil))
       (when (eq state dsh-emacs--streaming-assistant)
         (setq dsh-emacs--streaming-assistant nil))
       (when (eq state dsh-emacs--streaming-thinking)

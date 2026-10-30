@@ -8,7 +8,23 @@ minor) and stay undated until the release is cut.
 
 ## 0.8.0 - Unreleased
 
+### Breaking Changes
+
+- **Thinking rows start collapsed**: `dsh-emacs-thinking-expand-by-default` is
+  removed. The `expand` style still streams the reasoning body visibly, but the
+  folded Think row now always starts collapsed; open it in place to read the
+  body, and that fold state persists. `inline` already started collapsed.
+  (rationale: [postmortem/164](postmortem/164-thinking-inline-style.md))
+
 ### Added
+
+- **Inline Think rows**: `dsh-emacs-thinking-style` chooses how live reasoning
+  appears. The default `expand` keeps the existing behavior (body streams
+  visibly, then folds); `inline` renders dsh web's compact collapsed Think row
+  from the first delta, with a preview that follows the latest completed
+  paragraph and stays at its position when the answer settles. Inline rows are
+  expandable in place and start collapsed; open a row to read the body.
+  (rationale: [postmortem/164](postmortem/164-thinking-inline-style.md))
 
 - **Choose transcript event icons**: `dsh-emacs-render-style` defaults to
   `full` (dsh-web SVG icons) and offers `simple`, where every event row leads
