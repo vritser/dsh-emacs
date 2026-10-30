@@ -132,6 +132,7 @@ generation and a new clientId.")
 ;; Owned by dsh-emacs.el (`defvar-local'); the `userQuestions' projection
 ;; consumer and the late-answer command share it with the result renderer.
 (defvar dsh-emacs--session-questions)
+(defvar dsh-emacs--modeline-run-start)
 (defvar dsh-emacs-history-window)
 (declare-function dsh-emacs-history--start-load "dsh-emacs-history"
                   (count &optional visit))
@@ -793,19 +794,77 @@ in the current chat.  Inbox is owned by the control stream."
     (when questions
       (dsh-emacs--session-questions-apply questions))))
 
-(defun dsh-emacs-events--consume-frames (process)
-  "Consume complete WebSocket frames buffered for PROCESS in wire order.
-A dispatch can yield while rendering history.  Reentrant filters append
-input, but leave draining to the original consumer until it returns."
-  (unless (process-get process 'dsh-emacs-event-draining)
-    (let ((offset 0))
+(defconst dsh-emacs-events--dispatch-budget 0.01
+  "Maximum seconds of business-message dispatch before yielding to Emacs.
+A single message is atomic and may exceed this budget.")
+
+(defun dsh-emacs-events--cancel-dispatch (process)
+  "Cancel queued business messages and continuation for PROCESS."
+  (when (processp process)
+    (when-let* ((timer (process-get process 'dsh-emacs-event-dispatch-timer)))
+      (cancel-timer timer))
+    (process-put process 'dsh-emacs-event-dispatch-timer nil)
+    (process-put process 'dsh-emacs-event-messages nil)))
+
+(defun dsh-emacs-events--resume-dispatch (process)
+  "Resume queued business messages for a still-live PROCESS."
+  (when-let* ((timer (process-get process 'dsh-emacs-event-dispatch-timer)))
+    (cancel-timer timer))
+  (process-put process 'dsh-emacs-event-dispatch-timer nil)
+  (if (and (process-live-p process)
+           (buffer-live-p (process-buffer process)))
+      (with-current-buffer (process-buffer process)
+        (dsh-emacs-events--dispatch-pending process))
+    (dsh-emacs-events--cancel-dispatch process)))
+
+(defun dsh-emacs-events--dispatch-pending (process)
+  "Dispatch a bounded batch of PROCESS's messages in wire order.
+Reentrant filters may enqueue messages and answer Pings, but only this
+consumer dispatches business messages.  Keep an already-pending timer's
+deadline when more input arrives."
+  (unless (or (process-get process 'dsh-emacs-event-draining)
+              (process-get process 'dsh-emacs-event-dispatch-timer))
+    (let ((deadline (+ (float-time) dsh-emacs-events--dispatch-budget)))
       (process-put process 'dsh-emacs-event-draining t)
+      (unwind-protect
+          (condition-case err
+              (let (queue)
+                (while (and (< (float-time) deadline)
+                            (setq queue
+                                  (process-get process
+                                               'dsh-emacs-event-messages)))
+                  ;; Remove the message before dispatch can reenter the filter.
+                  (process-put process 'dsh-emacs-event-messages (cdr queue))
+                  (if (= (caar queue) 8)
+                      (progn
+                        (dsh-emacs-events--cancel-dispatch process)
+                        (delete-process process))
+                    (dsh-emacs-events--dispatch-json process (cdar queue)))))
+            (error
+             (if (process-live-p process)
+                 (message "dsh WebSocket frame error: %S" err)
+               (dsh-emacs-events--lost process))))
+        (process-put process 'dsh-emacs-event-draining nil)
+        (when (and (process-live-p process)
+                   (buffer-live-p (process-buffer process))
+                   (process-get process 'dsh-emacs-event-messages))
+          (process-put process 'dsh-emacs-event-dispatch-timer
+                       (run-at-time 0.001 nil
+                                    #'dsh-emacs-events--resume-dispatch
+                                    process)))))))
+
+(defun dsh-emacs-events--consume-frames (process)
+  "Decode buffered WebSocket frames, then dispatch a bounded message batch.
+Answer control Pings before rendering business messages, so a busy chat
+cannot hold its own connection's heartbeat behind a rendering backlog."
+  (unless (process-get process 'dsh-emacs-event-parsing)
+    (let ((offset 0) messages)
+      (process-put process 'dsh-emacs-event-parsing t)
       (unwind-protect
           (condition-case err
               (let (input frame)
                 (while (and (setq input (process-get process 'dsh-emacs-event-input))
                             (setq frame (dsh-emacs-events--read-frame input offset)))
-                  ;; Only this consumer owns the cursor, even across a yield.
                   (setq offset (nth 3 frame))
                   (let ((opcode (nth 0 frame))
                         (fin (nth 1 frame))
@@ -819,7 +878,9 @@ input, but leave draining to the original consumer until it returns."
                             (when (and (eq process dsh-emacs--event-process)
                                        (equal payload dsh-emacs--ws-probe-inflight))
                               (setq dsh-emacs--ws-probe-inflight nil))))))
-                     ((= opcode 8) (delete-process process))
+                     ;; Close follows preceding messages; it must not discard
+                     ;; business messages already accepted from the wire.
+                     ((= opcode 8) (push (cons 8 nil) messages))
                      ((or (= opcode 1) (= opcode 0))
                       (let ((fragment
                              (cons payload
@@ -828,22 +889,22 @@ input, but leave draining to the original consumer until it returns."
                         (if fin
                             (progn
                               (process-put process 'dsh-emacs-event-fragment nil)
-                              (dsh-emacs-events--dispatch-json
-                               process (decode-coding-string
-                                        (apply #'concat (nreverse fragment)) 'utf-8)))
+                              (push (cons 1 (decode-coding-string
+                                             (apply #'concat (nreverse fragment)) 'utf-8))
+                                    messages))
                           (process-put process 'dsh-emacs-event-fragment fragment))))))))
             (error
-             ;; Dispatching buffered frames can write (pong, rebaseline)
-             ;; after the peer already closed the socket.  That race is
-             ;; ordinary teardown: let `dsh-emacs-events--lost' clean up
-             ;; instead of reporting a frame error the disconnect owns.
              (if (process-live-p process)
                  (message "dsh WebSocket frame error: %S" err)
                (dsh-emacs-events--lost process))))
         (process-put process 'dsh-emacs-event-input
                      (substring (or (process-get process 'dsh-emacs-event-input) "")
                                 offset))
-        (process-put process 'dsh-emacs-event-draining nil)))))
+        (process-put process 'dsh-emacs-event-messages
+                     (nconc (process-get process 'dsh-emacs-event-messages)
+                            (nreverse messages)))
+        (process-put process 'dsh-emacs-event-parsing nil)))
+    (dsh-emacs-events--dispatch-pending process)))
 
 (defconst dsh-emacs-events--read-batch-interval 0.05
   "Seconds to accumulate chat socket input between reads.
@@ -947,6 +1008,7 @@ never stack parallel reconnect timers."
 
 (defun dsh-emacs-events--lost (process)
   "Handle a closed event stream PROCESS and arrange a reconnect."
+  (dsh-emacs-events--cancel-dispatch process)
   (dsh-emacs-events--cancel-read-timer process)
   (if (process-get process 'dsh-emacs-host-stream)
       (dsh-emacs-events--host-lost process)
@@ -1078,6 +1140,7 @@ reconnect is re-armed and another connect scheduled."
                            (and (zerop (or dsh-emacs--anchor-seq 0))
                                 session
                                 (dsh-protocol-session-running session))))
+             (run-start (and was-busy dsh-emacs--modeline-run-start))
              (process nil))
         (dsh-emacs-events-disconnect chat)
         ;; Teardown clears busy, but a failed connection is not a turn end.
@@ -1086,6 +1149,9 @@ reconnect is re-armed and another connect scheduled."
         ;; Only fresh transcripts seed from the host cache (above): an old
         ;; cached running flag must never undo an already consumed turn/end.
         (when was-busy
+          ;; Reconnecting the stream does not start a new turn.  Restore the
+          ;; clock before busy-set synchronizes the animation timer.
+          (setq dsh-emacs--modeline-run-start run-start)
           (dsh-emacs--ml-busy-set t))
         (condition-case err
             (let* ((url (url-generic-parse-url dsh-emacs-base-url))
@@ -1168,6 +1234,7 @@ reconnect is re-armed and another connect scheduled."
         (dsh-emacs-events--watchdog-stop)
         (let ((process dsh-emacs--event-process))
           (dsh-emacs-events--cancel-read-timer process)
+          (dsh-emacs-events--cancel-dispatch process)
           ;; Clear ownership before deleting: the sentinel must not schedule a
           ;; reconnect for an intentional session switch or buffer teardown.
           (setq dsh-emacs--event-process nil
@@ -1596,6 +1663,7 @@ snapshot.  UPDATED-AT is the host's timestamp in milliseconds."
 
 (defun dsh-emacs-events--host-lost (process)
   "Handle a closed host-stream PROCESS: reset and schedule reconnect."
+  (dsh-emacs-events--cancel-dispatch process)
   (let ((buffer (process-get process 'dsh-emacs-host-buffer)))
     (when (and (buffer-live-p buffer)
                (eq process (with-current-buffer buffer

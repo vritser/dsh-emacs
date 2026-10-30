@@ -983,6 +983,7 @@
           ;; Simulate a turn in flight: the busy flag is lit by the send path (timer
           ;; included)
           (dsh-emacs--ml-busy-set t)
+          (setq dsh-emacs--modeline-run-start 123.0)
           (cl-letf (((symbol-function 'open-network-stream)
                      (lambda (&rest _) (prog1 :fake-proc)))
                     ((symbol-function 'set-process-query-on-exit-flag)
@@ -1000,6 +1001,7 @@
             (dsh-emacs-events-connect buf)
             (dsh-emacs-events--health-stop))
           (ert-info ((format "%s" "reconnect-keeps-busy-flag"))
+            (should (= dsh-emacs--modeline-run-start 123.0))
             (should (and dsh-emacs--ml-busy
                          (not (string-empty-p (dsh-emacs--ml-busy-indicator))))))
           (dsh-emacs--ml-busy-clear))
@@ -1014,6 +1016,7 @@
     (setq-local dsh-emacs--buffer-session "reconnect-compaction")
     (setq-local dsh-emacs--anchor-seq 100)
     (dsh-emacs--ml-busy-set t)
+    (setq dsh-emacs--modeline-run-start 123.0)
     (let ((attempts 0))
       (unwind-protect
           (cl-letf (((symbol-function 'open-network-stream)
@@ -1041,12 +1044,14 @@
                                       (data . ((compactionId . "c") (turn . 1))))))])))
             (ert-info ((format "%s" "failed-reconnect-retains-running-after-compaction"))
               (should dsh-emacs--ml-busy)
+              (should (= dsh-emacs--modeline-run-start 123.0))
               (should (string-match-p "Deep diving" (dsh-emacs--ml-busy-indicator))))
             (dsh-emacs-events--dispatch-event
              (current-buffer)
              '((type . "turn/end") (seq . 103) (data . ((turn . 1)))))
             (ert-info ((format "%s" "recovered-connection-still-obeys-turn-end"))
               (should (null dsh-emacs--ml-busy))
+              (should (null dsh-emacs--modeline-run-start))
               (should (string-empty-p (dsh-emacs--ml-busy-indicator)))))
         (dsh-emacs-events-disconnect (current-buffer))))))
 
@@ -1965,9 +1970,13 @@
                 (should-not (process-get process 'dsh-emacs-event-draining))
                 (should (equal (reverse delivered) (if fail '("one") '("one" "two"))))
                 (should (equal (process-get process 'dsh-emacs-event-input)
-                               (concat (and fail second) (substring third 0 3))))
+                               (substring third 0 3)))
+                (should (equal (process-get process 'dsh-emacs-event-messages)
+                               (and fail '((1 . "two")))))
                 (should (= (length messages) (if fail 1 0))))
               (dsh-emacs-events--filter process (substring third 3))
+              (when fail
+                (dsh-emacs-events--resume-dispatch process))
               (should (equal (reverse delivered) '("one" "two" "three")))
               (should (equal (process-get process 'dsh-emacs-event-input) ""))
               (should-not (process-get process 'dsh-emacs-event-draining)))
@@ -2077,7 +2086,11 @@
                                      (wire `((type . "event") (event . ,event))))
                                    (nthcdr 5 events) "")))
                                (wire `((type . "event") (event . ,newer)))))))))
-                (dsh-emacs-events--filter process (wire snapshot)))
+                (dsh-emacs-events--filter process (wire snapshot))
+                ;; A slow snapshot can exhaust the first dispatch slice.
+                ;; Finish scheduled batches before checking their final order.
+                (while (process-get process 'dsh-emacs-event-messages)
+                  (dsh-emacs-events--resume-dispatch process)))
               (ert-info ((format "Reentrant %s must wait for the snapshot" arrival))
                 (should injected)
                 (should (= (how-many "FINAL-ONCE" (point-min) (point-max)) 1))
@@ -2467,6 +2480,136 @@
                      '((minMessages . 1) (minTurns . 1))))
       (should (= (alist-get 'maxMessages request) 7))
       (should (eq (alist-get 'assistantStream request) t)))))
+
+(ert-deftest dsh-emacs-test-events-burst-yields-and-pongs-before-rendering ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (let ((process (make-pipe-process :name "dsh-burst-test"
+                                      :buffer (current-buffer) :noquery t))
+          (clock 0.0) delivered pongs)
+      (unwind-protect
+          (cl-letf (((symbol-function 'float-time) (lambda (&rest _) clock))
+                    ((symbol-function 'dsh-emacs-events--dispatch-json)
+                     (lambda (_process text)
+                       (push text delivered)
+                       (setq clock (+ clock 0.006))))
+                    ((symbol-function 'dsh-emacs-events--send-pong)
+                     (lambda (_process text)
+                       (push (list text (length delivered)) pongs))))
+            (process-put process 'dsh-emacs-event-input
+                         (concat (dsh-emacs-events--frame 1 "one")
+                                 (dsh-emacs-events--frame 1 "two")
+                                 (dsh-emacs-events--frame 9 "ping")
+                                 (dsh-emacs-events--frame 1 "three")
+                                 (dsh-emacs-events--frame 1 "four")))
+            (dsh-emacs-events--consume-frames process)
+            (should (equal (reverse delivered) '("one" "two")))
+            (should (equal pongs '(("ping" 0))))
+            (should (timerp (process-get
+                             process 'dsh-emacs-event-dispatch-timer)))
+            (dsh-emacs-events--resume-dispatch process)
+            (should (equal (reverse delivered) '("one" "two" "three" "four")))
+            (should-not (process-get process 'dsh-emacs-event-dispatch-timer)))
+        (when-let* ((timer (process-get
+                            process 'dsh-emacs-event-dispatch-timer)))
+          (cancel-timer timer))
+        (delete-process process)))))
+
+(ert-deftest dsh-emacs-test-events-pending-burst-still-answers-new-pings ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (let ((process (make-pipe-process :name "dsh-burst-ping"
+                                      :buffer (current-buffer) :noquery t))
+          (clock 0.0) delivered pongs)
+      (unwind-protect
+          (cl-letf (((symbol-function 'float-time) (lambda (&rest _) clock))
+                    ((symbol-function 'dsh-emacs-events--dispatch-json)
+                     (lambda (_process text)
+                       (push text delivered)
+                       (setq clock (+ clock 0.02))))
+                    ((symbol-function 'dsh-emacs-events--send-pong)
+                     (lambda (_process text) (push text pongs))))
+            (process-put process 'dsh-emacs-event-input
+                         (concat (dsh-emacs-events--frame 1 "one")
+                                 (dsh-emacs-events--frame 1 "two")))
+            (dsh-emacs-events--consume-frames process)
+            (let ((timer (process-get process 'dsh-emacs-event-dispatch-timer)))
+              (should (timerp timer))
+              (process-put process 'dsh-emacs-event-input
+                           (concat (dsh-emacs-events--frame 9 "alive")
+                                   (dsh-emacs-events--frame 1 "three")))
+              (dsh-emacs-events--consume-frames process)
+              (should (equal pongs '("alive")))
+              (should (equal delivered '("one")))
+              (should (eq timer (process-get
+                                 process 'dsh-emacs-event-dispatch-timer))))
+            (dsh-emacs-events--cancel-dispatch process)
+            (should-not (process-get process 'dsh-emacs-event-dispatch-timer))
+            (should-not (process-get process 'dsh-emacs-event-messages))
+            (dsh-emacs-events--resume-dispatch process)
+            (should (equal delivered '("one"))))
+        (dsh-emacs-events--cancel-dispatch process)
+        (delete-process process)))))
+
+(ert-deftest dsh-emacs-test-events-close-follows-queued-business-messages ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (let ((process (make-pipe-process :name "dsh-burst-close"
+                                      :buffer (current-buffer) :noquery t))
+          delivered)
+      (unwind-protect
+          (cl-letf (((symbol-function 'dsh-emacs-events--dispatch-json)
+                     (lambda (proc text)
+                       (should (process-live-p proc))
+                       (push text delivered))))
+            (process-put process 'dsh-emacs-event-input
+                         (concat (dsh-emacs-events--frame 1 "last")
+                                 (dsh-emacs-events--frame 8 "")))
+            (dsh-emacs-events--consume-frames process)
+            (should (equal delivered '("last")))
+            (should-not (process-live-p process))
+            (should-not (process-get process 'dsh-emacs-event-messages))
+            (should-not (process-get process 'dsh-emacs-event-dispatch-timer)))
+        (dsh-emacs-events--cancel-dispatch process)
+        (delete-process process)))))
+
+;; Disconnecting must release a continuation and the messages it held, and
+;; must not dispatch them afterwards.
+(ert-deftest dsh-emacs-test-events-disconnect-cancels-pending-dispatch ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (let ((process (make-pipe-process :name "dsh-burst-disconnect"
+                                      :buffer (current-buffer) :noquery t))
+          (clock 0.0) delivered)
+      (unwind-protect
+          (cl-letf (((symbol-function 'float-time) (lambda (&rest _) clock))
+                    ((symbol-function 'dsh-emacs-events--dispatch-json)
+                     (lambda (_process text)
+                       (push text delivered)
+                       (setq clock (+ clock 0.02))))
+                    ((symbol-function 'dsh-emacs--ml-busy-clear) #'ignore))
+            (setq dsh-emacs--event-process process
+                  dsh-emacs--event-ready t)
+            (process-put process 'dsh-emacs-event-input
+                         (concat (dsh-emacs-events--frame 1 "one")
+                                 (dsh-emacs-events--frame 1 "two")))
+            (dsh-emacs-events--consume-frames process)
+            (ert-info ((format "%s" "disconnect-with-pending-continuation"))
+              (should (equal delivered '("one")))
+              (should (timerp (process-get
+                               process 'dsh-emacs-event-dispatch-timer)))
+              (should (equal (process-get process 'dsh-emacs-event-messages)
+                             '((1 . "two"))))
+              (dsh-emacs-events-disconnect (current-buffer))
+              (should-not (process-live-p process))
+              (should-not (process-get process 'dsh-emacs-event-dispatch-timer))
+              (should-not (process-get process 'dsh-emacs-event-messages))
+              ;; A stale continuation callback must not resurrect the batch.
+              (dsh-emacs-events--resume-dispatch process)
+              (should (equal delivered '("one")))))
+        (dsh-emacs-events--cancel-dispatch process)
+        (delete-process process)))))
 
 (provide 'dsh-test-events)
 ;;; dsh-test-events.el ends here

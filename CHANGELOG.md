@@ -40,6 +40,16 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Keep elapsed time across stream reconnects**: a running chat preserves its
+  original activity start time when the WebSocket reconnects, including failed
+  retries, instead of restarting the mode-line clock from zero.
+
+- **Keep streaming chats responsive**: WebSocket business messages now dispatch
+  in short, ordered batches while Ping/Pong controls are serviced before
+  rendering. Large bash-output bursts no longer hold modeline timers behind
+  the entire batch. Disconnects cancel pending dispatch work.
+  (rationale: [postmortem/163](postmortem/163-bounded-websocket-dispatch.md))
+
 - **Running subagent keeps the mode-line animation alive**: when a parent turn
   ends while one of its direct children is still running, the parent chat's
   whale and elapsed activity clock keep going until the last child settles.
