@@ -2347,5 +2347,158 @@
                               ((kind . "result") (value . "rejected"))))))))
       (when (buffer-live-p chat) (kill-buffer chat)))))
 
+;; A waterfall delivered by the WebSocket dispatcher must not open its prompt
+;; inside that dispatcher: the host's `cancel' frame (another client answered)
+;; could not be dispatched until the prompt returned.  The drain is scheduled
+;; instead; a cancel that arrives before it runs leaves nothing to ask.
+(ert-deftest dsh-emacs-test-questions-waterfall-prompt-defers-out-of-dispatcher ()
+  :tags '(dsh-unit)
+  (let ((chat (get-buffer-create " *dsh-test-question-defer*"))
+        (scheduled nil)
+        (prompted nil)
+        (dsh-emacs--question-queue nil)
+        (dsh-emacs--approval-queue nil)
+        (dsh-emacs--interaction-active nil)
+        (dsh-emacs--waterfall-cancelled-event-id nil)
+        (dsh-emacs-events--dispatching t)
+        (dsh-emacs-enable-notifications nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'run-at-time)
+                   (lambda (_time _repeat function &rest args)
+                     (setq scheduled (lambda () (apply function args)))
+                     'scheduled-timer))
+                  ((symbol-function 'dsh-emacs--collect-question-answers)
+                   (lambda (&rest _)
+                     (setq prompted t)
+                     nil)))
+          (dsh-emacs--question-requested
+           chat "wf-defer" "sess-defer"
+           '(((id . "q1") (question . "Proceed?")
+              (options . (((label . "Yes")))))))
+          (ert-info ((format "%s" "waterfall-prompt-defers-out-of-dispatcher"))
+            (should scheduled)
+            (should-not prompted)
+            (should (= 1 (length dsh-emacs--question-queue))))
+          ;; The host cancels while the prompt is still only scheduled.
+          (dsh-emacs--question-cancelled "wf-defer")
+          (funcall scheduled)
+          (ert-info ((format "%s" "scheduled-prompt-skips-cancelled-waterfall"))
+            (should-not prompted)
+            (should (null dsh-emacs--question-queue))
+            (should (null dsh-emacs--interaction-active))))
+      (when (buffer-live-p chat) (kill-buffer chat)))))
+
+(ert-deftest dsh-emacs-test-questions-cancelled-before-read-skips-prompt ()
+  :tags '(dsh-unit)
+  (let ((chat (get-buffer-create " *dsh-test-question-precancel*"))
+        (prompted nil)
+        (responded nil)
+        (dsh-emacs--interaction-active '(question . "wf-pre"))
+        (dsh-emacs--waterfall-cancelled-event-id "wf-pre")
+        (dsh-emacs-enable-notifications nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'dsh-emacs--collect-question-answers)
+                   (lambda (&rest _) (setq prompted t) nil))
+                  ((symbol-function 'dsh-emacs--events-result-async)
+                   (lambda (&rest _) (setq responded t))))
+          (dsh-emacs--question-answer
+           (list chat "wf-pre" "sess-pre"
+                 '(((id . "q1") (question . "Proceed?"))) nil))
+          (ert-info ((format "%s" "cancelled-before-read-skips-prompt"))
+            (should-not prompted)
+            (should-not responded)))
+      (when (buffer-live-p chat) (kill-buffer chat)))))
+
+;; A native dialog cannot be dismissed by the remote `cancel' frame; the
+;; approval reader must stay in the minibuffer it documents.
+(ert-deftest dsh-emacs-test-questions-approval-prompt-forces-minibuffer ()
+  :tags '(dsh-unit)
+  (let ((seen 'unset))
+    (let ((use-dialog-box t))
+      (cl-letf (((symbol-function 'y-or-n-p)
+                 (lambda (&rest _)
+                   (setq seen use-dialog-box)
+                   t)))
+        (dsh-emacs--approval-prompt "sess-a" "bash" "why" nil)))
+    (ert-info ((format "%s" "approval-prompt-forces-minibuffer"))
+      (should (eq seen nil)))))
+
+;; Approvals are deferred like questions, and a cancel that lands before the
+;; scheduled drain runs must leave nothing to ask.
+(ert-deftest dsh-emacs-test-questions-approval-prompt-defers-out-of-dispatcher ()
+  :tags '(dsh-unit)
+  (let ((chat (get-buffer-create " *dsh-test-approval-defer*"))
+        (scheduled nil)
+        (prompted nil)
+        (responded nil)
+        (dsh-emacs--question-queue nil)
+        (dsh-emacs--approval-queue nil)
+        (dsh-emacs--interaction-active nil)
+        (dsh-emacs--waterfall-cancelled-event-id nil)
+        (dsh-emacs-events--dispatching t)
+        (dsh-emacs-enable-notifications nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'run-at-time)
+                   (lambda (_time _repeat function &rest args)
+                     (setq scheduled (lambda () (apply function args)))
+                     'scheduled-timer))
+                  ((symbol-function 'dsh-emacs--approval-prompt)
+                   (lambda (&rest _) (setq prompted t) t))
+                  ((symbol-function 'dsh-emacs--events-result-async)
+                   (lambda (&rest _) (setq responded t))))
+          (dsh-emacs--approval-requested
+           chat "wf-ap-defer" "sess-ap" "bash" "why" nil)
+          (ert-info ((format "%s" "approval-prompt-defers-out-of-dispatcher"))
+            (should scheduled)
+            (should-not prompted)
+            (should (= 1 (length dsh-emacs--approval-queue))))
+          (dsh-emacs--approval-cancelled "wf-ap-defer")
+          (funcall scheduled)
+          (ert-info ((format "%s" "scheduled-approval-skips-cancelled-waterfall"))
+            (should-not prompted)
+            (should-not responded)
+            (should (null dsh-emacs--approval-queue))
+            (should (null dsh-emacs--interaction-active))))
+      (when (buffer-live-p chat) (kill-buffer chat)))))
+
+(ert-deftest dsh-emacs-test-questions-approval-cancelled-before-read-skips-prompt ()
+  :tags '(dsh-unit)
+  (let ((chat (get-buffer-create " *dsh-test-approval-precancel*"))
+        (prompted nil)
+        (responded nil)
+        (dsh-emacs--interaction-active '(approval . "wf-ap-pre"))
+        (dsh-emacs--waterfall-cancelled-event-id "wf-ap-pre"))
+    (unwind-protect
+        (cl-letf (((symbol-function 'dsh-emacs--approval-prompt)
+                   (lambda (&rest _) (setq prompted t) t))
+                  ((symbol-function 'dsh-emacs--events-result-async)
+                   (lambda (&rest _) (setq responded t))))
+          (dsh-emacs--approval-answer
+           (list chat "wf-ap-pre" "sess-ap" "bash" "why" nil))
+          (ert-info ((format "%s" "approval-cancelled-before-read-skips-prompt"))
+            (should-not prompted)
+            (should-not responded)))
+      (when (buffer-live-p chat) (kill-buffer chat)))))
+
+;; The late-answer picker uses the `(late-answer)' slot, which is not a
+;; waterfall: its cdr is nil like an uncancelled flag, so the pre-read guard
+;; must not mistake it for a cancelled question.
+(ert-deftest dsh-emacs-test-questions-late-answer-slot-is-not-cancelled ()
+  :tags '(dsh-unit)
+  (let ((dsh-emacs--interaction-active '(late-answer))
+        (dsh-emacs--waterfall-cancelled-event-id nil)
+        (choices 0))
+    (cl-letf (((symbol-function 'dsh-emacs--question-choice)
+               (lambda (&rest _)
+                 (setq choices (1+ choices))
+                 '((id . "q1") (selected . ("A"))))))
+      (ert-info ((format "%s" "late-answer-slot-is-not-cancelled"))
+        (should-not (dsh-emacs--waterfall-cancelled-p))
+        (should (equal
+                 (dsh-emacs--collect-question-answers
+                  '(((id . "q1") (question . "Proceed?"))) "sess-late")
+                 '(((id . "q1") (selected . ("A"))))))
+        (should (= 1 choices))))))
+
 (provide 'dsh-test-questions)
 ;;; dsh-test-questions.el ends here

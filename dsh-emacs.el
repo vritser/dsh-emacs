@@ -4758,6 +4758,28 @@ distinguish remote resolution from the user's `C-g'."
     (when (active-minibuffer-window)
       (abort-recursive-edit))))
 
+(defun dsh-emacs--waterfall-cancelled-p ()
+  "Non-nil when the active waterfall was cancelled by the host.
+The host sends a `cancel' frame when another client answers; the active
+event id is matched so a stale flag can never suppress a later prompt.
+Only a question or approval slot is a waterfall: the late-answer slot is
+`(late-answer)', whose cdr is nil like an uncancelled flag."
+  (and (memq (car-safe dsh-emacs--interaction-active) '(question approval))
+       (equal (cdr dsh-emacs--interaction-active)
+              dsh-emacs--waterfall-cancelled-event-id)))
+
+(defun dsh-emacs--interaction-run (kind)
+  "Answer queued waterfalls of KIND without blocking the event dispatcher.
+A reader is synchronous once started.  Starting it inside
+`dsh-emacs-events--dispatch-pending' would keep that dispatcher from
+consuming the host's `cancel' frame while the prompt is open, so a waterfall
+another client already answered could never close here.  Schedule a
+zero-delay drain from the dispatcher; direct callers (tests, commands) keep
+opening the reader immediately."
+  (if (bound-and-true-p dsh-emacs-events--dispatching)
+      (run-at-time 0 nil #'dsh-emacs--interaction-drain kind)
+    (dsh-emacs--interaction-drain kind)))
+
 (defun dsh-emacs--interaction-drain (kind)
   "Answer queued waterfalls, starting with KIND (question or approval).
 Each kind is FIFO: finish its queue before switching to the other kind.
@@ -4830,10 +4852,11 @@ claim until its asynchronous response arrives; other exits release it."
                           chat session-id
                           (dsh-protocol-question-wait-call-id wait))))
               (let ((answers
-                     (when (buffer-live-p chat)
-                       (with-current-buffer chat
-                         (dsh-emacs--collect-question-answers
-                          questions session-id)))))
+                     (unless (dsh-emacs--waterfall-cancelled-p)
+                       (when (buffer-live-p chat)
+                         (with-current-buffer chat
+                           (dsh-emacs--collect-question-answers
+                            questions session-id))))))
                 (cond
                  ((equal event-id dsh-emacs--waterfall-cancelled-event-id)
                   (message "Question was answered elsewhere"))
@@ -4906,6 +4929,7 @@ Safe on nil."
 ;; dsh-emacs-events.el.  The bare (defvar X) form asserts existence without
 ;; binding a default, so the owner's own defvar is not shadowed.
 (defvar dsh-emacs-events--client-id)
+(defvar dsh-emacs-events--dispatching)
 
 (defconst dsh-emacs--question-skip-label "Skip this question"
   "Internal sentinel for skipping one question with an empty selection.
@@ -5249,6 +5273,8 @@ C-g propagates to the caller, which declines the waterfall."
     (catch 'abort
       (dolist (q questions)
         (setq n (1+ n))
+        (when (dsh-emacs--waterfall-cancelled-p)
+          (throw 'abort nil))
         (let ((answer (dsh-emacs--question-choice q n total session-id)))
           (if (null answer) (throw 'abort nil)
             (push answer answers))))
@@ -5337,7 +5363,7 @@ Explicit plan-review intent opens a document without occupying the minibuffer."
                                (format " (+%d more)" (1- count))
                              ""))))
         (dsh-emacs-notify--post session-id body chat))))
-  (dsh-emacs--interaction-drain 'question))
+  (dsh-emacs--interaction-run 'question))
 
 (defun dsh-emacs--question-decline (event-id)
   "Abandon a whole `user-questions/request' waterfall EVENT-ID.
@@ -5546,21 +5572,22 @@ buffer-local transcript state."
     (let ((sent nil))
       (condition-case err
           (let ((allow
-                 (condition-case nil
-                     (if (buffer-live-p chat)
-                         (with-current-buffer chat
-                           (dsh-emacs--approval-prompt
-                            session-id tool-name reason call-id))
-                       (dsh-emacs--approval-prompt
-                        session-id tool-name reason call-id))
-                   ;; A remote cancel must reach the outer handler without
-                   ;; becoming the user's default rejection.
-                   (quit
-                    (if (equal event-id
-                               dsh-emacs--waterfall-cancelled-event-id)
-                        (signal 'quit nil)
-                      (message "Approval %s quit — rejecting" event-id)
-                      nil)))))
+                 (unless (dsh-emacs--waterfall-cancelled-p)
+                   (condition-case nil
+                       (if (buffer-live-p chat)
+                           (with-current-buffer chat
+                             (dsh-emacs--approval-prompt
+                              session-id tool-name reason call-id))
+                         (dsh-emacs--approval-prompt
+                          session-id tool-name reason call-id))
+                     ;; A remote cancel must reach the outer handler without
+                     ;; becoming the user's default rejection.
+                     (quit
+                      (if (equal event-id
+                                 dsh-emacs--waterfall-cancelled-event-id)
+                          (signal 'quit nil)
+                        (message "Approval %s quit — rejecting" event-id)
+                        nil))))))
             (if (equal event-id dsh-emacs--waterfall-cancelled-event-id)
                 (message "Approval was answered elsewhere")
               (dsh-emacs--events-result-async
@@ -5650,7 +5677,11 @@ the same rejection (an unanswered frame would block the host forever)."
            ;; colors above would be wiped by `minibuffer-prompt'.
            (list 'read-only t
                  'point-entered #'dsh-emacs--avoid-minibuffer-prompt)))
-      (y-or-n-p prompt))))
+      ;; `y-or-n-p' may otherwise use a native dialog (after a mouse event),
+      ;; which `abort-recursive-edit' cannot close when another client
+      ;; answers; the documented approval reader is the minibuffer.
+      (let ((use-dialog-box nil))
+        (y-or-n-p prompt)))))
 
 (defun dsh-emacs--approval-requested (chat event-id session-id tool-name
                                              reason call-id)
@@ -5690,7 +5721,7 @@ process filter: Quit\"."
              (body (format "Approval%s"
                            (if detail (format ": %s" detail) ""))))
         (dsh-emacs-notify--post session-id body chat))))
-  (dsh-emacs--interaction-drain 'approval))
+  (dsh-emacs--interaction-run 'approval))
 
 (defun dsh-emacs--approval-cancelled (event-id)
   "Retire the queued `approval/request' waterfall EVENT-ID.

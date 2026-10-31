@@ -798,6 +798,12 @@ in the current chat.  Inbox is owned by the control stream."
   "Maximum seconds of business-message dispatch before yielding to Emacs.
 A single message is atomic and may exceed this budget.")
 
+(defvar dsh-emacs-events--dispatching nil
+  "Non-nil while the WebSocket dispatcher runs a batch of business messages.
+Waterfall prompts check this so they open outside the dispatcher: a reader
+started here would keep the dispatcher from consuming the host's `cancel'
+frame (sent when another client answers) until the local user acted.")
+
 (defun dsh-emacs-events--cancel-dispatch (process)
   "Cancel queued business messages and continuation for PROCESS."
   (when (processp process)
@@ -824,7 +830,8 @@ consumer dispatches business messages.  Keep an already-pending timer's
 deadline when more input arrives."
   (unless (or (process-get process 'dsh-emacs-event-draining)
               (process-get process 'dsh-emacs-event-dispatch-timer))
-    (let ((deadline (+ (float-time) dsh-emacs-events--dispatch-budget)))
+    (let ((dsh-emacs-events--dispatching t)
+          (deadline (+ (float-time) dsh-emacs-events--dispatch-budget)))
       (process-put process 'dsh-emacs-event-draining t)
       (unwind-protect
           (condition-case err

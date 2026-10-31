@@ -861,6 +861,13 @@ Remote cancellation must match both kind and event id before closing a
 minibuffer. Plan documents bypass this slot. See
 [decision record 124](../postmortem/124-shared-interaction-owner.md).
 
+Prompts are scheduled outside the WebSocket dispatcher: while a message batch
+is dispatching, `dsh-emacs--interaction-run` starts the reader from a
+zero-delay timer so a host `cancel` frame (another client answered) can still
+be consumed. Approval prompts also bind `use-dialog-box` nil, because a native
+dialog cannot be aborted by that frame. See
+[decision record 165](../postmortem/165-prompt-dispatcher.md).
+
 dsh 0.2.0's **timed** form adds two rules on top of that reader, without
 changing it. While a timed question owns the answer slot, its handler claims the
 host's foreground wait with `userQuestions/attachWait` (a stream on the chat

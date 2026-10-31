@@ -125,6 +125,12 @@ minor) and stay undated until the release is cut.
   including when `dsh-emacs-default-preset` names a preset the server no
   longer has. (rationale: postmortem/156)
 
+- **Approval and question prompts close when another client answers**: the
+  readers now start outside the WebSocket dispatcher, so the host's `cancel`
+  frame is dispatched while the prompt waits; approval prompts also stay in
+  the minibuffer instead of a native dialog that a remote cancel cannot
+  dismiss. (rationale: [postmortem/165](postmortem/165-prompt-dispatcher.md))
+
 ### Changed
 
 - **Static command-row status**: slash-command and local `!` command rows no
