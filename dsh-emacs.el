@@ -16,7 +16,7 @@
 ;;
 ;; Main features:
 ;; - Session list (card view)
-;; - Chat buffer (with tool-call and reasoning folding)
+;; - Chat buffer (with tool-call and thinking folding)
 ;; - Mode-line stats (cwd, git branch, model, tokens, ctx%, cost)
 ;; - Markdown rendering
 ;;
@@ -143,17 +143,6 @@ Opening a fresh chat completes only the latest round;
 are completed with additional bounded requests.  A smaller batch reduces
 per-response parsing work but requires more network round trips."
   :type 'integer
-  :group 'dsh-emacs)
-
-(defcustom dsh-emacs-show-reasoning t
-  "Whether to show reasoning content.  Enabled by default, matching dsh web
-(the web always shows the Think line).  Set to nil for a leaner transcript."
-  :type 'boolean
-  :group 'dsh-emacs)
-
-(defcustom dsh-emacs-show-tool-calls t
-  "Whether to show tool calls."
-  :type 'boolean
   :group 'dsh-emacs)
 
 (defcustom dsh-emacs-default-cwd default-directory

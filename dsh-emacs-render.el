@@ -114,10 +114,11 @@ Nil keeps all formatting synchronous."
                  (integer :tag "Characters"))
   :group 'dsh-emacs)
 
-(defcustom dsh-emacs-show-reasoning t
-  "Whether to show reasoning (reasoning / thinking) content in the transcript.
-On by default, matching dsh web (the web UI always shows the Think row);
-set to nil for a leaner transcript."
+(defcustom dsh-emacs-show-thinking t
+  "Whether to show thinking (reasoning) content in the transcript.
+The UI row is the Think row; the wire content kind is `reasoning'.  On by
+default, matching dsh web (the web UI always shows the Think row); set to
+nil for a leaner transcript."
   :type 'boolean
   :group 'dsh-emacs-render)
 
@@ -1746,7 +1747,7 @@ the transcript's input point, so `reasoning-delta' chunks stay cheap to append;
 fragment once the authoritative reasoning text arrives.  With `inline' the
 first delta renders the collapsed fragment itself and later deltas refresh
 it."
-  (when (and dsh-emacs-show-reasoning
+  (when (and dsh-emacs-show-thinking
              (stringp text) (not (string-empty-p text)))
     (let* ((key (dsh-protocol-stream-key--from-alist event))
            (index (dsh-protocol-chunk-index--from-alist event))
@@ -2527,7 +2528,7 @@ submission was pending.  Reply text and per-turn facts remain unchanged."
          ;; If reasoning arrives only in the final message, reserve its
          ;; position before text is inserted or its live markers released.
          (reasoning-position
-          (when (and dsh-emacs-show-reasoning (not (string-empty-p reasoning)))
+          (when (and dsh-emacs-show-thinking (not (string-empty-p reasoning)))
             (copy-marker
              (or (plist-get (car (last (plist-get step :text-regions))) :start)
                  (and (equal key (plist-get dsh-emacs--streaming-assistant
@@ -2580,14 +2581,14 @@ submission was pending.  Reply text and per-turn facts remain unchanged."
      ;; a block added or removed by the correction falls back to the folded
      ;; row, which then still sits before the answer.
      ((and (eq dsh-emacs-thinking-style 'inline)
-           dsh-emacs-show-reasoning
+           dsh-emacs-show-thinking
            (plist-get step :thinking-regions)
            (dsh-emacs-render--reconcile-inline-thinking step content)))
      ((not (equal (plist-get step :reasoning) reasoning))
       ;; The `expand' style replaces the old fragments where they first
       ;; appeared, rather than appending the corrected body after text.
       (let ((position (dsh-emacs-render--drop-committed-thinking step)))
-        (when (and dsh-emacs-show-reasoning (not (string-empty-p reasoning)))
+        (when (and dsh-emacs-show-thinking (not (string-empty-p reasoning)))
           (dsh-emacs-render--render-thinking-block
            ns block-id reasoning
            (or position reasoning-position))))))
@@ -4562,7 +4563,7 @@ Returns the record-ordered content as one newline-joined string."
       (let ((type (dsh-protocol-assistant-record-type record)))
         (pcase type
           ((or "text-chunks" "reasoning-chunks")
-           (when (or dsh-emacs-show-reasoning
+           (when (or dsh-emacs-show-thinking
                      (equal type "text-chunks"))
              (let ((text (apply #'concat
                                 (dsh-protocol-assistant-record-texts record))))

@@ -88,9 +88,9 @@
     (should (equal (dsh-emacs-render--assistant-stream-text records)
                    "think\n→ bash {\"command\":\"ls\"}\nreply"))))
 
-(ert-deftest dsh-emacs-test-render-attempt-stream-text-respects-reasoning-option ()
+(ert-deftest dsh-emacs-test-render-attempt-stream-text-respects-thinking-option ()
   :tags '(dsh-unit)
-  (let ((dsh-emacs-show-reasoning nil)
+  (let ((dsh-emacs-show-thinking nil)
         (records (dsh-protocol--assistant-records
                   '[((type . "reasoning-chunks") (texts . ["hidden think"]))])))
     (should (equal (dsh-emacs-render--assistant-stream-text records) ""))))

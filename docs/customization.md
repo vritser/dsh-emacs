@@ -103,8 +103,8 @@ The most commonly used options, straight in your config:
 (setq dsh-emacs-server-auth-token nil)         ; launch token for dsh web 0.1.2-rc.1+; nil = auto-captured from a server dsh-emacs starts itself.  Set it for a server YOU run externally (a fresh random value every server restart).  When pointing at an external auth-requiring server with no token set, dsh-emacs asks you for it; a token that successfully authenticates is remembered here automatically (saved), so the next session reuses it — only a stale token (validation fails after a server restart) re-prompts, pre-filled for editing.  Successful authentication also caches the cookie instead of showing a Basic username/password prompt
 (setq dsh-emacs-history-window 30)                  ; maximum messages per opening or older-history network batch
 (setq dsh-emacs-history-rounds 3)                  ; complete earlier user+assistant rounds per C-c C-o; opening always completes only one
-(setq dsh-emacs-show-reasoning t)                  ; show reasoning content (on by default; nil = hide, unlike dsh web)
-(setq dsh-emacs-thinking-style 'expand)            ; live reasoning: expand = stream the body then fold (default); inline = dsh web's compact collapsed row with a running paragraph preview
+(setq dsh-emacs-show-thinking t)                   ; show thinking content in the Think rows (on by default; nil = hide, unlike dsh web)
+(setq dsh-emacs-thinking-style 'expand)            ; live thinking: expand = stream the body then fold (default); inline = dsh web's compact collapsed row with a running paragraph preview
 (setq dsh-emacs-show-tool-calls t)                 ; show tool calls
 (setq dsh-emacs-stream-markdown-limit 8192)        ; pending characters before idle formatting; nil = synchronous
 (setq dsh-emacs-default-cwd default-directory)     ; fallback working directory for new sessions (interactive ones use the current buffer's default-directory first)

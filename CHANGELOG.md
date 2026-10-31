@@ -16,6 +16,11 @@ minor) and stay undated until the release is cut.
   body, and that fold state persists. `inline` already started collapsed.
   (rationale: [postmortem/164](postmortem/164-thinking-inline-style.md))
 
+- **Rename the thinking visibility option**: `dsh-emacs-show-reasoning` is now
+  `dsh-emacs-show-thinking`, matching the Think row and the other `thinking-*`
+  options. Update any `setq` in your configuration; the wire content kind stays
+  `reasoning`. (rationale: [postmortem/166](postmortem/166-show-thinking-rename.md))
+
 ### Added
 
 - **Copy session id**: `M-x dsh-emacs-copy-session-id` copies the current

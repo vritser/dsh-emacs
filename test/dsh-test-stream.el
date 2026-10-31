@@ -1059,10 +1059,10 @@
         (should (string-match-p "second tail disconnect" (buffer-string)))
         (should (null (plist-get dsh-emacs--streaming-thinking :timer)))))))
 
-(ert-deftest dsh-emacs-test-stream-thinking-show-reasoning-defaults-on ()
+(ert-deftest dsh-emacs-test-stream-thinking-show-defaults-on ()
   :tags '(dsh-unit)
-  (ert-info ((format "%s" "thinking-show-reasoning-defaults-on"))
-    (should dsh-emacs-show-reasoning)))
+  (ert-info ((format "%s" "thinking-show-defaults-on"))
+    (should dsh-emacs-show-thinking)))
 
 (ert-deftest dsh-emacs-test-stream-thinking-stream-renders-live-block ()
   :tags '(dsh-unit)
@@ -1128,7 +1128,7 @@
   (with-temp-buffer
     (dsh-emacs-mode)
     (dsh-emacs-modeline-setup)
-    (let ((dsh-emacs-show-reasoning nil))
+    (let ((dsh-emacs-show-thinking nil))
       (dsh-emacs-render-event
        (json-read-from-string
         "{\"type\":\"assistant/chunk\",\"seq\":1,\"data\":{\"turn\":1,\"step\":1,\"chunk\":{\"type\":\"reasoning-delta\",\"index\":0,\"text\":\"should be hidden\"}}}"))

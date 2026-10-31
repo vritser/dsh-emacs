@@ -2337,7 +2337,7 @@ not enter the transcript; they instead feed the modeline's `step N` badge
 renders as a compact outcome card (initially `Incomplete reply`) rebuilt in order
 from the packed records of `data.stream`
 (`reasoning-chunks`/`tool-call-chunks`/`text-chunks`) (reasoning is subject to
-`dsh-emacs-show-reasoning`); if that attempt still has a live streaming body when
+`dsh-emacs-show-thinking`); if that attempt still has a live streaming body when
 it settles, the live body is taken over by the card rather than drawn twice;
 `session/end-seed` advances the event sequence anchor without rendering a row;
 the restore boundary is internal bookkeeping, not conversation content.
