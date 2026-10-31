@@ -15,7 +15,7 @@ emitted when another client answers — is queued but not dispatched. The prompt
 could not close until the local user answered. Approval `y-or-n-p` could also
 choose a native dialog, which `abort-recursive-edit` cannot dismiss.
 
-Commits: 3dd49c8 (bounded dispatch); fix pending.
+Commits: 3dd49c8 (bounded dispatch), f22e625 (this fix).
 
 ## Decision
 
