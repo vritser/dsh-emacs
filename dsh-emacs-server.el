@@ -130,7 +130,7 @@ on every single invocation.")
 (defconst dsh-emacs--server-alive-ttl 2.0
   "Seconds a cached liveness result stays valid.")
 
-(defconst dsh-emacs-server-default-base-url "http://127.0.0.1:3080"
+(defconst dsh-emacs--server-default-base-url "http://127.0.0.1:3080"
   "Fallback server address when `dsh-emacs-base-url' is not yet loaded.
 `dsh-emacs-base-url' is defined in dsh-emacs.el (the package entry), which
 always loads this module first at package load; the fallback only matters
@@ -158,7 +158,7 @@ server.  Reset whenever a fresh server is spawned.")
 actually builds a request URL."
   (if (boundp 'dsh-emacs-base-url)
       dsh-emacs-base-url
-    dsh-emacs-server-default-base-url))
+    dsh-emacs--server-default-base-url))
 
 (defun dsh-emacs--server-base-url ()
   "The server URL to probe and start: `dsh-emacs-base-url' or the default.

@@ -525,8 +525,8 @@
 ;; Inline child rows use the same catalog and direct-parent navigation as chats.
 (ert-deftest dsh-emacs-test-subagent-session-children-start-collapsed ()
   :tags '(dsh-unit)
-  (let* ((dsh-emacs-sessions-buffer (generate-new-buffer-name " *dsh-child-list*"))
-         (buffer (get-buffer-create dsh-emacs-sessions-buffer))
+  (let* ((dsh-emacs--sessions-buffer (generate-new-buffer-name " *dsh-child-list*"))
+         (buffer (get-buffer-create dsh-emacs--sessions-buffer))
          (dsh-emacs--subagent-catalogs (make-hash-table :test #'equal))
          (dsh-emacs--chat-buffers (make-hash-table :test #'equal))
          (dsh-emacs--subagent-host-live nil)
@@ -693,8 +693,8 @@
 
 (ert-deftest dsh-emacs-test-subagent-session-child-open-fetches-missing-ancestor-catalog ()
   :tags '(dsh-unit)
-  (let* ((dsh-emacs-sessions-buffer (generate-new-buffer-name " *dsh-child-reveal*"))
-         (buffer (get-buffer-create dsh-emacs-sessions-buffer))
+  (let* ((dsh-emacs--sessions-buffer (generate-new-buffer-name " *dsh-child-reveal*"))
+         (buffer (get-buffer-create dsh-emacs--sessions-buffer))
          (dsh-emacs--subagent-catalogs (make-hash-table :test #'equal))
          (dsh-emacs--chat-buffers (make-hash-table :test #'equal))
          (dsh-emacs--current-session "another-chat")
@@ -898,7 +898,7 @@
         (dsh-emacs--buffer-session "anim-parent")
         (dsh-emacs--buffer-subagent nil)
         (dsh-emacs--subagent-host-live t)
-        (dsh-emacs-sessions-buffer " *dsh-test-no-sessions*")
+        (dsh-emacs--sessions-buffer " *dsh-test-no-sessions*")
         (dsh-emacs--chat-buffers (make-hash-table :test #'equal))
         (dsh-emacs--sessions
          (list (dsh-protocol-session--from-alist '((sessionId . "a") (running . t)))
@@ -1014,7 +1014,7 @@
         (dsh-emacs--buffer-session "activity-parent")
         (dsh-emacs--buffer-subagent nil)
         (dsh-emacs--subagent-host-live t)
-        (dsh-emacs-sessions-buffer " *dsh-test-no-sessions*")
+        (dsh-emacs--sessions-buffer " *dsh-test-no-sessions*")
         (dsh-emacs--chat-buffers (make-hash-table :test #'equal))
         (dsh-emacs--sessions
          (list (dsh-protocol-session--from-alist
@@ -1050,7 +1050,7 @@
   (let* ((dsh-emacs--subagent-catalogs (make-hash-table :test #'equal))
          (dsh-emacs--chat-buffers (make-hash-table :test #'equal))
          (dsh-emacs--subagent-host-live t)
-         (dsh-emacs-sessions-buffer " *dsh-test-no-sessions*")
+         (dsh-emacs--sessions-buffer " *dsh-test-no-sessions*")
          (dsh-emacs--sessions
           (list (dsh-protocol-session--from-alist
                  '((sessionId . "cached-child") (running . t)))))

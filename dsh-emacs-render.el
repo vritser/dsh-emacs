@@ -112,7 +112,7 @@ This also applies to final-only replies and messages loaded from history.
 Nil keeps all formatting synchronous."
   :type '(choice (const :tag "Always synchronous" nil)
                  (integer :tag "Characters"))
-  :group 'dsh-emacs)
+  :group 'dsh-emacs-render)
 
 (defcustom dsh-emacs-show-thinking t
   "Whether to show thinking (reasoning) content in the transcript.
@@ -194,25 +194,20 @@ leaves elapsed time in the Completed summary.  Turns are not aggregated.
 Existing rows are not automatically redrawn when this option changes."
   :type '(repeat (choice (const copy) (const fork)
                          (const usage) (const duration)))
-  :group 'dsh-emacs)
+  :group 'dsh-emacs-render)
 
 (defcustom dsh-emacs-max-tool-result-chars 80
   "Maximum number of characters in the tool-result preview."
   :type 'integer
   :group 'dsh-emacs-render)
 
-(defcustom dsh-emacs-tool-call-chars 100
+(defcustom dsh-emacs-max-tool-call-chars 100
   "Maximum number of characters in the tool-call arguments preview."
   :type 'integer
   :group 'dsh-emacs-render)
 
-(defcustom dsh-emacs-tool-preview-lines 8
-  "Maximum number of lines in the collapsed tool-call preview."
-  :type 'integer
-  :group 'dsh-emacs-render)
-
 (defcustom dsh-emacs-max-buffer-size 200000
-  "Maximum character count of the chat transcript buffer.
+  "Maximum size of the chat transcript buffer, in characters.
 When the buffer exceeds this size old content is trimmed from the top, never
 past the editable input area.  Trimming is deferred while loading an older
 page, while a displayed window is not following new output, and when the
@@ -4577,7 +4572,7 @@ Returns the record-ordered content as one newline-joined string."
                     (concat "→ " (or name "tool")
                             (unless (string-empty-p args)
                               (concat " " args)))
-                    dsh-emacs-tool-call-chars)
+                    dsh-emacs-max-tool-call-chars)
                    parts))))))
     (mapconcat #'identity (nreverse parts) "\n")))
 

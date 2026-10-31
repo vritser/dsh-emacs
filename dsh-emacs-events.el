@@ -114,7 +114,7 @@ generation and a new clientId.")
 (defvar dsh-emacs--sessions)
 (defvar dsh-emacs--chat-buffers)
 (defvar dsh-emacs--current-session)
-(defvar dsh-emacs-sessions-buffer)
+(defvar dsh-emacs--sessions-buffer)
 (defvar dsh-emacs--workspaces)
 (defvar dsh-emacs--archived-sessions)
 ;; Owned by dsh-emacs-render.el (`defvar-local', default 0); the dispatch
@@ -1270,9 +1270,9 @@ host paints its empty state from `dsh-emacs-list-sessions-display' and
 the fetch's own drain, which are not gated."
   (when (and (not dsh-emacs-events--defer-host-repaint)
              (consp dsh-emacs--sessions)
-             dsh-emacs-sessions-buffer
-             (get-buffer dsh-emacs-sessions-buffer))
-    (with-current-buffer (get-buffer dsh-emacs-sessions-buffer)
+             dsh-emacs--sessions-buffer
+             (get-buffer dsh-emacs--sessions-buffer))
+    (with-current-buffer (get-buffer dsh-emacs--sessions-buffer)
       (dsh-emacs-session--render))))
 
 (defun dsh-emacs-events--host-frame-record (frame)
@@ -1795,8 +1795,8 @@ newer reorder.  The prior stream is therefore cancelled first (its frames
 are dropped once the host closes it), then a fresh one is opened and its
 id recorded.  Returns non-nil when a core process existed and the request
 was sent."
-  (let* ((list-buf (and (boundp 'dsh-emacs-sessions-buffer)
-                        (get-buffer dsh-emacs-sessions-buffer)))
+  (let* ((list-buf (and (boundp 'dsh-emacs--sessions-buffer)
+                        (get-buffer dsh-emacs--sessions-buffer)))
          (proc (and list-buf
                     (buffer-local-value 'dsh-emacs--host-process list-buf))))
     (when (and (processp proc) (process-live-p proc))

@@ -975,7 +975,7 @@
          (chat-buf (generate-new-buffer " *dsh-test-title-chat*"))
          (list-buf (generate-new-buffer "*dsh-sessions*"))
          (proc (make-pipe-process :name "t-title" :buffer nil))
-         (old-sessions-buffer dsh-emacs-sessions-buffer)
+         (old-sessions-buffer dsh-emacs--sessions-buffer)
          (json (concat "{\"type\":\"item\",\"streamId\":\"t1\","
                        "\"value\":{\"type\":\"event\","
                        "\"event\":{\"type\":\"session/title\","
@@ -1004,7 +1004,7 @@
                   (dsh-emacs-session--filter-ws-id nil)
                   (dsh-emacs-session--filter-ws-title nil))
               (dsh-emacs-session--render))
-            (setq dsh-emacs-sessions-buffer (buffer-name)))
+            (setq dsh-emacs--sessions-buffer (buffer-name)))
           ;; Follow stream frames go through --dispatch-json: the process binds
           ;; follow-stream-id and chat-buf.
           (process-put proc 'dsh-emacs-follow-stream-id "t1")
@@ -1030,7 +1030,7 @@
             (should (string-match-p "auto summary title" (buffer-name chat-buf)))))
       (setq dsh-emacs--sessions old-sessions)
       (setq dsh-emacs--chat-buffers old-buffers)
-      (setq dsh-emacs-sessions-buffer old-sessions-buffer)
+      (setq dsh-emacs--sessions-buffer old-sessions-buffer)
       (when (buffer-live-p chat-buf) (kill-buffer chat-buf))
       (when (buffer-live-p list-buf) (kill-buffer list-buf))
       (when (process-live-p proc) (delete-process proc)))))
@@ -1135,7 +1135,7 @@
   :tags '(dsh-unit)
   (let* ((old-sessions dsh-emacs--sessions)
          (old-workspaces dsh-emacs--workspaces)
-         (old-sessions-buffer dsh-emacs-sessions-buffer)
+         (old-sessions-buffer dsh-emacs--sessions-buffer)
          (ws (dsh-protocol-workspace--from-alist
               (list (cons 'workspaceId "w-race")
                     (cons 'title "Race WS")
@@ -1146,7 +1146,7 @@
         (progn
           (setq dsh-emacs--sessions nil)
           (setq dsh-emacs--workspaces (list ws))
-          (setq dsh-emacs-sessions-buffer (buffer-name list-buf))
+          (setq dsh-emacs--sessions-buffer (buffer-name list-buf))
           ;; 1) The core event arrives first: api-session/added puts s-new into
           ;; the sessions cache (no owner)
           (dsh-emacs-events--host-dispatch
@@ -1192,7 +1192,7 @@
                                            (plist-get ws-group :sessions))))))))
       (setq dsh-emacs--sessions old-sessions)
       (setq dsh-emacs--workspaces old-workspaces)
-      (setq dsh-emacs-sessions-buffer old-sessions-buffer)
+      (setq dsh-emacs--sessions-buffer old-sessions-buffer)
       (when (buffer-live-p list-buf) (kill-buffer list-buf)))))
 
 ;; --- Test 78: a new session carries agentPreset ---

@@ -12,7 +12,7 @@
 ;; `session/list' (nor re-baseline workspaces).
 (ert-deftest dsh-emacs-test-workspace-warm-open-costs-no-rpc ()
   :tags '(dsh-unit)
-  (let ((dsh-emacs-sessions-buffer (generate-new-buffer-name " *dsh-workspace-test*"))
+  (let ((dsh-emacs--sessions-buffer (generate-new-buffer-name " *dsh-workspace-test*"))
         (dsh-emacs--sessions nil)
         (calls 0)
         (dsh-emacs--current-session "warm")
@@ -39,7 +39,7 @@
             (ert-info ((format "%s" "warm-open-costs-no-rpc"))
               (should (zerop calls)))
             (ert-info ((format "%s" "warm-open-renders-and-jumps"))
-              (should (with-current-buffer dsh-emacs-sessions-buffer
+              (should (with-current-buffer dsh-emacs--sessions-buffer
                         (equal "warm" (dsh-emacs-session-id-at-point))))))
           ;; cold cache: nothing to show, so it fetches
           (setq calls 0
@@ -47,8 +47,8 @@
           (dsh-emacs-list-sessions-display)
           (ert-info ((format "%s" "cold-open-fetches"))
             (should (= 1 calls))))
-      (when (get-buffer dsh-emacs-sessions-buffer)
-        (kill-buffer dsh-emacs-sessions-buffer)))))
+      (when (get-buffer dsh-emacs--sessions-buffer)
+        (kill-buffer dsh-emacs--sessions-buffer)))))
 
 ;; C-c C-l belongs to the invoking chat even when another chat was opened
 ;; more recently.  Exercise the keymap and real window switch, including a
@@ -56,7 +56,7 @@
 (ert-deftest dsh-emacs-test-workspace-chat-list-cold-jump-keeps-caller-target ()
   :tags '(dsh-unit)
   (dolist (cold '(nil t))
-    (let* ((dsh-emacs-sessions-buffer
+    (let* ((dsh-emacs--sessions-buffer
             (generate-new-buffer-name " *dsh-chat-list-jump*"))
            (dsh-emacs--current-session "last-opened")
            (dsh-emacs--workspaces nil)
@@ -78,7 +78,7 @@
                 (setq-local dsh-emacs--buffer-session "invoking-chat")
                 (switch-to-buffer (current-buffer))
                 (execute-kbd-macro (kbd "C-c C-l"))
-                (with-current-buffer dsh-emacs-sessions-buffer
+                (with-current-buffer dsh-emacs--sessions-buffer
                   (when cold
                     (ert-info ((format "%s" "chat-list-cold-jump-keeps-caller-target"))
                       (should (equal dsh-emacs-session--auto-jump-session "invoking-chat")))
@@ -91,8 +91,8 @@
                   (dsh-emacs-session--render)
                   (ert-info ((format "%s" (format "chat-list-refresh-keeps-caller-cold-%s" cold)))
                     (should (equal (dsh-emacs-session-id-at-point) "invoking-chat")))))))
-        (when (get-buffer dsh-emacs-sessions-buffer)
-          (kill-buffer dsh-emacs-sessions-buffer))))))
+        (when (get-buffer dsh-emacs--sessions-buffer)
+          (kill-buffer dsh-emacs--sessions-buffer))))))
 
 ;; Project entry captures the caller's directory before displaying the list.
 (ert-deftest dsh-emacs-test-workspace-project-entry-captures-caller-directory ()
@@ -133,7 +133,7 @@
 (ert-deftest dsh-emacs-test-workspace-project-entry-missing-workspace-keeps-session ()
   :tags '(dsh-unit)
   (let* ((root (make-temp-file "dsh-entry-project-" t))
-         (dsh-emacs-sessions-buffer " *dsh-project-entry*")
+         (dsh-emacs--sessions-buffer " *dsh-project-entry*")
          (dsh-emacs-base-url "http://127.0.0.1:3000")
          (dsh-emacs--current-session "previous")
          (dsh-emacs--archived-sessions nil)
@@ -156,7 +156,7 @@
               (setq default-directory (file-name-as-directory
                                        (expand-file-name "src" root)))
               (dsh-emacs))
-            (with-current-buffer dsh-emacs-sessions-buffer
+            (with-current-buffer dsh-emacs--sessions-buffer
               (ert-info ((format "%s" "project-entry-missing-workspace-keeps-session"))
                 (should (equal "previous" (dsh-emacs-session-id-at-point))))
               (ert-info ((format "%s" "project-entry-retains-root-until-workspace-arrives"))
@@ -189,25 +189,25 @@
             (with-temp-buffer
               (setq default-directory (file-name-as-directory root))
               (dsh-emacs))
-            (with-current-buffer dsh-emacs-sessions-buffer
+            (with-current-buffer dsh-emacs--sessions-buffer
               (ert-info ((format "%s" "project-entry-warm-cache-prefers-project"))
                 (should (equal "project" (dsh-emacs-workspace-id-at-point)))
                 (should (null dsh-emacs-session--auto-jump-session))))
             ;; Opening without a project replaces an earlier pending target.
             (dsh-emacs-list-sessions-display "/tmp/missing-project")
             (dsh-emacs-list-sessions-display)
-            (with-current-buffer dsh-emacs-sessions-buffer
+            (with-current-buffer dsh-emacs--sessions-buffer
               (ert-info ((format "%s" "project-entry-normal-open-clears-pending-project"))
                 (should (null dsh-emacs-session--auto-jump-project))
                 (should (equal "previous" (dsh-emacs-session-id-at-point)))))))
-      (when (get-buffer dsh-emacs-sessions-buffer)
-        (kill-buffer dsh-emacs-sessions-buffer))
+      (when (get-buffer dsh-emacs--sessions-buffer)
+        (kill-buffer dsh-emacs--sessions-buffer))
       (delete-directory root t))))
 
 ;; Explicit list interaction supersedes an unfinished project/session jump.
 (ert-deftest dsh-emacs-test-workspace-project-open-selects-list-before-centering ()
   :tags '(dsh-unit)
-  (let* ((dsh-emacs-sessions-buffer " *dsh-project-navigation*")
+  (let* ((dsh-emacs--sessions-buffer " *dsh-project-navigation*")
          (dsh-emacs--current-session nil)
          (dsh-emacs--archived-sessions nil)
          (dsh-emacs--sessions nil)
@@ -226,7 +226,7 @@
                     ((symbol-function 'dsh-emacs-list-sessions) #'ignore))
             (dsh-emacs-list-sessions-display "/tmp/dsh-navigation-45")
             (ert-info ((format "%s" "project-open-selects-list-before-centering"))
-              (should (eq (window-buffer) (get-buffer dsh-emacs-sessions-buffer)))
+              (should (eq (window-buffer) (get-buffer dsh-emacs--sessions-buffer)))
               (should (equal "w45" (dsh-emacs-workspace-id-at-point)))
               (should (<= (abs (- (count-screen-lines (window-start) (point))
                                   (/ (window-body-height) 2))) 1)))
@@ -267,7 +267,7 @@
               (let ((recenters 0))
                 (cl-letf (((symbol-function 'recenter)
                            (lambda (&rest _) (setq recenters (1+ recenters)))))
-                  (with-current-buffer dsh-emacs-sessions-buffer
+                  (with-current-buffer dsh-emacs--sessions-buffer
                     (setq dsh-emacs-session--auto-jump-project
                           "/tmp/dsh-navigation-55")
                     (dsh-emacs-session--render)))
@@ -294,7 +294,7 @@
             (dsh-emacs-list-sessions-display)
             (ert-info ((format "%s" "project-no-jump-open-keeps-row"))
               (should (equal "w1" (dsh-emacs-workspace-id-at-point))))))
-      (dolist (name (list dsh-emacs-sessions-buffer " *dsh-project-other*"))
+      (dolist (name (list dsh-emacs--sessions-buffer " *dsh-project-other*"))
         (when (get-buffer name) (kill-buffer name))))))
 
 ;; 4) Non-workspace context: no workspaceId (ungrouped), only cwd
@@ -500,7 +500,7 @@
   (let* ((old-sessions dsh-emacs--sessions)
          (old-workspaces dsh-emacs--workspaces)
          (old-archived dsh-emacs--archived-sessions)
-         (old-sessions-buffer dsh-emacs-sessions-buffer)
+         (old-sessions-buffer dsh-emacs--sessions-buffer)
          (list-buf (get-buffer-create " *dsh-host-test-list*")))
     (unwind-protect
         (progn
@@ -513,7 +513,7 @@
           (with-current-buffer list-buf
             (erase-buffer)
             (insert "placeholder"))
-          (setq dsh-emacs-sessions-buffer (buffer-name list-buf))
+          (setq dsh-emacs--sessions-buffer (buffer-name list-buf))
 
           ;; 1) workspace/follow upsert: a new workspace enters the cache
           ;; (including sessionIds)
@@ -667,13 +667,13 @@
           (setq dsh-emacs--sessions old-sessions)
           (setq dsh-emacs--workspaces old-workspaces)
           (setq dsh-emacs--archived-sessions old-archived)
-          (setq dsh-emacs-sessions-buffer old-sessions-buffer)
+          (setq dsh-emacs--sessions-buffer old-sessions-buffer)
           (when (buffer-live-p list-buf) (kill-buffer list-buf))))))
 
 (ert-deftest dsh-emacs-test-workspace-session-notices-replay-original-summary ()
   :tags '(dsh-unit)
   (dolist (decoded '(nil t))
-    (let ((dsh-emacs-sessions-buffer
+    (let ((dsh-emacs--sessions-buffer
            (generate-new-buffer-name " *session-notices*"))
           (dsh-emacs--sessions nil)
           (dsh-emacs--chat-buffers (make-hash-table :test 'equal))
@@ -723,7 +723,7 @@
 (ert-deftest dsh-emacs-test-workspace-stream-changes-survive-refresh ()
   :tags '(dsh-unit)
   (dolist (decoded '(nil t))
-    (let* ((dsh-emacs-sessions-buffer
+    (let* ((dsh-emacs--sessions-buffer
             (generate-new-buffer-name " *workspace-stream*"))
            (dsh-emacs--sessions nil)
            (dsh-emacs--workspaces nil)
@@ -781,7 +781,7 @@
                   ((("items" . []) ("archivedSessionIds" . ["new"]))
                    nil ("new"))))
     (pcase-let* ((`(,payload ,ids ,archived) case)
-                 (dsh-emacs-sessions-buffer
+                 (dsh-emacs--sessions-buffer
                   (generate-new-buffer-name " *workspace-baseline*"))
                  (dsh-emacs--sessions nil)
                  (dsh-emacs--workspaces
@@ -815,12 +815,12 @@
   :tags '(dsh-unit)
   (let* ((old-workspaces dsh-emacs--workspaces)
          (old-archived dsh-emacs--archived-sessions)
-         (old-sessions-buffer dsh-emacs-sessions-buffer))
+         (old-sessions-buffer dsh-emacs--sessions-buffer))
     (unwind-protect
         (progn
           (setq dsh-emacs--workspaces nil)
           (setq dsh-emacs--archived-sessions nil)
-          (setq dsh-emacs-sessions-buffer nil) ; host-repaint skips without a list buffer
+          (setq dsh-emacs--sessions-buffer nil) ; host-repaint skips without a list buffer
           ;; 1) workspace/follow baseline (real wire shape: payload under value)
           (dsh-emacs-events--host-dispatch
            'host-proc
@@ -852,7 +852,7 @@
               (should (equal '("w-b1") ids)))))
       (setq dsh-emacs--workspaces old-workspaces)
       (setq dsh-emacs--archived-sessions old-archived)
-      (setq dsh-emacs-sessions-buffer old-sessions-buffer))))
+      (setq dsh-emacs--sessions-buffer old-sessions-buffer))))
 
 ;; --- Test 67: workspace ordering move-workspace (insertBefore) ---
 ;; The web side's drag-to-reorder calls workspace/insertBefore (always
@@ -934,7 +934,7 @@
 ;; are replayed in arrival order.
 (ert-deftest dsh-emacs-test-workspace-refresh-replays-workspace-frames ()
   :tags '(dsh-unit)
-  (let* ((dsh-emacs-sessions-buffer (generate-new-buffer-name " *dsh-workspace-test*"))
+  (let* ((dsh-emacs--sessions-buffer (generate-new-buffer-name " *dsh-workspace-test*"))
          (old-sessions dsh-emacs--sessions)
          (old-workspaces dsh-emacs--workspaces)
          (old-archived dsh-emacs--archived-sessions)
@@ -1055,7 +1055,7 @@
           (setq dsh-emacs--sessions
                 (dsh-emacs-test--session-items
                  (list (list (cons 'sessionId "s-a") (cons 'blank :json-false)))))
-          (let ((buf (get-buffer-create dsh-emacs-sessions-buffer))
+          (let ((buf (get-buffer-create dsh-emacs--sessions-buffer))
                 (renders 0))
             (unwind-protect
                 (progn
@@ -1166,7 +1166,7 @@
         (dsh-emacs--current-session "old-session")
         (dsh-emacs--current-buffer nil)
         (dsh-emacs-new-session-auto-project nil)
-        (dsh-emacs-sessions-buffer " *draft-test-list*")
+        (dsh-emacs--sessions-buffer " *draft-test-list*")
         (requests nil)
         (connected nil)
         (drafts nil)
@@ -1925,7 +1925,7 @@
   :tags '(dsh-unit)
   (let ((dsh-emacs--chat-buffers (make-hash-table :test #'equal))
         (dsh-emacs--subagent-catalogs (make-hash-table :test #'equal))
-        (dsh-emacs-sessions-buffer (generate-new-buffer-name " *absent-list*"))
+        (dsh-emacs--sessions-buffer (generate-new-buffer-name " *absent-list*"))
         (goal (dsh-protocol-goal--from-alist
                '((objective . "Keep this goal") (phase . "active"))))
         (items (list (dsh-emacs-test--queue-item "keep" "queued" "Keep this input"))))
@@ -1956,7 +1956,7 @@
   :tags '(dsh-unit)
   (let* ((dsh-emacs--chat-buffers (make-hash-table :test #'equal))
          (dsh-emacs--subagent-catalogs (make-hash-table :test #'equal))
-         (dsh-emacs-sessions-buffer (generate-new-buffer-name " *absent-list*"))
+         (dsh-emacs--sessions-buffer (generate-new-buffer-name " *absent-list*"))
          (first (dsh-protocol-session--from-alist '((sessionId . "before"))))
          (later (dsh-protocol-session--from-alist '((sessionId . "migration"))))
          (dsh-emacs--sessions (list first later)))
@@ -1976,8 +1976,8 @@
 ;; A host baseline is one UI update, regardless of the number of sessions.
 (ert-deftest dsh-emacs-test-workspace-session-baseline-repaints-once-after-all-caches ()
   :tags '(dsh-unit)
-  (let* ((dsh-emacs-sessions-buffer (generate-new-buffer-name " *dsh-list-batch*"))
-         (buffer (get-buffer-create dsh-emacs-sessions-buffer))
+  (let* ((dsh-emacs--sessions-buffer (generate-new-buffer-name " *dsh-list-batch*"))
+         (buffer (get-buffer-create dsh-emacs--sessions-buffer))
          (dsh-emacs--subagent-catalogs (make-hash-table :test #'equal))
          (dsh-emacs--chat-buffers (make-hash-table :test #'equal))
          (dsh-emacs--workspaces nil)

@@ -59,7 +59,7 @@ rows without elapsed time. Mid-turn input also prevents whole-turn folding.
 In these cases all replies remain visible, while contiguous thinking/tool cards
 between replies still fold into separate activity summaries. Even one card can
 form a group. Summaries count distinct calls by category, not files or steps;
-reasoning-only groups say **Analysis completed**.
+thinking-only groups say **Analysis completed**.
 Successful turns can fold their process even without a final answer. A turn
 with no process content has only a non-foldable completion row. Active and
 unknown-ending tasks do not receive a whole-turn disclosure.

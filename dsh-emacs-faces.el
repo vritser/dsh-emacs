@@ -108,16 +108,6 @@
   :type 'string
   :group 'dsh-emacs-faces)
 
-(defcustom dsh-emacs-color-tool-pending-bg "#fff7e6"
-  "Tool pending background (light)."
-  :type 'string
-  :group 'dsh-emacs-faces)
-
-(defcustom dsh-emacs-color-tool-pending-bg-dark "#2a2118"
-  "Tool pending background (dark)."
-  :type 'string
-  :group 'dsh-emacs-faces)
-
 (defcustom dsh-emacs-color-tool-success-border "#1a7f37"
   "Tool success border (light)."
   :type 'string
@@ -125,16 +115,6 @@
 
 (defcustom dsh-emacs-color-tool-success-border-dark "#5dd879"
   "Tool success border (dark)."
-  :type 'string
-  :group 'dsh-emacs-faces)
-
-(defcustom dsh-emacs-color-tool-success-bg "#e6f7ec"
-  "Tool success background (light)."
-  :type 'string
-  :group 'dsh-emacs-faces)
-
-(defcustom dsh-emacs-color-tool-success-bg-dark "#172821"
-  "Tool success background (dark)."
   :type 'string
   :group 'dsh-emacs-faces)
 
@@ -148,16 +128,6 @@
   :type 'string
   :group 'dsh-emacs-faces)
 
-(defcustom dsh-emacs-color-tool-error-bg "#fdecec"
-  "Tool error background (light)."
-  :type 'string
-  :group 'dsh-emacs-faces)
-
-(defcustom dsh-emacs-color-tool-error-bg-dark "#2c1818"
-  "Tool error background (dark)."
-  :type 'string
-  :group 'dsh-emacs-faces)
-
 (defcustom dsh-emacs-color-thinking "#b45f06"
   "Thinking block color (light)."
   :type 'string
@@ -165,16 +135,6 @@
 
 (defcustom dsh-emacs-color-thinking-dark "#f0a63c"
   "Thinking block color (dark)."
-  :type 'string
-  :group 'dsh-emacs-faces)
-
-(defcustom dsh-emacs-color-thinking-bg "#fdf6e3"
-  "Thinking block background (light)."
-  :type 'string
-  :group 'dsh-emacs-faces)
-
-(defcustom dsh-emacs-color-thinking-bg-dark "#1f1b16"
-  "Thinking block background (dark)."
   :type 'string
   :group 'dsh-emacs-faces)
 
@@ -821,75 +781,6 @@ so a user customization is not lost if that derivation is added later."
 (defface dsh-emacs-approval-command-face
   '((t :inherit shadow))
   "Approval prompt tool command (gray)."
-  :group 'dsh-emacs-faces)
-
-;;; ---------------------------------------------------------------------------
-;;;  Markdown faces
-;;; ---------------------------------------------------------------------------
-
-(defface dsh-emacs-markdown-heading-face
-  '((t :inherit font-lock-function-name-face :weight bold :height 1.2))
-  "Markdown heading."
-  :group 'dsh-emacs-faces)
-
-(defface dsh-emacs-markdown-bold-face
-  '((t :weight bold))
-  "Markdown bold text."
-  :group 'dsh-emacs-faces)
-
-(defface dsh-emacs-markdown-italic-face
-  '((t :slant italic))
-  "Markdown italic text."
-  :group 'dsh-emacs-faces)
-
-(defface dsh-emacs-markdown-strikethrough-face
-  '((t :strike-through t))
-  "Markdown strikethrough text."
-  :group 'dsh-emacs-faces)
-
-(defface dsh-emacs-markdown-code-face
-  '((t :inherit font-lock-string-face))
-  "Markdown inline code."
-  :group 'dsh-emacs-faces)
-
-(defface dsh-emacs-markdown-code-block-face
-  '((t :inherit font-lock-string-face :background "gray20"))
-  "Markdown code block."
-  :group 'dsh-emacs-faces)
-
-(defface dsh-emacs-markdown-link-face
-  '((t :inherit font-lock-keyword-face :underline t))
-  "Markdown link text."
-  :group 'dsh-emacs-faces)
-
-(defface dsh-emacs-markdown-link-url-face
-  '((t :inherit font-lock-string-face :underline t))
-  "Markdown link URL."
-  :group 'dsh-emacs-faces)
-
-(defface dsh-emacs-markdown-list-marker-face
-  '((t :inherit font-lock-builtin-face :weight bold))
-  "Markdown list marker."
-  :group 'dsh-emacs-faces)
-
-(defface dsh-emacs-markdown-quote-face
-  '((t :inherit font-lock-comment-face :slant italic))
-  "Markdown blockquote."
-  :group 'dsh-emacs-faces)
-
-(defface dsh-emacs-markdown-table-border-face
-  '((t :inherit font-lock-comment-face))
-  "Markdown table borders."
-  :group 'dsh-emacs-faces)
-
-(defface dsh-emacs-markdown-table-header-face
-  '((t :weight bold))
-  "Markdown table header cells."
-  :group 'dsh-emacs-faces)
-
-(defface dsh-emacs-markdown-divider-face
-  '((t :inherit font-lock-comment-face))
-  "Markdown horizontal rule."
   :group 'dsh-emacs-faces)
 
 ;;; ---------------------------------------------------------------------------

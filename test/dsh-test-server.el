@@ -82,7 +82,7 @@
                   (dsh-emacs--interaction-active nil)
                   (dsh-emacs--question-queue nil)
                   (dsh-emacs--approval-queue nil)
-                  (dsh-emacs-sessions-buffer " *dsh-e2e-auth-test*")
+                  (dsh-emacs--sessions-buffer " *dsh-e2e-auth-test*")
                   observed)
               (cl-letf (((symbol-function 'dsh-emacs--server-auth-token)
                          (lambda () dsh-emacs-server-auth-token))

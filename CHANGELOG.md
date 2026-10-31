@@ -21,6 +21,22 @@ minor) and stay undated until the release is cut.
   options. Update any `setq` in your configuration; the wire content kind stays
   `reasoning`. (rationale: [postmortem/166](postmortem/166-show-thinking-rename.md))
 
+- **Remove inert transcript options**: `dsh-emacs-tool-preview-lines` and the
+  eight unused `-bg` palette options (`dsh-emacs-color-tool-{pending,success,error}-bg`,
+  `dsh-emacs-color-thinking-bg` and their `-dark` forms) never affected
+  rendering; remove them from configurations.
+  (rationale: [postmortem/167](postmortem/167-inert-surface-cleanup.md))
+
+- **Rename the tool-call preview cap**: `dsh-emacs-tool-call-chars` is now
+  `dsh-emacs-max-tool-call-chars`, matching `dsh-emacs-max-tool-result-chars`.
+  (rationale: [postmortem/167](postmortem/167-inert-surface-cleanup.md))
+
+- **Remove unused Markdown faces**: the thirteen `dsh-emacs-markdown-*-face`
+  definitions in `dsh-emacs-faces.el` never rendered transcript Markdown; the
+  converter uses the `dsh-emacs-markdown-*` faces in `dsh-emacs-markdown.el`.
+  Remove any `custom-set-faces` entries for the `-face` names.
+  (rationale: [postmortem/167](postmortem/167-inert-surface-cleanup.md))
+
 ### Added
 
 - **Copy session id**: `M-x dsh-emacs-copy-session-id` copies the current
@@ -137,6 +153,10 @@ minor) and stay undated until the release is cut.
   dismiss. (rationale: [postmortem/165](postmortem/165-prompt-dispatcher.md))
 
 ### Changed
+
+- **Group render options with the renderer**: `dsh-emacs-stream-markdown-limit`
+  and `dsh-emacs-reply-footer-items` now appear in the `dsh-emacs-render` Custom
+  group; their names, defaults and behavior are unchanged.
 
 - **Static command-row status**: slash-command and local `!` command rows no
   longer run the `-\|/` timer animation.  The leading dot/icon and pending

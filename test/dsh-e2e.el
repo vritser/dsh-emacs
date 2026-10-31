@@ -94,7 +94,7 @@ A token without a saved base URL belongs only to the default local server."
             (let ((token (cdr (assq 'dsh-emacs-server-auth-token settings)))
                   (saved-base (if-let* ((entry (assq 'dsh-emacs-base-url settings)))
                                   (cdr entry)
-                                dsh-emacs-server-default-base-url)))
+                                dsh-emacs--server-default-base-url)))
               (when (and (stringp token) (not (string-empty-p token))
                          (stringp saved-base)
                          (equal base
@@ -575,7 +575,7 @@ waterfalls, wait claims, HTTP replies and projections all come from the host."
                   (dsh-emacs-interrupt-turn)
                   (dsh-e2e--check "subagent-real-stop-settles"
                                   (dsh-e2e--wait-until (lambda () (not (dsh-emacs--busy-p))) 30)))
-                (with-current-buffer (get-buffer dsh-emacs-sessions-buffer)
+                (with-current-buffer (get-buffer dsh-emacs--sessions-buffer)
                   (dsh-emacs-events-host-disconnect)
                   (dsh-e2e--check "subagent-disconnect-closes-input"
                                   (buffer-local-value 'buffer-read-only chat))
@@ -698,8 +698,8 @@ in flight across the reopen."
              (if (eq (car target) dsh-e2e--chat)
                  "list-navigation-returns-to-earlier-chat"
                "list-navigation-returns-to-latest-chat")
-             (and (eq (window-buffer) (get-buffer dsh-emacs-sessions-buffer))
-                  (with-current-buffer dsh-emacs-sessions-buffer
+             (and (eq (window-buffer) (get-buffer dsh-emacs--sessions-buffer))
+                  (with-current-buffer dsh-emacs--sessions-buffer
                     (equal (dsh-emacs-session-id-at-point) (cdr target)))))))
       (when (buffer-live-p other-chat)
         (dsh-emacs-events-disconnect other-chat)
@@ -739,7 +739,7 @@ DSH_E2E_PRESET selects the preset; existing chats and connections are preserved.
          (kill-ring-yank-pointer kill-ring)
          (interprogram-cut-function nil)
          (modeline-enabled dsh-emacs-modeline-enabled)
-         (core (get-buffer dsh-emacs-sessions-buffer))
+         (core (get-buffer dsh-emacs--sessions-buffer))
          (core-process (and core (buffer-local-value 'dsh-emacs--host-process core)))
          (core-connected (and (processp core-process) (process-live-p core-process)))
          (dsh-e2e--results nil)
@@ -767,7 +767,7 @@ DSH_E2E_PRESET selects the preset; existing chats and connections are preserved.
                   (lambda ()
                     (and dsh-emacs-events--client-id
                          (buffer-local-value 'dsh-emacs--host-ready
-                                             (get-buffer dsh-emacs-sessions-buffer))))
+                                             (get-buffer dsh-emacs--sessions-buffer))))
                   10))
 
                 (let* ((preset (getenv "DSH_E2E_PRESET"))
@@ -970,7 +970,7 @@ DSH_E2E_PRESET selects the preset; existing chats and connections are preserved.
                  "session-list-loaded"
                  (dsh-e2e--wait-until #'dsh-e2e--session-cached-p 10)
                  "created session did not appear in the session cache")
-                (with-current-buffer dsh-emacs-sessions-buffer
+                (with-current-buffer dsh-emacs--sessions-buffer
                   (dsh-e2e--check "session-list-mode"
                                   (eq major-mode 'dsh-emacs-session-mode))
                   (dsh-e2e--check "session-list-rendered"
@@ -997,7 +997,7 @@ DSH_E2E_PRESET selects the preset; existing chats and connections are preserved.
           (dsh-emacs-events-disconnect dsh-e2e--chat)
           (kill-buffer dsh-e2e--chat))
         (unless core-connected
-          (when-let* ((list-buffer (get-buffer dsh-emacs-sessions-buffer)))
+          (when-let* ((list-buffer (get-buffer dsh-emacs--sessions-buffer)))
             (with-current-buffer list-buffer
               (dsh-emacs-events-host-disconnect))))
         (unless (eq dsh-emacs-modeline-enabled modeline-enabled)

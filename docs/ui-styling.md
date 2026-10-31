@@ -326,13 +326,13 @@ more lines), rather than showing a bare title.
 | `dsh-emacs-thinking-face` | Live Think icon/dot; in `full`, also the "Think" label (bold accent) |
 | `dsh-emacs-thinking-body-face` | Reasoning preview and expanded body (muted) |
 
-The collapsed row shows a preview of the first reasoning sentence on the right
+The collapsed row shows a preview of the first thinking sentence on the right
 (`dsh-emacs-thinking-preview-max` controls the maximum length; longer content is
 truncated with `...`; set to 0 to disable). In `full`, the amber accent covers
 the icon and the "Think" label. In `simple`, the live dot is amber while
-reasoning streams, then settles to the muted `dsh-emacs-event-row-face` when
+thinking streams, then settles to the muted `dsh-emacs-event-row-face` when
 the fragment is complete; the label is muted throughout. The preview and the
-expanded reasoning body use the muted body face at normal weight in both styles.
+expanded thinking body use the muted body face at normal weight in both styles.
 
 ## Fragment styling for extensions
 
@@ -492,7 +492,7 @@ formatter skips its passes entirely. Bottom detection and scroll pinning use
 each window's screen rows, including line wrapping, while preserving each
 window's input cursor. See [031](../postmortem/031-stream-frontier-and-screen-rows.md).
 
-Large first chunks, queued reply/reasoning bursts and corrected replies keep
+Large first chunks, queued reply/thinking bursts and corrected replies keep
 the windows that were following immediately before the edit pinned afterward.
 The check happens when the text is written, so scrolling up while a timer is
 pending still takes effect. Partial-line formatting keeps one assistant base
@@ -561,8 +561,8 @@ that wrap call, so later renders use the current text and font settings.
 | `dsh-emacs-markdown-table-border` | Table border |
 | `dsh-emacs-markdown-table-zebra` | Table zebra striping |
 
-Customize the faces above for transcript Markdown. The renderer does not use
-the `dsh-emacs-markdown-*-face` definitions in `dsh-emacs-faces.el`.
+Customize the faces above for transcript Markdown; they are defined in
+`dsh-emacs-markdown.el`.
 
 ## Example: customize the tool card colors
 

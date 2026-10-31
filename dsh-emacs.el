@@ -136,15 +136,6 @@ snappier keys."
   :type 'string
   :group 'dsh-emacs)
 
-(defcustom dsh-emacs-history-window 30
-  "Maximum messages per history request, including the opening snapshot.
-Opening a fresh chat completes only the latest round;
-`dsh-emacs-history-rounds' controls manual older-history loads.  Long rounds
-are completed with additional bounded requests.  A smaller batch reduces
-per-response parsing work but requires more network round trips."
-  :type 'integer
-  :group 'dsh-emacs)
-
 (defcustom dsh-emacs-default-cwd default-directory
   "Fallback working directory for new sessions.
 Interactive new sessions take the current buffer's `default-directory'
@@ -984,9 +975,9 @@ arrives."
             (cons session-id
                   (dsh-protocol-workspace-session-ids ws))))
     (when (and (listp dsh-emacs--sessions)
-               dsh-emacs-sessions-buffer
-               (get-buffer dsh-emacs-sessions-buffer))
-      (with-current-buffer (get-buffer dsh-emacs-sessions-buffer)
+               dsh-emacs--sessions-buffer
+               (get-buffer dsh-emacs--sessions-buffer))
+      (with-current-buffer (get-buffer dsh-emacs--sessions-buffer)
         (dsh-emacs-session--render))))
   session-id)
 
@@ -1892,9 +1883,9 @@ no immediate re-baseline is attempted on a not-yet-handshaken socket."
   (interactive)
   (dsh-emacs-server-ensure)
   (unless (dsh-emacs-events--core-workspace-rebaseline)
-    (when (and dsh-emacs-sessions-buffer
-               (get-buffer dsh-emacs-sessions-buffer))
-      (with-current-buffer (get-buffer dsh-emacs-sessions-buffer)
+    (when (and dsh-emacs--sessions-buffer
+               (get-buffer dsh-emacs--sessions-buffer))
+      (with-current-buffer (get-buffer dsh-emacs--sessions-buffer)
         (dsh-emacs-events-host-connect)))))
 
 ;;;###autoload
@@ -4390,7 +4381,7 @@ and fetches any missing catalogs.  A cold session cache is fetched as before;
 `g' and `dsh-emacs-list-sessions' remain the explicit refresh."
   (interactive)
   (let ((session-id (dsh-emacs--active-session-id))
-        (buf (get-buffer-create dsh-emacs-sessions-buffer)))
+        (buf (get-buffer-create dsh-emacs--sessions-buffer)))
     ;; Re-opening a live list must not re-run the major mode: that runs
     ;; `kill-all-local-variables', which wipes the buffer's fold overrides
     ;; (so groups the user folded with TAB come back expanded), its workspace

@@ -8,7 +8,7 @@
   :tags '(dsh-unit)
   (dolist (snapshot-time '(nil 50 150))
     (let ((dsh-emacs--sessions nil)
-          (dsh-emacs-sessions-buffer nil)
+          (dsh-emacs--sessions-buffer nil)
           (dsh-emacs--host-refresh-depth 0)
           (dsh-emacs--host-refresh-frames nil))
       (dsh-emacs-events--host-refresh-begin)
@@ -43,7 +43,7 @@
                (dsh-emacs--sessions
                 (and cached (list (dsh-protocol-session--from-alist
                                    '((sessionId . "model-session"))))))
-               (dsh-emacs-sessions-buffer (generate-new-buffer-name " *absent-list*"))
+               (dsh-emacs--sessions-buffer (generate-new-buffer-name " *absent-list*"))
                (selection '((lastUsed . ((provider . "new-provider")
                                          (model . "new-model")))
                             (next . ((provider . "next-provider")
@@ -78,7 +78,7 @@
            (dsh-emacs--sessions nil)
            (dsh-emacs--host-refresh-depth 0)
            (dsh-emacs--host-refresh-frames nil)
-           (dsh-emacs-sessions-buffer (generate-new-buffer-name " *absent-list*"))
+           (dsh-emacs--sessions-buffer (generate-new-buffer-name " *absent-list*"))
            callback)
       (puthash "model-refresh" (current-buffer) dsh-emacs--chat-buffers)
       (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
@@ -135,7 +135,7 @@
              (dsh-emacs--sessions nil)
              (dsh-emacs--host-refresh-depth 0)
              (dsh-emacs--host-refresh-frames nil)
-             (dsh-emacs-sessions-buffer (generate-new-buffer-name " *absent-list*"))
+             (dsh-emacs--sessions-buffer (generate-new-buffer-name " *absent-list*"))
              (snapshot
               (dsh-protocol-read-json
                (concat "{\"cursor\":20,\"records\":[{\"type\":\"event\",\"event\":{"
@@ -228,7 +228,7 @@
         (setq-local dsh-emacs--buffer-session "follow-shapes")
         (let* ((dsh-emacs--chat-buffers (make-hash-table :test 'equal))
                (dsh-emacs--subagent-catalogs (make-hash-table :test 'equal))
-               (dsh-emacs-sessions-buffer (generate-new-buffer-name " *absent-list*"))
+               (dsh-emacs--sessions-buffer (generate-new-buffer-name " *absent-list*"))
                (goal (dsh-protocol-goal--from-alist
                       '((objective . "Existing goal") (phase . "active"))))
                (questions (dsh-protocol-user-questions--from-alist nil 3))
@@ -261,7 +261,7 @@
       (setq-local dsh-emacs--buffer-session "follow-order")
       (let* ((dsh-emacs--chat-buffers (make-hash-table :test 'equal))
              (dsh-emacs--subagent-catalogs (make-hash-table :test 'equal))
-             (dsh-emacs-sessions-buffer (generate-new-buffer-name " *absent-list*"))
+             (dsh-emacs--sessions-buffer (generate-new-buffer-name " *absent-list*"))
              (session (dsh-protocol-session--from-alist '((sessionId . "follow-order"))))
              (dsh-emacs--sessions (list session))
              (items (list (dsh-emacs-test--queue-item "keep" "queued" "Keep input")))

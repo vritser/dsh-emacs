@@ -369,7 +369,7 @@ window's own point behind, which the session list now preserves per window."
                               (updatedAt . ,n)))))
          (snapshot (mapcar #'copy-dsh-protocol-session dsh-emacs--sessions)))
     (with-temp-buffer
-      (let ((dsh-emacs-sessions-buffer (buffer-name)))
+      (let ((dsh-emacs--sessions-buffer (buffer-name)))
         (dsh-emacs-session--render)
         (should-not (dsh-emacs-session--row-pos
                      'dsh-emacs-row-id '(:recents "s1")))
@@ -946,7 +946,7 @@ window's own point behind, which the session list now preserves per window."
                               (cons 'sessionIds ["s2"]))))))
             (dsh-emacs-list-sessions-display)
             ;; the user folds WS B
-            (with-current-buffer dsh-emacs-sessions-buffer
+            (with-current-buffer dsh-emacs--sessions-buffer
               (goto-char (point-min))
               (search-forward "WS B")
               (beginning-of-line)
@@ -954,16 +954,16 @@ window's own point behind, which the session list now preserves per window."
             ;; ... and re-opens the list
             (dsh-emacs-list-sessions-display)
             (ert-info ((format "%s" "reopen-keeps-folded-group"))
-              (should (with-current-buffer dsh-emacs-sessions-buffer
+              (should (with-current-buffer dsh-emacs--sessions-buffer
                         (dsh-emacs-session--workspace-collapsed-p "w2"))))
             (ert-info ((format "%s" "reopen-keeps-folded-session-hidden"))
               (should (not (string-match-p
                             "Two"
-                            (with-current-buffer dsh-emacs-sessions-buffer
+                            (with-current-buffer dsh-emacs--sessions-buffer
                               (buffer-substring-no-properties (point-min)
                                                               (point-max)))))))))
-      (when (get-buffer dsh-emacs-sessions-buffer)
-        (kill-buffer dsh-emacs-sessions-buffer)))))
+      (when (get-buffer dsh-emacs--sessions-buffer)
+        (kill-buffer dsh-emacs--sessions-buffer)))))
 
 (ert-deftest dsh-emacs-test-session-workspace-fold-default-collapsed ()
   :tags '(dsh-unit)

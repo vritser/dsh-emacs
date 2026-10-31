@@ -86,16 +86,10 @@
 
 ;; Defvars for cross-file caches owned by dsh-emacs.el, so native
 ;; compilation does not treat the reads as free-variable errors.
-(defvar dsh-emacs--sessions nil
-  "Cached session struct list (owned by dsh-emacs.el).")
-(defvar dsh-emacs--workspaces nil
-  "Cached workspace struct list (owned by dsh-emacs.el).")
-(defvar dsh-emacs--archived-sessions nil
-  "Archived session ids (owned by dsh-emacs.el).")
-(defvar dsh-emacs--current-session nil
-  "Globally active session (the last opened one); owned by dsh-emacs.el.
-Interactively resolve command targets through `dsh-emacs--active-session-id'
-(see the authoritative defvar in dsh-emacs.el).")
+(defvar dsh-emacs--sessions)
+(defvar dsh-emacs--workspaces)
+(defvar dsh-emacs--archived-sessions)
+(defvar dsh-emacs--current-session)
 ;; Declare-only forward forms for buffer-local filter state defined further
 ;; down (the header/render uses near the top precede their `defvar-local').
 (defvar dsh-emacs-session--filter-ws-id)
@@ -108,7 +102,7 @@ Interactively resolve command targets through `dsh-emacs--active-session-id'
 ;;; Buffer and mode
 ;;; ---------------------------------------------------------------------------
 
-(defvar dsh-emacs-sessions-buffer "*dsh-sessions*"
+(defvar dsh-emacs--sessions-buffer "*dsh-sessions*"
   "Buffer name for the session list.")
 
 (defvar-local dsh-emacs-session--auto-jump-session nil

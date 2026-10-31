@@ -21,7 +21,6 @@
 (defvar dsh-emacs--buffer-session)
 (defvar dsh-emacs--buffer-subagent)
 (defvar dsh-emacs--input-marker)
-(defvar dsh-emacs-history-window)
 (declare-function dsh-emacs--seed-input-history "dsh-emacs"
                   (events session-id &optional older))
 (declare-function dsh-emacs--active-session-id "dsh-emacs" ())
@@ -57,6 +56,15 @@ Other windows keep their reading positions; the draft is left untouched."
     (user-error "This buffer has no chat input"))
   (goto-char (point-max))
   (recenter -1))
+
+(defcustom dsh-emacs-history-window 30
+  "Maximum messages per history request, including the opening snapshot.
+Opening a fresh chat completes only the latest round;
+`dsh-emacs-history-rounds' controls manual older-history loads.  Long rounds
+are completed with additional bounded requests.  A smaller batch reduces
+per-response parsing work but requires more network round trips."
+  :type 'integer
+  :group 'dsh-emacs)
 
 (defcustom dsh-emacs-history-rounds 3
   "Number of complete earlier human rounds fetched by
