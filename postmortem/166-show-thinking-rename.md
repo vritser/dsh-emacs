@@ -14,6 +14,8 @@ owns it) and `dsh-emacs.el`, with different docstrings and Custom groups.  The
 entry-file copy loaded last, so it shadowed the renderer's docstring and put the
 option in both `dsh-emacs` and `dsh-emacs-render`.
 
+Commits: ba34a5e.
+
 ## Decision
 
 Rename the public option to `dsh-emacs-show-thinking` without an alias, keep its

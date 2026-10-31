@@ -23,6 +23,8 @@ Finally, `dsh-emacs-history-window` was defined in `dsh-emacs.el` while every
 reader lived in `dsh-emacs-history.el` / `dsh-emacs-events.el`, and two render
 options sat in the top-level Custom group instead of `dsh-emacs-render`.
 
+Commits: ef08314.
+
 ## Decision
 
 Remove the nine inert options, rename `dsh-emacs-tool-call-chars` to
