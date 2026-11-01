@@ -112,6 +112,20 @@ minor) and stay undated until the release is cut.
   `kill-buffer` now retires its `job/follow` handler like `q` does, instead
   of leaving the subscription on the chat socket until the job ends.
 
+- **Re-opening a job from another chat moves the output subscription**: the
+  previous chat's `job/follow` stream is cancelled on the socket that opened
+  it, and closing that chat no longer kills a view the new chat still owns.
+
+- **`M-x dsh-emacs-reference` inserts the picked reference**: the menu used to
+  insert its display row (a bare path or session label), so a file pick lost
+  its `@` and a session pick had no canonical mention. The display row now
+  maps back to the mention behind it.
+
+- **`@` file and session rows stay distinct**: a file path and a session label
+  that spell the same text no longer collapse into one row (the session row
+  gains a ` #n` suffix), so picking the file references the file instead of
+  the session.
+
 - **`@` session-reference rows stay unique**: a session label that already
   looks like a generated suffix no longer aliases another session, so
   completing the row references the session it names.

@@ -586,12 +586,19 @@ first message restores candidates without a fetch."
 ENTRIES defaults to the current cache.  ROW is the short completion row
 (`@label'; a repeated label gains a ` #n' suffix so every session stays
 reachable); MENTION is the canonical text the pick inserts.  Every
-final ROW is unique: a label that already reads like a suffixed row
-(`same #2') cannot steal a generated one, so the exit lookup stays
-unambiguous.  File/directory entries are their own row and never appear
-here."
-  (let ((seen (make-hash-table :test 'equal))
-        (used (make-hash-table :test 'equal)))
+final ROW is unique, both against the other session rows (a label that
+already reads like a suffixed row cannot steal a generated one) and
+against every file/directory row: an @label that spells a file path is
+suffixed, so picking the file can never resolve to the session.  That
+keeps the exit lookup unambiguous."
+  (let* ((entries (or entries dsh-emacs--reference-candidates))
+         (seen (make-hash-table :test 'equal))
+         (used (make-hash-table :test 'equal)))
+    ;; Reserve the file/directory rows first: cache order puts them before
+    ;; sessions, but reserve every one so a later session cannot alias one.
+    (dolist (entry entries)
+      (unless (eq (plist-get (cdr entry) :kind) 'session)
+        (puthash (car entry) t used)))
     (delq nil
           (mapcar
            (lambda (entry)
@@ -608,16 +615,16 @@ here."
                  (puthash base n seen)
                  (puthash row t used)
                  (cons row (car entry)))))
-           (or entries dsh-emacs--reference-candidates)))))
+           entries))))
 
 (defun dsh-emacs-reference--entry-for (text)
   "The cache entry (MENTION . PROPS) behind completion row TEXT.
-File/directory rows are their own mention; a session row (the short
-`@label' display) resolves through `dsh-emacs-reference--session-rows'
-to its canonical mention first."
-  (or (assoc text dsh-emacs--reference-candidates)
-      (let ((mention (cdr (assoc text (dsh-emacs-reference--session-rows)))))
-        (and mention (assoc mention dsh-emacs--reference-candidates)))))
+A session row (the short `@label' display) resolves first through
+`dsh-emacs-reference--session-rows' to its canonical mention; a
+file/directory row is its own mention."
+  (or (let ((mention (cdr (assoc text (dsh-emacs-reference--session-rows)))))
+        (and mention (assoc mention dsh-emacs--reference-candidates)))
+      (assoc text dsh-emacs--reference-candidates)))
 
 (defun dsh-emacs-reference--row-icon (path kind)
   "Type icon for a completion row of KIND, or nil when none can render.
@@ -721,7 +728,8 @@ drilling can continue.  Only accepted STATUS values `finished' and
 `sole' finalize a reference; an ambiguous `exact' remains editable."
   (let* ((entry (dsh-emacs-reference--entry-for cand))
          (props (cdr entry))
-         (mention (cdr (assoc cand rows)))
+         (mention (and (eq (plist-get props :kind) 'session)
+                       (cdr (assoc cand rows))))
          (start (- (point) (length cand))))
     (when (and (memq status '(finished sole))
                (>= start (point-min))
@@ -1341,16 +1349,43 @@ style from bleeding onto following typed text."
 (defun dsh-emacs-reference--display-pairs ()
   "Completion display pairs for the M-x menu: (DISPLAY . MENTION).
 DISPLAY is the web-style row (file path / directory with slash /
-session label); MENTION is the text inserted on pick."
-  (mapcar
-   (lambda (entry)
-     (cons
-      (pcase (plist-get (cdr entry) :kind)
-        ('session (plist-get (cdr entry) :label))
-        ('directory (concat (plist-get (cdr entry) :path) "/"))
-        (_ (plist-get (cdr entry) :path)))
-      (car entry)))
-   (dsh-emacs-reference--visible-candidates)))
+session label); MENTION is the text inserted on pick.  DISPLAY rows are
+unique: a session label gains a ` #n' suffix when it spells a file path
+or an earlier session row, so the picked DISPLAY maps back to exactly
+one MENTION."
+  (let* ((entries (dsh-emacs-reference--visible-candidates))
+         (used (make-hash-table :test 'equal))
+         (seen (make-hash-table :test 'equal))
+         (base-rows
+          (mapcar
+           (lambda (entry)
+             (let ((props (cdr entry)))
+               (pcase (plist-get props :kind)
+                 ('session nil)
+                 ('directory (concat (plist-get props :path) "/"))
+                 (_ (plist-get props :path)))))
+           entries)))
+    ;; Reserve every file/directory row before a session can claim a suffix,
+    ;; so a session label earlier in the cache cannot shadow a later file.
+    (dolist (row base-rows)
+      (when row (puthash row t used)))
+    (cl-loop for entry in entries
+             for base in base-rows
+             collect
+             (cons
+              (or base
+                  (let* ((props (cdr entry))
+                         (label (or (plist-get props :label)
+                                    (plist-get props :session-id)))
+                         (n (1+ (gethash label seen 0)))
+                         (row (if (= n 1) label (format "%s #%d" label n))))
+                    (while (gethash row used)
+                      (setq n (1+ n)
+                            row (format "%s #%d" label n)))
+                    (puthash label n seen)
+                    (puthash row t used)
+                    row))
+              (car entry)))))
 
 (defun dsh-emacs-reference--insert-at-point (mention)
   "Insert MENTION into the editable input area at point.
@@ -1406,11 +1441,11 @@ again once results arrive.  Requires a chat buffer with a session."
       (if (dsh-emacs-reference--require-cache session-id query)
           (progn
             (condition-case nil
-                (let* ((pairs (dsh-emacs-reference--display-pairs))
-                       (picked (dsh-emacs--completing-read-ordered
-                                "Reference: " pairs nil t)))
-                  (when picked
-                    (dsh-emacs-reference--insert-at-point picked)))
+                (let ((pairs (dsh-emacs-reference--display-pairs)))
+                  (when-let* ((picked (dsh-emacs--completing-read-ordered
+                                       "Reference: " pairs nil t))
+                              (pair (assoc picked pairs)))
+                    (dsh-emacs-reference--insert-at-point (cdr pair))))
               (quit nil)))
         (message "Reference candidates are still loading…")))))
 

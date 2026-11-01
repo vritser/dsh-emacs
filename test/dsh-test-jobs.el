@@ -450,5 +450,87 @@
       (delete-process proc)
       (when (buffer-live-p chat) (kill-buffer chat)))))
 
+;; Opening the same job from a second chat retires the first chat's
+;; `job/follow' subscription on the socket that opened it: the stream id is
+;; registered on chat A's process, so cancelling it on chat B's socket would
+;; leave A's handler alive until the job ends.
+(ert-deftest dsh-emacs-test-jobs-switching-viewer-cancels-original-stream ()
+  :tags '(dsh-unit)
+  (let* ((chat-a (get-buffer-create " *dsh-test-job-viewer-a*"))
+         (chat-b (get-buffer-create " *dsh-test-job-viewer-b*"))
+         (proc-a (make-pipe-process :name "t-jobs-viewer-a" :buffer nil))
+         (proc-b (make-pipe-process :name "t-jobs-viewer-b" :buffer nil))
+         (job (dsh-protocol-job--from-alist
+               (json-read-from-string
+                (concat "{\"id\":\"shared-job\",\"kind\":\"bash\","
+                        "\"label\":\"shared\",\"status\":\"running\"}"))))
+         popup stream-a)
+    (cl-letf (((symbol-function 'pop-to-buffer) (lambda (&rest _) nil))
+              ((symbol-function 'process-send-string) (lambda (&rest _) nil)))
+      (unwind-protect
+          (progn
+            (with-current-buffer chat-a
+              (setq-local dsh-emacs--buffer-session "s-a"
+                          dsh-emacs--event-process proc-a)
+              (dsh-emacs-jobs-show-output job)
+              (setq popup dsh-emacs-jobs--popup))
+            (setq stream-a
+                  (buffer-local-value 'dsh-emacs-jobs--popup-stream popup))
+            (should (assoc stream-a
+                           (process-get proc-a 'dsh-emacs-stream-handlers)))
+            (with-current-buffer chat-b
+              (setq-local dsh-emacs--buffer-session "s-b"
+                          dsh-emacs--event-process proc-b)
+              (dsh-emacs-jobs-show-output job)
+              (should (eq popup dsh-emacs-jobs--popup)))
+            (ert-info ((format "%s" "switching-viewer-cancels-old-stream"))
+              (should-not (assoc stream-a
+                                 (process-get proc-a
+                                              'dsh-emacs-stream-handlers)))))
+        (when (buffer-live-p popup) (kill-buffer popup))
+        (when (buffer-live-p chat-a) (kill-buffer chat-a))
+        (when (buffer-live-p chat-b) (kill-buffer chat-b))
+        (delete-process proc-a)
+        (delete-process proc-b)))))
+
+;; Closing the chat that opened a job view must not kill the view another
+;; chat has since taken over: the output buffer follows the newest owner.
+(ert-deftest dsh-emacs-test-jobs-closing-old-chat-keeps-new-viewer ()
+  :tags '(dsh-unit)
+  (let* ((chat-a (get-buffer-create " *dsh-test-job-close-a*"))
+         (chat-b (get-buffer-create " *dsh-test-job-close-b*"))
+         (proc-a (make-pipe-process :name "t-jobs-close-a" :buffer nil))
+         (proc-b (make-pipe-process :name "t-jobs-close-b" :buffer nil))
+         (job (dsh-protocol-job--from-alist
+               (json-read-from-string
+                (concat "{\"id\":\"shared-job\",\"kind\":\"bash\","
+                        "\"label\":\"shared\",\"status\":\"running\"}"))))
+         popup)
+    (cl-letf (((symbol-function 'pop-to-buffer) (lambda (&rest _) nil))
+              ((symbol-function 'process-send-string) (lambda (&rest _) nil)))
+      (unwind-protect
+          (progn
+            (with-current-buffer chat-a
+              (setq-local dsh-emacs--buffer-session "s-a"
+                          dsh-emacs--event-process proc-a)
+              (add-hook 'kill-buffer-hook #'dsh-emacs-jobs--chat-closed nil t)
+              (dsh-emacs-jobs-show-output job)
+              (setq popup dsh-emacs-jobs--popup))
+            (with-current-buffer chat-b
+              (setq-local dsh-emacs--buffer-session "s-b"
+                          dsh-emacs--event-process proc-b)
+              (dsh-emacs-jobs-show-output job))
+            (should (eq chat-b
+                        (buffer-local-value 'dsh-emacs-jobs--popup-chat
+                                            popup)))
+            (kill-buffer chat-a)
+            (ert-info ((format "%s" "closing-old-chat-keeps-new-viewer"))
+              (should (buffer-live-p popup))))
+        (when (buffer-live-p popup) (kill-buffer popup))
+        (when (buffer-live-p chat-a) (kill-buffer chat-a))
+        (when (buffer-live-p chat-b) (kill-buffer chat-b))
+        (delete-process proc-a)
+        (delete-process proc-b)))))
+
 (provide 'dsh-test-jobs)
 ;;; dsh-test-jobs.el ends here

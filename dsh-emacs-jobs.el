@@ -199,12 +199,15 @@ Called by the event layer once a (re)connect completed its handshake."
 (defun dsh-emacs-jobs--chat-closed ()
   "Retire this chat's job state when its buffer is killed.
 Runs on `kill-buffer-hook': the socket teardown already retired the
-streams, so this only closes the output buffer that would otherwise be
-left displaying a subscription nobody serves."
+streams, so this only closes the output buffer this chat still owns.  A
+buffer another chat has since taken over keeps its subscription and
+stays open."
   (dsh-emacs-jobs--disarm)
-  (let ((popup dsh-emacs-jobs--popup))
+  (let ((popup dsh-emacs-jobs--popup)
+        (chat (current-buffer)))
     (setq dsh-emacs-jobs--popup nil)
-    (when (and (bufferp popup) (buffer-live-p popup))
+    (when (and (bufferp popup) (buffer-live-p popup)
+               (eq chat (buffer-local-value 'dsh-emacs-jobs--popup-chat popup)))
       (with-current-buffer popup
         (setq dsh-emacs-jobs--popup-stream nil
               dsh-emacs-jobs--popup-chat nil))
@@ -402,17 +405,17 @@ therefore also the recovery path after a drop."
     (with-current-buffer buffer
       (unless (derived-mode-p 'dsh-emacs-jobs-output-mode)
         (dsh-emacs-jobs-output-mode))
+      ;; Retire the previous owner's subscription on the socket that opened
+      ;; it, before this chat claims the buffer.  The stream id lives on that
+      ;; chat's process, so cancelling it on the new chat's socket would
+      ;; leave the old handler alive.
+      (dsh-emacs-jobs--cancel-stream)
       (setq dsh-emacs-jobs--popup-chat chat)
       (setq dsh-emacs-jobs--popup-id (dsh-protocol-job-id job))
       (setq dsh-emacs-jobs--popup-job job)
       (setq dsh-emacs-jobs--popup-next nil)
       (setq header-line-format (dsh-emacs-jobs--header job))
-      ;; A fresh subscription re-reads the retained ring from the oldest
-      ;; byte; the previous stream (if any) is retired first so its queued
-      ;; frames cannot interleave with the replacement.
-      (when (and dsh-emacs-jobs--popup-stream process
-                 (process-live-p process))
-        (dsh-emacs-events-close-stream process dsh-emacs-jobs--popup-stream))
+      ;; A fresh subscription re-reads the retained ring from the oldest byte.
       (let ((inhibit-read-only t))
         (erase-buffer)
         ;; Park point at the end so `dsh-emacs-jobs--append' follows the tail

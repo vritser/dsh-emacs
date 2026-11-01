@@ -190,6 +190,54 @@
         (should (equal (dsh-test-completion-items collection)
                        '("file.txt" "dir/" "Session")))))))
 
+;; --- M-x menu: completing-read returns the DISPLAY row, so the pick must map
+;; back to its own MENTION; a file and a session with the same label stay
+;; distinct rows and insert the right reference ---
+(ert-deftest dsh-emacs-test-reference-reference-menu-picks-the-paired-mention ()
+  :tags '(dsh-unit)
+  (let* ((mention (concat "@[Design]("
+                          (dsh-test-reference--session-uri "design") ")"))
+         (entries (list (cons "@Design" '(:kind file :path "Design"))
+                        (cons mention '(:kind session :label "Design"
+                                                :session-id "design"))))
+         (pick nil))
+    (with-temp-buffer
+      (dsh-test-reference-reset)
+      (insert "hi @")
+      (setq-local dsh-emacs--input-marker (point-min-marker))
+      (goto-char (point-max))
+      (setq dsh-emacs--reference-query ""
+            dsh-emacs--reference-candidates entries)
+      (ert-info ((format "%s" "menu-rows-stay-unique"))
+        (should (equal (mapcar #'car (dsh-emacs-reference--display-pairs))
+                       '("Design" "Design #2"))))
+      (cl-letf (((symbol-function 'dsh-emacs-server-ensure) (lambda () nil))
+                ((symbol-function 'dsh-emacs--active-session-id)
+                 (lambda () "sess"))
+                ((symbol-function 'dsh-emacs-reference--require-cache)
+                 (lambda (&rest _) t))
+                ((symbol-function 'dsh-emacs--completing-read-ordered)
+                 (lambda (_prompt _coll &rest _args) pick)))
+        (setq pick "Design")
+        (dsh-emacs-reference)
+        (ert-info ((format "%s" "menu-file-row-inserts-file-mention"))
+          (should (equal (dsh-emacs--get-input) "hi @Design")))
+        ;; Pick the session row: it keeps the short label in the buffer and
+        ;; expands to its canonical mention on send.
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (insert "hi @"))
+        (setq-local dsh-emacs--input-marker (point-min-marker))
+        (goto-char (point-max))
+        (setq pick "Design #2")
+        (dsh-emacs-reference)
+        (ert-info ((format "%s" "menu-session-row-inserts-canonical-mention"))
+          (should (equal (buffer-substring-no-properties
+                          (point-min) (point-max))
+                         "hi @Design"))
+          (should (equal (dsh-emacs--get-input)
+                         (concat "hi " mention))))))))
+
 (ert-deftest dsh-emacs-test-reference-refresh-updates-only-current-corfu ()
   :tags '(dsh-unit)
   (save-window-excursion
@@ -535,6 +583,71 @@
                   (nth 2 entries)))
       (should-not (eq (dsh-emacs-reference--entry-for "@same #2 #2")
                       (nth 1 entries))))))
+
+;; --- session-rows: a session label that spells a file path cannot take the
+;; file's row; each row still resolves to its own cache entry ---
+(ert-deftest dsh-emacs-test-reference-session-rows-avoid-file-rows ()
+  :tags '(dsh-unit)
+  (let* ((mention (concat "@[README.md]("
+                          (dsh-test-reference--session-uri "other-session") ")"))
+         (entries (list (cons "@README.md"
+                              '(:kind file :path "README.md"))
+                        (cons mention
+                              '(:kind session :label "README.md"
+                                      :session-id "other-session"))))
+         (dsh-emacs--reference-candidates entries)
+         (rows (dsh-emacs-reference--session-rows)))
+    (ert-info ((format "%s" "session-rows-avoid-file-rows"))
+      (should (equal (mapcar #'car rows) '("@README.md #2")))
+      (should (equal (mapcar #'cdr rows) (list mention)))
+      (should (eq (dsh-emacs-reference--entry-for "@README.md")
+                  (nth 0 entries)))
+      (should (eq (dsh-emacs-reference--entry-for "@README.md #2")
+                  (nth 1 entries))))))
+
+;; --- capf: when a file and a session share a label, the file row stays a
+;; file pick and the suffixed session row stays a session pick ---
+(ert-deftest dsh-emacs-test-reference-capf-file-row-beats-same-label-session ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (insert "@README.md")
+    (setq-local dsh-emacs--input-marker (point-min-marker)
+                dsh-emacs--reference-query ""
+                dsh-emacs--reference-candidates
+                (list (cons "@README.md"
+                            '(:kind file :path "README.md"))
+                      (cons (concat "@[README.md]("
+                                    (dsh-test-reference--session-uri "other") ")")
+                            '(:kind session :label "README.md"
+                                    :session-id "other"))))
+    (cl-letf (((symbol-function 'dsh-emacs--active-session-id)
+               (lambda () "audit-current"))
+              ((symbol-function 'dsh-emacs-reference--require-cache)
+               (lambda (&rest _) t)))
+      (let* ((capf (dsh-emacs-reference-completion-at-point))
+             (table (nth 2 capf))
+             (exit (plist-get (nthcdr 3 capf) :exit-function)))
+        (ert-info ((format "%s" "capf-file-session-rows-are-unique"))
+          (should (equal (dsh-test-completion-items table)
+                         '("@README.md" "@README.md #2"))))
+        ;; The front-end inserted the file row; exit must leave a file chip,
+        ;; not wrap it in the session's canonical mention.
+        (funcall exit "@README.md" 'finished)
+        (ert-info ((format "%s" "capf-file-row-stays-a-file"))
+          (should (equal (dsh-emacs--get-input) "@README.md"))
+          (should (null (get-text-property
+                         (point-min) 'dsh-emacs-reference-canonical)))
+          (should (get-text-property (point-min) 'dsh-emacs-reference-chip)))
+        ;; The session row keeps its own canonical mention.
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (insert "@README.md #2"))
+        (goto-char (point-max))
+        (funcall exit "@README.md #2" 'finished)
+        (ert-info ((format "%s" "capf-session-row-stays-a-session"))
+          (should (equal (dsh-emacs--get-input)
+                         (concat "@[README.md]("
+                                 (dsh-test-reference--session-uri "other") ")"))))))))
 
 ;; --- affixate: file/directory rows get a leading type-icon column (consult-buffer
 ;; style) ---
