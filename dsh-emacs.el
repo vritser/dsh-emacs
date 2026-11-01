@@ -465,8 +465,12 @@ following character); it is replaced with the visually close full-width
       (format "dsh: %s" session-id))))
 
 (defun dsh-emacs--chat-buffer-untrack ()
-  "Remove the current chat buffer from `dsh-emacs--chat-buffers' when killed."
-  (when dsh-emacs--buffer-session
+  "Remove the current chat buffer from `dsh-emacs--chat-buffers' when killed.
+Leaves the entry alone when it already points at another buffer, so a stale
+kill or mode change cannot deregister a replacement chat for the session."
+  (when (and dsh-emacs--buffer-session
+             (eq (gethash dsh-emacs--buffer-session dsh-emacs--chat-buffers)
+                 (current-buffer)))
     (remhash dsh-emacs--buffer-session dsh-emacs--chat-buffers)))
 
 (defun dsh-emacs--chat-buffer-sync (session-id)
@@ -1327,6 +1331,11 @@ The caller owns server readiness and window selection."
     ;; the transcript (see `dsh-emacs-events--follow-snapshot'), followed by
     ;; gapless live event frames — no history/stream hand-off gap exists.
     (dsh-emacs--subagent-input-update)
+    ;; The core connection is client-wide, not list-owned: a chat opened
+    ;; directly (M-x dsh-emacs-open-session, or a new session after
+    ;; `session/create') must start it too, or its queue projections,
+    ;; questions and approvals never arrive.  A live connection is a no-op.
+    (dsh-emacs-events-host-connect)
     (dsh-emacs-events-connect buf))
   buf)
 
@@ -1876,17 +1885,14 @@ the `workspace/follow' logical stream (a baseline frame on open).  A
 refresh re-opens that stream on the live core connection (retiring the
 previous one first); the fresh baseline seeds
 `dsh-emacs--workspaces'/`dsh-emacs--archived-sessions' and repaints.
-When no core connection is open the session list is connected first and
-the connect's own `workspace/follow' baseline (opened by
-`dsh-emacs-events--host-open' once the handshake completes) repaints —
-no immediate re-baseline is attempted on a not-yet-handshaken socket."
+When no core connection is open it is started, and the connect's own
+`workspace/follow' baseline (opened by `dsh-emacs-events--host-open' once
+the handshake completes) repaints — no immediate re-baseline is attempted
+on a not-yet-handshaken socket."
   (interactive)
   (dsh-emacs-server-ensure)
   (unless (dsh-emacs-events--core-workspace-rebaseline)
-    (when (and dsh-emacs--sessions-buffer
-               (get-buffer dsh-emacs--sessions-buffer))
-      (with-current-buffer (get-buffer dsh-emacs--sessions-buffer)
-        (dsh-emacs-events-host-connect)))))
+    (dsh-emacs-events-host-connect)))
 
 ;;;###autoload
 (defun dsh-emacs-create-workspace (path)
@@ -2387,6 +2393,17 @@ metadata preserves nearest-first ordering for display and cycling."
   ;; it too, so no window is left showing a stream nobody serves.
   (add-hook 'kill-buffer-hook #'dsh-emacs-jobs--chat-closed nil t)
   (add-hook 'kill-buffer-hook #'dsh-emacs--chat-buffer-untrack nil t)
+  ;; The core connection outlives one chat; close it only when the last
+  ;; owner (list or chat) is gone.  Append so the untrack hook above has
+  ;; already removed this buffer from the registry.
+  (add-hook 'kill-buffer-hook #'dsh-emacs-events--host-maybe-disconnect t t)
+  ;; Leaving the chat mode releases ownership.  The hook runs before the
+  ;; local session variable is killed, so untrack first; the owner check
+  ;; then closes the core stream when this was the last owner (a failed
+  ;; activation leaves the buffer in draft mode the same way).
+  (add-hook 'change-major-mode-hook #'dsh-emacs-events--host-maybe-disconnect
+            nil t)
+  (add-hook 'change-major-mode-hook #'dsh-emacs--chat-buffer-untrack nil t)
   ;; Chat buffers are never "modified": the session transcript
   ;; is not written to disk, so closing must not prompt to save
   (add-hook 'kill-buffer-query-functions #'dsh-emacs--chat-buffer-clear-modified nil t)

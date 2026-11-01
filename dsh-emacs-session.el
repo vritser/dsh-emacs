@@ -82,7 +82,7 @@
 (declare-function dsh-emacs-delete-workspace "dsh-emacs" (workspace-id))
 (declare-function dsh-emacs-move-workspace "dsh-emacs" (workspace-id before-workspace-id))
 (declare-function dsh-emacs-events-host-connect "dsh-emacs-events" ())
-(declare-function dsh-emacs-events-host-disconnect "dsh-emacs-events" ())
+(declare-function dsh-emacs-events--host-maybe-disconnect "dsh-emacs-events" ())
 
 ;; Defvars for cross-file caches owned by dsh-emacs.el, so native
 ;; compilation does not treat the reads as free-variable errors.
@@ -213,7 +213,10 @@ buffer; `dsh-emacs-collapse-workspaces' and
   (add-hook 'kill-buffer-hook #'dsh-emacs-session--auto-refresh-stop nil t)
   (dsh-emacs-session--auto-refresh-start)
   (dsh-emacs-events-host-connect)
-  (add-hook 'kill-buffer-hook #'dsh-emacs-events-host-disconnect nil t)
+  ;; The core stream is client-wide: closing the list keeps it for any open
+  ;; chat; closing the last owner tears it down (appended so the list buffer
+  ;; itself is not counted as a live owner).
+  (add-hook 'kill-buffer-hook #'dsh-emacs-events--host-maybe-disconnect t t)
   (dsh-emacs-session--render))
 
 ;;; ---------------------------------------------------------------------------

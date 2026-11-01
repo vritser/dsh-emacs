@@ -194,6 +194,7 @@
             ((symbol-function 'dsh-emacs-skill-prefetch) #'ignore)
             ((symbol-function 'dsh-emacs-reference-prefetch) #'ignore)
             ((symbol-function 'dsh-emacs-events-connect) (lambda (&rest _) nil))
+            ((symbol-function 'dsh-emacs-events-host-connect) #'ignore)
             ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
     (let ((dsh-emacs--chat-buffers (make-hash-table :test #'equal))
           (old-sessions dsh-emacs--sessions)
@@ -295,6 +296,7 @@
           (cl-letf (((symbol-function 'dsh-emacs-command-catalog-prefetch) #'ignore)
                     ((symbol-function 'dsh-emacs-skill-prefetch) #'ignore)
                     ((symbol-function 'dsh-emacs-reference-prefetch) #'ignore)
+                    ((symbol-function 'dsh-emacs-events-host-connect) #'ignore)
                     ((symbol-function 'dsh-emacs-events-connect)
                      (lambda (chat) (push (list 'connect chat) connects)))
                     ((symbol-function 'dsh-emacs-events-disconnect)
@@ -318,6 +320,7 @@
           (cl-letf (((symbol-function 'dsh-emacs-command-catalog-prefetch) #'ignore)
                     ((symbol-function 'dsh-emacs-skill-prefetch) #'ignore)
                     ((symbol-function 'dsh-emacs-reference-prefetch) #'ignore)
+                    ((symbol-function 'dsh-emacs-events-host-connect) #'ignore)
                     ((symbol-function 'dsh-emacs-events-connect)
                      (lambda (chat) (push (list 'connect chat) connects)))
                     ((symbol-function 'dsh-emacs-events-disconnect)
@@ -340,6 +343,161 @@
             (kill-buffer b))))
       (remhash "sess-ka" dsh-emacs--chat-buffers)
       (remhash "sess-kb" dsh-emacs--chat-buffers))))
+
+;; A chat opened directly must ensure the client-wide core stream: the
+;; session list is not the owner.  Without it, `session/control' queue
+;; projections and `$events' question/approval waterfalls never reach the
+;; chat (the direct `dsh-emacs-new-session' / `dsh-emacs-open-session' path).
+(ert-deftest dsh-emacs-test-lifecycle-open-session-starts-core-stream ()
+  :tags '(dsh-unit)
+  (cl-letf (((symbol-function 'dsh-emacs-command-catalog-prefetch) #'ignore)
+            ((symbol-function 'dsh-emacs-skill-prefetch) #'ignore)
+            ((symbol-function 'dsh-emacs-reference-prefetch) #'ignore)
+            ((symbol-function 'dsh-emacs-events-connect) (lambda (&rest _) nil))
+            ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
+    (let ((dsh-emacs--chat-buffers (make-hash-table :test #'equal))
+          (dsh-emacs--sessions-buffer nil) ; no session list is open
+          (old-sessions dsh-emacs--sessions)
+          (old-current-buffer dsh-emacs--current-buffer)
+          (old-current-session dsh-emacs--current-session)
+          (core-connects 0))
+      (unwind-protect
+          (progn
+            (setq dsh-emacs--sessions
+                  (dsh-emacs-test--session-items
+                   (list (list (cons 'sessionId "sess-core")
+                               (cons 'blank :json-false)
+                               (cons 'cwd "/tmp/ws")
+                               (cons 'agentPreset "standard")))))
+            (cl-letf (((symbol-function 'dsh-emacs-events-host-connect)
+                       (lambda () (cl-incf core-connects))))
+              (dsh-emacs-open-session "sess-core"))
+            (ert-info ((format "%s" "open-session-starts-core-stream"))
+              (should (= 1 core-connects))))
+        (setq dsh-emacs--sessions old-sessions
+              dsh-emacs--current-buffer old-current-buffer
+              dsh-emacs--current-session old-current-session)
+        (let ((b (gethash "sess-core" dsh-emacs--chat-buffers)))
+          (when (buffer-live-p b) (kill-buffer b)))
+        (remhash "sess-core" dsh-emacs--chat-buffers)))))
+
+;; The reported P1 reproduction: `M-x dsh-emacs-new-session` without the
+;; session list.  Creation activates the chat, and that activation must also
+;; ensure the client-wide core stream.
+(ert-deftest dsh-emacs-test-lifecycle-new-session-starts-core-stream ()
+  :tags '(dsh-unit)
+  (let ((dsh-emacs--sessions nil)
+        (dsh-emacs--chat-buffers (make-hash-table :test #'equal))
+        (dsh-emacs--sessions-buffer nil)
+        (dsh-emacs-new-session-auto-project nil)
+        (core-connects 0)
+        (buf nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method _params callback)
+                     (when (string= method "session/create")
+                       (funcall callback
+                                t '((sessionId . "new-core")
+                                    (agentPreset . "standard"))))))
+                  ((symbol-function 'pop-to-buffer)
+                   (lambda (buffer &rest _) buffer))
+                  ((symbol-function 'dsh-emacs-events-connect)
+                   (lambda (&rest _) nil))
+                  ((symbol-function 'dsh-emacs-events-host-connect)
+                   (lambda () (cl-incf core-connects)))
+                  ((symbol-function 'dsh-emacs-command-catalog-prefetch) #'ignore)
+                  ((symbol-function 'dsh-emacs-skill-prefetch) #'ignore)
+                  ((symbol-function 'dsh-emacs-reference-prefetch) #'ignore))
+          (setq buf (dsh-emacs-new-session "/tmp" nil "standard"))
+          (ert-info ((format "%s" "new-session-starts-core-stream"))
+            (should (= 1 core-connects))))
+      (when (buffer-live-p buf) (kill-buffer buf))
+      (remhash "new-core" dsh-emacs--chat-buffers))))
+
+;; A temporary core-connect error must not abort chat activation: the
+;; follow stream must still start and the buffer must be fully activated,
+;; or reopening the session would only reuse a half-activated buffer.
+(ert-deftest dsh-emacs-test-lifecycle-core-connect-error-keeps-activation ()
+  :tags '(dsh-unit)
+  (let ((dsh-emacs--chat-buffers (make-hash-table :test #'equal))
+        (dsh-emacs--sessions-buffer nil)
+        (dsh-emacs--host-process nil)
+        (dsh-emacs--host-ready nil)
+        (dsh-emacs--host-reconnect-timer nil)
+        (old-sessions dsh-emacs--sessions)
+        (old-current-buffer dsh-emacs--current-buffer)
+        (old-current-session dsh-emacs--current-session)
+        (connected nil)
+        (buf nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'dsh-emacs-command-catalog-prefetch) #'ignore)
+                  ((symbol-function 'dsh-emacs-skill-prefetch) #'ignore)
+                  ((symbol-function 'dsh-emacs-reference-prefetch) #'ignore)
+                  ((symbol-function 'open-network-stream)
+                   (lambda (&rest _) (error "temporary network failure")))
+                  ((symbol-function 'dsh-emacs-events-connect)
+                   (lambda (chat) (push chat connected)))
+                  ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil))
+                  ((symbol-function 'message) #'ignore))
+          (setq dsh-emacs--sessions
+                (dsh-emacs-test--session-items
+                 (list (list (cons 'sessionId "sess-connect-fail")
+                             (cons 'blank :json-false)
+                             (cons 'cwd "/tmp/ws")
+                             (cons 'agentPreset "standard")))))
+          (dsh-emacs-open-session "sess-connect-fail")
+          (setq buf dsh-emacs--current-buffer)
+          (ert-info ((format "%s" "core-connect-error-keeps-activation"))
+            (should (buffer-live-p buf))
+            (should (equal connected (list buf)))
+            (should (eq (gethash "sess-connect-fail" dsh-emacs--chat-buffers)
+                        buf))
+            (should (timerp dsh-emacs--host-reconnect-timer))))
+      (when (timerp dsh-emacs--host-reconnect-timer)
+        (cancel-timer dsh-emacs--host-reconnect-timer))
+      (setq dsh-emacs--host-reconnect-timer nil
+            dsh-emacs--sessions old-sessions
+            dsh-emacs--current-buffer old-current-buffer
+            dsh-emacs--current-session old-current-session)
+      (when (buffer-live-p buf) (kill-buffer buf))
+      (remhash "sess-connect-fail" dsh-emacs--chat-buffers))))
+
+;; Leaving chat mode must release the registry entry: otherwise the dead
+;; chat still counts as an owner and keeps the core stream alive after the
+;; real last chat closes.
+(ert-deftest dsh-emacs-test-lifecycle-mode-change-untracks-chat-owner ()
+  :tags '(dsh-unit)
+  (let ((dsh-emacs--chat-buffers (make-hash-table :test 'equal))
+        (dsh-emacs--sessions-buffer nil)
+        (disconnects 0)
+        chat-a chat-b)
+    (unwind-protect
+        (cl-letf (((symbol-function 'dsh-emacs-events-host-disconnect)
+                   (lambda () (cl-incf disconnects))))
+          (setq chat-a (generate-new-buffer " *t-chat-a*")
+                chat-b (generate-new-buffer " *t-chat-b*"))
+          (with-current-buffer chat-a
+            (dsh-emacs-mode)
+            (setq-local dsh-emacs--buffer-session "chat-a"))
+          (with-current-buffer chat-b
+            (dsh-emacs-mode)
+            (setq-local dsh-emacs--buffer-session "chat-b"))
+          (puthash "chat-a" chat-a dsh-emacs--chat-buffers)
+          (puthash "chat-b" chat-b dsh-emacs--chat-buffers)
+          ;; chat-a leaves chat mode; its ownership must go with it.
+          (with-current-buffer chat-a
+            (text-mode))
+          (ert-info ((format "%s" "mode-change-untracks-chat"))
+            (should (null (gethash "chat-a" dsh-emacs--chat-buffers)))
+            (should (eq (gethash "chat-b" dsh-emacs--chat-buffers) chat-b)))
+          ;; Closing the real last chat now tears the core stream down.
+          (with-current-buffer chat-b
+            (dsh-emacs--chat-buffer-untrack)
+            (dsh-emacs-events--host-maybe-disconnect))
+          (ert-info ((format "%s" "last-chat-after-mode-change-disconnects"))
+            (should (= 1 disconnects))))
+      (when (buffer-live-p chat-a) (kill-buffer chat-a))
+      (when (buffer-live-p chat-b) (kill-buffer chat-b)))))
 
 ;; --- Test 43d: first open of a new session (cache miss) → refetch the list to
 ;; get a ctx snapshot ---
@@ -409,6 +567,7 @@
                        (funcall cb t (list (cons 'items [])))))
                     ((symbol-function 'dsh-emacs-events-connect)
                      (lambda (&rest _) nil))
+                    ((symbol-function 'dsh-emacs-events-host-connect) #'ignore)
                     ((symbol-function 'dsh-emacs-command-catalog-prefetch) #'ignore)
                     ((symbol-function 'dsh-emacs-skill-prefetch) #'ignore)
                     ((symbol-function 'dsh-emacs-reference-prefetch) #'ignore)

@@ -457,7 +457,66 @@
           (ert-info ((format "%s" "host-connect-is-idempotent"))
             (should (zerop disconnects))
             (should (dsh-emacs-events-host-connected-p))))
+      ;; Detach before deleting: the global sentinel would otherwise treat
+      ;; the test pipe as a lost core stream and arm a reconnect timer.
+      (setq dsh-emacs--host-process nil)
       (delete-process proc))))
+
+;; The core stream is client-wide: the list or any live chat keeps it alive,
+;; and closing the last owner tears it down.  Before this, killing the list
+;; deafened every open chat (no `session/control' queue projections, no
+;; `$events' question/approval waterfalls).
+(ert-deftest dsh-emacs-test-events-host-outlives-the-list-and-closes-last ()
+  :tags '(dsh-unit)
+  (let* ((list-buf (generate-new-buffer " *t-host-list*"))
+         (chat (generate-new-buffer " *t-host-chat*"))
+         (dsh-emacs--sessions-buffer (buffer-name list-buf))
+         (dsh-emacs--chat-buffers (make-hash-table :test 'equal))
+         (disconnects 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'dsh-emacs-events-host-disconnect)
+                   (lambda () (cl-incf disconnects))))
+          (puthash "sess-host" chat dsh-emacs--chat-buffers)
+          ;; The list is closing while a chat is live: keep the core stream.
+          (with-current-buffer list-buf
+            (dsh-emacs-events--host-maybe-disconnect))
+          (ert-info ((format "%s" "host-outlives-the-list"))
+            (should (zerop disconnects)))
+          ;; The list is gone; the chat is now the last owner and closes.
+          (setq dsh-emacs--sessions-buffer nil)
+          (with-current-buffer chat
+            (dsh-emacs-events--host-maybe-disconnect))
+          (ert-info ((format "%s" "host-closes-with-the-last-chat"))
+            (should (= 1 disconnects))))
+      (when (buffer-live-p list-buf) (kill-buffer list-buf))
+      (when (buffer-live-p chat) (kill-buffer chat)))))
+
+;; A synchronous socket error must not escape: chat activation calls
+;; host-connect before its follow connect, so a throw used to leave the
+;; buffer registered but deaf.  The error schedules a retry instead.
+(ert-deftest dsh-emacs-test-events-host-connect-failure-is-contained ()
+  :tags '(dsh-unit)
+  (let ((dsh-emacs--host-process nil)
+        (dsh-emacs--host-ready nil)
+        (dsh-emacs--host-reconnect-timer nil)
+        (messages nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'open-network-stream)
+                   (lambda (&rest _) (error "temporary network failure")))
+                  ((symbol-function 'dsh-emacs-events-host-disconnect) #'ignore)
+                  ((symbol-function 'message)
+                   (lambda (format-string &rest args)
+                     (push (apply #'format format-string args) messages))))
+          (dsh-emacs-events-host-connect)
+          (ert-info ((format "%s" "host-connect-failure-arms-retry"))
+            (should (timerp dsh-emacs--host-reconnect-timer))
+            (should (cl-some (lambda (text)
+                               (string-match-p "core stream connect failed"
+                                               text))
+                             messages))))
+      (when (timerp dsh-emacs--host-reconnect-timer)
+        (cancel-timer dsh-emacs--host-reconnect-timer))
+      (setq dsh-emacs--host-reconnect-timer nil))))
 
 ;; --- Test 69: with multiple sessions in parallel, transcript events
 ;; route by buffer ownership (the guard must not use the global

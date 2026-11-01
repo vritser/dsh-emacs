@@ -1443,16 +1443,19 @@ the intentionally bounded syntax and differences from the Web renderer.
   HTTP callback dynamically raises the GC threshold for page decoding and
   rendering. Bounded network batches do not bound the total cost of the
   requested round range; staged pages still publish in one synchronous render.
-- **Core connection (list side)**: the session list keeps a separate
-  `/api/remote.mux` connection that opens `session/control` + `workspace/follow`
-  + `$events`.  `session/control` delivers whole-host projection baselines and
-  increments (since dsh 0.1.7 that record carries the `inbox` cell the queue
-  mirror is derived from; the 0.1.6 `queues`/`jobs` records are gone);
-  `workspace/follow` seeds and then upserts/removes/
-  reorders the workspace caches; `$events` carries the session list's live
-  changes (`api-session/added|removed|status|activity` emits) and the
-  approval/question waterfalls.  This connection is scoped to the list buffer's
-  lifecycle and is also self-healing (reconnect + re-baseline).
+- **Core connection**: a client-wide `/api/remote.mux` connection opens
+  `session/control` + `workspace/follow` + `$events`.  `session/control`
+  delivers whole-host projection baselines and increments (since dsh 0.1.7
+  that record carries the `inbox` cell the queue mirror is derived from; the
+  0.1.6 `queues`/`jobs` records are gone); `workspace/follow` seeds and then
+  upserts/removes/reorders the workspace caches; `$events` carries the
+  session list's live changes (`api-session/added|removed|status|activity`
+  emits) and the approval/question waterfalls.  The session list or any live
+  chat keeps this connection alive, so a chat opened directly (without the
+  list) still receives queue projections and question/approval waterfalls;
+  it closes when the last owner goes away and is self-healing: synchronous
+  connect failures are reported and retried without aborting chat
+  activation, and dropping out of chat mode releases the chat's ownership.
 
 ## History browsing (`dsh-emacs-history.el`)
 

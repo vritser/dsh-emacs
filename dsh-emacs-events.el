@@ -10,7 +10,7 @@
 ;; dsh Web multiplexes all logical Remote streams over one long-lived
 ;; WebSocket, `/api/remote.mux'.  A chat buffer opens a `session/follow'
 ;; stream whose snapshot seeds the transcript and whose `event' items
-;; render live; a core connection (the session list's) opens
+;; render live; a client-wide core connection opens
 ;; `session/control' + `workspace/follow' + `$events'.  This module
 ;; implements the small RFC 6455 client needed by those endpoints directly
 ;; on top of `open-network-stream', then routes each decoded frame:
@@ -57,17 +57,19 @@ the late snapshot projections must not replace those newer live values.")
   "Return a fresh client stream id for a `/api/remote.mux' logical stream."
   (format "emacs-%d-%d" (random 999999) (truncate (float-time))))
 
-;; The list view (`*dsh-sessions*') additionally opens a core
-;; `/api/remote.mux' connection carrying `$events' + `session/control' +
-;; `workspace/follow' logical streams.  Unlike the per-chat follow stream it
-;; is scoped to the list buffer's lifecycle: workspace/session/archive
-;; changes arrive there and refresh the caches and the list in place, so a
-;; dsh web (or second client) editing a workspace shows up without `g'.
-(defvar-local dsh-emacs--host-process nil
-  "Live core-stream network process, or nil.")
-(defvar-local dsh-emacs--host-ready nil
+;; A client-wide core `/api/remote.mux' connection carries `$events' +
+;; `session/control' + `workspace/follow' logical streams.  It is not scoped
+;; to one buffer: the session list or any live chat keeps it alive, and it is
+;; torn down only when neither remains (see
+;; `dsh-emacs-events--host-maybe-disconnect').  Workspace/session/archive
+;; changes refresh the caches and the list in place, and a chat opened
+;; without the list still receives queue projections and question/approval
+;; waterfalls.
+(defvar dsh-emacs--host-process nil
+  "Live client-wide core-stream network process, or nil.")
+(defvar dsh-emacs--host-ready nil
   "Non-nil once the core-stream handshake completed.")
-(defvar-local dsh-emacs--host-reconnect-timer nil
+(defvar dsh-emacs--host-reconnect-timer nil
   "Timer scheduling a core-stream reconnect after a drop.")
 
 (defvar dsh-emacs-events--client-id nil
@@ -972,15 +974,12 @@ No repeating timer is needed: a quiet socket stays normally readable."
                     (process-put process 'dsh-emacs-event-input
                                  (substring input (+ header-end 4)))
                     (if (process-get process 'dsh-emacs-host-stream)
-                        ;; Core stream has no chat buffer to mark ready; the
-                        ;; flag lives on the owning list buffer, then the
-                        ;; `session/control' + `workspace/follow' + `$events'
-                        ;; logical streams are opened on the socket.
-                        (let ((buffer (process-get process
-                                                   'dsh-emacs-host-buffer)))
-                          (when (buffer-live-p buffer)
-                            (with-current-buffer buffer
-                              (setq dsh-emacs--host-ready t)))
+                        ;; The core stream has no owning chat buffer: mark the
+                        ;; client-wide handshake and open its logical streams
+                        ;; only when this is still the current socket (a late
+                        ;; handshake from a replaced socket must not take over).
+                        (when (eq process dsh-emacs--host-process)
+                          (setq dsh-emacs--host-ready t)
                           (dsh-emacs-events--host-open process))
                       (let ((chat (dsh-emacs-events--chat process)))
                         (when (buffer-live-p chat)
@@ -1441,7 +1440,7 @@ Unknown trailing ids (a workspace appearing in the payload before its
 
 (defun dsh-emacs-events--host-dispatch (process json)
   "Route one decoded `/api/remote.mux' message from PROCESS.
-The list-scoped core connection multiplexes the `session/control',
+The client-wide core connection multiplexes the `session/control',
 `workspace/follow' and `$events' logical streams.  Server frames arrive as
 `item' (value = a control/workspace/$events logical frame), `error' or
 `end'; the logical frame `type' routes to the shared caches and chat
@@ -1668,95 +1667,131 @@ snapshot.  UPDATED-AT is the host's timestamp in milliseconds."
             (cons item (delq item dsh-emacs--sessions)))
       (dsh-emacs-events--host-repaint))))
 
+(defun dsh-emacs-events--host-schedule-reconnect ()
+  "Schedule one core reconnect while a list or chat still needs it.
+One-shot and idempotent: a drop and a failed connect never stack parallel
+timers, and the timer does nothing once the last owner is gone."
+  (unless (timerp dsh-emacs--host-reconnect-timer)
+    (setq dsh-emacs--host-reconnect-timer
+          (run-at-time 1 nil
+                       (lambda ()
+                         (setq dsh-emacs--host-reconnect-timer nil)
+                         (when (dsh-emacs-events--host-needed-p)
+                           (dsh-emacs-events-host-connect)))))))
+
 (defun dsh-emacs-events--host-lost (process)
-  "Handle a closed host-stream PROCESS: reset and schedule reconnect."
+  "Handle a closed core-stream PROCESS: reset and schedule reconnect."
   (dsh-emacs-events--cancel-dispatch process)
-  (let ((buffer (process-get process 'dsh-emacs-host-buffer)))
-    (when (and (buffer-live-p buffer)
-               (eq process (with-current-buffer buffer
-                             dsh-emacs--host-process)))
-      (with-current-buffer buffer
-        (setq dsh-emacs--host-process nil
-              dsh-emacs--host-ready nil)
-        (dsh-emacs-subagent-host-reset)
-        (dsh-emacs-plan--cancel)
-        (unless (timerp dsh-emacs--host-reconnect-timer)
-          (setq dsh-emacs--host-reconnect-timer
-                (run-at-time 1 nil
-                             (lambda (buffer)
-                               (when (buffer-live-p buffer)
-                                 (with-current-buffer buffer
-                                   (setq dsh-emacs--host-reconnect-timer nil)
-                                   (dsh-emacs-events-host-connect))))
-                             buffer)))))))
+  (when (eq process dsh-emacs--host-process)
+    (setq dsh-emacs--host-process nil
+          dsh-emacs--host-ready nil)
+    (dsh-emacs-subagent-host-reset)
+    (dsh-emacs-plan--cancel)
+    (dsh-emacs-events--host-schedule-reconnect)))
 
 (defun dsh-emacs-events-host-connected-p ()
-  "Non-nil when the current buffer's host stream is already live.
+  "Non-nil when the client's core stream is already live.
 A live process covers a handshake still in flight: keeping it preserves the
 work already done instead of starting the connect over."
-  (and (boundp 'dsh-emacs--host-process)
+  (and (processp dsh-emacs--host-process)
        (process-live-p dsh-emacs--host-process)))
 
-(defun dsh-emacs-events-host-connect ()
-  "Connect BUFFER's core stream to dsh's `/api/remote.mux'.
-The core connection is scoped to the session-list buffer (owned by
-`dsh-emacs-session-mode'): it opens the `session/control',
-`workspace/follow' and `$events' logical streams after the handshake
-(`dsh-emacs-events--host-open') and repaints the list on workspace/
-session/archive/queue/projection changes while the list is open;
-everything tears down with the buffer.
+(defun dsh-emacs-events--host-needed-p (&optional except)
+  "Return non-nil when the session list or a live chat needs the core stream.
+EXCEPT is a buffer to ignore, for a kill hook deciding whether its dying
+buffer was the last owner."
+  (or (let ((list (and (boundp 'dsh-emacs--sessions-buffer)
+                       dsh-emacs--sessions-buffer
+                       (get-buffer dsh-emacs--sessions-buffer))))
+        (and (buffer-live-p list) (not (eq list except))))
+      (and (boundp 'dsh-emacs--chat-buffers)
+           (hash-table-p dsh-emacs--chat-buffers)
+           (catch 'found
+             (maphash (lambda (_id buf)
+                        (when (and (buffer-live-p buf)
+                                   (not (eq buf except)))
+                          (throw 'found t)))
+                      dsh-emacs--chat-buffers)
+             nil))))
 
-Already connected is a no-op: the session-list mode re-runs on every open
-(`dsh-emacs-list-sessions-display'), and re-opening a list that is already
-live must not tear its streams down and handshake again.  A dropped
-connection clears `dsh-emacs--host-process' first (see
-`dsh-emacs-events--host-lost'), so the reconnect path still connects."
-  (when (and (buffer-live-p (current-buffer))
-             (not (dsh-emacs-events-host-connected-p)))
+(defun dsh-emacs-events--host-maybe-disconnect ()
+  "Tear down the core stream once neither the list nor any chat remains.
+Runs from `kill-buffer-hook', where the dying buffer is still live: it is
+the ignored owner, so closing the list keeps the stream for open chats and
+closing the last chat closes it."
+  (unless (dsh-emacs-events--host-needed-p (current-buffer))
+    (dsh-emacs-events-host-disconnect)))
+
+(defun dsh-emacs-events-host-connect ()
+  "Connect the client's core stream to dsh's `/api/remote.mux'.
+The core connection is client-wide, not list-owned: the session list or
+any live chat ensures it, so a chat opened directly still receives
+`session/control' queue projections and `$events' question/approval
+waterfalls.  It opens the `session/control', `workspace/follow' and
+`$events' logical streams after the handshake
+\(`dsh-emacs-events--host-open') and repaints the list when it is open.
+
+Already connected is a no-op: opening the list and every chat activation
+call this, and a live stream (handshake included) must not be torn down
+and re-handshaken.  A dropped connection clears
+`dsh-emacs--host-process' first (see `dsh-emacs-events--host-lost'), so
+the reconnect path still connects.
+
+Socket creation is failure-contained: `open-network-stream' can signal
+synchronously (unresolvable host, malformed `dsh-emacs-base-url').  The
+error is reported and a retry armed instead of propagating, so a caller's
+chat activation still reaches its `session/follow' connect — the same
+contract as `dsh-emacs-events-connect'."
+  (unless (dsh-emacs-events-host-connected-p)
     (dsh-emacs-events-host-disconnect)
-    (when (and (bound-and-true-p dsh-emacs-base-url)
-               (not (string-empty-p dsh-emacs-base-url)))
-      (let* ((url (url-generic-parse-url dsh-emacs-base-url))
-             (host (url-host url))
-             (port (or (url-port url)
-                       (if (equal (url-type url) "https") 443 80))))
-        (when (and host port)
-          (let ((buffer (current-buffer)))
-            (let ((stream-buffer (get-buffer-create " *dsh-host*")))
-              (with-current-buffer stream-buffer
-                (set-buffer-multibyte nil))
-              (let ((process
-                     (let ((url-proxy-services nil))
-                       (open-network-stream
-                        "dsh-host" stream-buffer host port
-                        :type (if (equal (url-type url) "https") 'tls 'plain)
-                        :nowait t))))
-                (set-process-query-on-exit-flag process nil)
-                ;; Keep CRLF handshake bytes untouched.  Without this the
-                ;; process coding system is inferred as nil (the stream buffer
-                ;; is converted to unibyte BEFORE opening, unlike the mux
-                ;; connect), and Emacs then folds the response's CRLF line
-                ;; endings to LF, so `\r\n\r\n' never matches and the
-                ;; handshake never completes.  `no-conversion' preserves the
-                ;; raw bytes so `dsh-emacs-events--filter' sees the exact
-                ;; HTTP/1.1 101 upgrade response.
-                (set-process-coding-system process 'no-conversion
-                                           'no-conversion)
-                (process-put process 'dsh-emacs-host-stream t)
-                (process-put process 'dsh-emacs-event-input "")
-                (process-put process 'dsh-emacs-event-ready nil)
-                (process-put process 'dsh-emacs-host-buffer buffer)
-                ;; Reuse the mux sentinel: it routes by the host-stream property
-                ;; to `dsh-emacs-events--host-lost', and the handshake path is
-                ;; taken from the process property (defaults to
-                ;; /api/remote.mux).  Bytecode delegates, as with the mux
-                ;; (native subrs are not reliably invoked as `:nowait' filters
-                ;; on this build).
-                (set-process-filter process dsh-emacs-events--filter-fn)
-                (set-process-sentinel process dsh-emacs-events--sentinel-fn)
-                (with-current-buffer buffer
+    (let ((process nil))
+      (condition-case err
+          (when (and (bound-and-true-p dsh-emacs-base-url)
+                     (not (string-empty-p dsh-emacs-base-url)))
+            (let* ((url (url-generic-parse-url dsh-emacs-base-url))
+                   (host (url-host url))
+                   (port (or (url-port url)
+                             (if (equal (url-type url) "https") 443 80))))
+              (when (and host port)
+                (let ((stream-buffer (get-buffer-create " *dsh-host*")))
+                  (with-current-buffer stream-buffer
+                    (set-buffer-multibyte nil))
+                  (setq process
+                        (let ((url-proxy-services nil))
+                          (open-network-stream
+                           "dsh-host" stream-buffer host port
+                           :type (if (equal (url-type url) "https")
+                                     'tls 'plain)
+                           :nowait t)))
+                  (set-process-query-on-exit-flag process nil)
+                  ;; Keep CRLF handshake bytes untouched.  Without this the
+                  ;; process coding system is inferred as nil (the stream
+                  ;; buffer is converted to unibyte BEFORE opening, unlike the
+                  ;; mux connect), and Emacs then folds the response's CRLF
+                  ;; line endings to LF, so `\r\n\r\n' never matches and
+                  ;; the handshake never completes.  `no-conversion'
+                  ;; preserves the raw bytes so `dsh-emacs-events--filter'
+                  ;; sees the exact HTTP/1.1 101 upgrade response.
+                  (set-process-coding-system process 'no-conversion
+                                             'no-conversion)
+                  (process-put process 'dsh-emacs-host-stream t)
+                  (process-put process 'dsh-emacs-event-input "")
+                  (process-put process 'dsh-emacs-event-ready nil)
+                  ;; Reuse the mux sentinel: it routes by the host-stream
+                  ;; property to `dsh-emacs-events--host-lost', and the
+                  ;; handshake path is taken from the process property
+                  ;; (defaults to /api/remote.mux).  Bytecode delegates, as
+                  ;; with the mux (native subrs are not reliably invoked as
+                  ;; `:nowait' filters on this build).
+                  (set-process-filter process dsh-emacs-events--filter-fn)
+                  (set-process-sentinel process dsh-emacs-events--sentinel-fn)
                   (setq dsh-emacs--host-process process
-                        dsh-emacs--host-ready nil))))))))))
+                        dsh-emacs--host-ready nil)))))
+        (error
+         (when (and (processp process) (process-live-p process))
+           (delete-process process))
+         (message "dsh: core stream connect failed: %S" err)
+         (dsh-emacs-events--host-schedule-reconnect))))))
 
 (defun dsh-emacs-events--host-open (process)
   "Open the core logical streams on PROCESS after its handshake.
@@ -1795,10 +1830,7 @@ newer reorder.  The prior stream is therefore cancelled first (its frames
 are dropped once the host closes it), then a fresh one is opened and its
 id recorded.  Returns non-nil when a core process existed and the request
 was sent."
-  (let* ((list-buf (and (boundp 'dsh-emacs--sessions-buffer)
-                        (get-buffer dsh-emacs--sessions-buffer)))
-         (proc (and list-buf
-                    (buffer-local-value 'dsh-emacs--host-process list-buf))))
+  (let ((proc dsh-emacs--host-process))
     (when (and (processp proc) (process-live-p proc))
       ;; Retire the workspace/follow stream opened at connect (or by the last
       ;; re-baseline) so exactly one live workspace stream feeds the caches.
@@ -1815,7 +1847,7 @@ was sent."
       t)))
 
 (defun dsh-emacs-events-host-disconnect ()
-  "Disconnect the current buffer's host stream, if any."
+  "Disconnect the client's core stream, if any."
   (when (timerp dsh-emacs--host-reconnect-timer)
     (cancel-timer dsh-emacs--host-reconnect-timer))
   (setq dsh-emacs--host-reconnect-timer nil)

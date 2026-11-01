@@ -81,6 +81,16 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Chats opened without the list get core events**: the host-wide
+  `session/control` + `$events` connection is now kept alive by the session
+  list or any live chat, not by the list alone. Opening a session directly
+  (`M-x dsh-emacs-new-session` or `dsh-emacs-open-session`) without the list
+  now receives queue projections, questions and approvals, and closing the
+  list no longer cuts them off while a chat stays open. A temporary connect
+  error no longer aborts the chat's activation (the follow stream still
+  starts and the core connection retries), and leaving chat mode releases
+  the chat's ownership so the connection closes with the real last owner.
+
 - **Send-now keeps queued text literal**: sending a queued item while idle
   submits its text as an ordinary message instead of routing it back through
   the composer. A queued `!command` no longer runs locally, a queued `/name`

@@ -739,8 +739,7 @@ DSH_E2E_PRESET selects the preset; existing chats and connections are preserved.
          (kill-ring-yank-pointer kill-ring)
          (interprogram-cut-function nil)
          (modeline-enabled dsh-emacs-modeline-enabled)
-         (core (get-buffer dsh-emacs--sessions-buffer))
-         (core-process (and core (buffer-local-value 'dsh-emacs--host-process core)))
+         (core-process dsh-emacs--host-process)
          (core-connected (and (processp core-process) (process-live-p core-process)))
          (dsh-e2e--results nil)
          (dsh-e2e--session-id nil)
@@ -758,16 +757,16 @@ DSH_E2E_PRESET selects the preset; existing chats and connections are preserved.
                 (dsh-e2e--rpc "session/list" (dsh-protocol-session-list-request))
                 (dsh-e2e--pass "health-check")
 
-                ;; The normal entry point owns the core control/projection stream;
-                ;; opening a chat directly only starts its transcript follow stream.
+                ;; The core control/projection stream is client-wide: the list
+                ;; or any chat ensures it, so a directly opened chat receives
+                ;; questions, approvals and queue projections too.
                 (dsh-emacs)
                 (dsh-e2e--check
                  "core-stream-ready"
                  (dsh-e2e--wait-until
                   (lambda ()
                     (and dsh-emacs-events--client-id
-                         (buffer-local-value 'dsh-emacs--host-ready
-                                             (get-buffer dsh-emacs--sessions-buffer))))
+                         dsh-emacs--host-ready))
                   10))
 
                 (let* ((preset (getenv "DSH_E2E_PRESET"))
@@ -997,9 +996,7 @@ DSH_E2E_PRESET selects the preset; existing chats and connections are preserved.
           (dsh-emacs-events-disconnect dsh-e2e--chat)
           (kill-buffer dsh-e2e--chat))
         (unless core-connected
-          (when-let* ((list-buffer (get-buffer dsh-emacs--sessions-buffer)))
-            (with-current-buffer list-buffer
-              (dsh-emacs-events-host-disconnect))))
+          (dsh-emacs-events-host-disconnect))
         (unless (eq dsh-emacs-modeline-enabled modeline-enabled)
           (dsh-emacs-modeline-toggle))
         (when dsh-e2e--session-id
