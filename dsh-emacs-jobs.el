@@ -489,16 +489,27 @@ for the confirming press rather than exiting on the armed one)."
   "Return ((LABEL . JOB) ...) for JOBS with unique LABELs.
 Live jobs lead, each group in the
 host's own order; colliding labels get a numeric suffix so a label maps
-back to exactly one job however the minibuffer picked it."
+back to exactly one job however the minibuffer picked it.  The suffix is
+tracked on the FINAL labels, not just the raw descriptions: a job whose
+description already looks like a generated suffix (\"same [2]\") must not
+reuse a label another job already claimed — the candidate keeps
+incrementing until it is free.  Every final label therefore maps to
+exactly one job, and the job rides in the cdr the menu verbs act on."
   (let ((live (cl-remove-if-not #'dsh-emacs-jobs--live-p jobs))
         (settled (cl-remove-if #'dsh-emacs-jobs--live-p jobs))
-        (seen (make-hash-table :test 'equal)))
+        (seen (make-hash-table :test 'equal))
+        (used (make-hash-table :test 'equal)))
     (mapcar
      (lambda (job)
        (let* ((base (dsh-emacs-jobs--describe job))
-              (n (1+ (gethash base seen 0))))
+              (n (1+ (gethash base seen 0)))
+              (label (if (= n 1) base (format "%s [%d]" base n))))
+         (while (gethash label used)
+           (setq n (1+ n)
+                 label (format "%s [%d]" base n)))
          (puthash base n seen)
-         (cons (if (= n 1) base (format "%s [%d]" base n)) job)))
+         (puthash label t used)
+         (cons label job)))
      (append live settled))))
 
 (defvar dsh-emacs-jobs--pick-table nil

@@ -379,5 +379,36 @@
       (kill-buffer buf)
       (kill-buffer chat))))
 
+;; Menu labels must stay unique even when a job's description already looks
+;; like a generated suffix: descriptions "same", "same", "same [2]" used to
+;; yield two identical "[bash] (run) same [2]" labels, so a label lookup
+;; could act on the second job instead of the third — a stop could hit the
+;; wrong one.
+(ert-deftest dsh-emacs-test-jobs-job-menu-labels-stay-unique-on-suffix-collision ()
+  :tags '(dsh-unit)
+  (let* ((jobs (mapcar
+                (lambda (spec)
+                  (dsh-protocol-job--from-alist
+                   (json-read-from-string
+                    (format (concat "{\"id\":\"%s\",\"kind\":\"bash\","
+                                    "\"label\":\"%s\",\"status\":\"running\"}")
+                            (nth 0 spec) (nth 1 spec)))))
+                '(("job-1" "same") ("job-2" "same") ("job-3" "same [2]"))))
+         (table (dsh-emacs-jobs--table jobs))
+         (labels (mapcar #'car table)))
+    (ert-info ((format "%s" "job-menu-labels-are-unique"))
+      (should (= (length labels)
+                 (length (delete-dups (copy-sequence labels))))))
+    (ert-info ((format "%s" "job-menu-label-resolves-to-its-own-job"))
+      (should (equal '("job-1" "job-2" "job-3")
+                     (mapcar (lambda (entry)
+                               (dsh-protocol-job-id
+                                (cdr (assoc (car entry) table))))
+                             table))))
+    (ert-info ((format "%s" "job-menu-third-label-maps-to-third-job"))
+      (should (equal "job-3"
+                     (dsh-protocol-job-id
+                      (cdr (assoc (nth 2 labels) table))))))))
+
 (provide 'dsh-test-jobs)
 ;;; dsh-test-jobs.el ends here

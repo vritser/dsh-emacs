@@ -91,6 +91,10 @@ minor) and stay undated until the release is cut.
   newer one no longer rolls the cache back; superseded responses still
   balance the refresh replay but do not install, sync or re-baseline.
 
+- **Job menu labels stay unique**: a job whose description already looks like
+  a generated suffix no longer collides with another job's label, so a menu
+  action always resolves to the job it names.
+
 - **Closing a plan document keeps its decision alive**: the approval
   request is now owned by the chat buffer instead of the closable document,
   so a response arriving after the document is closed still settles the
