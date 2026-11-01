@@ -518,6 +518,31 @@
         (cancel-timer dsh-emacs--host-reconnect-timer))
       (setq dsh-emacs--host-reconnect-timer nil))))
 
+;; A workspace re-baseline must not write mux frames before the WebSocket
+;; upgrade: the connect's own `workspace/follow' baseline covers that window.
+(ert-deftest dsh-emacs-test-events-core-rebaseline-waits-for-handshake ()
+  :tags '(dsh-unit)
+  (let* ((proc (make-pipe-process :name "dsh-test-rebaseline" :noquery t))
+         (dsh-emacs--host-process proc)
+         (dsh-emacs--host-ready nil)
+         (sent nil))
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'process-send-string)
+                     (lambda (_proc string) (push string sent))))
+            (ert-info ((format "%s" "rebaseline-waits-for-handshake"))
+              (should (null (dsh-emacs-events--core-workspace-rebaseline)))
+              (should (null sent))))
+          (setq dsh-emacs--host-ready t
+                sent nil)
+          (cl-letf (((symbol-function 'process-send-string)
+                     (lambda (_proc string) (push string sent))))
+            (ert-info ((format "%s" "rebaseline-sends-once-ready"))
+              (should (dsh-emacs-events--core-workspace-rebaseline))
+              (should (= 1 (length sent))))))
+      (setq dsh-emacs--host-process nil)
+      (delete-process proc))))
+
 ;; --- Test 69: with multiple sessions in parallel, transcript events
 ;; route by buffer ownership (the guard must not use the global
 ;; current-session) ---

@@ -308,6 +308,62 @@
       (dolist (buffer documents)
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
+;; Closing the plan document must not take the decision's completion with it:
+;; the review belongs to the chat, so the result request (and its callback)
+;; must be owned by the live chat buffer, not by the closable document.
+(ert-deftest dsh-emacs-test-plan-plan-document-close-keeps-failure-callback-ownership ()
+  :tags '(dsh-unit)
+  (let ((chat (generate-new-buffer " *plan-owner-chat*"))
+        (dsh-emacs-events--client-id "owner-client")
+        (dsh-emacs-enable-notifications nil)
+        documents sent request-buffer callback)
+    (unwind-protect
+        (cl-letf (((symbol-function 'display-buffer)
+                   (lambda (buffer &rest _) (cl-pushnew buffer documents) nil))
+                  ((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method args cb)
+                     (push (cons method args) sent)
+                     (setq request-buffer (current-buffer)
+                           callback cb))))
+          (with-current-buffer chat
+            (dsh-emacs--question-requested
+             chat "owner-event" "owner-session" (list (dsh-test--plan-question)))
+            (let ((review (car dsh-emacs-plan--pending)))
+              (with-current-buffer (plist-get review :buffer)
+                (dsh-emacs-plan-approve))
+              (ert-info ((format "%s" "plan-decision-request-belongs-to-chat"))
+                (should (eq request-buffer chat))
+                (should (= (length sent) 1)))
+              (kill-buffer (plist-get review :buffer))
+              ;; Mirror `dsh-emacs--http-post': a response only reaches the
+              ;; buffer that made the request while that buffer is live.
+              (when (buffer-live-p request-buffer)
+                (with-current-buffer request-buffer
+                  (funcall callback nil "offline")))
+              (ert-info ((format "%s" "plan-document-close-keeps-failure-callback-ownership"))
+                (should (null (plist-get review :busy)))
+                (should (not (plist-get review :retired)))
+                (should (memq review dsh-emacs-plan--pending))
+                (should (equal (plist-get review :status)
+                               "Decision failed: offline")))
+              (let ((document
+                     (dsh-emacs-plan--show
+                      chat (plist-get review :identity)
+                      (dsh-protocol-question-detail
+                       (plist-get review :question)))))
+                (with-current-buffer document
+                  (ert-info ((format "%s" "plan-reopened-after-failure-offers-approve"))
+                    (should (eq review dsh-emacs-plan--review))
+                    (should (string-match-p "Decision failed: offline"
+                                            (buffer-string)))
+                    (should (string-match-p "Approve and execute"
+                                            (buffer-string)))))))))
+      (when (buffer-live-p chat)
+        (with-current-buffer chat (dsh-emacs-plan--cancel)))
+      (when (buffer-live-p chat) (kill-buffer chat))
+      (dolist (buffer documents)
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
 ;; Equal call ids in different chats must never share actions or retirement.
 (ert-deftest dsh-emacs-test-plan-plan-documents-isolate-equal-call-ids-by-chat ()
   :tags '(dsh-unit)

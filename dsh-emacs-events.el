@@ -1828,10 +1828,13 @@ dispatches on logical frame type and ignores `streamId', a second live
 connect — a stale `order'/'remove' from the retired stream could revert a
 newer reorder.  The prior stream is therefore cancelled first (its frames
 are dropped once the host closes it), then a fresh one is opened and its
-id recorded.  Returns non-nil when a core process existed and the request
-was sent."
+id recorded.  Returns non-nil when a READY core process existed and the
+request was sent; a process still in its handshake returns nil, so the
+caller can leave the baseline to `dsh-emacs-events--host-open' instead of
+writing mux frames into the unfinished upgrade."
   (let ((proc dsh-emacs--host-process))
-    (when (and (processp proc) (process-live-p proc))
+    (when (and (processp proc) (process-live-p proc)
+               dsh-emacs--host-ready)
       ;; Retire the workspace/follow stream opened at connect (or by the last
       ;; re-baseline) so exactly one live workspace stream feeds the caches.
       (let ((old (process-get proc 'dsh-emacs-host-ws-stream-id)))

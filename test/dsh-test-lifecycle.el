@@ -530,13 +530,131 @@
                                                               (list (cons 'values
                                                                           (list (cons 'contextPressure
                                                                                       (list (cons 'pressureTokens 129946)
-                                                                                            (cons 'contextWindow 262144)))))))))))))))
+                                                                                            (cons 'contextWindow 262144))))))))))))))
+                    ;; The shared list fetch re-baselines workspaces; keep it
+                    ;; off the network (and out of `dsh-emacs--host-process').
+                    ((symbol-function 'dsh-emacs-list-workspaces) #'ignore))
             (dsh-emacs--link-session-preset "sess-first"))
           (ert-info ((format "%s" "first-open-fetches-session-list"))
             (should (member "session/list" methods))))
       (setq dsh-emacs--sessions old-sessions)
       (remhash "sess-first" dsh-emacs--chat-buffers)
       (when (buffer-live-p buf) (kill-buffer buf)))))
+
+;; --- Test 43g: the lazy session/list behind the preset link must replay live
+;; frames instead of rolling the cache back ---
+;; Regression: the fetch installed its stale response directly, so a status or
+;; title frame that arrived while the round trip was in flight was overwritten.
+(ert-deftest dsh-emacs-test-lifecycle-preset-fetch-replays-live-state ()
+  :tags '(dsh-unit)
+  (let* ((dsh-emacs--chat-buffers (make-hash-table :test #'equal))
+         (dsh-emacs--sessions
+          (dsh-emacs-test--session-items
+           '(((sessionId . "sess-preset-race")
+              (running . :json-false)
+              (projections . ((values . ((title . "Old title")))))))))
+         (dsh-emacs--sessions-buffer
+          (generate-new-buffer-name " *absent-list*"))
+         (dsh-emacs--host-refresh-depth 0)
+         (dsh-emacs--host-refresh-frames nil)
+         (dsh-emacs--subagent-catalogs (make-hash-table :test #'equal))
+         (buf (generate-new-buffer " *t43g-chat*"))
+         callback)
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (dsh-emacs-mode)
+            (setq-local dsh-emacs--buffer-session "sess-preset-race"))
+          (puthash "sess-preset-race" buf dsh-emacs--chat-buffers)
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (_method _params cb) (setq callback cb)))
+                    ((symbol-function 'dsh-emacs-list-workspaces) #'ignore))
+            ;; The cached row has no agentPreset: the lazy fetch fires.
+            (dsh-emacs--link-session-preset "sess-preset-race")
+            (should callback)
+            ;; Live frames land while the stale response is in flight.
+            (dsh-emacs-events--host-item
+             nil '((type . "emit") (event . "api-session/status")
+                   (args . ["sess-preset-race" t])))
+            (dsh-emacs-events--host-item
+             nil '((type . "projection") (sessionId . "sess-preset-race")
+                   (key . "title") (value . "Live title")))
+            (should (dsh-protocol-session-running
+                     (dsh-emacs--chat-session-item "sess-preset-race")))
+            (should (equal (buffer-name buf) "dsh: Live title"))
+            ;; The response predates those frames: install it, replay the rest.
+            (funcall callback
+                     t '((items
+                          . [((sessionId . "sess-preset-race")
+                              (running . :json-false)
+                              (projections
+                               . ((values . ((title . "Stale title"))))))])))
+            (ert-info ((format "%s" "preset-fetch-replays-live-state"))
+              (should (dsh-protocol-session-running
+                       (dsh-emacs--chat-session-item "sess-preset-race")))
+              (should (equal (buffer-name buf) "dsh: Live title")))))
+      (remhash "sess-preset-race" dsh-emacs--chat-buffers)
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+;; The lazy preset fetch can outlive the chat that started it.  The cache
+;; install must survive, but it must not re-create a core connection once the
+;; last owner is gone: nothing would hold the stream, and no later kill hook
+;; would close it.
+(ert-deftest dsh-emacs-test-lifecycle-late-preset-fetch-keeps-no-ownerless-core ()
+  :tags '(dsh-unit)
+  (let* ((chat (generate-new-buffer " *t43h-chat*"))
+         (dsh-emacs--sessions-buffer
+          (generate-new-buffer-name " *absent-list*"))
+         (dsh-emacs--chat-buffers (make-hash-table :test 'equal))
+         (dsh-emacs--sessions
+          (dsh-emacs-test--session-items
+           '(((sessionId . "sess-late-fetch") (cwd . "/tmp")))))
+         (dsh-emacs--subagent-catalogs (make-hash-table :test 'equal))
+         (dsh-emacs--host-process (make-pipe-process
+                                   :name "dsh-test-late-preset-core"
+                                   :noquery t))
+         (dsh-emacs--host-ready t)
+         (dsh-emacs--host-reconnect-timer nil)
+         (dsh-emacs--host-refresh-depth 0)
+         (dsh-emacs--host-refresh-frames nil)
+         callback origin revived)
+    (unwind-protect
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_method _params cb)
+                     (setq callback cb origin (current-buffer))))
+                  ((symbol-function 'dsh-emacs-server-ensure) #'ignore)
+                  ((symbol-function 'open-network-stream)
+                   (lambda (_name buffer &rest _)
+                     (setq revived (make-pipe-process
+                                    :name "dsh-test-late-preset-revived"
+                                    :buffer buffer :noquery t)))))
+          (with-current-buffer chat
+            (dsh-emacs-mode)
+            (setq-local dsh-emacs--buffer-session "sess-late-fetch"))
+          (puthash "sess-late-fetch" chat dsh-emacs--chat-buffers)
+          (with-current-buffer chat
+            (dsh-emacs--link-session-preset "sess-late-fetch"))
+          (kill-buffer chat)
+          (ert-info ((format "%s" "late-preset-fetch-starts-ownerless"))
+            (should-not dsh-emacs--host-process)
+            (should-not (dsh-emacs-events--host-needed-p)))
+          (with-current-buffer origin
+            (funcall callback
+                     t '((items
+                          . [((sessionId . "sess-late-fetch")
+                              (cwd . "/tmp") (running . t))]))))
+          (ert-info ((format "%s" "late-preset-fetch-keeps-cache-without-core"))
+            (should-not (dsh-emacs-events--host-needed-p))
+            (should-not dsh-emacs--host-process)
+            (should (dsh-emacs--chat-session-item "sess-late-fetch"))))
+      (when (buffer-live-p chat) (kill-buffer chat))
+      (when (timerp dsh-emacs--host-reconnect-timer)
+        (cancel-timer dsh-emacs--host-reconnect-timer))
+      (when (process-live-p dsh-emacs--host-process)
+        (set-process-sentinel dsh-emacs--host-process nil)
+        (delete-process dsh-emacs--host-process))
+      (when (and revived (process-live-p revived))
+        (delete-process revived)))))
 
 ;; --- Test 43e: with a warm cache the mode-line ctx snapshot lands after
 ;; open-session ---

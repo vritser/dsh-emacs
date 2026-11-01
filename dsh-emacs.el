@@ -618,7 +618,13 @@ known value."
                                       (dsh-emacs--chat-buffers-sync-all)
                                       ;; Refresh workspaces in parallel so the
                                       ;; session list can group by workspace.
-                                      (dsh-emacs-list-workspaces))
+                                      ;; This fetch can outlive the chat that
+                                      ;; triggered it (the lazy preset link):
+                                      ;; keep the installed cache, but do not
+                                      ;; create a core connection when no list
+                                      ;; or chat is left to own and close it.
+                                      (when (dsh-emacs-events--host-needed-p)
+                                        (dsh-emacs-list-workspaces)))
                                   (message "Failed to fetch session list: %s"
                                            (dsh-emacs-rpc-error-text value)))
                               ;; Snapshot installed: replay any frame that arrived
@@ -1761,9 +1767,12 @@ streams, user messages and transcript controls are not fork boundaries."
 (defun dsh-emacs--link-session-preset (session-id)
   "Fill the mode-line agent preset for SESSION-ID.
 Uses the cached session list when possible; otherwise refreshes
-`session/list' once and lets the sync feed the preset from the response.
-SAFE outside a chat buffer (the RPC callback runs in the buffer that called
-this).  The lazy fetch also covers the ctx% snapshot on first open: a session
+`session/list' once through `dsh-emacs-list-sessions--fetch' and lets the sync
+feed the preset from the response.  SAFE outside a chat buffer: that fetch
+runs from the hidden session-cache buffer, so a killed caller cannot drop the
+callback, and it brackets the round trip with the refresh replay so a live
+status/title frame that lands mid-flight survives the stale snapshot.
+The lazy fetch also covers the ctx% snapshot on first open: a session
 missing from `dsh-emacs--sessions' has no `contextPressure' to feed the
 mode-line either (see `dsh-emacs--chat-buffer-context-sync'), so the same
 fetch — whose callback calls `dsh-emacs--chat-buffers-sync-all' — brings
@@ -1774,18 +1783,11 @@ preset, context snapshot, title and workspace in one round trip."
       ;; mode line through the shared sync (same source the cache refresh
       ;; uses for model/ctx), so the preset and its siblings stay consistent.
       (dsh-emacs--chat-buffer-preset-sync session-id (current-buffer))
-    (dsh-emacs--rpc-async "session/list" (dsh-protocol-session-list-request)
-                          (lambda (ok value)
-                            (when ok
-                              (let ((items (dsh-protocol-session-list--from-alist value)))
-                                ;; A brand-new session on first open is missing
-                                ;; from the cache: refresh the whole cache so
-                                ;; the buffer name (`dsh: <title>') and the
-                                ;; workspace (default-directory) come along
-                                ;; too; `dsh-emacs--chat-buffers-sync-all' now
-                                ;; also feeds the preset to open chat buffers.
-                                (setq dsh-emacs--sessions items)
-                                (dsh-emacs--chat-buffers-sync-all)))))))
+    ;; No cached row/preset yet: use the shared, replay-protected refresh
+    ;; rather than installing a raw `session/list' response.  A brand-new
+    ;; session on first open is missing from the cache, and a stale response
+    ;; must not roll back state the core stream already delivered.
+    (dsh-emacs-list-sessions--fetch)))
 
 (defun dsh-emacs-archive-session (session-id)
   "Archive SESSION-ID: remove it from its workspace view.

@@ -306,8 +306,11 @@ its own outcome answers the waterfall."
                         (dsh-emacs-plan--paint))))
                   (message "Plan decision failed: %s" value))))))
       (condition-case err
-          (dsh-emacs--events-result-async
-           client (plist-get review :event-id) outcome done)
+          (with-current-buffer chat
+            ;; The decision belongs to the chat, not the document: the
+            ;; document may close while the HTTP response is in flight.
+            (dsh-emacs--events-result-async
+             client (plist-get review :event-id) outcome done))
         (error (funcall done nil (error-message-string err)))))))
 
 (defun dsh-emacs-plan-approve ()

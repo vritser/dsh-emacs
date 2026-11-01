@@ -571,18 +571,26 @@ read-only, so a child conversation rejects here before any removal too."
           (dsh-emacs-queue-preview (dsh-protocol-queue-item-text item))))
 
 (defun dsh-emacs-queue--table (items)
-  "Return ((LABEL . ITEM) ...) for ITEMS with unique LABELs:
-items whose preview text collides get a \"[N]\" suffix, so each label
-maps back to exactly one item however the minibuffer picked it."
-  (let ((seen (make-hash-table :test 'equal)))
-    (mapcar (lambda (item)
-              (let* ((base (dsh-emacs-queue--label item))
-                     (n (1+ (gethash base seen 0))))
-                (puthash base n seen)
-                (cons (if (= n 1) base
-                        (format "%s [%d]" base n))
-                      item)))
-            items)))
+  "Return ((LABEL . ITEM) ...) for ITEMS with unique LABELs.
+A preview collision takes a \"[N]\" suffix; a candidate that would still
+collide with an already assigned label (for example an item literally
+named \"same [2]\") keeps incrementing until it is free.  Every final
+label therefore maps to exactly one item, and the item — hence its host
+id — rides in the cdr the menu verbs act on."
+  (let ((seen (make-hash-table :test 'equal))
+        (used (make-hash-table :test 'equal)))
+    (mapcar
+     (lambda (item)
+       (let* ((base (dsh-emacs-queue--label item))
+              (n (1+ (gethash base seen 0)))
+              (label (if (= n 1) base (format "%s [%d]" base n))))
+         (while (gethash label used)
+           (setq n (1+ n)
+                 label (format "%s [%d]" base n)))
+         (puthash base n seen)
+         (puthash label t used)
+         (cons label item)))
+     items)))
 
 (defvar dsh-emacs--queue-pick-table nil
   "((LABEL . ITEM) ...): the queue entries of the open queue menu.

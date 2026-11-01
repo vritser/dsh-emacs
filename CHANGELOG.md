@@ -81,6 +81,24 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Closing a plan document keeps its decision alive**: the approval
+  request is now owned by the chat buffer instead of the closable document,
+  so a response arriving after the document is closed still settles the
+  review; a failure clears "Sending decision…" and the reopened document can
+  retry.
+
+- **A late session-list refresh no longer rolls back live state**: the lazy
+  `session/list` fetch behind a missing agent preset now uses the
+  replay-protected refresh, so running status and titles delivered while the
+  response was in flight survive the stale snapshot. The cache update no
+  longer belongs to the caller's chat buffer, and a response that outlives
+  the last list/chat owner updates the cache without re-creating an
+  unsupervised core connection.
+
+- **Queue menu labels stay unique**: an item whose text already looks like a
+  generated suffix (e.g. `same [2]`) no longer collides with another item's
+  suffix, so a menu action always resolves to the message it names.
+
 - **Chats opened without the list get core events**: the host-wide
   `session/control` + `$events` connection is now kept alive by the session
   list or any live chat, not by the list alone. Opening a session directly

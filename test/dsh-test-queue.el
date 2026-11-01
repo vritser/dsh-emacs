@@ -84,6 +84,34 @@
                                (make-string 100 ?x)))))
     (should (string-suffix-p "..." (dsh-emacs-queue-preview (make-string 100 ?x))))))
 
+;; Menu labels must stay unique even when an item's literal text already
+;; looks like a generated suffix: "same", "same", "same [2]" used to
+;; produce two "[Q] same [2]" labels, so a label lookup could act on the
+;; wrong host item.
+(ert-deftest dsh-emacs-test-queue-menu-labels-stay-unique-on-suffix-collision ()
+  :tags '(dsh-unit)
+  (let* ((items (list (dsh-emacs-test--queue-item "id-1" "queued" "same")
+                      (dsh-emacs-test--queue-item "id-2" "queued" "same")
+                      (dsh-emacs-test--queue-item "id-3" "queued" "same [2]")))
+         (table (dsh-emacs-queue--table items))
+         (labels (mapcar #'car table)))
+    (ert-info ((format "%s" "menu-labels-are-unique"))
+      (should (= (length labels)
+                 (length (delete-dups (copy-sequence labels))))))
+    (ert-info ((format "%s" "menu-labels-keep-their-own-item"))
+      (should (equal '("id-1" "id-2" "id-3")
+                     (mapcar (lambda (entry)
+                               (dsh-protocol-queue-item-id (cdr entry)))
+                             table))))
+    (ert-info ((format "%s" "menu-label-lookup-hits-the-right-item"))
+      (should (equal "id-3"
+                     (dsh-protocol-queue-item-id
+                      (cdr (assoc (nth 2 labels) table))))))
+    (ert-info ((format "%s" "menu-labels-keep-the-queue-prefix"))
+      (should (cl-every (lambda (label)
+                          (string-prefix-p "[Q] same" label))
+                        labels)))))
+
 ;; diff: consume (disappear), newly queued, newly steering, promote
 (ert-deftest dsh-emacs-test-queue-queue-diff-events-consume-queue-steer ()
   :tags '(dsh-unit)
