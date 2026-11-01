@@ -440,6 +440,67 @@
       (dolist (buffer documents)
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
+;; A response settles only the waterfall it was submitted for.  When the
+;; host re-issues the same plan under a new event id, the old response must
+;; not retire the new request, and the re-issued request must be answerable.
+(ert-deftest dsh-emacs-test-plan-plan-superseded-response-does-not-retire-reissue ()
+  :tags '(dsh-unit)
+  (let ((chat (generate-new-buffer " *plan-superseded*"))
+        (dsh-emacs-events--client-id "superseded-client")
+        (dsh-emacs-enable-notifications nil)
+        documents sent callbacks)
+    (unwind-protect
+        (cl-letf (((symbol-function 'display-buffer)
+                   (lambda (buffer &rest _) (cl-pushnew buffer documents) nil))
+                  ((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method args callback)
+                     (push (cons method args) sent)
+                     (push (cons (alist-get 'eventId args) callback) callbacks))))
+          (with-current-buffer chat
+            (dsh-emacs--question-requested
+             chat "plan-old" "superseded"
+             (list (dsh-test--plan-question "call-superseded")))
+            (let ((review (car dsh-emacs-plan--pending)))
+              (with-current-buffer (plist-get review :buffer)
+                (dsh-emacs-plan-approve))
+              (let ((stale (cdr (assoc "plan-old" callbacks))))
+                (dsh-emacs--question-requested
+                 chat "plan-new" "superseded"
+                 (list (dsh-test--plan-question "call-superseded")))
+                (funcall stale t nil)
+                (ert-info ((format "%s" "plan-superseded-success-keeps-reissued-review"))
+                  (should-not (plist-get review :retired))
+                  (should (memq review dsh-emacs-plan--pending))
+                  (should (equal (plist-get review :event-id) "plan-new"))
+                  (should-not (plist-get review :busy))
+                  (should (equal (plist-get review :status) "Pending review"))
+                  (should (with-current-buffer (plist-get review :buffer)
+                            (string-match-p "Approve and execute" (buffer-string)))))
+                (funcall stale nil "stale failure")
+                (ert-info ((format "%s" "plan-superseded-failure-keeps-reissued-status"))
+                  (should (memq review dsh-emacs-plan--pending))
+                  (should-not (plist-get review :retired))
+                  (should (equal (plist-get review :status) "Pending review"))
+                  (should-not (plist-get review :busy)))
+                (with-current-buffer (plist-get review :buffer)
+                  (dsh-emacs-plan-approve))
+                (ert-info ((format "%s" "plan-superseded-reissue-answers-newest-event"))
+                  (should (= (length sent) 2))
+                  (should (equal (alist-get 'eventId (cdr (car sent))) "plan-new"))
+                  (should (plist-get review :busy)))
+                (funcall (cdr (assoc "plan-new" callbacks)) t nil)
+                (ert-info ((format "%s" "plan-current-response-retires-reissued-review"))
+                  (should-not (memq review dsh-emacs-plan--pending))
+                  (should (plist-get review :retired))
+                  (should (equal (plist-get review :status) "Approved"))
+                  (should (with-current-buffer (plist-get review :buffer)
+                            (string-match-p "Approved" (buffer-string)))))))))
+      (when (buffer-live-p chat)
+        (with-current-buffer chat (dsh-emacs-plan--cancel)))
+      (when (buffer-live-p chat) (kill-buffer chat))
+      (dolist (buffer documents)
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
 ;; An empty call id is no identity: two submitted documents stay two requests
 ;; (and two document buffers) instead of collapsing onto each other.
 (ert-deftest dsh-emacs-test-plan-plan-empty-call-id-keeps-requests-separate ()

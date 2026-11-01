@@ -193,6 +193,7 @@ the fallback rather than silently reusing the question reader."
                       (plist-get existing :question) question
                       (plist-get existing :client-id)
                       dsh-emacs-events--client-id
+                      (plist-get existing :busy) nil
                       (plist-get existing :status) "Pending review")
                 (dsh-emacs-plan--show chat identity text existing))
                ;; The same waterfall replayed: keep the request as it is.
@@ -262,7 +263,12 @@ its own outcome answers the waterfall."
   "Answer this document's live request; APPROVE nil requests changes."
   (let* ((review dsh-emacs-plan--review)
          (chat (plist-get review :chat))
-         (client (plist-get review :client-id)))
+         (client (plist-get review :client-id))
+         ;; A response only settles the waterfall it was sent for.  The host
+         ;; may re-issue the same plan under a new event id while this request
+         ;; is in flight; without binding the callback to this event id, the
+         ;; late response would retire the re-issued request.
+         (event-id (plist-get review :event-id)))
     (unless (and review (not (plist-get review :retired))
                  (buffer-live-p chat)
                  (memq review (buffer-local-value 'dsh-emacs-plan--pending chat))
@@ -288,7 +294,8 @@ its own outcome answers the waterfall."
             (lambda (ok value)
               (when (and (buffer-live-p chat)
                          (not (plist-get review :expired))
-                         (equal client dsh-emacs-events--client-id))
+                         (equal client dsh-emacs-events--client-id)
+                         (equal event-id (plist-get review :event-id)))
                 (if ok
                     (progn
                       (dsh-emacs-plan--retire
@@ -310,7 +317,7 @@ its own outcome answers the waterfall."
             ;; The decision belongs to the chat, not the document: the
             ;; document may close while the HTTP response is in flight.
             (dsh-emacs--events-result-async
-             client (plist-get review :event-id) outcome done))
+             client event-id outcome done))
         (error (funcall done nil (error-message-string err)))))))
 
 (defun dsh-emacs-plan-approve ()
