@@ -1212,10 +1212,18 @@ character also returns it, so backspace there can delete the whole chip."
 
 (defun dsh-emacs-reference--chip-guard-before ()
   "Prevent a chip's canonical mention from being edited in the middle.
-If point rests on a chip character and THIS-COMMAND would edit, hop to the
-chip's end first so the edit lands after it and the wire text stays a valid
-mention.  Deleting at a chip boundary removes the whole chip (handled by
-`dsh-emacs-reference--chip-delete-guard').
+If point rests strictly inside a chip and THIS-COMMAND would edit, hop to
+the chip's end first so the edit lands after it and the wire text stays a
+valid mention.  Deleting at a chip boundary removes the whole chip (handled
+by `dsh-emacs-reference--chip-delete-guard').
+
+At the chip's LEADING edge, insertion commands (typing, quoted insert,
+yank) go BEFORE the chip and cannot split it, so they are left alone.
+Hopping there made the text before an `@' reference uneditable.  In
+OVERWRITE mode typing replaces the character at point instead, so the
+leading-edge exception is off there and the old hop to the chip's end is
+kept — otherwise `self-insert-command' would replace the chip's first
+character and silently destroy the reference.
 
 A forward `kill-line' (C-k) that starts on a chip is different: it kills to
 the end of the input, which normally covers the whole chip, so hopping to the
@@ -1226,7 +1234,14 @@ whole chip as one atomic unit (plus any trailing text) — never a fragment."
     (when (and (dsh-emacs-reference--editing-command-p this-command)
                (get-text-property pt 'dsh-emacs-reference-chip))
       (let ((chip (dsh-emacs-reference--chip-region pt)))
-        (when (and chip (< pt (cdr chip)))
+        (when (and chip (< pt (cdr chip))
+                   (or (< (car chip) pt)
+                       (not (and (memq this-command
+                                        '(self-insert-command quoted-insert
+                                          yank yank-pop))
+                                 (not (or (bound-and-true-p overwrite-mode)
+                                          (bound-and-true-p
+                                           binary-overwrite-mode)))))))
           (goto-char (if (eq this-command 'kill-line)
                          (car chip)
                        (cdr chip))))))))
@@ -1247,15 +1262,33 @@ calls."
       (delete-region (car region) (cdr region))
       t)))
 
+(defun dsh-emacs-reference--user-delete-command-p ()
+  "Non-nil when THIS-COMMAND is a user-level delete, or a direct call.
+A compound command can call `delete-char' internally for a single-character
+replacement — `quoted-insert' in overwrite mode does exactly that.  Promoting
+such an internal call to whole-chip deletion would swallow the entire
+reference instead of replacing one character of the text after it."
+  (or (null this-command)
+      (memq this-command
+            '(delete-char delete-forward-char
+              delete-backward-char backward-delete-char
+              backward-delete-char-untabify))))
+
 (defun dsh-emacs-reference--chip-delete-backward (orig &optional arg killflag)
-  "`delete-backward-char' advice: backspace at a chip deletes the whole chip."
-  (if (dsh-emacs-reference--delete-chip-at-boundary)
+  "`delete-backward-char' advice: backspace at a chip deletes the whole chip.
+Only for a user-level delete; an internal call from a compound command keeps
+its original one-character meaning."
+  (if (and (dsh-emacs-reference--user-delete-command-p)
+           (dsh-emacs-reference--delete-chip-at-boundary))
       nil
     (funcall orig arg killflag)))
 
 (defun dsh-emacs-reference--chip-delete-forward (orig &optional arg killflag)
-  "`delete-char' advice: forward-delete at a chip deletes the whole chip."
-  (if (dsh-emacs-reference--delete-chip-at-boundary)
+  "`delete-char' advice: forward-delete at a chip deletes the whole chip.
+Only for a user-level delete; `quoted-insert' in overwrite mode uses the
+original single-character delete."
+  (if (and (dsh-emacs-reference--user-delete-command-p)
+           (dsh-emacs-reference--delete-chip-at-boundary))
       nil
     (funcall orig arg killflag)))
 

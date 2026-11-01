@@ -81,6 +81,19 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **`C-q` in overwrite mode keeps an `@` reference**: the chip delete advice
+  now promotes only a user-level delete to whole-chip removal; the internal
+  `delete-char` that `quoted-insert` uses in overwrite mode replaces one
+  character after the chip instead of swallowing the whole reference.
+
+- **Text can be typed before an `@` reference**: the composer chip guard no
+  longer hops past a session/file chip when an insertion starts at its
+  leading edge, so typing or yanking immediately before a completed
+  reference works; edits starting inside the chip still hop out and cannot
+  split it. In `overwrite-mode` the guard keeps hopping, so overwriting
+  cannot replace the chip's first character and silently drop the
+  reference.
+
 - **A stale plan decision cannot retire a re-issued request**: the approval
   callback is bound to the event id it was sent for, so when the host
   re-issues the same plan under a new waterfall, a late success or failure

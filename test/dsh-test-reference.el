@@ -875,9 +875,12 @@
         (dsh-emacs-reference--chip-guard-before))
       (ert-info ((format "%s" "chip-guard-hops-out-of-interior"))
         (should (= (point) (point-max))))
-      ;; backspace at the trailing edge deletes the whole chip (atomic unit)
+      ;; backspace at the trailing edge deletes the whole chip (atomic unit);
+      ;; binding `this-command' models the interactive delete, which is the
+      ;; only caller allowed to promote the boundary hit to whole-chip removal
       (goto-char (point-max))
-      (delete-backward-char 1)
+      (let ((this-command 'delete-backward-char))
+        (delete-backward-char 1))
       (ert-info ((format "%s" "chip-backspace-deletes-whole-span"))
         (should (string= (buffer-substring-no-properties (point-min) (point-max)) "")))
       ;; typing after the chip must not inherit its link/face style
@@ -888,6 +891,80 @@
         (should (let ((p (- (point) 5)))
                   (and (null (get-text-property p 'face))
                        (null (get-text-property p 'dsh-emacs-reference-chip)))))))))
+
+;; Typing at a chip's leading edge must insert BEFORE the chip: the guard may
+;; only hop when the edit starts strictly inside it.  Regression: hopping at
+;; the edge made the text before an @ reference uneditable.
+(ert-deftest dsh-emacs-test-reference-typing-before-chip-inserts-before ()
+  :tags '(dsh-unit)
+  (let ((canon "@[My Talk](dsh-session:ab12_CD)"))
+    (with-temp-buffer
+      (setq-local dsh-emacs--input-marker (point-min-marker))
+      (insert "@My Talk")
+      (dsh-emacs-reference--session-chip (point-min) (point-max) canon)
+      (goto-char (point-min))
+      (let ((this-command 'self-insert-command))
+        (dsh-emacs-reference--chip-guard-before))
+      (ert-info ((format "%s" "chip-guard-leading-edge-does-not-hop"))
+        (should (= (point) (point-min))))
+      (insert ">")
+      (ert-info ((format "%s" "typed-before-chip-stays-outside-chip"))
+        (should (string= (buffer-substring-no-properties (point-min) (point-max))
+                         ">@My Talk"))
+        (should (null (get-text-property (point-min)
+                                         'dsh-emacs-reference-chip)))
+        (should (string= (dsh-emacs-reference--expanded-text
+                          (point-min) (point-max))
+                         (concat ">" canon)))))))
+
+;; Overwrite mode must not use the leading-edge insertion exception: typing
+;; there replaces the chip's first character (`@'), dropping the reference.
+;; The guard must keep the old hop to the chip's end in overwrite mode.
+(ert-deftest dsh-emacs-test-reference-overwrite-before-chip-preserves-chip ()
+  :tags '(dsh-unit)
+  (let ((canon "@[My Talk](dsh-session:ab12_CD)"))
+    (with-temp-buffer
+      (setq-local dsh-emacs--input-marker (point-min-marker))
+      (insert "@My Talk")
+      (dsh-emacs-reference--session-chip (point-min) (point-max) canon)
+      (overwrite-mode 1)
+      (goto-char (point-min))
+      (let ((this-command 'self-insert-command))
+        (dsh-emacs-reference--chip-guard-before))
+      (ert-info ((format "%s" "overwrite-mode-guard-keeps-chip"))
+        (should (= (point) (point-max)))
+        (should (get-text-property (point-min) 'dsh-emacs-reference-chip))
+        (should (string= (dsh-emacs-reference--expanded-text
+                          (point-min) (point-max))
+                         canon))))))
+
+;; `quoted-insert' in overwrite mode calls `delete-char' internally to replace
+;; one character.  The chip delete advice must not promote that internal call
+;; to whole-chip deletion: C-q X at the reference start used to swallow the
+;; whole chip and leave only X.
+(ert-deftest dsh-emacs-test-reference-quoted-insert-overwrite-keeps-chip ()
+  :tags '(dsh-unit)
+  (let ((canon "@[My Talk](dsh-session:ab12_CD)"))
+    (with-temp-buffer
+      (setq-local dsh-emacs--input-marker (point-min-marker))
+      (insert "@My Talk tail")
+      (dsh-emacs-reference--session-chip (point-min) (+ (point-min) 8) canon)
+      (binary-overwrite-mode 1)
+      (goto-char (point-min))
+      (let ((this-command 'quoted-insert))
+        ;; The guard sees overwrite mode and hops to the chip end; the
+        ;; command then deletes one following character and inserts its own.
+        (dsh-emacs-reference--chip-guard-before)
+        (delete-char 1)
+        (insert "X"))
+      (ert-info ((format "%s" "quoted-insert-overwrite-keeps-chip"))
+        (should (get-text-property (point-min) 'dsh-emacs-reference-chip))
+        (should (string= (buffer-substring-no-properties
+                          (point-min) (point-max))
+                         "@My TalkXtail"))
+        (should (string= (dsh-emacs-reference--expanded-text
+                          (point-min) (+ (point-min) 8))
+                         canon))))))
 
 ;; --- C-k on a chip deletes the whole chip atomically (not just its tail) ---
 ;; Regression: the chip guard used to hop every edit that started on a chip
