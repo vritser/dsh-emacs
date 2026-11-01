@@ -503,6 +503,39 @@
                      '(("@My Talk" . "@[My Talk](dsh-session:cyJpZCI6InMxIn0)")
                        ("@My Talk #2" . "@[My Talk](dsh-session:cyJpZCI6InMyIn0)")))))))
 
+;; --- session-rows: a literal suffix in a label cannot collide with a generated
+;; suffix row; every final row still resolves to its own session in the cache ---
+(ert-deftest dsh-emacs-test-reference-session-rows-suffixed-label-collision ()
+  :tags '(dsh-unit)
+  (let* ((entries
+          (mapcar (lambda (spec)
+                    (pcase-let ((`(,sid ,label) spec))
+                      (cons (concat "@[" label "]("
+                                    (dsh-test-reference--session-uri sid) ")")
+                            (list :kind 'session :label label
+                                  :session-id sid))))
+                  '(("s1" "same")
+                    ("s2" "same")
+                    ("s3" "same #2"))))
+         (dsh-emacs--reference-candidates entries)
+         (rows (dsh-emacs-reference--session-rows)))
+    (ert-info ((format "%s" "session-rows-suffixed-label-collision"))
+      (should (equal (mapcar #'car rows)
+                     '("@same" "@same #2" "@same #2 #2")))
+      (should (= (length rows)
+                 (length (delete-dups (mapcar #'car rows)))))
+      (should (equal (mapcar #'cdr rows) (mapcar #'car entries)))
+      (should (equal (mapcar (lambda (row)
+                               (plist-get (cdr (dsh-emacs-reference--entry-for
+                                                row))
+                                          :session-id))
+                             (mapcar #'car rows))
+                     '("s1" "s2" "s3")))
+      (should (eq (dsh-emacs-reference--entry-for "@same #2 #2")
+                  (nth 2 entries)))
+      (should-not (eq (dsh-emacs-reference--entry-for "@same #2 #2")
+                      (nth 1 entries))))))
+
 ;; --- affixate: file/directory rows get a leading type-icon column (consult-buffer
 ;; style) ---
 (ert-deftest dsh-emacs-test-reference-affixate-icon-column-shape ()

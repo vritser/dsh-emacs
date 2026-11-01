@@ -99,6 +99,10 @@ minor) and stay undated until the release is cut.
   `kill-buffer` now retires its `job/follow` handler like `q` does, instead
   of leaving the subscription on the chat socket until the job ends.
 
+- **`@` session-reference rows stay unique**: a session label that already
+  looks like a generated suffix no longer aliases another session, so
+  completing the row references the session it names.
+
 - **Closing a plan document keeps its decision alive**: the approval
   request is now owned by the chat buffer instead of the closable document,
   so a response arriving after the document is closed still settles the

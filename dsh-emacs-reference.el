@@ -585,10 +585,13 @@ first message restores candidates without a fetch."
   "Alist (ROW . MENTION) for every session cache entry, in cache order.
 ENTRIES defaults to the current cache.  ROW is the short completion row
 (`@label'; a repeated label gains a ` #n' suffix so every session stays
-reachable and the exit lookup stays unambiguous); MENTION is the
-canonical text the pick inserts.  File/directory entries are their own
-row and never appear here."
-  (let ((seen (make-hash-table :test 'equal)))
+reachable); MENTION is the canonical text the pick inserts.  Every
+final ROW is unique: a label that already reads like a suffixed row
+(`same #2') cannot steal a generated one, so the exit lookup stays
+unambiguous.  File/directory entries are their own row and never appear
+here."
+  (let ((seen (make-hash-table :test 'equal))
+        (used (make-hash-table :test 'equal)))
     (delq nil
           (mapcar
            (lambda (entry)
@@ -597,12 +600,14 @@ row and never appear here."
                       (label (or (plist-get props :label)
                                  (plist-get props :session-id)))
                       (base (concat "@" label))
-                      (n (1+ (gethash base seen 0))))
+                      (n (1+ (gethash base seen 0)))
+                      (row (if (= n 1) base (format "%s #%d" base n))))
+                 (while (gethash row used)
+                   (setq n (1+ n)
+                         row (format "%s #%d" base n)))
                  (puthash base n seen)
-                 (cons (if (= n 1)
-                           base
-                         (format "%s #%d" base n))
-                       (car entry)))))
+                 (puthash row t used)
+                 (cons row (car entry)))))
            (or entries dsh-emacs--reference-candidates)))))
 
 (defun dsh-emacs-reference--entry-for (text)
