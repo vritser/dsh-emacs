@@ -81,6 +81,12 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Send-now keeps queued text literal**: sending a queued item while idle
+  submits its text as an ordinary message instead of routing it back through
+  the composer. A queued `!command` no longer runs locally, a queued `/name`
+  no longer executes as a command, and the draft being edited in the input
+  area is no longer cleared.
+
 - **Empty question text shows its options**: an `ask_user_question` call whose
   question text is empty but carries an id and options now renders the
   questionnaire, using "Question" as the placeholder, instead of falling back

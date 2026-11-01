@@ -398,7 +398,7 @@ it uses the buffer background. One
 space after the preview text carries a compact action cluster, one space apart,
 whose text-region keymaps run the queue's own item verbs on the previewed
 message: the up arrow (`IconSendOutlineRegular`) → `dsh-emacs-queue--send-now`
-\(steer into the running turn, or re-submit text-only items while idle), `IconEditOutline16` →
+\(steer into the running turn, or submit text-only items literally while idle), `IconEditOutline16` →
 `dsh-emacs-queue--edit` after a `read-string` (present only while
 `dsh-protocol-queue-item-text-only`, since the edit RPC answers with text
 blocks), and `IconTrashOutline16` → `dsh-emacs-queue--delete`. The queue owner

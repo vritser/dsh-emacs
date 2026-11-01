@@ -863,8 +863,9 @@
                  (lambda (method args callback)
                    (push (list method args) calls)
                    (funcall callback t nil)))
-                ((symbol-function 'dsh-emacs--submit-prompt)
-                 (lambda (&rest args) (push args submitted))))
+                ((symbol-function 'dsh-emacs--submit-plain)
+                 (lambda (message &rest args)
+                   (push (cons message args) submitted))))
         (setq dsh-emacs--queue-items (list item))
         (condition-case nil
             (call-interactively
@@ -891,12 +892,104 @@
               item (dsh-emacs-test--queue-item "text-q" "queued" "Plain")
               dsh-emacs--queue-items (list item))
         (dsh-emacs-queue--send-now item)
-        (ert-info ((format "%s" "inline-idle-send-still-resubmits-text"))
-          (should (equal submitted '(("Plain"))))
+        (ert-info ((format "%s" "inline-idle-send-submits-literal-text"))
+          (should (equal submitted '(("Plain" :input-consumed t))))
           (should (equal calls
                          '(("session/updateQueue"
                             ((request (sessionId . "inline-send") (itemId . "text-q")
                                       (action (kind . "remove")))))))))))))
+
+;; A queued item is a literal message: sending it now must not re-enter the
+;; composer's input parsing.  A server-originated `!' line must stay text (the
+;; client would otherwise run it locally), a queued `/name' line must not run
+;; as a command, and none of them may consume the unrelated draft the user is
+;; editing — the queue text never passes through the input area.
+(ert-deftest dsh-emacs-test-queue-idle-send-now-bypasses-input-parsing ()
+  :tags '(dsh-unit)
+  (dolist (queued '("!echo pwned" "/compact" "plain queued text"))
+    (with-temp-buffer
+      (dsh-emacs-mode)
+      (setq-local dsh-emacs--buffer-session "send-now")
+      (dsh-emacs--replace-input "draft in progress")
+      (let ((item (dsh-emacs-test--queue-item "q1" "queued" queued))
+            (calls nil) (submitted nil) (shell nil) (commands nil))
+        (cl-letf (((symbol-function 'dsh-emacs--busy-p) (lambda () nil))
+                  ((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (method args callback)
+                     (push (list method args) calls)
+                     (funcall callback t nil)))
+                  ((symbol-function 'dsh-emacs--submit-plain)
+                   (lambda (message &rest args)
+                     (push (cons message args) submitted)
+                     ;; Mirror the real path's input consumption: a submit
+                     ;; without :input-consumed wipes the draft, which is
+                     ;; exactly the regression this test pins down.
+                     (unless (plist-get args :input-consumed)
+                       (dsh-emacs--clear-input))))
+                  ((symbol-function 'dsh-emacs-shell-submit)
+                   (lambda (&rest args) (push args shell)))
+                  ((symbol-function 'dsh-emacs-command-execute)
+                   (lambda (&rest args) (push args commands)))
+                  ((symbol-function 'dsh-emacs--push-input-history) #'ignore)
+                  ((symbol-function 'dsh-emacs-render-command-optimistic)
+                   #'ignore))
+          (setq dsh-emacs--queue-items (list item))
+          (dsh-emacs-queue--send-now item)
+          (ert-info ((concat "idle-send-now-literal-" queued))
+            (should (null shell))
+            (should (null commands))
+            (should (equal submitted (list (cons queued '(:input-consumed t)))))
+            (should (equal "draft in progress" (dsh-emacs--get-input)))
+            (should (equal '("session/updateQueue")
+                           (mapcar #'car calls)))))))))
+
+;; The real submit path must leave the composer draft alone: send-now passes
+;; :input-consumed t because the queue text never passed through the input area.
+(ert-deftest dsh-emacs-test-queue-idle-send-now-keeps-the-current-draft ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (setq-local dsh-emacs--buffer-session "send-now-real"
+                dsh-emacs--event-ready t)
+    (dsh-emacs--replace-input "draft in progress")
+    (let ((item (dsh-emacs-test--queue-item "q1" "queued" "queued work"))
+          (prompts nil))
+      (cl-letf (((symbol-function 'dsh-emacs--busy-p) (lambda () nil))
+                ((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (method args callback)
+                   (when (equal method "session/prompt")
+                     (push args prompts))
+                   (funcall callback t nil)))
+                ((symbol-function 'dsh-emacs--render-user-message-optimistic)
+                 (lambda (&rest _) nil))
+                ((symbol-function 'dsh-emacs--push-input-history) #'ignore)
+                ((symbol-function 'dsh-emacs--ml-busy-set) #'ignore)
+                ((symbol-function 'dsh-emacs-events--watchdog-start) #'ignore)
+                ((symbol-function 'dsh-emacs-render--follow-stream) #'ignore))
+        (setq dsh-emacs--queue-items (list item))
+        (dsh-emacs-queue--send-now item)
+        (ert-info ((concat "idle-send-now-keeps-draft"))
+          (should (equal "draft in progress" (dsh-emacs--get-input)))
+          (should (= 1 (length prompts))))))))
+
+;; Child queues are read-only: the removal RPC must not run before the
+;; capability check, or the item would leave the host queue with nothing sent.
+(ert-deftest dsh-emacs-test-queue-send-now-rejects-subagent-before-removal ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (setq-local dsh-emacs--buffer-session "child"
+                dsh-emacs--buffer-subagent 'dummy)
+    (let ((item (dsh-emacs-test--queue-item "q1" "queued" "text"))
+          (calls nil))
+      (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (&rest args) (push args calls))))
+        (setq dsh-emacs--queue-items (list item))
+        (should-error (dsh-emacs-queue--send-now item) :type 'user-error)
+        (ert-info ((concat "send-now-rejects-subagent-before-removal"))
+          (should (null calls))
+          (should (equal (list item) dsh-emacs--queue-items))
+          (should (null dsh-emacs--queue-deleted)))))))
 
 ;; A projection replaces structs even when only placement changes.  The row's
 ;; arrow must run against the new placement in both directions.

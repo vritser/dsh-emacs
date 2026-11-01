@@ -45,7 +45,7 @@
 ;; declare-function at runtime, avoiding a top-level require cycle.
 (declare-function dsh-emacs--active-session-id "dsh-emacs" ())
 (declare-function dsh-emacs--busy-p "dsh-emacs" ())
-(declare-function dsh-emacs--submit-prompt "dsh-emacs" (message &optional attachments mode))
+(declare-function dsh-emacs--submit-plain "dsh-emacs" (message &rest args))
 (declare-function dsh-emacs-composer-render "dsh-emacs-composer" ())
 
 ;; Borrowed vertico runtime variables (see `dsh-emacs-queue--menu-item'):
@@ -517,10 +517,15 @@ edited preview at once; the confirming frame overwrites the mirror."
   "Send ITEM right away.
 While a turn is running this steers it into the running turn (jump the
 queue).  While idle there is no wake-only RPC: the item is deleted and
-re-submitted as an ordinary prompt, which wakes the driver — the parked
-queue drains in order and the re-submitted copy re-joins at the tail
-with its text preserved.  Reject non-text items while idle, before removing
-anything: the text-only resubmit cannot preserve their attachments."
+submitted as a literal prompt, which wakes the driver — the parked queue
+drains in order and the submitted copy re-joins at the tail with its text
+preserved.  The text never re-enters the composer's input parsing, so a
+queued \"!\" or \"/name\" line stays an ordinary message (no local shell,
+no `commands.execute') and the unrelated draft in the input area is left
+untouched.  Reject non-text items while idle, before removing anything: the
+text-only submit cannot preserve their attachments.  Subagent queues are
+read-only, so a child conversation rejects here before any removal too."
+  (dsh-emacs-subagent-require 'mutate)
   (cond
    ((eq (dsh-protocol-queue-item-placement item) 'steering)
     (message "Already steering"))
@@ -543,15 +548,15 @@ anything: the text-only resubmit cannot preserve their attachments."
            (with-current-buffer buf
              (if ok
                  (progn
-                   ;; Optimistic removal + input-line flash, then resubmit
-                   ;; (a failure is never resent).
+                   ;; Optimistic removal + input-line flash, then submit
+                   ;; the item's text as a literal message (never resent).
                    (setq dsh-emacs--queue-items
                          (cl-remove-if
                           (lambda (it)
                             (equal id (dsh-protocol-queue-item-id it)))
                           dsh-emacs--queue-items))
                    (dsh-emacs-queue--refresh-ui)
-                   (dsh-emacs--submit-prompt text))
+                   (dsh-emacs--submit-plain text :input-consumed t))
                (progn
                  (setq dsh-emacs--queue-deleted
                        (delete id dsh-emacs--queue-deleted))

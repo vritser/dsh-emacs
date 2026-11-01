@@ -473,13 +473,14 @@ Emacs cannot draw SVG, the inline cells use text fallbacks: `||` pause, `▶`
 resume, `✎` edit and `✕` clear.
 Steering items take priority in the separate Next Message preview; hover for
 the full text, and click or press RET on the cells just after the preview: the
-up arrow sends that message now (steering the running turn, or re-submitting
-a text-only item while idle — the same verb RET runs in `C-c C-q`), `✎` edits its text
-in the minibuffer (text-only messages; the manager's `e`), and `✕` deletes it
-\(the manager's `d`). Before the server confirms a newly queued item, its
-preview has no action cells. Sending an item with attachments while idle
-reports an error and leaves the original item queued. `C-c C-q` manages the
-whole queue and applies the same send-now restriction.
+up arrow sends that message now (steering the running turn, or submitting a
+text-only item literally while idle — the same verb RET runs in `C-c C-q`; the
+queued text is never re-parsed and the current draft stays in the input), `✎`
+edits its text in the minibuffer (text-only messages; the manager's `e`), and
+`✕` deletes it (the manager's `d`). Before the server confirms a newly
+queued item, its preview has no action cells. Sending an item with
+attachments while idle reports an error and leaves the original item queued.
+`C-c C-q` manages the whole queue and applies the same send-now restriction.
 
 ## Markdown responsiveness
 

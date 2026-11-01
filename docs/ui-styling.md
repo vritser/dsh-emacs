@@ -453,9 +453,10 @@ One space after the preview text sits a compact action cluster, one
 space apart, all tinted with `dsh-emacs-composer-next-action-face` (text
 fallbacks when Emacs lacks SVG): the up arrow `IconSendOutlineRegular` (RET or
 a click sends the previewed message now — steering the running turn, or
-re-submitting text-only items while idle, the verb RET runs in `C-c C-q`), then `✎` edit
-(`IconEditOutline16`, offered only for a message whose content is all text,
-because the edit RPC answers with text blocks) and `✕` delete
+submitting text-only items literally while idle, the verb RET runs in
+`C-c C-q`), then `✎` edit (`IconEditOutline16`, offered only for a message
+whose content is all text, because the edit RPC answers with text blocks) and
+`✕` delete
 \(`IconTrashOutline16`), which run the manager's `e`/`d` verbs. Local previews
 show no cells until their server queue ID arrives. Send-now refuses attachments
 while idle, preserving the original queued item. Each cell names
