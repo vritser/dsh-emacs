@@ -15,6 +15,8 @@
 (require 'subr-x)
 
 (declare-function dsh-emacs-composer-refresh "dsh-emacs-composer" ())
+(declare-function dsh-emacs-events--host-needed-p "dsh-emacs-events" ())
+(declare-function dsh-emacs-events-host-restore "dsh-emacs-events" ())
 (declare-function dsh-emacs-modeline-update "dsh-emacs-modeline" ())
 (declare-function dsh-emacs-session--render "dsh-emacs-session" ())
 (defvar dsh-emacs--interaction-active)
@@ -98,6 +100,9 @@ customizations remain above the new default spec."
 DIRECTORY defaults to the source directory of this loaded package.  Explicit
 .el paths bypass stale bytecode.  Keep chats, drafts, attachments, custom
 settings, running connections and timers; never re-enter a major mode.
+A reload that renames the client-wide core stream adopts the previous
+socket, or closes leftovers and rebuilds it, so chats keep receiving
+questions and approvals.
 
 Refresh keymap defaults in place (ad-hoc edits to package maps are replaced),
 face defaults, Composer rows, the session list and mode lines.  Existing
@@ -130,6 +135,11 @@ and reload again, or restart Emacs.  No server restart or prompt is sent."
            (load-read-function #'dsh-emacs-reload--read))
       (dolist (file dsh-emacs-reload--files)
         (load file nil t t))
+      ;; A build that shares one core connection can rename the owner of the
+      ;; live socket, leaving it stranded; nothing else reconnects on reload,
+      ;; so adopt it or rebuild before the UI refresh or chats go deaf.
+      (when (dsh-emacs-events--host-needed-p)
+        (dsh-emacs-events-host-restore))
       (setq dsh-emacs-modeline--logo-labels nil
             dsh-emacs-modeline--whale-tail-labels nil
             dsh-emacs-modeline--whale-tail-frames nil
@@ -147,6 +157,14 @@ and reload again, or restart Emacs.  No server restart or prompt is sent."
       (force-mode-line-update t)
       (message "Reloaded %d dsh-emacs source modules" (length dsh-emacs-reload--files))
       (length dsh-emacs-reload--files))))
+
+;; This file is loaded from inside the previous build's reload body.  That
+;; body cannot call the new restore step: redefining a function does not
+;; change an invocation already in progress.  Schedule the reconciliation
+;; once the reload has finished loading every module, so the first upgrade
+;; reload re-owns the core stream too.
+(when dsh-emacs-reload--files
+  (run-at-time 0 nil #'dsh-emacs-events-host-restore))
 
 (provide 'dsh-emacs-reload)
 ;;; dsh-emacs-reload.el ends here

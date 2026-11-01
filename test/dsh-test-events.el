@@ -448,7 +448,7 @@
 (ert-deftest dsh-emacs-test-events-host-connect-is-idempotent ()
   :tags '(dsh-unit)
   (let* ((proc (make-pipe-process :name "dsh-test-host" :noquery t))
-         (dsh-emacs--host-process proc)
+         (dsh-emacs-events--host-process proc)
          (disconnects 0))
     (unwind-protect
         (cl-letf (((symbol-function 'dsh-emacs-events-host-disconnect)
@@ -459,8 +459,165 @@
             (should (dsh-emacs-events-host-connected-p))))
       ;; Detach before deleting: the global sentinel would otherwise treat
       ;; the test pipe as a lost core stream and arm a reconnect timer.
-      (setq dsh-emacs--host-process nil)
+      (setq dsh-emacs-events--host-process nil)
       (delete-process proc))))
+
+;; The core stream is one client-wide connection.  Buffer-local state would
+;; give each buffer its own copy, and the handshake's ownership check (`eq'
+;; against the default value) would then skip `$events' for every new socket.
+;; A live reload is exactly when that split appears, so pin the plain-`defvar'
+;; contract.
+(ert-deftest dsh-emacs-test-events-host-reap-keeps-only-the-owned-core ()
+  :tags '(dsh-unit)
+  (let* ((owned (make-pipe-process :name "dsh-test-core-owned" :noquery t))
+         (stale (make-pipe-process :name "dsh-test-core-stale" :noquery t))
+         (dsh-emacs-events--host-process owned))
+    (unwind-protect
+        (progn
+          (process-put owned 'dsh-emacs-host-stream t)
+          (process-put stale 'dsh-emacs-host-stream t)
+          (dsh-emacs-events--host-reap)
+          (ert-info ((format "%s" "host-reap-keeps-only-the-owned-core"))
+            (should (process-live-p owned))
+            (should-not (process-live-p stale))))
+      (setq dsh-emacs-events--host-process nil)
+      (when (process-live-p owned) (delete-process owned))
+      (when (process-live-p stale) (delete-process stale)))))
+
+(ert-deftest dsh-emacs-test-events-host-restore-adopts-the-lone-legacy-core ()
+  :tags '(dsh-unit)
+  (let* ((chat (generate-new-buffer " *t-host-adopt-chat*"))
+         (legacy (make-pipe-process :name "dsh-test-core-legacy" :noquery t))
+         (dsh-emacs--sessions-buffer nil)
+         (dsh-emacs--chat-buffers (make-hash-table :test 'equal))
+         (dsh-emacs-events--host-process nil)
+         (dsh-emacs-events--host-ready nil)
+         (dsh-emacs-events--host-reconnect-timer nil)
+         (connects 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'dsh-emacs-events-host-connect)
+                   (lambda () (cl-incf connects))))
+          (puthash "sess-adopt" chat dsh-emacs--chat-buffers)
+          (process-put legacy 'dsh-emacs-host-stream t)
+          (process-put legacy 'dsh-emacs-event-ready t)
+          (process-put legacy 'dsh-emacs-host-ws-stream-id "emacs-1-2")
+          (dsh-emacs-events-host-restore)
+          (ert-info ((format "%s" "host-restore-adopts-legacy-core"))
+            (should (eq legacy dsh-emacs-events--host-process))
+            (should dsh-emacs-events--host-ready)
+            (should (process-live-p legacy))
+            (should (zerop connects))))
+      (setq dsh-emacs-events--host-process nil
+            dsh-emacs-events--host-ready nil)
+      (when (process-live-p legacy) (delete-process legacy))
+      (when (buffer-live-p chat) (kill-buffer chat)))))
+
+(ert-deftest dsh-emacs-test-events-host-restore-rebuilds-without-a-handshake ()
+  :tags '(dsh-unit)
+  (let* ((chat (generate-new-buffer " *t-host-rebuild-chat*"))
+         (legacy (make-pipe-process :name "dsh-test-core-unready" :noquery t))
+         (dsh-emacs--sessions-buffer nil)
+         (dsh-emacs--chat-buffers (make-hash-table :test 'equal))
+         (dsh-emacs-events--host-process nil)
+         (dsh-emacs-events--host-ready nil)
+         (dsh-emacs-events--host-reconnect-timer nil)
+         (connects 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'dsh-emacs-events-host-connect)
+                   (lambda () (cl-incf connects))))
+          (puthash "sess-rebuild" chat dsh-emacs--chat-buffers)
+          (process-put legacy 'dsh-emacs-host-stream t)
+          (dsh-emacs-events-host-restore)
+          (ert-info ((format "%s" "host-restore-rebuilds-without-handshake"))
+            (should-not (process-live-p legacy))
+            (should (= 1 connects))))
+      (when (process-live-p legacy) (delete-process legacy))
+      (when (buffer-live-p chat) (kill-buffer chat)))))
+
+(ert-deftest dsh-emacs-test-events-host-lost-reconnects-an-unowned-core ()
+  :tags '(dsh-unit)
+  (let* ((chat (generate-new-buffer " *t-host-unowned-chat*"))
+         (stale (make-pipe-process :name "dsh-test-core-unowned" :noquery t))
+         (dsh-emacs--sessions-buffer nil)
+         (dsh-emacs--chat-buffers (make-hash-table :test 'equal))
+         (dsh-emacs-events--host-process nil)
+         (dsh-emacs-events--host-ready nil)
+         (dsh-emacs-events--host-reconnect-timer nil))
+    (unwind-protect
+        (progn
+          (puthash "sess-unowned" chat dsh-emacs--chat-buffers)
+          (process-put stale 'dsh-emacs-host-stream t)
+          (dsh-emacs-events--host-lost stale)
+          (ert-info ((format "%s" "host-lost-reconnects-an-unowned-core"))
+            (should (timerp dsh-emacs-events--host-reconnect-timer))))
+      (when (timerp dsh-emacs-events--host-reconnect-timer)
+        (cancel-timer dsh-emacs-events--host-reconnect-timer))
+      (setq dsh-emacs-events--host-reconnect-timer nil)
+      (when (process-live-p stale) (delete-process stale))
+      (when (buffer-live-p chat) (kill-buffer chat)))))
+
+(ert-deftest dsh-emacs-test-events-reload-restores-the-core-stream ()
+  :tags '(dsh-unit)
+  (let ((restored 0))
+    (cl-letf (((symbol-function 'dsh-emacs-reload--sources)
+               (lambda (_directory) nil))
+              ((symbol-function 'dsh-emacs-events--host-needed-p)
+               (lambda () t))
+              ((symbol-function 'dsh-emacs-events-host-restore)
+               (lambda () (cl-incf restored)))
+              ((symbol-function 'dsh-emacs-composer-refresh) #'ignore)
+              ((symbol-function 'dsh-emacs-modeline-update) #'ignore)
+              ((symbol-function 'dsh-emacs-session--render) #'ignore)
+              ((symbol-function 'message) #'ignore))
+      (dsh-emacs-reload temporary-file-directory)
+      (ert-info ((format "%s" "reload-restores-the-core-stream"))
+        (should (= 1 restored))))))
+
+(ert-deftest dsh-emacs-test-events-first-reload-schedules-core-restore ()
+  :tags '(dsh-unit)
+  (let ((file (expand-file-name "dsh-emacs-reload.el"
+                                dsh-emacs-reload--directory))
+        (restored 0)
+        scheduled)
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (_time _repeat function &rest args)
+                 (setq scheduled (lambda () (apply function args)))
+                 'scheduled-timer))
+              ((symbol-function 'dsh-emacs-events-host-restore)
+               (lambda () (cl-incf restored))))
+      ;; A clean load must stay silent.
+      (let ((dsh-emacs-reload--files nil))
+        (load file nil t t))
+      (ert-info ((format "%s" "clean-load-schedules-no-restore"))
+        (should-not scheduled))
+      ;; The previous build's reload body has its file list bound while it
+      ;; loads the new body; that new body cannot run until the next reload,
+      ;; so the load itself must schedule the ownership reconciliation.
+      (let ((dsh-emacs-reload--files '("dsh-emacs-events.el")))
+        (load file nil t t))
+      (ert-info ((format "%s" "first-reload-schedules-core-restore"))
+        (should scheduled)
+        (funcall scheduled)
+        (should (= 1 restored))))))
+
+(ert-deftest dsh-emacs-test-events-host-state-is-client-wide ()
+  :tags '(dsh-unit)
+  (let ((process (default-value 'dsh-emacs-events--host-process))
+        (ready (default-value 'dsh-emacs-events--host-ready)))
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (setq dsh-emacs-events--host-process 'core
+                  dsh-emacs-events--host-ready t)
+            (ert-info ((format "%s" "host-state-set-in-a-buffer-stays-global"))
+              (should (eq 'core (default-value 'dsh-emacs-events--host-process)))
+              (should (eq t (default-value 'dsh-emacs-events--host-ready)))
+              (should-not (local-variable-p 'dsh-emacs-events--host-process))
+              (should-not (local-variable-p 'dsh-emacs-events--host-ready))))
+          (with-temp-buffer
+            (should (eq 'core dsh-emacs-events--host-process))))
+      (set-default 'dsh-emacs-events--host-process process)
+      (set-default 'dsh-emacs-events--host-ready ready))))
 
 ;; The core stream is client-wide: the list or any live chat keeps it alive,
 ;; and closing the last owner tears it down.  Before this, killing the list
@@ -496,9 +653,9 @@
 ;; buffer registered but deaf.  The error schedules a retry instead.
 (ert-deftest dsh-emacs-test-events-host-connect-failure-is-contained ()
   :tags '(dsh-unit)
-  (let ((dsh-emacs--host-process nil)
-        (dsh-emacs--host-ready nil)
-        (dsh-emacs--host-reconnect-timer nil)
+  (let ((dsh-emacs-events--host-process nil)
+        (dsh-emacs-events--host-ready nil)
+        (dsh-emacs-events--host-reconnect-timer nil)
         (messages nil))
     (unwind-protect
         (cl-letf (((symbol-function 'open-network-stream)
@@ -509,22 +666,22 @@
                      (push (apply #'format format-string args) messages))))
           (dsh-emacs-events-host-connect)
           (ert-info ((format "%s" "host-connect-failure-arms-retry"))
-            (should (timerp dsh-emacs--host-reconnect-timer))
+            (should (timerp dsh-emacs-events--host-reconnect-timer))
             (should (cl-some (lambda (text)
                                (string-match-p "core stream connect failed"
                                                text))
                              messages))))
-      (when (timerp dsh-emacs--host-reconnect-timer)
-        (cancel-timer dsh-emacs--host-reconnect-timer))
-      (setq dsh-emacs--host-reconnect-timer nil))))
+      (when (timerp dsh-emacs-events--host-reconnect-timer)
+        (cancel-timer dsh-emacs-events--host-reconnect-timer))
+      (setq dsh-emacs-events--host-reconnect-timer nil))))
 
 ;; A workspace re-baseline must not write mux frames before the WebSocket
 ;; upgrade: the connect's own `workspace/follow' baseline covers that window.
 (ert-deftest dsh-emacs-test-events-core-rebaseline-waits-for-handshake ()
   :tags '(dsh-unit)
   (let* ((proc (make-pipe-process :name "dsh-test-rebaseline" :noquery t))
-         (dsh-emacs--host-process proc)
-         (dsh-emacs--host-ready nil)
+         (dsh-emacs-events--host-process proc)
+         (dsh-emacs-events--host-ready nil)
          (sent nil))
     (unwind-protect
         (progn
@@ -533,14 +690,14 @@
             (ert-info ((format "%s" "rebaseline-waits-for-handshake"))
               (should (null (dsh-emacs-events--core-workspace-rebaseline)))
               (should (null sent))))
-          (setq dsh-emacs--host-ready t
+          (setq dsh-emacs-events--host-ready t
                 sent nil)
           (cl-letf (((symbol-function 'process-send-string)
                      (lambda (_proc string) (push string sent))))
             (ert-info ((format "%s" "rebaseline-sends-once-ready"))
               (should (dsh-emacs-events--core-workspace-rebaseline))
               (should (= 1 (length sent))))))
-      (setq dsh-emacs--host-process nil)
+      (setq dsh-emacs-events--host-process nil)
       (delete-process proc))))
 
 ;; --- Test 69: with multiple sessions in parallel, transcript events

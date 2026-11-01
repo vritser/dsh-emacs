@@ -65,11 +65,14 @@ the late snapshot projections must not replace those newer live values.")
 ;; changes refresh the caches and the list in place, and a chat opened
 ;; without the list still receives queue projections and question/approval
 ;; waterfalls.
-(defvar dsh-emacs--host-process nil
+;; Client-wide state.  These stay plain `defvar': `defvar-local' would give
+;; every chat its own connection, and the handshake's ownership check would
+;; then miss the socket it is completing (no `$events' after a reload).
+(defvar dsh-emacs-events--host-process nil
   "Live client-wide core-stream network process, or nil.")
-(defvar dsh-emacs--host-ready nil
+(defvar dsh-emacs-events--host-ready nil
   "Non-nil once the core-stream handshake completed.")
-(defvar dsh-emacs--host-reconnect-timer nil
+(defvar dsh-emacs-events--host-reconnect-timer nil
   "Timer scheduling a core-stream reconnect after a drop.")
 
 (defvar dsh-emacs-events--client-id nil
@@ -978,8 +981,8 @@ No repeating timer is needed: a quiet socket stays normally readable."
                         ;; client-wide handshake and open its logical streams
                         ;; only when this is still the current socket (a late
                         ;; handshake from a replaced socket must not take over).
-                        (when (eq process dsh-emacs--host-process)
-                          (setq dsh-emacs--host-ready t)
+                        (when (eq process dsh-emacs-events--host-process)
+                          (setq dsh-emacs-events--host-ready t)
                           (dsh-emacs-events--host-open process))
                       (let ((chat (dsh-emacs-events--chat process)))
                         (when (buffer-live-p chat)
@@ -1671,30 +1674,82 @@ snapshot.  UPDATED-AT is the host's timestamp in milliseconds."
   "Schedule one core reconnect while a list or chat still needs it.
 One-shot and idempotent: a drop and a failed connect never stack parallel
 timers, and the timer does nothing once the last owner is gone."
-  (unless (timerp dsh-emacs--host-reconnect-timer)
-    (setq dsh-emacs--host-reconnect-timer
+  (unless (timerp dsh-emacs-events--host-reconnect-timer)
+    (setq dsh-emacs-events--host-reconnect-timer
           (run-at-time 1 nil
                        (lambda ()
-                         (setq dsh-emacs--host-reconnect-timer nil)
+                         (setq dsh-emacs-events--host-reconnect-timer nil)
                          (when (dsh-emacs-events--host-needed-p)
                            (dsh-emacs-events-host-connect)))))))
 
 (defun dsh-emacs-events--host-lost (process)
-  "Handle a closed core-stream PROCESS: reset and schedule reconnect."
+  "Handle a closed core-stream PROCESS: reset and schedule reconnect.
+PROCESS need not be the current owner: a socket from before a reload can
+outlive its ownership, and losing it must still reconnect while the list or
+a chat needs the stream."
   (dsh-emacs-events--cancel-dispatch process)
-  (when (eq process dsh-emacs--host-process)
-    (setq dsh-emacs--host-process nil
-          dsh-emacs--host-ready nil)
+  (when (eq process dsh-emacs-events--host-process)
+    (setq dsh-emacs-events--host-process nil
+          dsh-emacs-events--host-ready nil)
     (dsh-emacs-subagent-host-reset)
-    (dsh-emacs-plan--cancel)
+    (dsh-emacs-plan--cancel))
+  (when (and (not (dsh-emacs-events-host-connected-p))
+             (dsh-emacs-events--host-needed-p))
     (dsh-emacs-events--host-schedule-reconnect)))
+
+(defun dsh-emacs-events--host-adoptable-process ()
+  "The single live core socket that completed its handshake, or nil.
+A reload can leave the previous build's socket live under a renamed
+ownership variable.  Only one such socket can be adopted: its `$events'
+client id must still be the one this build holds, so two candidates are
+ambiguous and force a rebuild."
+  (let (found)
+    (catch 'one
+      (dolist (process (process-list))
+        (when (and (process-get process 'dsh-emacs-host-stream)
+                   (process-live-p process)
+                   (process-get process 'dsh-emacs-event-ready)
+                   (process-get process 'dsh-emacs-host-ws-stream-id))
+          (if found
+              (throw 'one nil)
+            (setq found process))))
+      found)))
+
+(defun dsh-emacs-events--host-reap ()
+  "Close core sockets that are no longer the client-wide connection.
+A reload can leave sockets from before the shared-connection design; only
+`dsh-emacs-events--host-process' may stay live, so a stale socket cannot
+keep answering waterfalls with an outdated client id."
+  (dolist (process (process-list))
+    (when (and (process-get process 'dsh-emacs-host-stream)
+               (not (eq process dsh-emacs-events--host-process))
+               (process-live-p process))
+      (delete-process process))))
+
+(defun dsh-emacs-events-host-restore ()
+  "Re-establish ownership of the client-wide core stream after a reload.
+A reload that renames the ownership variables leaves the previous build's
+socket live but unowned; nothing else reconnects on reload.  Adopt that
+socket when it completed the core handshake, otherwise close the leftovers
+and rebuild the connection from the list or live chat that needs it."
+  (cond
+   ((not (dsh-emacs-events--host-needed-p)) nil)
+   ((dsh-emacs-events-host-connected-p) (dsh-emacs-events--host-reap))
+   ((when-let* ((legacy (dsh-emacs-events--host-adoptable-process)))
+      (setq dsh-emacs-events--host-process legacy
+            dsh-emacs-events--host-ready t)
+      (dsh-emacs-events--host-reap)
+      t))
+   (t
+    (dsh-emacs-events--host-reap)
+    (dsh-emacs-events-host-connect))))
 
 (defun dsh-emacs-events-host-connected-p ()
   "Non-nil when the client's core stream is already live.
 A live process covers a handshake still in flight: keeping it preserves the
 work already done instead of starting the connect over."
-  (and (processp dsh-emacs--host-process)
-       (process-live-p dsh-emacs--host-process)))
+  (and (processp dsh-emacs-events--host-process)
+       (process-live-p dsh-emacs-events--host-process)))
 
 (defun dsh-emacs-events--host-needed-p (&optional except)
   "Return non-nil when the session list or a live chat needs the core stream.
@@ -1734,14 +1789,15 @@ waterfalls.  It opens the `session/control', `workspace/follow' and
 Already connected is a no-op: opening the list and every chat activation
 call this, and a live stream (handshake included) must not be torn down
 and re-handshaken.  A dropped connection clears
-`dsh-emacs--host-process' first (see `dsh-emacs-events--host-lost'), so
-the reconnect path still connects.
+`dsh-emacs-events--host-process' first (see
+`dsh-emacs-events--host-lost'), so the reconnect path still connects.
 
 Socket creation is failure-contained: `open-network-stream' can signal
 synchronously (unresolvable host, malformed `dsh-emacs-base-url').  The
 error is reported and a retry armed instead of propagating, so a caller's
 chat activation still reaches its `session/follow' connect — the same
 contract as `dsh-emacs-events-connect'."
+  (dsh-emacs-events--host-reap)
   (unless (dsh-emacs-events-host-connected-p)
     (dsh-emacs-events-host-disconnect)
     (let ((process nil))
@@ -1785,8 +1841,8 @@ contract as `dsh-emacs-events-connect'."
                   ;; `:nowait' filters on this build).
                   (set-process-filter process dsh-emacs-events--filter-fn)
                   (set-process-sentinel process dsh-emacs-events--sentinel-fn)
-                  (setq dsh-emacs--host-process process
-                        dsh-emacs--host-ready nil)))))
+                  (setq dsh-emacs-events--host-process process
+                        dsh-emacs-events--host-ready nil)))))
         (error
          (when (and (processp process) (process-live-p process))
            (delete-process process))
@@ -1832,9 +1888,9 @@ id recorded.  Returns non-nil when a READY core process existed and the
 request was sent; a process still in its handshake returns nil, so the
 caller can leave the baseline to `dsh-emacs-events--host-open' instead of
 writing mux frames into the unfinished upgrade."
-  (let ((proc dsh-emacs--host-process))
+  (let ((proc dsh-emacs-events--host-process))
     (when (and (processp proc) (process-live-p proc)
-               dsh-emacs--host-ready)
+               dsh-emacs-events--host-ready)
       ;; Retire the workspace/follow stream opened at connect (or by the last
       ;; re-baseline) so exactly one live workspace stream feeds the caches.
       (let ((old (process-get proc 'dsh-emacs-host-ws-stream-id)))
@@ -1851,14 +1907,14 @@ writing mux frames into the unfinished upgrade."
 
 (defun dsh-emacs-events-host-disconnect ()
   "Disconnect the client's core stream, if any."
-  (when (timerp dsh-emacs--host-reconnect-timer)
-    (cancel-timer dsh-emacs--host-reconnect-timer))
-  (setq dsh-emacs--host-reconnect-timer nil)
-  (let ((process dsh-emacs--host-process))
+  (when (timerp dsh-emacs-events--host-reconnect-timer)
+    (cancel-timer dsh-emacs-events--host-reconnect-timer))
+  (setq dsh-emacs-events--host-reconnect-timer nil)
+  (let ((process dsh-emacs-events--host-process))
     ;; Clear ownership before deleting: the host sentinel must not schedule a
     ;; reconnect for an intentional teardown.
-    (setq dsh-emacs--host-process nil
-          dsh-emacs--host-ready nil)
+    (setq dsh-emacs-events--host-process nil
+          dsh-emacs-events--host-ready nil)
     (when process (dsh-emacs-subagent-host-reset))
     (dsh-emacs-plan--cancel)
     (when (process-live-p process)

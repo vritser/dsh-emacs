@@ -739,7 +739,7 @@ DSH_E2E_PRESET selects the preset; existing chats and connections are preserved.
          (kill-ring-yank-pointer kill-ring)
          (interprogram-cut-function nil)
          (modeline-enabled dsh-emacs-modeline-enabled)
-         (core-process dsh-emacs--host-process)
+         (core-process dsh-emacs-events--host-process)
          (core-connected (and (processp core-process) (process-live-p core-process)))
          (dsh-e2e--results nil)
          (dsh-e2e--session-id nil)
@@ -766,7 +766,7 @@ DSH_E2E_PRESET selects the preset; existing chats and connections are preserved.
                  (dsh-e2e--wait-until
                   (lambda ()
                     (and dsh-emacs-events--client-id
-                         dsh-emacs--host-ready))
+                         dsh-emacs-events--host-ready))
                   10))
 
                 (let* ((preset (getenv "DSH_E2E_PRESET"))

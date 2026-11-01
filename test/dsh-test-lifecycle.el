@@ -421,9 +421,9 @@
   :tags '(dsh-unit)
   (let ((dsh-emacs--chat-buffers (make-hash-table :test #'equal))
         (dsh-emacs--sessions-buffer nil)
-        (dsh-emacs--host-process nil)
-        (dsh-emacs--host-ready nil)
-        (dsh-emacs--host-reconnect-timer nil)
+        (dsh-emacs-events--host-process nil)
+        (dsh-emacs-events--host-ready nil)
+        (dsh-emacs-events--host-reconnect-timer nil)
         (old-sessions dsh-emacs--sessions)
         (old-current-buffer dsh-emacs--current-buffer)
         (old-current-session dsh-emacs--current-session)
@@ -452,10 +452,10 @@
             (should (equal connected (list buf)))
             (should (eq (gethash "sess-connect-fail" dsh-emacs--chat-buffers)
                         buf))
-            (should (timerp dsh-emacs--host-reconnect-timer))))
-      (when (timerp dsh-emacs--host-reconnect-timer)
-        (cancel-timer dsh-emacs--host-reconnect-timer))
-      (setq dsh-emacs--host-reconnect-timer nil
+            (should (timerp dsh-emacs-events--host-reconnect-timer))))
+      (when (timerp dsh-emacs-events--host-reconnect-timer)
+        (cancel-timer dsh-emacs-events--host-reconnect-timer))
+      (setq dsh-emacs-events--host-reconnect-timer nil
             dsh-emacs--sessions old-sessions
             dsh-emacs--current-buffer old-current-buffer
             dsh-emacs--current-session old-current-session)
@@ -532,7 +532,7 @@
                                                                                       (list (cons 'pressureTokens 129946)
                                                                                             (cons 'contextWindow 262144))))))))))))))
                     ;; The shared list fetch re-baselines workspaces; keep it
-                    ;; off the network (and out of `dsh-emacs--host-process').
+                    ;; off the network (and out of `dsh-emacs-events--host-process').
                     ((symbol-function 'dsh-emacs-list-workspaces) #'ignore))
             (dsh-emacs--link-session-preset "sess-first"))
           (ert-info ((format "%s" "first-open-fetches-session-list"))
@@ -610,11 +610,11 @@
           (dsh-emacs-test--session-items
            '(((sessionId . "sess-late-fetch") (cwd . "/tmp")))))
          (dsh-emacs--subagent-catalogs (make-hash-table :test 'equal))
-         (dsh-emacs--host-process (make-pipe-process
+         (dsh-emacs-events--host-process (make-pipe-process
                                    :name "dsh-test-late-preset-core"
                                    :noquery t))
-         (dsh-emacs--host-ready t)
-         (dsh-emacs--host-reconnect-timer nil)
+         (dsh-emacs-events--host-ready t)
+         (dsh-emacs-events--host-reconnect-timer nil)
          (dsh-emacs--host-refresh-depth 0)
          (dsh-emacs--host-refresh-frames nil)
          callback origin revived)
@@ -636,7 +636,7 @@
             (dsh-emacs--link-session-preset "sess-late-fetch"))
           (kill-buffer chat)
           (ert-info ((format "%s" "late-preset-fetch-starts-ownerless"))
-            (should-not dsh-emacs--host-process)
+            (should-not dsh-emacs-events--host-process)
             (should-not (dsh-emacs-events--host-needed-p)))
           (with-current-buffer origin
             (funcall callback
@@ -645,14 +645,14 @@
                               (cwd . "/tmp") (running . t))]))))
           (ert-info ((format "%s" "late-preset-fetch-keeps-cache-without-core"))
             (should-not (dsh-emacs-events--host-needed-p))
-            (should-not dsh-emacs--host-process)
+            (should-not dsh-emacs-events--host-process)
             (should (dsh-emacs--chat-session-item "sess-late-fetch"))))
       (when (buffer-live-p chat) (kill-buffer chat))
-      (when (timerp dsh-emacs--host-reconnect-timer)
-        (cancel-timer dsh-emacs--host-reconnect-timer))
-      (when (process-live-p dsh-emacs--host-process)
-        (set-process-sentinel dsh-emacs--host-process nil)
-        (delete-process dsh-emacs--host-process))
+      (when (timerp dsh-emacs-events--host-reconnect-timer)
+        (cancel-timer dsh-emacs-events--host-reconnect-timer))
+      (when (process-live-p dsh-emacs-events--host-process)
+        (set-process-sentinel dsh-emacs-events--host-process nil)
+        (delete-process dsh-emacs-events--host-process))
       (when (and revived (process-live-p revived))
         (delete-process revived)))))
 

@@ -81,6 +81,12 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Live reload keeps ask and approval prompts**: reloading into a build
+  that shares one core connection now adopts the previous socket (or closes
+  leftovers and rebuilds it), so questions, approvals and live session
+  updates keep arriving after `M-x dsh-emacs-reload`; losing a socket the
+  reload left unowned still arms a reconnect.
+
 - **`C-q` in overwrite mode keeps an `@` reference**: the chip delete advice
   now promotes only a user-level delete to whole-chip removal; the internal
   `delete-char` that `quoted-insert` uses in overwrite mode replaces one
