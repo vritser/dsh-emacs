@@ -410,5 +410,45 @@
                      (dsh-protocol-job-id
                       (cdr (assoc (nth 2 labels) table))))))))
 
+;; Killing an output buffer directly (C-x k) must retire its `job/follow'
+;; subscription too: only `q' cancelled it, so a direct `kill-buffer' left
+;; the handler registered on the chat buffer's socket until the job settled
+;; or the connection dropped.
+(ert-deftest dsh-emacs-test-jobs-job-output-kill-buffer-cancels-stream ()
+  :tags '(dsh-unit)
+  (let* ((buf (get-buffer-create " *dsh-test-job-kill*"))
+         (chat (get-buffer-create " *dsh-test-job-kill-chat*"))
+         (proc (make-pipe-process :name "t-jobs-kill-buffer" :buffer nil))
+         (closed nil)
+         (stream-after-cleanup 'unset))
+    (unwind-protect
+        (progn
+          ;; The socket lives on the CHAT buffer (as in the `q' test): the
+          ;; output buffer follows the job but owns no connection.
+          (with-current-buffer chat
+            (setq-local dsh-emacs--event-process proc))
+          (with-current-buffer buf
+            (dsh-emacs-jobs-output-mode)
+            (setq dsh-emacs-jobs--popup-chat chat)
+            (setq dsh-emacs-jobs--popup-stream "job-kill-1")
+            ;; Appended at depth 100 so it runs after the mode's own cleanup
+            ;; hook and can observe the stream id that cleanup left behind.
+            (add-hook 'kill-buffer-hook
+                      (lambda ()
+                        (setq stream-after-cleanup
+                              dsh-emacs-jobs--popup-stream))
+                      100 t)
+            (cl-letf (((symbol-function 'dsh-emacs-events-close-stream)
+                       (lambda (process stream)
+                         (setq closed (cons process stream)))))
+              (kill-buffer buf)))
+          (ert-info ((format "%s" "job-output-kill-buffer-cancels-stream"))
+            (should (equal closed (cons proc "job-kill-1"))))
+          (ert-info ((format "%s" "job-output-kill-buffer-clears-stream-id"))
+            (should (null stream-after-cleanup))))
+      (when (buffer-live-p buf) (kill-buffer buf))
+      (delete-process proc)
+      (when (buffer-live-p chat) (kill-buffer chat)))))
+
 (provide 'dsh-test-jobs)
 ;;; dsh-test-jobs.el ends here

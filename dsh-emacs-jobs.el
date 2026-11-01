@@ -343,20 +343,32 @@ or the chat socket dropping); the text already appended stands."
                        (dsh-emacs-jobs--header job))))
               (_ nil))))))))
 
-(defun dsh-emacs-jobs--quit ()
-  "Quit this output window and cancel its subscription (`q').
-The buffer stays (with the text delivered so far) so re-opening the job
-resumes from a fresh whole-ring read rather than an empty buffer; the
-stream itself is retired, since nothing is displaying it.  The cancel goes
-out on the chat buffer's socket — this buffer follows the job but does not
-own the connection, so it has no process of its own."
-  (interactive)
+(defun dsh-emacs-jobs--cancel-stream ()
+  "Cancel this output buffer's `job/follow' subscription, if any.
+The cancel goes out on the chat buffer's socket — this buffer follows the
+job but does not own the connection, so it has no process of its own.
+No-op when the chat is gone, its socket is dead, or no stream is open."
   (let ((process (dsh-emacs-jobs--chat-process))
         (stream dsh-emacs-jobs--popup-stream))
     (when (and (processp process) (process-live-p process) stream)
       (dsh-emacs-events-close-stream process stream))
-    (setq dsh-emacs-jobs--popup-stream nil)
-    (quit-window)))
+    (setq dsh-emacs-jobs--popup-stream nil)))
+
+(defun dsh-emacs-jobs--quit ()
+  "Quit this output window and cancel its subscription (`q').
+The buffer stays (with the text delivered so far) so re-opening the job
+resumes from a fresh whole-ring read rather than an empty buffer; the
+stream itself is retired, since nothing is displaying it."
+  (interactive)
+  (dsh-emacs-jobs--cancel-stream)
+  (quit-window))
+
+(defun dsh-emacs-jobs--kill-buffer-cleanup ()
+  "Cancel this output buffer's subscription when the buffer is killed.
+Runs on `kill-buffer-hook': a direct `kill-buffer' bypasses `q', and the
+`job/follow' handler would otherwise stay registered on the chat buffer's
+socket until the job settles or the connection drops."
+  (dsh-emacs-jobs--cancel-stream))
 
 (defvar dsh-emacs-jobs-output-mode-map
   (let ((map (make-sparse-keymap)))
@@ -368,9 +380,10 @@ own the connection, so it has no process of its own."
   "Major mode for one background job's output.
 The buffer is read-only and appended by the `job/follow' stream; `q'
 buries the window and cancels this buffer's subscription (other viewers
-are unaffected)."
+are unaffected).  Killing the buffer directly also cancels it."
   (setq-local truncate-lines nil)
-  (setq-local header-line-format nil))
+  (setq-local header-line-format nil)
+  (add-hook 'kill-buffer-hook #'dsh-emacs-jobs--kill-buffer-cleanup nil t))
 
 (defun dsh-emacs-jobs-show-output (job)
   "Show JOB's retained output in its own buffer, subscribing to it.

@@ -95,6 +95,10 @@ minor) and stay undated until the release is cut.
   a generated suffix no longer collides with another job's label, so a menu
   action always resolves to the job it names.
 
+- **Killing a job output buffer cancels its stream**: closing the buffer with
+  `kill-buffer` now retires its `job/follow` handler like `q` does, instead
+  of leaving the subscription on the chat socket until the job ends.
+
 - **Closing a plan document keeps its decision alive**: the approval
   request is now owned by the chat buffer instead of the closable document,
   so a response arriving after the document is closed still settles the
