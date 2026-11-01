@@ -252,7 +252,7 @@ for no added meaning (see
   options under the minibuffer reader's own numbering, the chosen ones checked
   (`✓ `) with the label in the accent face, each description hanging at the
   label column in `dsh-emacs-meta-face`, and a closing `→ <free text>` answer or
-  `Not answered` once that question settled.  The collapsed row states the
+  `Skipped` once that question settled.  The collapsed row states the
   outcome instead (`waiting`, `2/3 answered`, `cancelled`, `interrupted`).  A
   question set the user dismissed (`ASK_CANCELLED`) settles and an abandoned
   one (`ASK_ABORTED`) reads as interrupted rather than a failed call, and the

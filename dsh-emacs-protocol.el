@@ -2641,10 +2641,12 @@ argument-derived diff for a `write' and the generic ioCard for an `edit')."
 (defun dsh-protocol-ask-questions--from-alist (args-raw)
   "Decode an `ask_user_question' call's ARGS-RAW into question structs.
 Returns the questions in their offered order, or nil when the arguments name
-no usable question — a missing `questions' array, a question without text, or
-malformed JSON — so the caller keeps the generic ioCard.  The protocol module
-owns both argument spellings of the multi-select flag and drops a malformed
-element instead of signalling."
+no usable question — a missing `questions' array, a question without an id or
+text, or malformed JSON — so the caller keeps the generic ioCard.  Empty text
+is allowed: it is a presentation concern, and the caller substitutes a
+placeholder while still showing the options.  The protocol module owns both
+argument spellings of the multi-select flag and drops a malformed element
+instead of signalling."
   (let ((parsed (dsh-protocol--tool-json args-raw)))
     (when parsed
       (delq nil
@@ -2652,9 +2654,12 @@ element instead of signalling."
              (lambda (item)
                (let ((question (dsh-protocol-question--from-alist item)))
                  (when (and (dsh-protocol-question-p question)
-                            (let ((text (dsh-protocol-question-text question)))
-                              (and (stringp text)
-                                   (not (string-empty-p text)))))
+                            (let ((id (dsh-protocol-question-id question))
+                                  (text (dsh-protocol-question-text question)))
+                              (or (and (stringp id)
+                                       (not (string-empty-p id)))
+                                  (and (stringp text)
+                                       (not (string-empty-p text))))))
                    question)))
              (dsh-protocol--objects
               (dsh-protocol--field "questions" parsed)))))))

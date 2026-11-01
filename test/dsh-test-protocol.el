@@ -724,6 +724,24 @@
       (should-not (dsh-protocol-question-request-questions request))
       (should-not (dsh-protocol-question-request-wait request)))))
 
+;; Empty question text is presentational; the options still belong to the
+;; card.  Only a question with neither an id nor text is unusable.
+(ert-deftest dsh-emacs-test-protocol-ask-questions-keeps-empty-text-with-id ()
+  :tags '(dsh-unit)
+  (let* ((args (json-encode
+                '((questions
+                   . [((id . "q1") (question . "")
+                       (options . [((label . "A")) ((label . "B"))]))
+                      ((question . "")
+                       (options . [((label . "dropped"))]))]))))
+         (questions (dsh-protocol-ask-questions--from-alist args)))
+    (should (= 1 (length questions)))
+    (should (equal "q1" (dsh-protocol-question-id (car questions))))
+    (should (equal '("A" "B")
+                   (mapcar #'dsh-protocol-question-option-label
+                           (dsh-protocol-question-options
+                            (car questions)))))))
+
 ;; --- Test 57: protocol layer workspace baseline / workspace-result
 ;; / model-selection-result ---
 ;; workspace/follow baseline top-level values: items array->list,

@@ -81,6 +81,21 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Empty question text shows its options**: an `ask_user_question` call whose
+  question text is empty but carries an id and options now renders the
+  questionnaire, using "Question" as the placeholder, instead of falling back
+  to the raw argument JSON and hiding every option.
+
+- **Question options survive deletion**: completion candidates are the plain
+  option labels with the ordinal shown as a display affix, so completing an
+  option and then deleting it restores every candidate instead of leaving the
+  numbered prefix behind; typed numbers still resolve to their option.
+  Whitespace-only answers are treated as skip.
+
+- **Skipped questions read Skipped**: an empty answer (empty input or the Skip
+  key) now closes its card row as `Skipped` instead of `Not answered`, and still
+  does not count toward the answered total.
+
 - **Keep elapsed time across stream reconnects**: a running chat preserves its
   original activity start time when the WebSocket reconnects, including failed
   retries, instead of restarting the mode-line clock from zero.

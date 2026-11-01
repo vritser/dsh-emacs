@@ -3440,7 +3440,7 @@ generic card."
 ;;; and the answer reader below consume.  The card records the decision
 ;;; instead of dumping the two JSON documents into an ioCard: every question
 ;;; with its numbered options and descriptions, the chosen options marked, and
-;;; `Not answered' where the batch settled empty.  A call whose arguments name
+;;; `Skipped' where the batch settled empty.  A call whose arguments name
 ;;; no usable question keeps the generic ioCard.
 
 (defun dsh-emacs-render--ask-summary (answers error-code settled &optional pending)
@@ -3470,16 +3470,20 @@ outcome, which the caller reports with its result preview."
 The question's own HEADER is the chip dsh web shows as its eyebrow and leads
 the row in the accent face; a batch of several questions prefixes the index as
 `Q2 · '.  Both parts are optional, so a bare question still renders as one
-clean row."
+clean row: empty TEXT falls back to the chip, then to \"Question\"."
   (let* ((number (and multi (concat "Q" (number-to-string index) " · ")))
          (chip (and (stringp header)
                     (not (string-empty-p header))
-                    (propertize header 'face 'dsh-emacs-accent-face))))
+                    (propertize header 'face 'dsh-emacs-accent-face)))
+         (text (and (stringp text)
+                    (not (string-empty-p text))
+                    text))
+         (label (or text (and (not chip) "Question"))))
     (concat "  "
             (and number (propertize number 'face 'dsh-emacs-tool-meta-face))
             chip
-            (and chip " — ")
-            text)))
+            (and chip label " — ")
+            label)))
 
 (defun dsh-emacs-render--ask-question-block (question index multi answer)
   "Return one ask QUESTION as a block of body rows, joined by newlines.
@@ -3489,7 +3493,7 @@ cell, or nil while the call runs.  Every option keeps the reader's own
 numbering, with the chosen ones checked and accented; an option's description
 hangs at the label column in `dsh-emacs-meta-face' (the transcript's note
 face), and a settled question closes with its free-text answer or
-`Not answered'."
+`Skipped'."
   (let* ((selected (nth 1 answer))
          (custom (nth 2 answer))
          (rows (list (dsh-emacs-render--ask-question-row
@@ -3523,7 +3527,7 @@ face), and a settled question closes with its free-text answer or
                                 (propertize "→ " 'face 'dsh-emacs-accent-face)
                                 custom))
                        ((and answer (null selected))
-                        (concat "  " (propertize "Not answered"
+                        (concat "  " (propertize "Skipped"
                                                  'face
                                                  'dsh-emacs-tool-meta-face))))))
       (mapconcat #'identity

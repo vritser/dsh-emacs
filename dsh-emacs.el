@@ -4650,7 +4650,7 @@ matching runs only for a local server and a non-remote directory."
 ;; forever on the pending approval).
 ;;
 ;; Interaction: read every question in the MINIBUFFER in one pass —
-;; options are completion candidates (numbered), multi-select is
+;; options are completion candidates (ordinals shown as affixes), multi-select is
 ;; comma-separated; text that matches no option is itself the
 ;; answer, and empty input skips the question.  Prompts carry the
 ;; Question N/M number; once all are answered, one outcome is
@@ -4939,9 +4939,9 @@ The skip command returns it directly; it is not a visible candidate.")
   "Whether the question being read selects multiple options.")
 
 (defun dsh-emacs--question-pick-labels (labels)
-  "Return LABELS numbered from 1, the form the reader offers.
-The number is part of the option, so a comma-separated answer can name
-options by number as well as by label."
+  "Return LABELS numbered from 1, the answer form for typed numbers.
+The reader displays the ordinal as a completion affix, but a comma-separated
+answer can still name options by number as well as by label."
   (cl-loop for label in labels for n from 1
            collect (format "%d. %s" n label)))
 
@@ -4961,7 +4961,7 @@ text is never mapped to the wrong option."
 
 (defun dsh-emacs--question-numbered-label (number labels)
   "Return the LABELS entry NUMBER refers to, or nil.
-NUMBER is a bare option number.  The numbered candidates are matched in
+NUMBER is a bare option number.  The numbered forms are matched in
 order, so `2' finds `2. Version' even when the label itself is numeric, and
 an out-of-range number matches nothing."
   (let (found)
@@ -4974,10 +4974,11 @@ an out-of-range number matches nothing."
 
 (defun dsh-emacs--question-label-of (picked labels)
   "Return the plain LABELS entry PICKED names, or nil.
-PICKED is a candidate string, a bare option number, a label, or an
-unambiguous prefix of a label.  An exact label wins over an unambiguous
-prefix, and both win over stripping a numbered prefix, so a label that
-starts with \"<number>. \" still round-trips; a bare number addresses the
+PICKED is a candidate string, a bare option number, a label, an
+unambiguous prefix of a label, or a numbered prefix such as \"2. \".
+An exact label wins over an unambiguous prefix, and both win over
+stripping a numbered prefix, so a label that starts with \"<number>. \"
+still round-trips; a bare number or a number with no label addresses the
 option at that position, because `completing-read-multiple' can hand back
 an element the completion engine left unexpanded."
   (or (cl-find picked labels :test #'equal)
@@ -4985,7 +4986,10 @@ an element the completion engine left unexpanded."
       (let ((plain
              (cond
               ((string-match "\\`[0-9]+\\. \\(.+\\)\\'" picked)
-               (match-string 1 picked))
+               (dsh-emacs--question-label-of (match-string 1 picked) labels))
+              ((string-match "\\`\\([0-9]+\\)\\. ?\\'" picked)
+               (dsh-emacs--question-numbered-label
+                (match-string 1 picked) labels))
               ((string-match "\\`\\([0-9]+\\)\\'" picked)
                (dsh-emacs--question-numbered-label picked labels)))))
         (and plain (cl-find plain labels :test #'equal)))))
@@ -5017,26 +5021,45 @@ echo area; an empty TEXT clears help this reader owns."
     (message nil))
   (setq dsh-emacs--question-echo-message nil))
 
-(defun dsh-emacs--question-annotation (candidate)
-  "Return CANDIDATE's option description, or an empty string.
-The description rides along with its candidate, so it is visible in the
-completion list without a tooltip, styled with `dsh-emacs-meta-face' — the
-face the ask card gives the same description in the transcript.  The
-annotation must carry a face of its own: a frontend adds
-`completions-annotations' only to a suffix that has none, so a bare string
-would be repainted by whatever default the user's UI applies."
-  (let* ((label (or (dsh-emacs--question-label-of
-                     candidate dsh-emacs--question-roster)
-                    candidate))
-         (option (cl-find label dsh-emacs--question-options
-                          :key #'dsh-protocol-question-option-label
-                          :test #'equal))
-         (description (and option
-                           (dsh-protocol-question-option-description option))))
-    (if (or (null description) (string-empty-p description))
-        ""
-      (propertize (format "  %s" description)
-                  'face 'dsh-emacs-meta-face))))
+(defun dsh-emacs--question-affixation (candidates)
+  "Number CANDIDATES and append their option descriptions.
+CANDIDATES are the plain option labels; the ordinal is display-only, so a
+frontend completes with the label and deleting it leaves an empty answer
+instead of a stale \"N. \" prefix.  Each description carries
+`dsh-emacs-meta-face', matching the ask card."
+  (mapcar
+   (lambda (candidate)
+     (let* ((position (cl-position candidate dsh-emacs--question-roster
+                                   :test #'equal))
+            (option (cl-find candidate dsh-emacs--question-options
+                             :key #'dsh-protocol-question-option-label
+                             :test #'equal))
+            (description (and option
+                              (dsh-protocol-question-option-description option)))
+            (suffix (if (or (null description)
+                            (string-empty-p description))
+                        ""
+                      (propertize (format "  %s" description)
+                                  'face 'dsh-emacs-meta-face))))
+       (list candidate
+             (if position (format "%d. " (1+ position)) "")
+             suffix)))
+   candidates))
+
+(defun dsh-emacs--question-completion-table (labels)
+  "Completion table over plain LABELS that also accepts option numbers.
+A typed number or numbered prefix is resolved through
+`dsh-emacs--question-label-of', so \"1\", \"1. \" and \"1. Alpha\" complete
+to \"Alpha\"; the reader displays the ordinal separately through
+`dsh-emacs--question-affixation'.  The table pins the incoming order."
+  (lambda (string pred action)
+    (if (eq action 'metadata)
+        '(metadata (display-sort-function . identity)
+                   (cycle-sort-function . identity))
+      (let* ((trimmed (string-trim string))
+             (target (or (dsh-emacs--question-label-of trimmed labels)
+                         trimmed)))
+        (complete-with-action action labels target pred)))))
 
 (defun dsh-emacs--question-skip-command ()
   "Skip the current question with an empty selection.
@@ -5059,7 +5082,7 @@ is remapped and completion keep working."
     map))
 
 (defun dsh-emacs--question-reader-setup ()
-  "Install the reader's keymap, candidate annotations and echo-area help.
+  "Install the reader's keymap, candidate affixes and echo-area help.
 Everything is minibuffer-local, so no other `completing-read' sees it.  The
 prompt is preselected instead of the first candidate: an empty answer means
 \"skip\", and a frontend that preselects the first row would otherwise turn
@@ -5074,7 +5097,7 @@ read, where there is no question context to show."
   (when (boundp 'vertico-preselect)
     (setq-local vertico-preselect 'prompt))
   (setq-local completion-extra-properties
-              (list :annotation-function #'dsh-emacs--question-annotation))
+              (list :affixation-function #'dsh-emacs--question-affixation))
   (use-local-map (dsh-emacs--question-reader-keymap))
   (add-hook 'minibuffer-exit-hook #'dsh-emacs--question-echo-cleanup nil t)
   (dsh-emacs--question-echo
@@ -5093,35 +5116,38 @@ tell `every value is an option` from `the user is answering in text`, and
 never silently drops part of the answer.  The answer follows the order the
 question offered the options, not the order they were typed."
   (let ((values (mapcar (lambda (value)
-                          (or (dsh-emacs--question-label-of value labels) value))
+                          (let ((value (if (stringp value)
+                                           (string-trim value)
+                                         value)))
+                            (or (dsh-emacs--question-label-of value labels)
+                                value)))
                         picked)))
     (cl-stable-sort values #'< :key (lambda (value)
                                       (or (cl-position value labels :test #'equal)
                                           most-positive-fixnum)))))
 
 (defun dsh-emacs--question-read-multiple (labels)
-  "Read one comma-separated answer over numbered LABELS.
+  "Read one comma-separated answer over LABELS.
 Returns the selected candidate strings, the free-text sentinel, or nil for
-an empty answer.  `require-match' is nil on purpose: the answer is typed
-text, so an empty minibuffer must stay empty (a mandatory match lets a
-frontend turn a bare RET into its preselected candidate) and an unknown
-value is better treated as a free-text answer than rejected.  C-g
-propagates.
-The candidates carry identity sort metadata: the number in a candidate is
-its position in the question, so a frontend must not reorder the list (the
-default ranking is by history, length and alphabet, which scrambles the
-numbered items and differs from question to question).  CRM hands the
-collection on to the frontend through `crm--collection-fn', which passes
-this metadata through."
+an empty answer.  Candidates are the plain labels; the reader shows their
+ordinals through `dsh-emacs--question-affixation', so completing inserts the
+label and deleting it leaves an empty answer.  `require-match' is nil on
+purpose: the answer is typed text, so an empty minibuffer must stay empty (a
+mandatory match lets a frontend turn a bare RET into its preselected
+candidate) and an unknown value is better treated as a free-text answer than
+rejected.  C-g propagates.
+The completion table carries identity sort metadata: the ordinal is the
+option's position in the question, so a frontend must not reorder the list
+(the default ranking is by history, length and alphabet, which scrambles the
+items and differs from question to question).  CRM hands the collection on to
+the frontend through `crm--collection-fn', which passes this metadata
+through."
   (catch 'dsh-emacs--question-command
     (minibuffer-with-setup-hook #'dsh-emacs--question-reader-setup
       (completing-read-multiple
        (concat dsh-emacs--question-where dsh-emacs--question-text
                (or dsh-emacs--question-hint "") ": ")
-       (dsh-emacs--completion-table-with-metadata
-        (dsh-emacs--question-pick-labels labels)
-        '((display-sort-function . identity)
-          (cycle-sort-function . identity)))
+       (dsh-emacs--question-completion-table labels)
        nil nil nil nil nil))))
 
 (defun dsh-emacs--question-choose (labels)
@@ -5141,6 +5167,10 @@ is the user's own text."
                                             (cl-member value labels :test #'equal))
                                           values)))
           (cond
+           ((cl-every #'string-empty-p values)
+            ;; Whitespace only: treat it as the empty answer, not as a
+            ;; custom reply made of spaces.
+            :skip)
            ((null options)
             ;; Names no option: the text is the answer, like an unmatched
             ;; input at any completion prompt.
@@ -5159,8 +5189,9 @@ is the user's own text."
 QUESTION accepts a protocol struct or legacy wire alist.  INDEX/TOTAL
 and SESSION-ID identify the question and its owning session in the prompt.
 Multiple selection is one comma-separated answer (for example `2,3'):
-the numbered options are the candidates, an empty input skips the
-question, and any text that names no option is itself the answer (like an
+the options are the candidates and their ordinals are display affixes, so
+typing a number still answers but completing inserts the plain label.  An
+empty input skips the question, and any text that names no option is itself the answer (like an
 unmatched input at any completion prompt).  Single selection uses the first
 value when several are given.  Every question is answered by one minibuffer read, so the reader is
 never reopened per key.  The skip key
@@ -5172,7 +5203,10 @@ area; each option's description rides along with its candidate."
                     #'dsh-protocol-question-p
                     #'dsh-protocol-question--from-alist question))
          (id (dsh-protocol-question-id question))
-         (text (or (dsh-protocol-question-text question) "Question"))
+         (text (let ((text (dsh-protocol-question-text question)))
+                 (if (and (stringp text) (not (string-empty-p text)))
+                     text
+                   "Question")))
          (options (dsh-protocol-question-options question))
          (labels (mapcar #'dsh-protocol-question-option-label options))
          (dsh-emacs--question-roster labels)
@@ -5199,10 +5233,11 @@ area; each option's description rides along with its candidate."
               " (a name or your own text; empty = skip)"))))
     (if (null labels)
         (let ((custom
-               (minibuffer-with-setup-hook #'dsh-emacs--question-reader-setup
-                 (read-string (format "%s%s%s: "
-                                      dsh-emacs--question-where text
-                                      dsh-emacs--question-hint)))))
+               (string-trim
+                (minibuffer-with-setup-hook #'dsh-emacs--question-reader-setup
+                  (read-string (format "%s%s%s: "
+                                       dsh-emacs--question-where text
+                                       dsh-emacs--question-hint))))))
           (dsh-protocol-question-answer-request
            id [] (unless (string-empty-p custom) custom)))
       (let ((answer (dsh-emacs--question-choose labels)))

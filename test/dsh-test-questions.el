@@ -61,6 +61,29 @@
         (should (not (string-match-p "^  IN" block)))
         (should (not (string-match-p "^  OUT" block)))))))
 
+;; An empty question text must keep the questionnaire instead of falling back
+;; to the raw argument JSON, which would hide every option.
+(ert-deftest dsh-emacs-test-questions-ask-empty-text-keeps-options ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (dsh-emacs-modeline-setup)
+    (setq-local dsh-emacs-tool-expand-by-default t)
+    (dsh-emacs-render-tool-call
+     (dsh-emacs-test--tool-call-event
+      1 "k-empty" "ask_user_question"
+      (json-encode
+       '((questions . [((id . "q1") (question . "")
+                        (options . [((label . "A")) ((label . "B"))]))])))))
+    (let ((block (dsh-emacs-test--tool-block-text
+                  (dsh-emacs-render--make-namespace) "tool-k-empty")))
+      (ert-info ((format "%s" "ask-empty-text-keeps-options"))
+        (should (string-match-p "Ask question · waiting" block))
+        (should (string-match-p "^  Question$" block))
+        (should (string-match-p "^   1\\.   A$" block))
+        (should (string-match-p "^   2\\.   B$" block))
+        (should-not (string-match-p "\"options\"" block))))))
+
 (ert-deftest dsh-emacs-test-questions-ask-answered-card-marks-choices-and-free-text ()
   :tags '(dsh-unit)
   (with-temp-buffer
@@ -84,7 +107,7 @@
         (should (string-match-p "^   2\\.   Compact$" block))
         (should (string-match-p "^  → and a summary$" block))))))
 
-(ert-deftest dsh-emacs-test-questions-ask-settled-empty-question-reads-not-answered ()
+(ert-deftest dsh-emacs-test-questions-ask-settled-empty-question-reads-skipped ()
   :tags '(dsh-unit)
   (with-temp-buffer
     (dsh-emacs-mode)
@@ -99,9 +122,9 @@
       (json-encode '((answers . [((id . "q1") (selected . []))])))))
     (let ((block (dsh-emacs-test--tool-block-text
                   (dsh-emacs-render--make-namespace) "tool-k3")))
-      (ert-info ((format "%s" "ask-settled-empty-question-reads-not-answered"))
+      (ert-info ((format "%s" "ask-settled-empty-question-reads-skipped"))
         (should (string-match-p "Ask question · 0/1 answered" block))
-        (should (string-match-p "^  Not answered$" block))))))
+        (should (string-match-p "^  Skipped$" block))))))
 
 ;; An abandoned ask is the user's own decision: the row interrupts instead of
 ;; failing red, like dsh web's ASK_ABORTED state.
@@ -346,9 +369,9 @@
     (should (equal "x" (dsh-emacs--question-label-of "10" (make-list 10 "x"))))
     (should (null (dsh-emacs--question-label-of "0" '("Alpha" "Beta"))))))
 
-;; each candidate's description travels with the candidate
-;; (annotation), no longer a tooltip that follows the highlight.
-(ert-deftest dsh-emacs-test-questions-question-annotation-carries-description ()
+;; The ordinal is display-only: candidates stay plain labels so deleting a
+;; completed option leaves an empty answer instead of a stale "1. " prefix.
+(ert-deftest dsh-emacs-test-questions-question-affixation-numbers-labels ()
   :tags '(dsh-unit)
   (let* ((dsh-emacs--question-current
           (dsh-protocol-question--from-alist
@@ -357,14 +380,39 @@
                          ((label . "Beta"))]))))
          (dsh-emacs--question-options
           (dsh-protocol-question-options dsh-emacs--question-current))
-         (dsh-emacs--question-roster '("Alpha" "Beta")))
-    (ert-info ((format "%s" "question-annotation-carries-description"))
-      (should (equal "  Safe route." (dsh-emacs--question-annotation "1. Alpha")))
-      (should (equal "  Safe route." (dsh-emacs--question-annotation "Alpha")))
-      (should (equal "" (dsh-emacs--question-annotation "2. Beta")))
-      (should (equal "" (dsh-emacs--question-annotation "something else")))
+         (dsh-emacs--question-roster '("Alpha" "Beta"))
+         (rows (dsh-emacs--question-affixation
+                '("Alpha" "Beta" "something else"))))
+    (ert-info ((format "%s" "question-affixation-numbers-labels"))
+      (should (equal '("Alpha" "1. " "  Safe route.")
+                     (list (nth 0 (nth 0 rows))
+                           (nth 1 (nth 0 rows))
+                           (substring-no-properties (nth 2 (nth 0 rows))))))
+      (should (equal '("Beta" "2. " "")
+                     (list (nth 0 (nth 1 rows))
+                           (nth 1 (nth 1 rows))
+                           (substring-no-properties (nth 2 (nth 1 rows))))))
+      (should (equal '("something else" "" "")
+                     (list (nth 0 (nth 2 rows))
+                           (nth 1 (nth 2 rows))
+                           (substring-no-properties (nth 2 (nth 2 rows))))))
       (should (eq 'dsh-emacs-meta-face
-                  (get-text-property 0 'face (dsh-emacs--question-annotation "Alpha")))))))
+                  (get-text-property 0 'face (nth 2 (nth 0 rows))))))))
+
+;; Typing a number still completes to the plain label, so the inserted text
+;; carries no ordinal.
+(ert-deftest dsh-emacs-test-questions-question-completion-table-accepts-numbers ()
+  :tags '(dsh-unit)
+  (let ((table (dsh-emacs--question-completion-table
+                '("Alpha" "Beta" "Gamma"))))
+    (ert-info ((format "%s" "question-completion-table-accepts-numbers"))
+      (should (equal '("Alpha") (all-completions "1" table)))
+      (should (equal '("Alpha") (all-completions "1. " table)))
+      (should (equal '("Alpha") (all-completions "1. Al" table)))
+      (should (equal '("Beta") (all-completions "2" table)))
+      (should (equal '("Alpha" "Beta" "Gamma")
+                     (all-completions "" table)))
+      (should (equal '("Beta") (all-completions "Beta" table))))))
 
 ;; single select: likewise one read (CRM takes only one value),
 ;; numeric candidate -> original label.
@@ -377,6 +425,22 @@
         (should (equal '((id . "q1") (selected "Yes"))
                        (dsh-emacs--question-choice
                         '((id . "q1") (question . "Proceed?")
+                          (options . (((label . "Yes")) ((label . "No"))))))))))))
+
+;; Typing a number and pressing RET without completing also selects that option.
+(ert-deftest dsh-emacs-test-questions-question-choice-bare-number ()
+  :tags '(dsh-unit)
+  (let ((reads '(("1") ("2. "))))
+    (cl-letf (((symbol-function 'completing-read-multiple)
+               (lambda (&rest _) (or (pop reads) (error "Unexpected read")))))
+      (ert-info ((format "%s" "question-choice-bare-number"))
+        (should (equal '((id . "q-number") (selected "Yes"))
+                       (dsh-emacs--question-choice
+                        '((id . "q-number") (question . "Proceed?")
+                          (options . (((label . "Yes")) ((label . "No"))))))))
+        (should (equal '((id . "q-number") (selected "No"))
+                       (dsh-emacs--question-choice
+                        '((id . "q-number") (question . "Proceed?")
                           (options . (((label . "Yes")) ((label . "No"))))))))))))
 
 ;; multiple select: the whole answer is read in one go; answers come back in
@@ -405,7 +469,31 @@
         (should (equal '((id . "q3") (selected . []))
                        (dsh-emacs--question-choice
                         '((id . "q3") (question . "Pick?") (multiSelect . t)
-                          (options . (((label . "A")) ((label . "B"))))))))))))
+                          (options . (((label . "A")) ((label . "B"))))))))))
+
+;; Empty text still reads the options; the prompt substitutes a placeholder
+;; instead of starting with a bare hint.
+(ert-deftest dsh-emacs-test-questions-question-choice-empty-text-uses-placeholder ()
+  :tags '(dsh-unit)
+  (let (prompt)
+    (cl-letf (((symbol-function 'completing-read-multiple)
+               (lambda (value &rest _) (setq prompt value) nil)))
+      (dsh-emacs--question-choice
+       '((id . "q-empty") (question . "")
+         (options . (((label . "A")) ((label . "B")))))))
+    (ert-info ((format "%s" "question-choice-empty-text-uses-placeholder"))
+      (should (string-match-p "\\`Question " prompt)))))))
+
+;; Whitespace is not a custom answer: deleting an option can leave spaces.
+(ert-deftest dsh-emacs-test-questions-question-choice-whitespace-is-skip ()
+  :tags '(dsh-unit)
+  (cl-letf (((symbol-function 'completing-read-multiple)
+             (lambda (&rest _) '(" "))))
+    (ert-info ((format "%s" "question-choice-whitespace-is-skip"))
+      (should (equal '((id . "q-space") (selected . []))
+                     (dsh-emacs--question-choice
+                      '((id . "q-space") (question . "Pick?")
+                        (options . (((label . "A")) ((label . "B")))))))))))
 
 ;; no "type an answer" candidate: typing text directly is the answer, same
 ;; for multiple and single select, and there is only one read (no more
@@ -466,7 +554,7 @@
 ;; No-option questions are still free text: empty input = skip, non-empty = custom.
 (ert-deftest dsh-emacs-test-questions-question-choice-no-options-custom ()
   :tags '(dsh-unit)
-  (let ((customs '("free text" "")))
+  (let ((customs '("  free text  " "" " ")))
     (cl-letf (((symbol-function 'read-string)
                (lambda (&rest _) (pop customs))))
       (ert-info ((format "%s" "question-choice-no-options-custom"))
@@ -474,6 +562,10 @@
                        (dsh-emacs--question-choice
                         '((id . "q7") (question . "Say?"))))))
       (ert-info ((format "%s" "question-choice-no-options-empty-skips"))
+        (should (equal '((id . "q7") (selected . []))
+                       (dsh-emacs--question-choice
+                        '((id . "q7") (question . "Say?"))))))
+      (ert-info ((format "%s" "question-choice-no-options-whitespace-skips"))
         (should (equal '((id . "q7") (selected . []))
                        (dsh-emacs--question-choice
                         '((id . "q7") (question . "Say?")))))))))
@@ -522,9 +614,9 @@
                                      (kbd "C-c C-s"))
                          'dsh-emacs--question-skip-command)))))))
 
-;; reader setup: candidate annotations + question detail into the echo area (both
+;; reader setup: candidate affixes + question detail into the echo area (both
 ;; scoped to this minibuffer).
-(ert-deftest dsh-emacs-test-questions-question-reader-setup-annotations-and-echo ()
+(ert-deftest dsh-emacs-test-questions-question-reader-setup-affixes-and-echo ()
   :tags '(dsh-unit)
   (let* ((dsh-emacs--question-current
           (dsh-protocol-question--from-alist
@@ -540,12 +632,18 @@
       (with-temp-buffer
         (use-local-map (make-sparse-keymap))
         (dsh-emacs--question-reader-setup)
-        (let ((annotation (plist-get completion-extra-properties
-                                     :annotation-function)))
-          (ert-info ((format "%s" "question-reader-setup-annotations-and-echo"))
-            (should (equal "  Go ahead" (funcall annotation "1. Yes")))
-            (should (equal "  Go ahead" (funcall annotation "Yes")))
-            (should (equal "" (funcall annotation "2. No")))
+        (let* ((affixation (plist-get completion-extra-properties
+                                      :affixation-function))
+               (rows (funcall affixation '("Yes" "No"))))
+          (ert-info ((format "%s" "question-reader-setup-affixes-and-echo"))
+            (should (equal '("Yes" "1. " "  Go ahead")
+                           (list (nth 0 (nth 0 rows))
+                                 (nth 1 (nth 0 rows))
+                                 (substring-no-properties (nth 2 (nth 0 rows))))))
+            (should (equal '("No" "2. " "")
+                           (list (nth 0 (nth 1 rows))
+                                 (nth 1 (nth 1 rows))
+                                 (substring-no-properties (nth 2 (nth 1 rows))))))
             (should (equal "Context here" echoed))))))))
 
 ;; the reader must preselect prompt, not the first item: a frontend preselecting the
@@ -588,21 +686,22 @@
         (should (equal "Proceed? (a name or your own text; empty = skip): "
                        prompt))))))
 
-;; candidate order = the question's original option order: for numbered options
-;; ("1. ...") the number is the order, and the completion frontend must not reorder.
-;; Only an identity `display-sort-function'/`cycle-sort-function' on the collection
-;; makes that possible -- otherwise vertico reorders by history/length/alphabet by
-;; default (and across several questions the list order of the same question batch
-;; even differs). CRM passes this metadata through `crm-completion-table' to the
-;; frontend's collection (`crm--collection-fn'), so assertions must go through it
-;; to cover the table the frontend actually sees.
+;; candidate order = the question's original option order; the reader shows
+;; ordinals as affixes, and the completion frontend must not reorder the plain
+;; labels.  Only an identity `display-sort-function'/`cycle-sort-function' on
+;; the collection makes that possible -- otherwise vertico reorders by
+;; history/length/alphabet by default (and across several questions the list
+;; order of the same question batch even differs). CRM passes this metadata
+;; through `crm-completion-table' to the frontend's collection
+;; (`crm--collection-fn'), so assertions must go through it to cover the table
+;; the frontend actually sees.
 (ert-deftest dsh-emacs-test-questions-question-reader-pins-option-order ()
   :tags '(dsh-unit)
   (let ((seen 'unset))
     (cl-letf (((symbol-function 'completing-read-multiple)
                (lambda (_prompt collection &rest _)
                  (setq seen collection)
-                 '("2. Alpha"))))
+                 '("Alpha"))))
       (dsh-emacs--question-choice
        '((id . "q-order") (question . "Pick?") (multiSelect . t)
          (options . (((label . "Zulu")) ((label . "Alpha"))
@@ -614,7 +713,7 @@
                       (completion-metadata-get metadata 'display-sort-function)))
           (should (eq #'identity
                       (completion-metadata-get metadata 'cycle-sort-function)))
-          (should (equal '("1. Zulu" "2. Alpha" "3. Mike")
+          (should (equal '("Zulu" "Alpha" "Mike")
                          (all-completions "" #'crm--collection-fn nil))))))))
 
 ;; The preview command demos a whole batch of questions (multi-select + single
