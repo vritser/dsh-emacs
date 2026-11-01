@@ -86,6 +86,11 @@ minor) and stay undated until the release is cut.
   re-issues the same plan under a new waterfall, a late success or failure
   response is ignored and the new request stays answerable.
 
+- **The latest session-list refresh wins**: overlapping `session/list`
+  requests now carry a generation, so an older response that arrives after a
+  newer one no longer rolls the cache back; superseded responses still
+  balance the refresh replay but do not install, sync or re-baseline.
+
 - **Closing a plan document keeps its decision alive**: the approval
   request is now owned by the chat buffer instead of the closable document,
   so a response arriving after the document is closed still settles the

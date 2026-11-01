@@ -1466,5 +1466,98 @@ window's own point behind, which the session list now preserves per window."
           (dolist (marker (list first middle last))
             (set-marker marker nil)))))))
 
+;; --- Concurrent session-list fetches settle on the newest response ---
+(defun dsh-emacs-test--session-list-race (newest-first &optional latest-fails)
+  "Run two overlapping `session/list' fetches and describe the settled state.
+Request A starts first and returns only the \"old\" session; request B starts
+second and returns both \"old\" and the newer \"new\" session.  NEWEST-FIRST
+selects whether B's response callback runs before A's (the out-of-order
+case) or after it.  LATEST-FAILS makes B's response an error.  The returned
+plist carries the installed cache, how many workspace refreshes fired, the
+leftover refresh depth, and the messages emitted, so a test can assert the
+span balanced and failures were reported."
+  (let ((callbacks nil)
+        (messages nil)
+        (workspace-refreshes 0)
+        (dsh-emacs--sessions nil)
+        (dsh-emacs--chat-buffers (make-hash-table :test #'equal))
+        (dsh-emacs--sessions-buffer nil)
+        (dsh-emacs--host-refresh-depth 0)
+        (dsh-emacs--host-refresh-frames nil)
+        (dsh-emacs--session-list-fetch-generation 0)
+        (old-snapshot (list (cons 'items
+                                  (vector (list (cons 'sessionId "old")
+                                                (cons 'updatedAt 1))))))
+        (new-snapshot (list (cons 'items
+                                  (vector (list (cons 'sessionId "new")
+                                                (cons 'updatedAt 2))
+                                          (list (cons 'sessionId "old")
+                                                (cons 'updatedAt 1)))))))
+    (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+               (lambda (_method _params callback)
+                 (push callback callbacks)))
+              ((symbol-function 'dsh-emacs-list-workspaces)
+               (lambda ()
+                 (setq workspace-refreshes (1+ workspace-refreshes))))
+              ((symbol-function 'dsh-emacs-events--host-needed-p)
+               (lambda (&optional _) t))
+              ((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (push (apply #'format format-string args) messages))))
+      (dsh-emacs-list-sessions--fetch)
+      (dsh-emacs-list-sessions--fetch)
+      (setq callbacks (nreverse callbacks))
+      (let ((a-callback (nth 0 callbacks))
+            (b-callback (nth 1 callbacks)))
+        (if newest-first
+            (progn
+              (funcall b-callback (not latest-fails)
+                       (if latest-fails nil new-snapshot))
+              (funcall a-callback t old-snapshot))
+          (funcall a-callback t old-snapshot)
+          (funcall b-callback (not latest-fails)
+                   (if latest-fails nil new-snapshot)))))
+    (list :sessions dsh-emacs--sessions
+          :workspace-refreshes workspace-refreshes
+          :depth dsh-emacs--host-refresh-depth
+          :messages (nreverse messages))))
+
+(ert-deftest dsh-emacs-test-session-list-fetch-newest-wins-out-of-order ()
+  :tags '(dsh-unit)
+  (let ((result (dsh-emacs-test--session-list-race t)))
+    (ert-info ((format "%s" "session-list-fetch-newest-wins-out-of-order"))
+      ;; B's newer response landed first, then A's stale one; the stale
+      ;; snapshot must not roll "new" back out of the cache.
+      (should (equal '("new" "old")
+                     (mapcar #'dsh-protocol-session-session-id
+                             (plist-get result :sessions))))
+      ;; Only the latest request may trigger the workspace refresh.
+      (should (= 1 (plist-get result :workspace-refreshes)))
+      (should (= 0 (plist-get result :depth))))))
+
+(ert-deftest dsh-emacs-test-session-list-fetch-newest-wins-in-order ()
+  :tags '(dsh-unit)
+  (let ((result (dsh-emacs-test--session-list-race nil)))
+    (ert-info ((format "%s" "session-list-fetch-newest-wins-in-order"))
+      ;; A's superseded response arrives first: it must neither install nor
+      ;; refresh workspaces, and B's snapshot is the one left in the cache.
+      (should (equal '("new" "old")
+                     (mapcar #'dsh-protocol-session-session-id
+                             (plist-get result :sessions))))
+      (should (= 1 (plist-get result :workspace-refreshes)))
+      (should (= 0 (plist-get result :depth))))))
+
+(ert-deftest dsh-emacs-test-session-list-fetch-latest-failure-keeps-cache ()
+  :tags '(dsh-unit)
+  (let ((result (dsh-emacs-test--session-list-race t t)))
+    (ert-info ((format "%s" "session-list-fetch-latest-failure-keeps-cache"))
+      ;; The latest request failed: report it, but leave the cache alone and
+      ;; never let the superseded success that lands afterwards install.
+      (should-not (plist-get result :sessions))
+      (should (= 0 (plist-get result :workspace-refreshes)))
+      (should (= 0 (plist-get result :depth)))
+      (should (equal '("Failed to fetch session list: no response")
+                     (plist-get result :messages))))))
+
 (provide 'dsh-test-session)
 ;;; dsh-test-session.el ends here

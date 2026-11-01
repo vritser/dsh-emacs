@@ -593,44 +593,56 @@ known value."
         (with-current-buffer buf
           (dsh-emacs-modeline-set-preset preset))))))
 
+(defvar dsh-emacs--session-list-fetch-generation 0
+  "Generation of the latest `session/list' fetch.
+Every fetch increments it and keeps the value it started with; only the
+response whose token still matches this variable may install its snapshot.
+Concurrent refreshes can complete out of order, so an older response must
+not roll the cache back below a newer one.")
+
 ;;;###autoload
 (defun dsh-emacs-list-sessions--fetch ()
   "Fetch the session list via RPC and populate `dsh-emacs--sessions'."
   ;; This callback owns global caches, not the lifetime of the caller's chat.
   (with-current-buffer (get-buffer-create " *dsh-session-cache*")
     (dsh-emacs-events--host-refresh-begin)
-    (dsh-emacs--rpc-async "session/list" (dsh-protocol-session-list-request)
-                          (lambda (ok value)
-                            (unwind-protect
-				(if ok
-                                    (progn
-                                      ;; JSON arrays arrive as vectors; normalize
-                                      ;; them before the session list renderer uses
-                                      ;; `dolist', and wrap each item in a
-                                      ;; `dsh-protocol-session' struct so field
-                                      ;; access is centralized (protoco.el).
-                                      (setq dsh-emacs--sessions
-                                            (dsh-protocol-session-list--from-alist value))
-                                      ;; Title/workspace may have drifted
-                                      ;; (auto summary/rename/session move):
-                                      ;; re-sync all live chat buffers' name and
-                                      ;; default-directory.
-                                      (dsh-emacs--chat-buffers-sync-all)
-                                      ;; Refresh workspaces in parallel so the
-                                      ;; session list can group by workspace.
-                                      ;; This fetch can outlive the chat that
-                                      ;; triggered it (the lazy preset link):
-                                      ;; keep the installed cache, but do not
-                                      ;; create a core connection when no list
-                                      ;; or chat is left to own and close it.
-                                      (when (dsh-emacs-events--host-needed-p)
-                                        (dsh-emacs-list-workspaces)))
-                                  (message "Failed to fetch session list: %s"
-                                           (dsh-emacs-rpc-error-text value)))
-                              ;; Snapshot installed: replay any frame that arrived
-                              ;; while the refresh was in flight, so the list never
-                              ;; rolls back below the stream's latest state.
-                              (dsh-emacs-events--host-refresh-drain))))))
+    (let ((generation (setq dsh-emacs--session-list-fetch-generation
+                            (1+ dsh-emacs--session-list-fetch-generation))))
+      (dsh-emacs--rpc-async "session/list" (dsh-protocol-session-list-request)
+                            (lambda (ok value)
+                              (unwind-protect
+                                  (when (= generation
+                                           dsh-emacs--session-list-fetch-generation)
+                                    (if ok
+                                        (progn
+                                          ;; JSON arrays arrive as vectors; normalize
+                                          ;; them before the session list renderer uses
+                                          ;; `dolist', and wrap each item in a
+                                          ;; `dsh-protocol-session' struct so field
+                                          ;; access is centralized (protoco.el).
+                                          (setq dsh-emacs--sessions
+                                                (dsh-protocol-session-list--from-alist value))
+                                          ;; Title/workspace may have drifted
+                                          ;; (auto summary/rename/session move):
+                                          ;; re-sync all live chat buffers' name and
+                                          ;; default-directory.
+                                          (dsh-emacs--chat-buffers-sync-all)
+                                          ;; Refresh workspaces in parallel so the
+                                          ;; session list can group by workspace.
+                                          ;; This fetch can outlive the chat that
+                                          ;; triggered it (the lazy preset link):
+                                          ;; keep the installed cache, but do not
+                                          ;; create a core connection when no list
+                                          ;; or chat is left to own and close it.
+                                          (when (dsh-emacs-events--host-needed-p)
+                                            (dsh-emacs-list-workspaces)))
+                                      (message "Failed to fetch session list: %s"
+                                               (dsh-emacs-rpc-error-text value))))
+                                ;; End the refresh span even for a superseded
+                                ;; response: the depth must balance and frames
+                                ;; recorded mid-flight must replay, but the stale
+                                ;; snapshot must not touch the caches.
+                                (dsh-emacs-events--host-refresh-drain)))))))
 
 (defun dsh-emacs-list-sessions--fetch-when-ready (deadline)
   "Poll until the server is alive, then fetch the session list.
