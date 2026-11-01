@@ -274,21 +274,46 @@ overwriting the newer catalog."
 
 (defun dsh-emacs-command-catalog-sync (session-id)
   "Fetch and cache the `commands/list' catalog of SESSION-ID synchronously.
-Returns the item list, or nil on failure (a message is emitted)."
+Returns the item list, or nil on failure (a message is emitted).
+A synchronous read supersedes any prefetch already in flight for
+SESSION-ID.  It also carries its own stamp: waiting on the network can
+service a timer that starts a prefetch, which may install a newer catalog
+before this read returns.  In that case the older synchronous result is
+not cached (and the newer catalog is returned when it landed) — the same
+latest-request-wins rule as the asynchronous fetch."
   (or (dsh-emacs-command-catalog session-id)
-      (let* ((res (dsh-emacs--rpc-request
-                   "commands/list"
-                   (dsh-protocol-commands-list-request session-id)))
-             (items (and (car res)
-                         (mapcar #'dsh-protocol-command--from-alist
-                                 (dsh-protocol--list (cdr res))))))
-        (if items
-            (progn
-              (dsh-emacs-command--cache-catalog session-id items)
-              items)
-          (message "Failed to list commands: %s"
-                   (dsh-emacs-rpc-error-text (cdr res)))
-          nil))))
+      (let ((stamp nil))
+        ;; Supersede a prefetch started before this read, then mark this read
+        ;; as the current request for the session.
+        (dsh-emacs-command-catalog-invalidate session-id)
+        (setq stamp (setq dsh-emacs--command-fetch-generation
+                          (1+ dsh-emacs--command-fetch-generation)))
+        (setq dsh-emacs--command-fetch-stamps
+              (cons (cons session-id stamp)
+                    (assoc-delete-all session-id
+                                      dsh-emacs--command-fetch-stamps)))
+        (let* ((res (dsh-emacs--rpc-request
+                     "commands/list"
+                     (dsh-protocol-commands-list-request session-id)))
+               (items (and (car res)
+                           (mapcar #'dsh-protocol-command--from-alist
+                                   (dsh-protocol--list (cdr res)))))
+               (current (equal stamp
+                               (cdr (assoc session-id
+                                            dsh-emacs--command-fetch-stamps)))))
+          (cond
+           ((null items)
+            (message "Failed to list commands: %s"
+                     (dsh-emacs-rpc-error-text (cdr res)))
+            nil)
+           (current
+            (dsh-emacs-command--cache-catalog session-id items)
+            items)
+           ;; A newer request started while this read waited and owns the
+           ;; cache now.  Use its catalog when it already landed; never
+           ;; overwrite it with this older result.
+           (t (or (dsh-emacs-command-catalog session-id) items)))))))
+
 
 (defun dsh-emacs-command-catalog-prefetch (session-id)
   "Pre-fetch the `commands/list' catalog of SESSION-ID lazily.

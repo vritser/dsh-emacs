@@ -103,6 +103,11 @@ minor) and stay undated until the release is cut.
   looks like a generated suffix no longer aliases another session, so
   completing the row references the session it names.
 
+- **A synchronous command-list read keeps the newest catalog**: it supersedes
+  a prefetch already in flight, and if a newer prefetch lands while the sync
+  read waits, that catalog is kept instead of being overwritten by the older
+  synchronous result.
+
 - **Closing a plan document keeps its decision alive**: the approval
   request is now owned by the chat buffer instead of the closable document,
   so a response arriving after the document is closed still settles the

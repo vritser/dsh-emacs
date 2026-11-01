@@ -265,6 +265,72 @@
             dsh-emacs--command-fetch-inflight old-inflight
             dsh-emacs--command-fetch-stamps old-stamps))))
 
+;; A synchronous read supersedes a prefetch already in flight: the late
+;; prefetch response is older than the sync catalog and must not overwrite it.
+(ert-deftest dsh-emacs-test-command-command-catalog-sync-supersedes-prefetch ()
+  :tags '(dsh-unit)
+  (let ((sid "sess-cmd-sync-stale")
+        (old-catalogs dsh-emacs--command-catalogs)
+        (old-inflight dsh-emacs--command-fetch-inflight)
+        (old-stamps dsh-emacs--command-fetch-stamps)
+        (callback nil))
+    (unwind-protect
+        (progn
+          ;; Prefetch starts; its response is captured, not run.
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (_method _params cb) (setq callback cb))))
+            (dsh-emacs-command-catalog-fetch sid))
+          ;; The synchronous read returns a newer catalog and caches it.
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-request)
+                     (lambda (_method _params)
+                       (cons t [((name . "new") (description . "N"))]))))
+            (should (dsh-emacs-command-catalog-sync sid)))
+          ;; The older prefetch response arrives late.
+          (funcall callback t [((name . "old") (description . "O"))])
+          (let ((items (dsh-emacs-command-catalog sid)))
+            (ert-info ((format "%s" "command-catalog-sync-supersedes-prefetch"))
+              (should (consp items))
+              (should (string= "new"
+                               (dsh-protocol-command-name (car items)))))))
+      (setq dsh-emacs--command-catalogs old-catalogs
+            dsh-emacs--command-fetch-inflight old-inflight
+            dsh-emacs--command-fetch-stamps old-stamps))))
+
+;; Waiting on a synchronous RPC services timers: a prefetch can start and
+;; cache a newer catalog before the older synchronous response returns.  The
+;; sync result must not overwrite that newer catalog.
+(ert-deftest dsh-emacs-test-command-command-catalog-sync-loses-to-newer-prefetch ()
+  :tags '(dsh-unit)
+  (let ((sid "sess-cmd-sync-race")
+        (old-catalogs dsh-emacs--command-catalogs)
+        (old-inflight dsh-emacs--command-fetch-inflight)
+        (old-stamps dsh-emacs--command-fetch-stamps))
+    (unwind-protect
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-request)
+                   (lambda (_method _params)
+                     ;; A prefetch starts and completes while the synchronous
+                     ;; read waits on the network.
+                     (dsh-emacs-command-catalog-fetch sid)
+                     (cons t [((name . "older-command")
+                               (description . "O"))])))
+                  ((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_method _params callback)
+                     (funcall callback
+                              t [((name . "newer-command")
+                                  (description . "N"))]))))
+          (let ((returned (dsh-emacs-command-catalog-sync sid))
+                (items (dsh-emacs-command-catalog sid)))
+            (ert-info ((format "%s" "command-catalog-sync-keeps-newer-prefetch"))
+              (should (consp items))
+              (should (string= "newer-command"
+                               (dsh-protocol-command-name (car items))))
+              (should (consp returned))
+              (should (string= "newer-command"
+                               (dsh-protocol-command-name (car returned)))))))
+      (setq dsh-emacs--command-catalogs old-catalogs
+            dsh-emacs--command-fetch-inflight old-inflight
+            dsh-emacs--command-fetch-stamps old-stamps))))
+
 ;; --- Test 98: command/run + command/done rendering ---
 (ert-deftest dsh-emacs-test-command-command-render-run-and-done ()
   :tags '(dsh-unit)
