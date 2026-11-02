@@ -91,6 +91,7 @@ Callers build the clip lazily, so an absent backend must not signal."
 ;; after the major-mode segment); otherwise it falls back to the native
 ;; mode-line-format splice.
 (declare-function doom-modeline-def-segment "doom-modeline-core" (name &rest body))
+(defvar doom-modeline-major-mode-icon)
 (declare-function doom-modeline-add-segment "doom-modeline-core" (segment anchor &optional position modeline))
 (defvar nerd-icons-mode-icon-alist)
 
@@ -1452,9 +1453,25 @@ caption and clock while preserving the enclosing turn's running interval."
   "Return the DSH whale for Nerd Icons' major-mode lookup."
   (dsh-emacs-modeline--whale-label))
 
+(defun dsh-emacs-modeline-refresh ()
+  "Discard image caches and refresh live chat and session-list mode lines.
+Reload uses this instead of resetting modeline-owned caches or calling a
+third-party icon backend itself.  Buffer contents and running state stay live."
+  (setq dsh-emacs-modeline--logo-labels nil
+        dsh-emacs-modeline--whale-tail-labels nil
+        dsh-emacs-modeline--whale-tail-frames nil
+        dsh-emacs-modeline--whale-tail-gif-data nil)
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (when (derived-mode-p 'dsh-emacs-mode 'dsh-emacs-session-mode)
+        (when (fboundp 'doom-modeline-update-buffer-file-icon)
+          (doom-modeline-update-buffer-file-icon))
+        (dsh-emacs-modeline-update))))
+  (force-mode-line-update t))
+
 (defun dsh-emacs-modeline--nerd-icon-for-mode (orig-fn mode &rest args)
-  "Return the DSH whale for MODE, otherwise call ORIG-FN with ARGS."
-  (if (eq mode 'dsh-emacs-mode)
+  "Return the DSH whale for a DSH MODE, otherwise call ORIG-FN with ARGS."
+  (if (memq mode '(dsh-emacs-mode dsh-emacs-session-mode))
       (dsh-emacs-modeline--whale-label)
     (apply orig-fn mode args)))
 
@@ -1465,7 +1482,9 @@ caption and clock while preserving the enclosing turn's running interval."
   (advice-add 'nerd-icons-icon-for-mode :around
               #'dsh-emacs-modeline--nerd-icon-for-mode)
   (add-to-list 'nerd-icons-mode-icon-alist
-               '(dsh-emacs-mode dsh-emacs-modeline--nerd-icon "DSH")))
+               '(dsh-emacs-mode dsh-emacs-modeline--nerd-icon "DSH"))
+  (add-to-list 'nerd-icons-mode-icon-alist
+               '(dsh-emacs-session-mode dsh-emacs-modeline--nerd-icon "DSH")))
 
 (eval-after-load 'nerd-icons #'dsh-emacs-modeline--install-nerd-icon)
 
@@ -1535,14 +1554,35 @@ Both presentations preserve Doom's segment styling."
                       'local-map mode-line-major-mode-keymap)))
     text))
 
+(defun dsh-emacs-modeline--dsh-file-icon ()
+  "Return the DSH whale as a Doom file icon.
+Doom's icon propertizer needs a plist face on the icon string, otherwise it
+discards the string and its SVG display spec."
+  (let ((icon (copy-sequence (dsh-emacs-modeline--whale-label))))
+    (put-text-property 0 (length icon) 'face '(:inherit doom-modeline) icon)
+    icon))
+
+(defun dsh-emacs-modeline--doom-icon-for-buffer (orig-fn &rest args)
+  "Choose the whale for a fileless session list through Doom's icon API."
+  (if (and (derived-mode-p 'dsh-emacs-session-mode)
+           (null buffer-file-name))
+      (dsh-emacs-modeline--dsh-file-icon)
+    (apply orig-fn args)))
+
 (defun dsh-emacs-modeline--doom-buffer-file-icon (orig-fn &rest args)
-  "Skip Doom's file-icon refresh for a fileless DSH chat buffer."
+  "Let Doom refresh its own cache, suppressing duplicate chat icons.
+Chats already carry a whale segment.  Use Doom's public icon option for this
+refresh so it clears the redundant file icon without exposing its cache."
   (if (and (derived-mode-p 'dsh-emacs-mode) (null buffer-file-name))
-      nil
+      (let ((doom-modeline-major-mode-icon nil))
+        (apply orig-fn args))
     (apply orig-fn args)))
 
 (defun dsh-emacs-modeline--install-doom-icon ()
   "Register the DSH buffer icon with Doom Modeline."
+  (when (fboundp 'doom-modeline-icon-for-buffer)
+    (advice-add 'doom-modeline-icon-for-buffer :around
+                #'dsh-emacs-modeline--doom-icon-for-buffer))
   (when (fboundp 'doom-modeline-update-buffer-file-icon)
     (advice-add 'doom-modeline-update-buffer-file-icon :around
                 #'dsh-emacs-modeline--doom-buffer-file-icon)))

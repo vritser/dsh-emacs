@@ -158,5 +158,33 @@
       (kill-buffer output)
       (delete-directory copy t))))
 
+(ert-deftest dsh-emacs-test-reload-completes-once-with-modeline-owner ()
+  :tags '(dsh-unit)
+  (let ((dsh-emacs-reload--finish-timer nil)
+        (file (expand-file-name "dsh-emacs-reload.el"
+                                dsh-emacs-reload--directory))
+        (restores 0)
+        (refreshes 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'dsh-emacs-reload--sources)
+                   (lambda (_directory) (list file)))
+                  ((symbol-function 'dsh-emacs-events-host-restore)
+                   (lambda () (cl-incf restores)))
+                  ((symbol-function 'dsh-emacs--composer-delete-guard-install)
+                   #'ignore)
+                  ((symbol-function 'dsh-emacs-composer-refresh) #'ignore)
+                  ((symbol-function 'dsh-emacs-session--render) #'ignore)
+                  ((symbol-function 'dsh-emacs-modeline-refresh)
+                   (lambda () (cl-incf refreshes))))
+          (dsh-emacs-reload)
+          (should (= restores 1))
+          (should (= refreshes 1))
+          (should-not dsh-emacs-reload--finish-timer)
+          (accept-process-output nil 0.01)
+          (should (= restores 1))
+          (should (= refreshes 1)))
+      (when (timerp dsh-emacs-reload--finish-timer)
+        (cancel-timer dsh-emacs-reload--finish-timer)))))
+
 (provide 'dsh-test-reload)
 ;;; dsh-test-reload.el ends here

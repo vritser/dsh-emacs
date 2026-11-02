@@ -39,6 +39,13 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Extend the commands that jump to the composer**:
+  `dsh-emacs-composer-typing-commands` lists the editing commands that park
+  point at the input when invoked from the read-only transcript, including
+  register insertion and chat paste. Append other commands that edit at point;
+  unlisted commands retain their standard read-only behavior.
+  (rationale: [postmortem/168](postmortem/168-composer-command-boundaries.md))
+
 - **Copy session id**: `M-x dsh-emacs-copy-session-id` copies the current
   chat's session id, or the session-list row at point, to the kill ring.
   Subagent rows copy the child session id.
@@ -80,6 +87,34 @@ minor) and stay undated until the release is cut.
   Recents. (rationale: postmortem/154)
 
 ### Fixed
+
+- **RET and C-j from the transcript keep the prompt intact**: a composer
+  guard clamps `delete-horizontal-space` to the editable input, so
+  electric-indent, `newline-and-indent` and the C-j entry
+  (`electric-newline-and-maybe-indent`) can no longer try to delete the
+  read-only `❯ ` space; both keys open a new line after reading history.
+  Supported commands route before reading interactive arguments, so a
+  register selection is consumed once.
+
+- **Routing from history re-protects reference chips**: the reference-chip
+  guard runs again after the cursor hops to the composer, so overwrite and
+  insertion commands cannot replace a leading chip's first character; `C-q`
+  in `binary-overwrite-mode` no longer turns `@file.txt` into `Xfile.txt`.
+
+- **Sent text is trimmed**: submitting a message strips leading and trailing
+  whitespace from the model-bound text and its transcript echo, matching the
+  web composer. Command routing still reads the raw line, so a leading space
+  cannot change which kind of submit it is. An attachment-only caption may
+  therefore be empty. Failed submissions restore the original untrimmed draft.
+
+- **The sessions list shows the DSH icon**: the `*dsh-sessions*` mode line no
+  longer falls back to the generic Emacs file icon; it carries the whale like
+  a chat buffer and stays fileless.
+
+- **Typing from more chat places reaches the input**: RET, TAB, insert-char,
+  completion and the other common insert commands now jump to the composer
+  from the transcript; a cursor below the input continues at the draft end
+  instead of editing the separator.
 
 - **Live reload keeps ask and approval prompts**: reloading into a build
   that shares one core connection now adopts the previous socket (or closes

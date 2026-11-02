@@ -4,6 +4,8 @@
 
 (require 'dsh-test-support)
 
+(defvar doom-modeline-major-mode-icon)
+
 (defvar motion-line-current-time-function)
 (defvar motion-line-visible-p-function)
 (defvar motion-line--timer)
@@ -183,18 +185,38 @@
         (should (null (dsh-emacs-modeline--permission-nerd-icon "auto" 'default)))
         (should (null (dsh-emacs-modeline--permission-nerd-icon "custom" 'default)))))))
 
-(ert-deftest dsh-emacs-test-modeline-doom-file-icon-skipped-for-fileless-dsh-buffer ()
+(ert-deftest dsh-emacs-test-modeline-doom-chat-icon-uses-public-option ()
   :tags '(dsh-unit)
   (with-temp-buffer
     (dsh-emacs-mode)
-    (let ((called nil))
-      (ert-info ((format "%s" "doom-file-icon-skipped-for-fileless-dsh-buffer"))
-        (should (null
-                 (dsh-emacs-modeline--doom-buffer-file-icon
-                  (lambda (&rest _args)
-                    (setq called t)
-                    (signal 'wrong-type-argument '(stringp nil))))))
-        (should (not called))))))
+    (let ((doom-modeline-major-mode-icon t)
+          called)
+      (should-not
+       (dsh-emacs-modeline--doom-buffer-file-icon
+        (lambda ()
+          (setq called t)
+          (should-not doom-modeline-major-mode-icon)
+          nil)))
+      (should called)
+      (should doom-modeline-major-mode-icon))))
+
+(ert-deftest dsh-emacs-test-modeline-session-mode-uses-dsh-icon ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (setq major-mode 'dsh-emacs-session-mode)
+    (let (called)
+      (let ((icon (dsh-emacs-modeline--doom-icon-for-buffer
+                   (lambda () (setq called t) "generic"))))
+        (should (equal (substring-no-properties icon) "DSH"))
+        (should (listp (get-text-property 0 'face icon))))
+      (should-not called)
+      (should (eq 'updated
+                  (dsh-emacs-modeline--doom-buffer-file-icon
+                   (lambda () 'updated))))))
+  (with-temp-buffer
+    (should (eq 'generic
+                (dsh-emacs-modeline--doom-icon-for-buffer
+                 (lambda () 'generic))))))
 
 (ert-deftest dsh-emacs-test-modeline-doom-file-icon-delegates-for-other-buffers ()
   :tags '(dsh-unit)
@@ -1639,6 +1661,36 @@
     (should (equal (dsh-emacs--ml-busy-indicator) ""))
     (when (featurep 'motion-line)
       (should-not (motion-line-playing-p 'dsh-running)))))
+
+(ert-deftest dsh-emacs-test-modeline-refresh-owns-caches-and-icons ()
+  :tags '(dsh-unit)
+  (let ((chat (generate-new-buffer " *modeline-refresh-chat*"))
+        (sessions (generate-new-buffer " *modeline-refresh-list*"))
+        (other (generate-new-buffer " *modeline-refresh-other*"))
+        (dsh-emacs-modeline--logo-labels '(old))
+        (dsh-emacs-modeline--whale-tail-labels '(old))
+        (dsh-emacs-modeline--whale-tail-frames '(old))
+        (dsh-emacs-modeline--whale-tail-gif-data "old")
+        icons)
+    (unwind-protect
+        (progn
+          (with-current-buffer chat
+            (setq major-mode 'dsh-emacs-mode))
+          (with-current-buffer sessions
+            (setq major-mode 'dsh-emacs-session-mode))
+          (cl-letf (((symbol-function 'doom-modeline-update-buffer-file-icon)
+                     (lambda () (push (current-buffer) icons))))
+            (dsh-emacs-modeline-refresh))
+          (should (memq chat icons))
+          (should (memq sessions icons))
+          (should-not (memq other icons))
+          (should-not dsh-emacs-modeline--logo-labels)
+          (should-not dsh-emacs-modeline--whale-tail-labels)
+          (should-not dsh-emacs-modeline--whale-tail-frames)
+          (should-not dsh-emacs-modeline--whale-tail-gif-data))
+      (kill-buffer chat)
+      (kill-buffer sessions)
+      (kill-buffer other))))
 
 (provide 'dsh-test-modeline)
 ;;; dsh-test-modeline.el ends here

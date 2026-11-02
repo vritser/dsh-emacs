@@ -111,6 +111,9 @@ See [Web folding rules and remaining differences](docs/web-folding.md).
 Visible chat windows follow new output independently while their cursors and
 views stay near the draft, preserving each editing position. Windows reading
 older messages stay put; `C-c >` returns that window to the draft and following.
+Typing from the read-only transcript jumps to the composer; extend
+`dsh-emacs-composer-typing-commands` for a mode-specific editing command
+(see [Customization](docs/customization.md#typing-from-the-transcript)).
 
 The 0.7.0 release removes `dsh-emacs-group-consecutive-tools` and
 `dsh-emacs-assistant-divider`; both are deleted, so remove any remaining

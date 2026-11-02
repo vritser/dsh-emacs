@@ -15,18 +15,14 @@
 (require 'subr-x)
 
 (declare-function dsh-emacs-composer-refresh "dsh-emacs-composer" ())
-(declare-function dsh-emacs-events--host-needed-p "dsh-emacs-events" ())
 (declare-function dsh-emacs-events-host-restore "dsh-emacs-events" ())
-(declare-function dsh-emacs-modeline-update "dsh-emacs-modeline" ())
+(declare-function dsh-emacs--composer-delete-guard-install "dsh-emacs" ())
+(declare-function dsh-emacs-modeline-refresh "dsh-emacs-modeline" ())
 (declare-function dsh-emacs-session--render "dsh-emacs-session" ())
 (defvar dsh-emacs--interaction-active)
 (defvar dsh-emacs--creation-pending)
 (defvar dsh-emacs--history-loading)
 (defvar dsh-emacs-session--row-cache)
-(defvar dsh-emacs-modeline--logo-labels)
-(defvar dsh-emacs-modeline--whale-tail-labels)
-(defvar dsh-emacs-modeline--whale-tail-frames)
-(defvar dsh-emacs-modeline--whale-tail-gif-data)
 
 (defconst dsh-emacs-reload--directory
   (file-name-directory (or load-file-name buffer-file-name))
@@ -34,6 +30,9 @@
 
 (defvar dsh-emacs-reload--files nil
   "Source files being reloaded, dynamically bound by the command.")
+
+(defvar dsh-emacs-reload--finish-timer nil
+  "Pending completion of a reload begun by an older loader.")
 
 (defun dsh-emacs-reload--sources (directory)
   "Read all package sources in DIRECTORY and return dependency order.
@@ -94,6 +93,27 @@ customizations remain above the new default spec."
          `(progn ,form (face-spec-set ',name ,spec 'face-defface-spec)))
         (_ form)))))
 
+(defun dsh-emacs-reload--finish ()
+  "Complete source reload by reconciling ownership and live presentation.
+The current loader calls this synchronously and cancels its queued fallback.
+An older loader reaches the same completion through the one deferred callback
+registered while loading this file."
+  (when (timerp dsh-emacs-reload--finish-timer)
+    (cancel-timer dsh-emacs-reload--finish-timer))
+  (setq dsh-emacs-reload--finish-timer nil)
+  (dsh-emacs-events-host-restore)
+  (save-selected-window
+    (dolist (buffer (buffer-list))
+      (with-current-buffer buffer
+        (cond
+         ((derived-mode-p 'dsh-emacs-mode)
+          (dsh-emacs--composer-delete-guard-install)
+          (save-excursion (dsh-emacs-composer-refresh)))
+         ((derived-mode-p 'dsh-emacs-session-mode)
+          (setq dsh-emacs-session--row-cache nil)
+          (dsh-emacs-session--render))))))
+  (dsh-emacs-modeline-refresh))
+
 ;;;###autoload
 (defun dsh-emacs-reload (&optional directory)
   "Reload every dsh-emacs source module and refresh existing presentation.
@@ -135,36 +155,18 @@ and reload again, or restart Emacs.  No server restart or prompt is sent."
            (load-read-function #'dsh-emacs-reload--read))
       (dolist (file dsh-emacs-reload--files)
         (load file nil t t))
-      ;; A build that shares one core connection can rename the owner of the
-      ;; live socket, leaving it stranded; nothing else reconnects on reload,
-      ;; so adopt it or rebuild before the UI refresh or chats go deaf.
-      (when (dsh-emacs-events--host-needed-p)
-        (dsh-emacs-events-host-restore))
-      (setq dsh-emacs-modeline--logo-labels nil
-            dsh-emacs-modeline--whale-tail-labels nil
-            dsh-emacs-modeline--whale-tail-frames nil
-            dsh-emacs-modeline--whale-tail-gif-data nil)
-      (save-selected-window
-        (dolist (buffer (buffer-list))
-          (with-current-buffer buffer
-            (cond
-             ((derived-mode-p 'dsh-emacs-mode)
-              (save-excursion (dsh-emacs-composer-refresh))
-              (dsh-emacs-modeline-update))
-             ((derived-mode-p 'dsh-emacs-session-mode)
-              (setq dsh-emacs-session--row-cache nil)
-              (dsh-emacs-session--render))))))
-      (force-mode-line-update t)
+      (dsh-emacs-reload--finish)
       (message "Reloaded %d dsh-emacs source modules" (length dsh-emacs-reload--files))
       (length dsh-emacs-reload--files))))
 
 ;; This file is loaded from inside the previous build's reload body.  That
 ;; body cannot call the new restore step: redefining a function does not
-;; change an invocation already in progress.  Schedule the reconciliation
-;; once the reload has finished loading every module, so the first upgrade
-;; reload re-owns the core stream too.
-(when dsh-emacs-reload--files
-  (run-at-time 0 nil #'dsh-emacs-events-host-restore))
+;; change an invocation already in progress.  The current loader cancels
+;; this callback when it completes synchronously; an older loader lets it run.
+(when (and dsh-emacs-reload--files
+           (not (timerp dsh-emacs-reload--finish-timer)))
+  (setq dsh-emacs-reload--finish-timer
+        (run-at-time 0 nil #'dsh-emacs-reload--finish)))
 
 (provide 'dsh-emacs-reload)
 ;;; dsh-emacs-reload.el ends here

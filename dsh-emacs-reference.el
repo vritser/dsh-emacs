@@ -1300,16 +1300,14 @@ original single-character delete."
       nil
     (funcall orig arg killflag)))
 
-(defvar dsh-emacs-reference--chip-delete-guard-installed nil
-  "Non-nil once the global delete-command advice has been added once.")
-
 (defun dsh-emacs-reference--chip-guard-install ()
   "Install the composer chip editing guards (buffer-local, idempotent)."
   (add-hook 'pre-command-hook #'dsh-emacs-reference--chip-guard-before nil t)
-  (unless dsh-emacs-reference--chip-delete-guard-installed
-    (setq dsh-emacs-reference--chip-delete-guard-installed t)
-    (advice-add 'delete-backward-char :around #'dsh-emacs-reference--chip-delete-backward)
-    (advice-add 'delete-char :around #'dsh-emacs-reference--chip-delete-forward)))
+  (pcase-dolist (`(,command . ,guard)
+                '((delete-backward-char . dsh-emacs-reference--chip-delete-backward)
+                  (delete-char . dsh-emacs-reference--chip-delete-forward)))
+    (unless (advice-member-p guard command)
+      (advice-add command :around guard))))
 
 (defun dsh-emacs-reference--composer-file-chip (start end path)
   "Wrap a completed file mention START..END as a composer chip.

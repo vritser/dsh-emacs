@@ -114,6 +114,7 @@ The most commonly used options, straight in your config:
 (setq dsh-emacs-model-group-format #(" %s " 0 4 (face vertico-group-title))) ; provider group-header format inside the model picker (nil = hide group titles)
 (setq dsh-emacs-input-history-length 50)           ; prompts kept for M-p / M-n recall
 (setq dsh-emacs-input-history-cross-session nil)   ; M-p / M-n recall only the current session's prompts (nil, default); t = recall prompts from every session
+(setq dsh-emacs-composer-typing-commands (append dsh-emacs-composer-typing-commands '(my-insert-command))) ; extra commands that jump to the composer when invoked from the transcript
 (setq dsh-emacs-word-completion-limit 100000)      ; how many characters above the input TAB searches when completing an ordinary word from the draft/transcript (nil = whole buffer)
 (setq dsh-emacs-busy-enter-behavior 'queue)          ; what C-c C-c does while a turn runs: `queue` lines input up as the next turn (default), `steer` wakes the running agent before its next step, `stop` interrupts like before; `C-u C-c C-c` explicitly sends a nonempty message with steer mode regardless of this setting or the local busy indicator, a blank input with no staged attachments interrupts a running turn, and `C-c C-b` interrupts explicitly (C-c C-q manages the queue)
 (setq dsh-emacs-question-skip-key "C-c C-s") ; key that skips the current ask question inside the reader (nil = no shortcut; empty input also skips)
@@ -451,6 +452,30 @@ Nerd Font shield glyph when `nerd-icons` is installed, else a short token.
 Set `dsh-emacs-modeline-permission-style` to `text` to show the full preset
 name instead, or remove `permission` from `dsh-emacs-modeline-format-spec`
 like any other segment (see [Mode-line Status](modeline.md)).
+
+## Typing from the transcript
+
+The transcript is read-only; typing or editing from it moves point to the
+composer first. `dsh-emacs-composer-typing-commands` lists the common editing
+commands that get this pre-command jump and the automatic scroll to the input.
+The default list includes `insert-register` and the chat paste command. Routing
+runs before the command reads interactive arguments, so a register is selected
+once. Commands outside the list retain their standard read-only behavior;
+return to the input before using them, or explicitly add a command that edits
+at point:
+
+```elisp
+(add-to-list 'dsh-emacs-composer-typing-commands 'my-insert-command)
+```
+
+Mouse commands that choose their own insertion location still use that
+location; click in the editable input to paste with the mouse. See
+[decision 168](../postmortem/168-composer-command-boundaries.md) for the routing
+boundary and the rejected generic interception approach.
+
+Model-bound messages trim leading and trailing whitespace for the sent text,
+transcript echo and prompt history. A failed submit restores the original
+draft, including its whitespace, unless a newer draft has taken its place.
 
 ## Goal actions
 

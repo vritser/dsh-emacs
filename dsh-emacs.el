@@ -218,6 +218,24 @@ recorded prompts."
   :type 'boolean
   :group 'dsh-emacs)
 
+(defcustom dsh-emacs-composer-typing-commands
+  '(self-insert-command
+    newline newline-and-indent electric-newline-and-maybe-indent open-line
+    indent-for-tab-command insert-char quoted-insert
+    completion-at-point dabbrev-expand hippie-expand
+    yank yank-pop insert-register dsh-emacs-paste
+    delete-backward-char delete-forward-char
+    backward-delete-char-untabify
+    dsh-emacs-delete-input)
+  "Commands that jump to the composer when invoked from the transcript.
+When one of these commands runs while point is in the read-only history, the
+cursor moves to the editable input first, so a mode-specific insertion command
+does not signal `text-read-only'; the input line is also scrolled into view.
+Append a command here when it edits at point and should use the same route.
+Commands outside this list retain their usual read-only behavior."
+  :type '(repeat symbol)
+  :group 'dsh-emacs)
+
 (defcustom dsh-emacs-word-completion-limit 100000
   "How many characters above the input word completion searches.
 Input word completion offers words already present in the chat buffer —
@@ -1168,30 +1186,23 @@ last-opened one."
 (defun dsh-emacs--route-typing-to-input ()
   "When about to type or edit while point is in the read-only region, first\nmove the cursor back to the input area after `❯ '.\n
 Used with `dsh-emacs--reveal-input-when-typing': typing directly in the\nread-only area would trigger `text-read-only'; this moves point into the\ninput area before the command runs, so typing no longer errors\nand the input area scrolls into view automatically."
-  (when (and (memq this-command
-                   '(self-insert-command
-                     delete-backward-char
-                     delete-forward-char
-                     backward-delete-char-untabify
-                     dsh-emacs-delete-input
-                     yank yank-pop))
-             dsh-emacs--input-marker
+  (when (and (memq this-command dsh-emacs-composer-typing-commands)
              (markerp dsh-emacs--input-marker)
              (eq (marker-buffer dsh-emacs--input-marker) (current-buffer))
-             (< (point) (marker-position dsh-emacs--input-marker)))
-    (goto-char (marker-position dsh-emacs--input-marker))))
+             (or (< (point) (marker-position dsh-emacs--input-marker))
+                 (> (point) (dsh-emacs--input-end))))
+    (goto-char (if (< (point) (marker-position dsh-emacs--input-marker))
+                   (marker-position dsh-emacs--input-marker)
+                 (dsh-emacs--input-end)))
+    ;; The reference hook ran at the old point.  Protect the new target
+    ;; before the command reads its arguments or edits the draft.
+    (dsh-emacs-reference--chip-guard-before)))
 
 (defun dsh-emacs--reveal-input-when-typing ()
   "Immediately scroll the window to the input area when typing (self-insert /\nediting commands).\n
 When the input line is not visible because the window was scrolled up to\nread history, starting to type scrolls the input line\nback to the bottom of the window, so the `❯ ' line being typed is visible."
   (when (and (window-live-p (get-buffer-window (current-buffer) t))
-             (memq this-command
-                   '(self-insert-command
-                     delete-backward-char
-                     delete-forward-char
-                     backward-delete-char-untabify
-                     dsh-emacs-delete-input
-                     yank yank-pop))
+             (memq this-command dsh-emacs-composer-typing-commands)
              dsh-emacs--input-marker
              (markerp dsh-emacs--input-marker)
              (eq (marker-buffer dsh-emacs--input-marker) (current-buffer))
@@ -1234,6 +1245,20 @@ their standard behavior."
           (apply orig clipped-start clipped-end args)))
     (apply orig start end args)))
 
+(defun dsh-emacs--composer-delete-horizontal-space (orig &optional backward-only)
+  "`delete-horizontal-space' advice: never delete the prompt's trailing space.
+Point inside the composer is narrowed to the editable input, so the
+electric-indent and `newline-and-indent' cleanup before a newline cannot
+reach the read-only `❯ ' space just before the input marker."
+  (let ((boundary (dsh-emacs--composer-boundary))
+        (start (and (markerp dsh-emacs--input-marker)
+                    (marker-position dsh-emacs--input-marker))))
+    (if (and start boundary (<= start (point) boundary))
+        (save-restriction
+          (narrow-to-region start (point-max))
+          (funcall orig backward-only))
+      (funcall orig backward-only))))
+
 (defun dsh-emacs--composer-delete-forward (orig &optional arg)
   "`delete-forward-char' advice: stop at the composer's structural newline.
 `C-d' at the very end of the input would otherwise delete the separator
@@ -1247,20 +1272,20 @@ line.  Deletions are capped at the input boundary."
           ((null boundary) (funcall orig arg))
           (t (funcall orig effective)))))
 
-(defvar dsh-emacs--composer-delete-guard-installed nil
-  "Non-nil once the composer deletion guards have been added once.")
-
 (defun dsh-emacs--composer-delete-guard-install ()
   "Install the composer deletion boundary guards (global, idempotent).
 Advises the deletion commands (`kill-region', which `C-k'/`kill-line' and
-word/region kills route through, and `delete-forward-char'/`C-d')
-rather than the `delete-region' primitive, because a native-compiled caller
-can bypass advice on the primitive while the interactive command symbols are
-always reached through advice."
-  (unless dsh-emacs--composer-delete-guard-installed
-    (setq dsh-emacs--composer-delete-guard-installed t)
-    (advice-add 'kill-region :around #'dsh-emacs--composer-kill-region)
-    (advice-add 'delete-forward-char :around #'dsh-emacs--composer-delete-forward)))
+word/region kills route through, `delete-forward-char'/`C-d', and
+`delete-horizontal-space' for electric-indent newlines) rather than the
+`delete-region' primitive, because a native-compiled caller can bypass advice
+on the primitive while the interactive command symbols are always reached
+through advice."
+  (pcase-dolist (`(,command . ,guard)
+                '((delete-horizontal-space . dsh-emacs--composer-delete-horizontal-space)
+                  (kill-region . dsh-emacs--composer-kill-region)
+                  (delete-forward-char . dsh-emacs--composer-delete-forward)))
+    (unless (advice-member-p guard command)
+      (advice-add command :around guard))))
 
 ;;;###autoload
 (defun dsh-emacs-open-session (session-id &optional address other-window)
@@ -2882,7 +2907,7 @@ once every staged file has become a receipt."
         ;; by the `commands.execute' response, and the result is
         ;; rendered from the command/run + command/done session events.
         (unless parts
-          (dsh-emacs--push-input-history message))
+          (dsh-emacs--push-input-history (string-trim message)))
         (unless input-consumed
           (when (buffer-live-p input-buffer)
             (with-current-buffer input-buffer
@@ -2942,6 +2967,8 @@ uploading; the host admits images by the session's current model at claim
 time.  Slash lines are NOT routed to `commands.execute' here — busy input
 is queued as literal text, the same semantics as dsh web's busyEnter.  A
 prompt carrying attachments is not recorded for `M-p' recall.
+MESSAGE stays unchanged for failure recovery; outgoing text and history use
+its trimmed form.
 With nothing already pending in the mirror, the submit arms
 `dsh-emacs-queue--mark-submit-suppress': the splice+claim transient of
 this own message gets no `queued:' / `running:' echo (nothing to order
@@ -2950,17 +2977,18 @@ against); genuinely parked items keep their feedback."
   (dsh-emacs-subagent-require 'send)
   (when (and dsh-emacs--buffer-subagent parts)
     (user-error "Attachments are unavailable in subagent conversations"))
-  (let* ((mode (pcase mode
+  (let* ((text (string-trim message))
+         (mode (pcase mode
                  ((or "queue" "steer") mode)
                  ((or 'queue 'steer) (symbol-name mode))
                  ('stop "queue")
                  (_ (if (eq dsh-emacs-busy-enter-behavior 'steer) "steer" "queue"))))
          (session-id (dsh-emacs--active-session-id))
          (input-buffer (current-buffer))
-         (content (dsh-protocol-prompt-content message parts))
+         (content (dsh-protocol-prompt-content text parts))
          (payload (if dsh-emacs--buffer-subagent
                       (dsh-protocol-subagent-prompt-request
-                       dsh-emacs--buffer-subagent (dsh-emacs--rpc-id) mode message
+                       dsh-emacs--buffer-subagent (dsh-emacs--rpc-id) mode text
                        (dsh-emacs--client-time-zone))
                     (dsh-protocol-session-prompt-request
                      session-id (dsh-emacs--rpc-id) mode content
@@ -2968,7 +2996,7 @@ against); genuinely parked items keep their feedback."
     ;; Same web-style feel as the immediate path: the draft leaves the
     ;; input area and lands in history right away, before the RPC settles.
     (unless parts
-      (dsh-emacs--push-input-history message))
+      (dsh-emacs--push-input-history text))
     (unless input-consumed
       (when (buffer-live-p input-buffer)
         (with-current-buffer input-buffer
@@ -2983,7 +3011,7 @@ against); genuinely parked items keep their feedback."
     ;; A queued message is real but its host `inbox' projection frame is still a
     ;; round trip away; show it in the Next Message row now so the send does
     ;; not feel sticky.  The host's frame or the failure branch clears it.
-    (dsh-emacs-queue--optimistic-submit-show message)
+    (dsh-emacs-queue--optimistic-submit-show text)
     (dsh-emacs--rpc-async (if dsh-emacs--buffer-subagent
                               "subagents/prompt" "session/prompt") payload
                           (lambda (ok value)
@@ -3038,15 +3066,18 @@ The draft leaves the input area at submit time — the same web-style feel
 as the command and deferred paths — so a second submit keypress during
 the RPC round-trip reads an empty input instead of sending the message
 twice; on a transport failure the draft is restored only when both the
-input and staged attachments are empty (a newer draft is left alone)."
+input and staged attachments are empty (a newer draft is left alone).
+MESSAGE stays unchanged for recovery; outgoing text, echo and history use
+its trimmed form."
 
   (dsh-emacs-subagent-require 'mutate)
-  (let* ((session-id (dsh-emacs--active-session-id))
+  (let* ((text (string-trim message))
+         (session-id (dsh-emacs--active-session-id))
          (chat-buffer (and (boundp 'dsh-emacs--buffer-session)
                            dsh-emacs--buffer-session
                            (current-buffer)))
          (input-buffer (current-buffer))
-         (content (dsh-protocol-prompt-content message parts))
+         (content (dsh-protocol-prompt-content text parts))
          (payload (dsh-protocol-session-prompt-request
                    session-id (dsh-emacs--rpc-id) "queue" content
                    (dsh-emacs--client-time-zone)))
@@ -3064,16 +3095,16 @@ input and staged attachments are empty (a newer draft is left alone)."
         ;; Register before the RPC round-trip: a fast run can end before its
         ;; prompt callback is processed.
         (setq dsh-emacs--turn-awaiting t)
-        (unless (string-empty-p message)
+        (unless (string-empty-p text)
           (setq dsh-emacs--pending-user-messages
-                (append dsh-emacs--pending-user-messages (list message)))
+                (append dsh-emacs--pending-user-messages (list text)))
           ;; Echo the message NOW, not in the response callback: the user
           ;; pressed C-c C-c and the input is about to clear, so the
           ;; transcript must show it without waiting for the HTTP round trip
           ;; (a rejected prompt rolls the echo back, see the failure branch).
           (setq echo-entry
                 (dsh-emacs--render-user-message-optimistic
-                 message staged)))
+                 text staged)))
         ;; A submit with an empty queue still passes through the host
         ;; inbox (the wire knows only queue/steer modes): the host splices
         ;; the message in and claims it again at the turn start, and the
@@ -3097,7 +3128,7 @@ input and staged attachments are empty (a newer draft is left alone)."
                             (if ok
                                 (progn
                                   (unless (or history-recorded parts)
-                                    (dsh-emacs--push-input-history message))
+                                    (dsh-emacs--push-input-history text))
                                   ;; The echo is already on screen (rendered
                                   ;; optimistically at submit); the callback
                                   ;; only arms the live-follow state.
@@ -3152,7 +3183,7 @@ input and staged attachments are empty (a newer draft is left alone)."
                                     (dsh-emacs--discard-user-message-echo
                                      echo-entry))
                                   (setq dsh-emacs--pending-user-messages
-                                        (delq message
+                                        (delq text
                                               dsh-emacs--pending-user-messages))
                                   ;; A failed prompt never produces the
                                   ;; splice/claim frames that would settle

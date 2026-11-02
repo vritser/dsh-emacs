@@ -45,10 +45,12 @@ order; unreadable forms and cycles reject the reload before evaluation.
 Explicit `.el` paths bypass stale bytecode. External dependencies remain owned
 by ordinary `require`; this does not reload third-party packages.
 
-This is definition and presentation reload, not an unload or session migration.
-It does not re-enter modes, reconnect transports, restart the server, send RPCs
-or submit a prompt. Existing buffers, draft text, attachments, stream state,
-processes and timers remain live. Current `defvar` and Custom option values
+Reload preserves existing buffers, draft text, attachments, stream state and
+owned transports without re-entering modes or restarting the server. A core
+socket stranded by an ownership-variable rename is adopted when it is the
+single fully opened candidate; ambiguous or unfinished leftovers are closed
+and the core connection is rebuilt for its live owners. No prompt is submitted.
+Current `defvar` and Custom option values
 remain intact, with two intentional presentation exceptions:
 
 - Existing keymaps declared by `defvar` take their source initializer's contents
@@ -58,9 +60,13 @@ remain intact, with two intentional presentation exceptions:
 - Face default specs refresh while Custom/theme overrides retain precedence.
   This is not a reset of user options or saved face customizations.
 
-After loading, the command invalidates visual image caches and refreshes
-Composer rows, session-list rows and mode-line presentation. It neither replays
-nor reformats the existing transcript. Stable named `eval-after-load` callbacks
+After loading, one completion step restores core ownership, updates composer
+guards and refreshes Composer and session-list rows. The modeline module owns
+image-cache invalidation and optional Doom icon refresh. An older loader still
+executing its previous body reaches that same completion through one deferred
+callback; the current loader cancels the callback and completes synchronously.
+See [decision 168](../postmortem/168-composer-command-boundaries.md).
+The transcript is preserved. Stable named `eval-after-load` callbacks
 register optional icon integrations without retaining a new anonymous callback
 body on each source revision.
 

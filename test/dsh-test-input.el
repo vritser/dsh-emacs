@@ -4,6 +4,16 @@
 
 (require 'dsh-test-support)
 
+(defun dsh-emacs-test--read-char-insert-command ()
+  "Read one interactive character, then insert it."
+  (interactive)
+  (insert (format "%c" (read-char "pick: "))))
+
+(defun dsh-emacs-test--unlisted-insert-command ()
+  "An insertion command the pre-command route does not name."
+  (interactive)
+  (insert "X"))
+
 (defun dsh-emacs-test--user-echo-count (needle)
   "Count transcript user blocks whose body contains NEEDLE.
 Blocks are located by the `dsh-emacs-user-message' property, so a restored
@@ -135,6 +145,138 @@ input-area draft (which carries no such property) is not counted."
         (dsh-emacs--route-typing-to-input)
         (ert-info ((format "%s" "typing-in-history-routes-to-input"))
           (should (= (point) (marker-position dsh-emacs--input-marker))))))))
+
+;; --- Test 33c: typing from below the input area, and standard insert commands
+;; (RET/TAB/insert-char), route back to the editable draft ---
+(ert-deftest dsh-emacs-test-input-route-typing-from-below-and-standard-inserts ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (dsh-emacs-modeline-setup)
+    (goto-char dsh-emacs--input-marker)
+    (insert "draft")
+    (let ((marker (marker-position dsh-emacs--input-marker))
+          (input-end (dsh-emacs--input-end)))
+      ;; Below the input area (a stray click on the separator): continue at
+      ;; the end of the draft, not at its start.
+      (goto-char (point-max))
+      (let ((this-command 'self-insert-command))
+        (dsh-emacs--route-typing-to-input))
+      (ert-info ((format "%s" "typing-below-input-routes-to-draft-end"))
+        (should (= (point) input-end)))
+      ;; Inside the editable draft typing must stay where the cursor is.
+      (goto-char (+ marker 2))
+      (let ((this-command 'self-insert-command)
+            (inside (point)))
+        (dsh-emacs--route-typing-to-input)
+        (ert-info ((format "%s" "typing-inside-draft-keeps-point"))
+          (should (= (point) inside))))
+      ;; RET/TAB/insert-char from the transcript route like typing does.
+      (dolist (command '(newline indent-for-tab-command insert-char))
+        (goto-char (point-min))
+        (let ((this-command command))
+          (dsh-emacs--route-typing-to-input))
+        (ert-info ((format "%s" (format "route-%s-from-history" command)))
+          (should (= (point) marker)))))))
+
+;; --- Test 33e: routed newline commands survive the read-only prompt space ---
+;; electric-indent's post-self-insert cleanup and `newline-and-indent' both
+;; call `delete-horizontal-space'; without a clamp they try to delete the
+;; read-only `❯ ' space and fail before the newline lands.
+(ert-deftest dsh-emacs-test-input-routed-newlines-keep-the-prompt-space ()
+  :tags '(dsh-unit)
+  (let ((electric-was electric-indent-mode))
+    (unwind-protect
+        (progn
+          (electric-indent-mode 1)
+          (dolist (command '(newline newline-and-indent
+                             electric-newline-and-maybe-indent))
+            (with-temp-buffer
+              (dsh-emacs-mode)
+              (dsh-emacs-modeline-setup)
+              (let ((inhibit-read-only t))
+                (goto-char (point-min))
+                (insert "user  old\n")
+                (put-text-property (point-min) (1- (point)) 'read-only t))
+              (dsh-emacs--ensure-input-marker)
+              (let ((marker (marker-position dsh-emacs--input-marker)))
+                (goto-char (point-min))
+                (let ((this-command command))
+                  (dsh-emacs--route-typing-to-input))
+                (let ((this-command command))
+                  (call-interactively command))
+                (ert-info ((format "%s" (format "routed-%s-keeps-prompt-space"
+                                                command)))
+                  (should (eq (char-before marker) ?\s))
+                  (should (equal (buffer-substring-no-properties
+                                  marker (1+ marker))
+                                 "\n")))))))
+      (electric-indent-mode (if electric-was 1 -1)))))
+
+;; Unlisted commands retain the transcript's standard read-only behavior.
+(ert-deftest dsh-emacs-test-input-unlisted-command-keeps-history-read-only ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (goto-char (+ (point-min) 2))
+    (should-error (command-execute 'dsh-emacs-test--unlisted-insert-command)
+                  :type 'text-read-only)
+    (should (string-empty-p (dsh-emacs--get-input)))))
+
+;; Explicit extensions route before the command reads interactive input.
+(ert-deftest dsh-emacs-test-input-configured-command-reads-once ()
+  :tags '(dsh-unit)
+  (let ((dsh-emacs-composer-typing-commands
+         (cons 'dsh-emacs-test--read-char-insert-command
+               dsh-emacs-composer-typing-commands)))
+    (with-temp-buffer
+      (dsh-emacs-mode)
+      (goto-char (+ (point-min) 2))
+      (let ((this-command 'dsh-emacs-test--read-char-insert-command)
+            (unread-command-events '(?a ?b)))
+        (dsh-emacs--route-typing-to-input)
+        (command-execute this-command)
+        (should (equal (dsh-emacs--get-input) "a"))
+        (should (equal unread-command-events '(?b)))))))
+
+(ert-deftest dsh-emacs-test-input-insert-register-from-history-lands-in-input ()
+  :tags '(dsh-unit)
+  (let ((register-alist '((?a . "hello"))))
+    (with-temp-buffer
+      (dsh-emacs-mode)
+      (goto-char (+ (point-min) 2))
+      (let ((this-command 'insert-register)
+            (unread-command-events '(?a ?b)))
+        (dsh-emacs--route-typing-to-input)
+        (call-interactively 'insert-register)
+        (should (equal (dsh-emacs--get-input) "hello"))
+        (should (equal unread-command-events '(?b)))))))
+
+;; --- Test 33d: submitted text is trimmed like the web composer ---
+(ert-deftest dsh-emacs-test-input-submit-trims-message ()
+  :tags '(dsh-unit)
+  (dolist (mode '(nil queue))
+    (with-temp-buffer
+      (dsh-emacs-mode)
+      (dsh-emacs-modeline-setup)
+      (setq-local dsh-emacs--buffer-session "trim-session")
+      (let ((draft "  hello  \n")
+            (dsh-emacs--input-history nil)
+            (dsh-emacs--input-history-by-session (make-hash-table :test #'equal))
+            sent callback)
+        (dsh-emacs--replace-input draft)
+        (cl-letf (((symbol-function 'dsh-emacs-subagent-require) #'ignore)
+                  ((symbol-function 'dsh-emacs--busy-p) #'ignore)
+                  ((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_method params cb)
+                     (setq sent params callback cb))))
+          (dsh-emacs--submit-prompt draft nil mode)
+          (let* ((request (alist-get 'request sent))
+                 (part (aref (alist-get 'content request) 0)))
+            (should (equal (alist-get 'text part) "hello")))
+          (should (string-empty-p (dsh-emacs--get-input)))
+          (funcall callback nil '((message . "offline")))
+          (should (equal (dsh-emacs--get-input) draft)))))))
 
 ;; --- Test 33b: cursor clamped at the bottom of the input area — multi-line
 ;; input is unaffected, and it is independent of the global current-buffer (with
@@ -638,7 +780,7 @@ input-area draft (which carries no such property) is not counted."
             (dsh-emacs--submit-prompt (dsh-emacs--get-input)))
           (ert-info ((format "%s" "submit-slash-clears-and-records-immediately"))
             (should (and (string-empty-p (dsh-emacs--get-input))
-                         (string= "/compact " (car dsh-emacs--input-history))
+                         (string= "/compact" (car dsh-emacs--input-history))
                          (null dsh-emacs--input-history-pos)))))
       (kill-buffer buf))))
 
@@ -1015,6 +1157,17 @@ input-area draft (which carries no such property) is not counted."
       (ert-info ((format "%s" "backward-word-kill-non-chat-unchanged"))
         (should (equal (buffer-string) "hello "))
         (should (equal (car kill-ring) "world"))))))
+
+(ert-deftest dsh-emacs-test-input-delete-guard-repairs-missing-advice ()
+  :tags '(dsh-unit)
+  (dsh-emacs--composer-delete-guard-install)
+  (unwind-protect
+      (progn
+        (advice-remove 'kill-region #'dsh-emacs--composer-kill-region)
+        (dsh-emacs--composer-delete-guard-install)
+        (should (advice-member-p #'dsh-emacs--composer-kill-region 'kill-region)))
+    (unless (advice-member-p #'dsh-emacs--composer-kill-region 'kill-region)
+      (advice-add 'kill-region :around #'dsh-emacs--composer-kill-region))))
 
 (provide 'dsh-test-input)
 ;;; dsh-test-input.el ends here

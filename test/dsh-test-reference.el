@@ -1755,5 +1755,18 @@
       (should (equal (mapcar #'car (dsh-emacs-reference--visible-candidates))
                      '("@live" "@blank" "@unknown" "@file.txt"))))))
 
+(ert-deftest dsh-emacs-test-reference-chip-guard-repairs-missing-advice ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (dsh-emacs-reference--chip-guard-install)
+    (unwind-protect
+        (progn
+          (advice-remove 'delete-char #'dsh-emacs-reference--chip-delete-forward)
+          (dsh-emacs-reference--chip-guard-install)
+          (should (advice-member-p #'dsh-emacs-reference--chip-delete-forward
+                                  'delete-char)))
+      (unless (advice-member-p #'dsh-emacs-reference--chip-delete-forward 'delete-char)
+        (advice-add 'delete-char :around #'dsh-emacs-reference--chip-delete-forward)))))
+
 (provide 'dsh-test-reference)
 ;;; dsh-test-reference.el ends here
