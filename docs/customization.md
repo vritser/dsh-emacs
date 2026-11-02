@@ -528,6 +528,34 @@ An interrupted attempt may repeat computation; a formatting error is reported
 and leaves the raw reply visible. See
 [decision record 036](../postmortem/036-bounded-stream-markdown.md).
 
+## Desktop notifications
+
+`dsh-emacs-enable-notifications` (default **t**) posts a desktop notification
+when a submitted run finishes, or when an ask-question or approval request
+arrives, and its chat is not visible on a focused frame. Replayed host frames
+do not notify again; set the option to **nil** to keep quiet.
+
+Clicking the notification returns to that session when the backend supports an
+action:
+
+- **GNU/Linux (D-Bus)**: dsh-emacs registers an `Open session` action through
+  `notifications-notify`. The desktop notification service must advertise
+  action support; otherwise the banner still appears but has no action.
+- **macOS**: install
+  [terminal-notifier](https://github.com/julienXX/terminal-notifier)
+  (`brew install terminal-notifier`) and keep an Emacs daemon/server running
+  with `M-x server-start` (this is the Emacs server, separate from the dsh
+  server). The click runs `emacsclient` to select the chat and activates the
+  Emacs bundle (`org.gnu.Emacs`). Without terminal-notifier, or without the
+  Emacs server, the banner still appears through Emacs itself but clicking
+  only activates the application.
+
+The action reopens the chat even after its buffer was killed, using the
+session cache for ordinary sessions and the direct parent's catalog for child
+conversations. A child needs no session summary, but must still have a cached
+catalog entry to recover its address. If that entry or the ordinary session
+is no longer available, the click reports that the session is unavailable.
+
 ## Approval prompts
 
 `dsh-emacs-approval-language` selects the language of approval reasons supplied

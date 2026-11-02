@@ -95,6 +95,8 @@
 (require 'dsh-emacs-reload)
 (declare-function dsh-emacs-session--ancestors "dsh-emacs-session" (id))
 (declare-function dsh-emacs-subagent--cell "dsh-emacs-subagent" (id key))
+(declare-function dsh-emacs-subagent--value "dsh-emacs-subagent" (id key))
+(defvar dsh-emacs--subagent-catalogs)
 
 ;;; ---------------------------------------------------------------------------
 ;;;  Customization options
@@ -1390,6 +1392,42 @@ The caller owns server readiness and window selection."
     (with-current-buffer dsh-emacs--current-buffer
       (setq dsh-emacs--subagent-departure marker))
     (dsh-emacs-subagent--refresh-summaries)))
+
+(defun dsh-emacs-notify--open (session-id)
+  "Open SESSION-ID's chat after its desktop notification was clicked.
+Reuse a live chat or resolve a closed child's direct parent from the catalog.
+Raise and focus the selected frame when Emacs is graphical."
+  (condition-case err
+      (let* ((live (buffer-live-p (gethash session-id dsh-emacs--chat-buffers)))
+             (owner
+              (unless live
+                (catch 'found
+                  (maphash
+                   (lambda (parent _state)
+                     (when-let* ((entry
+                                  (cl-find session-id
+                                           (dsh-emacs-subagent--value
+                                            parent 'subagentCatalog)
+                                           :test #'equal
+                                           :key #'dsh-protocol-subagent-entry-id)))
+                       (throw 'found (cons parent entry))))
+                   dsh-emacs--subagent-catalogs)
+                  nil)))
+             (session (unless (or live owner)
+                        (dsh-emacs--chat-session-item session-id))))
+        (if (or live owner
+                (and session
+                     (not (equal (dsh-protocol-session-origin session)
+                                 "subagent"))))
+            (progn
+              (if owner
+                  (dsh-emacs-open-subagent (car owner) (cdr owner))
+                (dsh-emacs-open-session session-id))
+              (when (display-graphic-p)
+                (select-frame-set-input-focus (selected-frame))))
+          (message "dsh: the notified session is no longer available")))
+    (error (message "dsh: cannot open the notified session (%s)"
+                    (error-message-string err)))))
 
 (defun dsh-emacs--subagent-input-update ()
   "Apply child input presentation; command guards independently enforce policy."

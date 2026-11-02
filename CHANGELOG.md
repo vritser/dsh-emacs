@@ -39,6 +39,15 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Click notifications to reopen their chat**: a run-finished, question or
+  approval notification now switches back to that session when clicked.
+  Closed child conversations reopen through their direct parent's catalog,
+  including children without a session summary.
+  GNU/Linux D-Bus notifications carry an `Open session` action; on macOS the
+  click works with `terminal-notifier` and a running Emacs server, while the
+  built-in notification still only activates Emacs.
+  (rationale: [postmortem/169](postmortem/169-notification-click.md))
+
 - **Extend the commands that jump to the composer**:
   `dsh-emacs-composer-typing-commands` lists the editing commands that park
   point at the input when invoked from the read-only transcript, including

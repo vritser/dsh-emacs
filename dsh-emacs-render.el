@@ -83,6 +83,7 @@
 (defvar dsh-emacs--buffer-subagent)
 ;; Notification backends are built into their respective Emacs ports.
 (declare-function dsh-emacs--chat-title "dsh-emacs" (session-id))
+(declare-function dsh-emacs-notify--open "dsh-emacs" (session-id))
 (declare-function notifications-notify "notifications" (&rest params))
 (declare-function ns-do-applescript "ns-win" (script))
 (declare-function w32-notification-notify "w32fns.c" (&rest params))
@@ -4388,22 +4389,53 @@ running spinner (idempotent — the send path already lit it, and a
              (eq t (frame-focus-state (window-frame window))))
            (get-buffer-window-list (or buffer (current-buffer)) nil t)))
 
+(defun dsh-emacs-notify--server-p ()
+  "Return non-nil when this Emacs is serving emacsclient."
+  (and (boundp 'server-process)
+       (processp server-process)
+       (process-live-p server-process)))
+
+(defun dsh-emacs-notify--macos-arguments (session-id title body)
+  "Return `terminal-notifier' arguments for SESSION-ID with TITLE and BODY.
+The click action evaluates `dsh-emacs-notify--open' in this Emacs through
+`emacsclient', then activates the Emacs bundle."
+  (let* ((client (executable-find "emacsclient"))
+         (form (format "(dsh-emacs-notify--open %S)" session-id)))
+    (list "-title" title
+          "-message" body
+          "-group" (concat "dsh-" session-id)
+          "-activate" "org.gnu.Emacs"
+          "-execute" (concat (shell-quote-argument client)
+                             " --eval " (shell-quote-argument form)))))
+
 (defun dsh-emacs-notify--post (session-id body &optional buffer)
   "Post BODY for SESSION-ID unless its chat is already visible.
 The visibility gate applies to BUFFER (default: the current buffer, which
 is the chat buffer when called from the render dispatch); SESSION-ID only
-identifies the chat for the notification title."
+identifies the chat for the notification title.  A click reopens that chat
+where the backend supports notification actions: D-Bus on GNU/Linux, or
+`terminal-notifier' plus a running emacsclient server on macOS."
   (when (and dsh-emacs-enable-notifications
              (not (dsh-emacs-notify--visible-p buffer)))
-    (let ((title (or (and (stringp session-id)
-                          (dsh-emacs--chat-title session-id))
-                     (buffer-name (or buffer (current-buffer))))))
+    (let* ((session (and (stringp session-id)
+                         (not (string-empty-p session-id))
+                         session-id))
+           (title (or (and session (dsh-emacs--chat-title session))
+                      (buffer-name (or buffer (current-buffer))))))
       (setq title (replace-regexp-in-string "[[:cntrl:]]" " " title)
             body (replace-regexp-in-string "[[:cntrl:]]" " " body))
       (condition-case err
           (cond
            ((fboundp 'w32-notification-notify)
             (w32-notification-notify :title title :body body))
+           ((and session
+                 (eq system-type 'darwin)
+                 (dsh-emacs-notify--server-p)
+                 (executable-find "terminal-notifier")
+                 (executable-find "emacsclient"))
+            (apply #'start-process "dsh-notification" nil
+                   (executable-find "terminal-notifier")
+                   (dsh-emacs-notify--macos-arguments session title body)))
            ((fboundp 'ns-do-applescript)
             (ns-do-applescript
              (format "display notification %S with title %S" body title)))
@@ -4414,8 +4446,15 @@ identifies the chat for the notification title."
            ((and (featurep 'dbusbind)
                  (ignore-errors (require 'notifications nil t))
                  (fboundp 'notifications-notify))
-            (notifications-notify :title title :body body
-                                  :app-name "dsh-emacs"))
+            (apply #'notifications-notify
+                   (append (list :title title :body body
+                                 :app-name "dsh-emacs")
+                           (when session
+                             (list :actions '("default" "Open session")
+                                   :on-action
+                                   (lambda (_id action)
+                                     (when (equal action "default")
+                                       (dsh-emacs-notify--open session))))))))
            ((executable-find "notify-send")
             (start-process "dsh-notification" nil "notify-send" title body))
            (t (message "dsh: %s — %s" title body)))
