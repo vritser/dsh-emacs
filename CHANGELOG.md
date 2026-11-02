@@ -97,6 +97,10 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Broken event JSON is diagnosed**: malformed JSON on chat and core
+  sockets reports the failing decode layer; valid unrelated frames remain
+  silent. (rationale: [postmortem/170](postmortem/170-event-and-menu-boundaries.md))
+
 - **RET and C-j from the transcript keep the prompt intact**: a composer
   guard clamps `delete-horizontal-space` to the editable input, so
   electric-indent, `newline-and-indent` and the C-j entry

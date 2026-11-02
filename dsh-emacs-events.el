@@ -413,8 +413,7 @@ is dropped."
                (process-get process 'dsh-emacs-host-stream))
           (dsh-emacs-events--host-dispatch process json)
         (let ((frame (dsh-protocol-mux-frame--from-alist
-                      (condition-case nil (dsh-protocol-read-json json)
-                        (error nil)))))
+                      (dsh-protocol-read-json json))))
           (when (dsh-protocol-mux-frame-stream-id frame)
             (dsh-emacs-events--dispatch-stream process frame))))
     (error (message "dsh event decode error: %S" err))))
@@ -1098,6 +1097,16 @@ silent indefinitely while its transport continues to answer pings."
     (cancel-timer dsh-emacs--ws-watchdog-timer))
   (setq-local dsh-emacs--ws-watchdog-timer nil))
 
+(defun dsh-emacs-events-ensure-follow ()
+  "Watch the current chat's accepted turn and recover a missing event socket.
+A live socket still upgrading is left to the connection health check.  Only
+an absent or dead socket needs another connect; callers need not inspect the
+event layer's buffer-local readiness and process state."
+  (dsh-emacs-events--watchdog-start)
+  (unless (or dsh-emacs--event-ready
+              (process-live-p dsh-emacs--event-process))
+    (dsh-emacs-events-connect (current-buffer))))
+
 (defun dsh-emacs-events--health-tick (buffer)
   "Health-check the stream socket of BUFFER every repeat.
 A `:nowait' socket on affected builds can stay `open' while the kernel queue
@@ -1450,8 +1459,7 @@ The client-wide core connection multiplexes the `session/control',
 buffers (see `dsh-emacs-events--host-item')."
   (condition-case err
       (let ((frame (dsh-protocol-mux-frame--from-alist
-                    (condition-case nil (dsh-protocol-read-json json)
-                      (error nil)))))
+                    (dsh-protocol-read-json json))))
         (pcase (dsh-protocol-mux-frame-type frame)
           ("item" (dsh-emacs-events--host-item
                    process (dsh-protocol-mux-frame-value frame)))

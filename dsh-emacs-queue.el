@@ -39,6 +39,7 @@
 (require 'cl-lib)
 (require 'dsh-emacs-protocol)
 (require 'dsh-emacs-server)
+(require 'dsh-emacs-ui)
 
 ;; Lazy boundary with same-package modules (see AGENTS.md): dsh-emacs.el
 ;; assembles this module, which calls back into its symbols through
@@ -47,11 +48,6 @@
 (declare-function dsh-emacs--busy-p "dsh-emacs" ())
 (declare-function dsh-emacs--submit-plain "dsh-emacs" (message &rest args))
 (declare-function dsh-emacs-composer-render "dsh-emacs-composer" ())
-
-;; Borrowed vertico runtime variables (see `dsh-emacs-queue--menu-item'):
-;; declare-only so the byte-compiler stays quiet — always read under `boundp'.
-(defvar vertico--index)
-(defvar vertico--candidates)
 
 ;;; ---------------------------------------------------------------------------
 ;;; State mirror (buffer-local, replaced wholesale by mux frames)
@@ -600,24 +596,10 @@ act on through this table — the same pattern as
 `dsh-emacs--question-pick-labels'.")
 
 (defun dsh-emacs-queue--menu-item ()
-  "The ITEM the next menu key acts on: the vertico-highlighted
-candidate when vertico renders the list; else the minibuffer's typed
-input as an exact/prefix match on the labels; else the first entry
-(the next to run).
-The highlighted candidate is read straight off `vertico--index' /
-`vertico--candidates' rather than through an accessor like
-`vertico--current', which no longer exists in current vertico
-(renamed to `vertico--candidate', whose return additionally prepends
-`vertico--base' after the user typed input).  `equal' ignores text
-properties, so the face vertico puts on the candidate does not break
-the table lookup."
-  (let* ((vertico-active (and (bound-and-true-p vertico-mode)
-                              (boundp 'vertico--candidates)
-                              (boundp 'vertico--index)
-                              (>= vertico--index 0)))
-         (hl (and vertico-active
-                  (ignore-errors
-                    (nth vertico--index vertico--candidates))))
+  "Return the item selected by highlight, typed label/prefix, or menu order.
+The UI module supplies the optional frontend's highlighted label; this menu
+owns its item lookup and fallback policy."
+  (let* ((hl (dsh-emacs-ui-completion-highlighted))
          (typed (condition-case nil (minibuffer-contents) (error nil)))
          (entry (or (and hl
                          (assoc hl dsh-emacs--queue-pick-table))

@@ -26,6 +26,18 @@
 (require 'text-property-search)
 (require 'dsh-emacs-faces)
 
+(defun dsh-emacs-ui-completion-highlighted ()
+  "Return the current Vertico candidate, or nil when none is selected.
+Keep optional frontend internals at this UI boundary.  Callers own typed
+input, label matching and their menu's default selection."
+  (when (bound-and-true-p vertico-mode)
+    (let ((index (and (boundp 'vertico--index)
+                      (symbol-value 'vertico--index)))
+          (candidates (and (boundp 'vertico--candidates)
+                           (symbol-value 'vertico--candidates))))
+      (when (and (natnump index) (listp candidates))
+        (nth index candidates)))))
+
 (defvar-local dsh-emacs-ui--following-windows-function nil
   "Optional function returning this buffer's windows that follow new output.
 When nil, fragments use their generic bottom-of-buffer check.  Chat buffers

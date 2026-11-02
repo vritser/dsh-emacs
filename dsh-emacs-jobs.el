@@ -43,6 +43,7 @@
 (require 'cl-lib)
 (require 'dsh-emacs-protocol)
 (require 'dsh-emacs-server)
+(require 'dsh-emacs-ui)
 
 ;; Lazy boundary with same-package modules (see AGENTS.md): dsh-emacs.el
 ;; assembles this module; the event layer calls back into its
@@ -55,10 +56,6 @@
 (defvar dsh-emacs--buffer-session)
 (defvar dsh-emacs--current-session)
 (defvar dsh-emacs--event-process)
-;; Borrowed vertico runtime variables (see `dsh-emacs-jobs--menu-item'):
-;; declare-only so the byte-compiler stays quiet — always read under `boundp'.
-(defvar vertico--index)
-(defvar vertico--candidates)
 
 (defvar-local dsh-emacs-jobs--roster nil
   "Background jobs this chat's session can see, newest frame wins.
@@ -535,19 +532,10 @@ A DYNAMIC binding set by `dsh-emacs-list-jobs' around the
 act on through this table — the same pattern as the queue chooser.")
 
 (defun dsh-emacs-jobs--menu-item ()
-  "The JOB the next menu key acts on.
-Uses the vertico-highlighted candidate when vertico renders the list, else
-the typed input as an exact/prefix match on the labels, else the first
-entry.  Reads `vertico--index' /
-`vertico--candidates' directly rather than through an accessor, exactly as
-the queue chooser does; `equal' ignores text properties, so the face
-vertico puts on a candidate does not break the lookup."
-  (let* ((vertico-active (and (bound-and-true-p vertico-mode)
-                              (boundp 'vertico--candidates)
-                              (boundp 'vertico--index)
-                              (>= vertico--index 0)))
-         (hl (and vertico-active
-                  (ignore-errors (nth vertico--index vertico--candidates))))
+  "Return the item selected by highlight, typed label/prefix, or menu order.
+The UI module supplies the optional frontend's highlighted label; this menu
+owns its item lookup and fallback policy."
+  (let* ((hl (dsh-emacs-ui-completion-highlighted))
          (typed (condition-case nil (minibuffer-contents) (error nil)))
          (entry (or (and hl (assoc hl dsh-emacs-jobs--pick-table))
                     (and typed (assoc typed dsh-emacs-jobs--pick-table))

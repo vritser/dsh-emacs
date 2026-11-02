@@ -6,7 +6,7 @@ Module ownership:
 dsh-emacs/
 ├── dsh-emacs.el              # Main entry point, session management, mode definition
 ├── dsh-emacs-protocol.el     # Typed views of dsh RPC payloads (cl-defstruct)
-├── dsh-emacs-ui.el           # Fragment snapshots, borders, folding, fragment faces
+├── dsh-emacs-ui.el           # Fragment snapshots, folding, faces, completion frontend
 ├── dsh-emacs-faces.el        # Shared faces and palette defaults
 ├── dsh-emacs-tokens.el       # Token tracking and formatting
 ├── dsh-emacs-markdown.el     # Markdown syntax highlighting
@@ -144,6 +144,12 @@ validation and activation remain owned by dsh; there is no save hook or
 settings RPC path. See [decision record 079](../postmortem/079-config-file-entry.md).
 
 ## Transcript fragments (`dsh-emacs-ui.el`)
+
+The UI module also owns optional completion-frontend integration. Queue and
+job menus obtain the highlighted label through
+`dsh-emacs-ui-completion-highlighted`; each menu retains its typed-label,
+prefix and default-item policy. Only this UI boundary reads Vertico's private
+candidate state.
 
 The renderer supplies a complete alist snapshot: identity, labels, body,
 border style, optional header/body faces, and the non-foldable flag. Optional

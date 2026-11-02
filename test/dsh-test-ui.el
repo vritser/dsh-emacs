@@ -1570,5 +1570,19 @@ both followers' prompts above their viewports."
           (should (string-match-p (format "width %d" width) (buffer-string))))
         (should (= calls 2))))))
 
+(ert-deftest dsh-emacs-test-ui-completion-highlight-preserves-label ()
+  :tags '(dsh-unit)
+  (let ((label (propertize "Beta" 'face 'highlight)))
+    (cl-progv '(vertico-mode vertico--index vertico--candidates)
+        (list t 1 (list "Alpha" label))
+      (should (eq label (dsh-emacs-ui-completion-highlighted)))
+      (set 'vertico--index -1)
+      (should-not (dsh-emacs-ui-completion-highlighted))
+      (set 'vertico--index 8)
+      (should-not (dsh-emacs-ui-completion-highlighted))
+      (set 'vertico-mode nil)
+      (set 'vertico--index 0)
+      (should-not (dsh-emacs-ui-completion-highlighted)))))
+
 (provide 'dsh-test-ui)
 ;;; dsh-test-ui.el ends here

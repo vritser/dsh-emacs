@@ -1133,7 +1133,7 @@
       (should (string-match-p "\"payload\":{\"args\":{}}" json))
       (should (and args (null (cdr args)))))))
 
-(ert-deftest dsh-emacs-test-events-mux-malformed-input-stays-quiet ()
+(ert-deftest dsh-emacs-test-events-mux-unrelated-input-stays-quiet ()
   :tags '(dsh-unit)
   (let (chat-frames host-items messages)
     (cl-letf (((symbol-function 'dsh-emacs-events--dispatch-stream)
@@ -1142,7 +1142,7 @@
                (lambda (_process value) (push value host-items)))
               ((symbol-function 'message)
                (lambda (&rest args) (push args messages))))
-      (dolist (json '("{" "[]" "false" "5" "\"text\"" "{}"))
+      (dolist (json '("[]" "false" "5" "\"text\"" "{}"))
         (dsh-emacs-events--dispatch-json nil json)
         (dsh-emacs-events--host-dispatch nil json))
       (dsh-emacs-events--dispatch-json
@@ -1161,6 +1161,20 @@
                      (dsh-protocol-mux-frame-value (car chat-frames))))
       (should (equal host-items '(((type . "ready")))))
       (should-not messages))))
+
+(ert-deftest dsh-emacs-test-events-mux-broken-json-reports-its-layer ()
+  :tags '(dsh-unit)
+  (let (messages)
+    (cl-letf (((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (push (apply #'format format-string args) messages))))
+      (dsh-emacs-events--dispatch-json nil "{")
+      (should (= 1 (length messages)))
+      (should (string-prefix-p "dsh event decode error:" (car messages)))
+      (setq messages nil)
+      (dsh-emacs-events--host-dispatch nil "{")
+      (should (= 1 (length messages)))
+      (should (string-prefix-p "dsh core event decode error:" (car messages))))))
 
 (ert-deftest dsh-emacs-test-events-mux-custom-error-keeps-handler-until-end ()
   :tags '(dsh-unit)

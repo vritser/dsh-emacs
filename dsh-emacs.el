@@ -3167,42 +3167,14 @@ its trimmed form."
                                 (progn
                                   (unless (or history-recorded parts)
                                     (dsh-emacs--push-input-history text))
-                                  ;; The echo is already on screen (rendered
-                                  ;; optimistically at submit); the callback
-                                  ;; only arms the live-follow state.
                                   (when (buffer-live-p chat-buffer)
                                     (with-current-buffer chat-buffer
-                                      ;; The host accepted the prompt.  Light
-                                      ;; the mode-line running spinner only
-                                      ;; while the submitted run is still
-                                      ;; awaited: a fast run can start AND end
-                                      ;; on the mux before this HTTP callback
-                                      ;; runs (the ordering the
-                                      ;; `dsh-emacs--turn-awaiting'
-                                      ;; pre-registration above exists for),
-                                      ;; and re-lighting would leave the
-                                      ;; spinner running past that `turn/end'.
+                                      ;; A fast turn can end before HTTP accepts it.
+                                      ;; Never relight an already-finished turn.
                                       (when dsh-emacs--turn-awaiting
                                         (dsh-emacs--ml-busy-set t))
-                                      ;; Confirm the stream keeps delivering
-                                      ;; while this turn runs.
-                                      (dsh-emacs-events--watchdog-start)
                                       (dsh-emacs-render--follow-stream)
-                                      (unless dsh-emacs--event-ready
-                                        ;; Self-heal when the stream is offline:
-                                        ;; with no process at all, this session's
-                                        ;; mux dropped and nobody reconnected
-                                        ;; (opening a new session used to tear
-                                        ;; down the previous one's stream) — so
-                                        ;; reconnect first, letting the "switches
-                                        ;; back to realtime" promise hold; a
-                                        ;; process mid-handshake is covered by
-                                        ;; connect's health check, so do not
-                                        ;; connect again here.
-                                        (when (not (process-live-p
-                                                    dsh-emacs--event-process))
-                                          (dsh-emacs-events-connect
-                                           (current-buffer)))))))
+                                      (dsh-emacs-events-ensure-follow))))
                               (message "Failed to send: %s"
                                        (dsh-emacs-rpc-error-text value))
                               ;; The server rejected the prompt, so no
