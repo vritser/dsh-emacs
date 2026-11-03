@@ -13,8 +13,9 @@ same id across providers keep their provider visible in the suffix.
   The prompt shows the running selection as **`provider/model`**, where
   `provider` is the same display name used for the group headers (so the
   prompt and the list agree), e.g.
-  `Select model (current DeepSeek/deepseek-v4-flash-0731):`; empty RET keeps
-  it.
+  `Select model (current DeepSeek/deepseek-v4-flash-0731):`; an empty
+  reader result keeps it. A frontend may accept its highlighted row on RET
+  from an empty minibuffer.
 - **Sticky provider groups**: the table carries a `group-function` in its
   completion metadata. Modern vertico (and Emacs 27+ `*Completions*` buffers)
   draw one sticky header per provider, recomputed on every filter input, so
@@ -44,6 +45,9 @@ same id across providers keep their provider visible in the suffix.
   running effort and sends only `session/selectModel` with a new
   `reasoningEffort` — no model row to re-pick. A model without `reasoning`
   options reports that and sends nothing.
-- **Behaviour**: empty RET keeps the current model (no RPC), unknown input is
-  rejected, `C-g` cancels cleanly inside the RPC filter; when vertico is active
-  the picker locally disables extra sorting and pre-selects the first row.
+- **Behaviour**: an empty string returned by the reader keeps the current model
+  (no RPC). A completion frontend may accept its highlighted row on RET from an
+  empty minibuffer instead, so that case selects the highlighted model; unknown
+  input is rejected, `C-g` cancels cleanly inside the RPC filter. When Vertico
+  is active the picker locally disables extra sorting and pre-selects the first
+  row.

@@ -43,7 +43,7 @@
      "dsh-emacs-markdown.el" "dsh-emacs-render.el" "dsh-emacs-events.el"
      "dsh-emacs-ui.el" "dsh-emacs-faces.el" "dsh-emacs-tokens.el"
      "dsh-emacs-modeline.el" "dsh-emacs-queue.el" "dsh-emacs-jobs.el"
-     "dsh-emacs-server.el" "dsh-emacs-provider.el"
+     "dsh-emacs-server.el" "dsh-emacs-provider.el" "dsh-emacs-model.el"
      "dsh-emacs-plan.el" "dsh-emacs-subagent.el"
      "dsh-emacs-command.el" "dsh-emacs-skill.el" "dsh-emacs-reference.el"
      "dsh-emacs-composer.el" "dsh-emacs-history.el"

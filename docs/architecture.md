@@ -4,7 +4,7 @@ Module ownership:
 
 ```
 dsh-emacs/
-├── dsh-emacs.el              # Main entry point, session management, mode definition
+├── dsh-emacs.el              # Entry point, chat mode and session/submit coordination
 ├── dsh-emacs-protocol.el     # Typed views of dsh RPC payloads (cl-defstruct)
 ├── dsh-emacs-ui.el           # Fragment snapshots, folding, faces, completion frontend
 ├── dsh-emacs-faces.el        # Shared faces and palette defaults
@@ -20,6 +20,7 @@ dsh-emacs/
 ├── dsh-emacs-plan.el         # Plan documents, asynchronous review and decisions
 ├── dsh-emacs-server.el       # HTTP/RPC client, server bootstrap, authentication, configuration entry
 ├── dsh-emacs-provider.el     # Minibuffer provider setup through settings and credential RPCs
+├── dsh-emacs-model.el        # Model/effort catalog readers, picker options and selection RPCs
 ├── dsh-emacs-command.el      # Slash surface: commands/list + commands/execute, "/" completion and menu
 ├── dsh-emacs-skill.el        # Skill catalog (skills/list) and /name gestures
 ├── dsh-emacs-shell.el        # Client-side `!command` shell commands (local execution)
@@ -108,6 +109,32 @@ second server probe or window selection. The draft text and point are restored
 into the chat composer, including recovery if a mode hook fails. Closing a draft
 does not roll back a session already accepted by the host. See
 [decision record 111](../postmortem/111-asynchronous-session-drafts.md).
+
+## Model and effort selection (`dsh-emacs-model.el`)
+
+The model module owns the live catalog's candidate presentation, provider
+grouping, model and effort readers, selection RPCs, model options and optional
+completion-icon registration. Provider configuration stays in the provider
+module. The entry point still owns session identity and cached session
+projections, and supplies the current selection to the model module.
+The model and effort command autoload cookies explicitly load `dsh-emacs`,
+so invoking either command before requiring the package still initializes the
+session coordinator. Loading the model module itself remains independent.
+
+The catalog callback decodes once and prefers the session's cached selection
+over the catalog default. Readers consume decoded data and return a choice
+without submitting RPCs or changing the modeline. An empty reader result keeps
+the current selection; unknown input and provider headers do not select a
+model. A completion frontend may accept its highlighted candidate on RET
+even when the minibuffer text is empty. Effort defaults retain the current
+effort when reselecting the model, otherwise the catalog default or first
+available effort. Callback boundaries catch quit and apply successful choices,
+then refresh the session cache; internal reader errors still propagate.
+
+The entry point continues to own input editing, attachments and question /
+approval interactions pending separate ownership changes. This extraction
+does not expand Composer's read-only-row responsibility. See
+[decision 174](../postmortem/174-model-selection-owner.md).
 
 ## Provider setup (`dsh-emacs-provider.el`)
 

@@ -7,6 +7,115 @@
 (defvar vertico-mode)
 (defvar vertico-group-format)
 
+(ert-deftest dsh-emacs-test-model-selection-autoload-initializes-coordinator ()
+  :tags '(dsh-unit)
+  (unless (require 'loaddefs-gen nil t)
+    (require 'autoload))
+  (let* ((directory (make-temp-file "dsh-model-autoload-" t))
+         (source (expand-file-name "dsh-emacs-model.el" directory))
+         (loaddefs (expand-file-name "dsh-model-autoloads.el" directory)))
+    (unwind-protect
+        (progn
+          (copy-file (expand-file-name "dsh-emacs-model.el" dsh-emacs-test-root)
+                     source)
+          (let ((inhibit-message t))
+            (if (fboundp 'loaddefs-generate)
+                (loaddefs-generate directory loaddefs)
+              (with-temp-buffer
+                (insert ";;; -*- lexical-binding: t; -*-\n")
+                (autoload-generate-file-autoloads source (current-buffer) loaddefs)
+                (write-region (point-min) (point-max) loaddefs nil 'silent))))
+          (dolist (command '(dsh-emacs-select-model dsh-emacs-select-effort))
+            (ert-info ((format "Cold autoload: %s" command))
+              (with-temp-buffer
+                (let ((status
+                       (call-process
+                        (expand-file-name invocation-name invocation-directory)
+                        nil (list t t) nil "-Q" "--batch"
+                        "-L" dsh-emacs-test-root "--eval"
+                        (prin1-to-string
+                         `(progn
+                            (require 'ert)
+                            (should-not (featurep 'dsh-emacs))
+                            (load ,loaddefs nil t)
+                            (should (autoloadp (symbol-function ',command)))
+                            (should-not (featurep 'dsh-emacs))
+                            (should
+                             (equal
+                              (should-error (call-interactively ',command)
+                                            :type 'user-error)
+                              '(user-error "Open or select a session first")))
+                            (should (featurep 'dsh-emacs)))))))
+                  (ert-info ((buffer-string))
+                    (should (equal status 0))))))))
+      (delete-directory directory t))))
+
+(ert-deftest dsh-emacs-test-model-selection-reader-returns-choice-without-rpc ()
+  :tags '(dsh-unit)
+  (let* ((directory
+          (dsh-protocol-model-directory--from-alist
+           '((groups . [((id . "g2") (name . "Provider Two")
+                         (models . [((id . "m2") (name . "Model Two"))]))]))))
+         (vertico-mode nil))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _) "m2 [g2|Provider Two]"))
+              ((symbol-function 'dsh-emacs--rpc-async)
+               (lambda (&rest _) (ert-fail "Reader submitted an RPC"))))
+      (should (equal (dsh-emacs--read-model-selection directory nil)
+                     '(("m2" "g2" "Provider Two" "Model Two" nil) nil))))))
+
+(ert-deftest dsh-emacs-test-model-selection-reader-rejects-without-rpc ()
+  :tags '(dsh-unit)
+  (let* ((directory
+          (dsh-protocol-model-directory--from-alist
+           '((groups . [((id . "g1") (name . "Provider One")
+                         (models . [((id . "m1") (name . "Model One"))]))]))))
+         (vertico-mode nil)
+         (picked "")
+         (messages nil)
+         (calls nil))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _) picked))
+              ((symbol-function 'dsh-emacs--rpc-async)
+               (lambda (&rest args) (push args calls)))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (push (apply #'format fmt args) messages))))
+      (dolist (case '(("" "Kept the current model")
+                      ("no-such-model" "Unknown model")
+                      ("Provider One" "provider header")))
+        (setq picked (car case)
+              messages nil)
+        (ert-info ((format "Reader rejects %S" picked))
+          (should-not (dsh-emacs--read-model-selection directory nil))
+          (should-not calls)
+          (should (cl-some (lambda (text)
+                             (string-match-p (nth 1 case) text))
+                           messages)))))))
+
+(ert-deftest dsh-emacs-test-model-selection-effort-reader-without-rpc ()
+  :tags '(dsh-unit)
+  (let* ((directory
+          (dsh-protocol-model-directory--from-alist
+           '((current . ((provider . "g1") (model . "m1")))
+             (groups . [((id . "g1") (name . "Provider One")
+                         (models . [((id . "m1")
+                                     (reasoning
+                                      . ((defaultEffort . "high")
+                                         (efforts
+                                          . [((id . "high") (name . "High"))
+                                             ((id . "max") (name . "Max"))]))))]))]))))
+         (current (dsh-protocol-model-directory-current directory)))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt _collection _predicate _require-match
+                                _initial _history default &rest _)
+                 (should (equal default "High"))
+                 "Max"))
+              ((symbol-function 'dsh-emacs--rpc-async)
+               (lambda (&rest _) (ert-fail "Reader submitted an RPC"))))
+      (should (equal (dsh-emacs--read-effort-selection directory current)
+                     '("g1" "m1" "max"))))))
+
 ;; --- Test 47: model catalog expansion + sorting + selectModel call ---
 (ert-deftest dsh-emacs-test-model-selection-model-candidates-flattened ()
   :tags '(dsh-unit)

@@ -97,6 +97,12 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Model commands initialize the package on first use**: autoloading
+  `dsh-emacs-select-model` or `dsh-emacs-select-effort` loads the session
+  coordinator before running the command, preserving startup behavior after
+  the model module extraction.
+  (rationale: [postmortem/174](postmortem/174-model-selection-owner.md))
+
 - **Queue edit refuses attachment items**: `C-c e` on a queued message that
   carries an image or file now reports that and leaves it queued, instead of
   replacing its content with one text block and dropping the attachment.
