@@ -269,6 +269,55 @@
       (ert-info ((format "%s" "markdown-unchanged-plain-text-does-not-write"))
         (should (= tick (buffer-modified-tick)))))))
 
+;; A resource scan skips plain runs instead of testing every character.
+(ert-deftest dsh-emacs-test-markdown-resource-scan-skips-plain-runs ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (insert (make-string 2000 ?a) "\n"
+            "plain " (make-string 2000 ?b) "\n"
+            "[link](https://example.test)\n")
+    (let ((checks 0)
+          (scan (symbol-function 'dsh-emacs-markdown--in-avoid-range-p)))
+      (cl-letf (((symbol-function 'dsh-emacs-markdown--in-avoid-range-p)
+                 (lambda (&rest args)
+                   (setq checks (1+ checks))
+                   (apply scan args))))
+        (should (= (length (dsh-emacs-markdown--inline-resources)) 1)))
+      (ert-info ((format "avoid-range checks: %d" checks))
+        ;; One check per line start and interesting character, not one per
+        ;; buffer character.
+        (should (< checks 20))))))
+
+(ert-deftest dsh-emacs-test-markdown-resource-scan-crosses-field-boundaries ()
+  :tags '(dsh-unit)
+  (let ((inhibit-field-text-motion nil)
+        (line-end (symbol-function 'line-end-position))
+        (calls 0)
+        rendered opened)
+    (cl-letf (((symbol-function 'line-end-position)
+               (lambda (&rest args)
+                 ;; Bound the failed scan so this regression cannot hang ERT.
+                 (when (> (cl-incf calls) 100)
+                   (ert-fail "Resource scan stuck at a field boundary"))
+                 (apply line-end args))))
+      (setq rendered
+            (dsh-emacs-markdown-convert
+             (concat (propertize "aaaa" 'field 'first)
+                     (propertize "bbbb [la" 'field 'second)
+                     (propertize "bel](https://example.test/pa" 'field 'third)
+                     (propertize "th)\n" 'field 'fourth)))))
+    (should (equal (substring-no-properties rendered) "aaaabbbb label\n"))
+    (should (eq (get-text-property 0 'field rendered) 'first))
+    (should (eq (get-text-property 4 'field rendered) 'second))
+    (let ((command (lookup-key (get-text-property 9 'keymap rendered)
+                               (kbd "RET"))))
+      (should (commandp command))
+      (cl-letf (((symbol-function 'browse-url)
+                 (lambda (url &rest _) (setq opened url))))
+        (call-interactively command)))
+    (should (equal opened "https://example.test/path"))
+    (should-not inhibit-field-text-motion)))
+
 (ert-deftest dsh-emacs-test-markdown-markdown-yank-handler-inserts-plain-text ()
   :tags '(dsh-unit)
   (let ((styled (with-temp-buffer

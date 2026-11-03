@@ -1372,9 +1372,13 @@ filesystem resolution. Resource scanning captures destinations before prose
 styling can consume their punctuation. Rendered resources retain their click
 identity in text properties; after images and links are stripped, their parse
 markers are detached before emphasis edits. Raw destinations retain their
-markers for protection. Single-line and code-span boundaries apply equally to
-full and streamed rendering; a bare image cannot freeze on an unfinished path
-fragment. See [171](../postmortem/171-markdown-marker-lifetime.md).
+markers for protection. The scanner skips runs that cannot begin a resource in
+one call, so only line starts and `[`, `!`, a backtick or a backslash get
+per-position work. Line scans ignore `field` properties, which cannot end a
+Markdown line. Single-line and code-span boundaries apply equally to full
+and streamed rendering; a bare image cannot freeze on an unfinished path
+fragment. See [171](../postmortem/171-markdown-marker-lifetime.md) and
+[172](../postmortem/172-resource-scan-prefilter.md).
 
 The shared local-path decoder rejects remote authorities and unsafe input,
 then links validate existing targets and optional one-based line/column

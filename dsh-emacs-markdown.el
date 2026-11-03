@@ -940,53 +940,65 @@ Return resource records with marker positions.  Scan left to right so
 backticks in destinations cannot open code spans in following prose.
 Only images are recognized inside link labels; labels are never reparsed
 as links after their outer resource has been rendered."
-  (let (resources)
+  ;; Field boundaries are display metadata, not Markdown line boundaries.
+  ;; Otherwise line-end-position can stop a plain run without advancing it.
+  (let ((inhibit-field-text-motion t)
+        resources)
     (save-excursion
       (cl-labels
           ((scan (limit images-only)
              (while (< (point) limit)
-               (let ((avoid (dsh-emacs-markdown--in-avoid-range-p
-                             (point) (1+ (point)) avoid-ranges)))
-                 (cond
-                  (avoid (goto-char (min limit (cdr avoid))))
-                  ((get-text-property (point) 'dsh-emacs-markdown-frozen)
-                   (goto-char (next-single-property-change
-                               (point) 'dsh-emacs-markdown-frozen nil limit)))
-                  ((and (bolp)
-                        (looking-at
-                         "[ \t]*\\(?:file://\\|/\\|~[^/ \t\n]*/\\|\\.\\.?/\\)[^ \t\n]*[ \t]*$"))
-                   (let ((start (point)) (finish (match-end 0)))
-                     (push (list (copy-marker start) (copy-marker start)
-                                 (copy-marker finish t) (copy-marker finish t)
-                                 nil nil)
-                           resources)
-                     (goto-char finish)))
-                  ((eq (char-after) ?\\)
-                   (forward-char (min 2 (- limit (point)))))
-                  ((eq (char-after) ?`)
-                   (let ((ranges (save-restriction
-                                   (narrow-to-region (point) (min limit (line-end-position)))
-                                   (dsh-emacs-markdown--inline-code-ranges))))
-                     (if ranges
-                         (progn (goto-char (cdar ranges))
-                                (skip-chars-forward "`" limit))
-                       (skip-chars-forward "`" limit))))
-                  ((or (and (eq (char-after) ?!) (eq (char-after (1+ (point))) ?\[))
-                       (and (not images-only) (eq (char-after) ?\[)))
-                   (let ((resource (dsh-emacs-markdown--resource-at-point
-                                    (min limit (line-end-position)))))
-                     (if (not resource)
-                         (forward-char)
-                       (pcase-let ((`(,start ,beg ,end ,finish ,url ,image) resource))
-                         (push (list (copy-marker start) (copy-marker beg)
-                                     (copy-marker end t) (copy-marker finish t)
-                                     url image)
-                               resources)
-                         (when (and url (not image))
-                           (goto-char beg)
-                           (scan end t))
-                         (goto-char finish)))))
-                  (t (forward-char)))))))
+               (if (and (not (bolp))
+                        (not (memq (char-after) '(?\\ ?` ?! ?\[))))
+                   ;; Only line starts and these characters can begin a
+                   ;; resource; skip every other position in one call.
+                   (progn
+                     (skip-chars-forward "^[!`\\\\"
+                                         (min limit (line-end-position)))
+                     (when (and (eolp) (< (point) limit))
+                       (forward-char 1)))
+                 (let ((avoid (dsh-emacs-markdown--in-avoid-range-p
+                               (point) (1+ (point)) avoid-ranges)))
+                   (cond
+                    (avoid (goto-char (min limit (cdr avoid))))
+                    ((get-text-property (point) 'dsh-emacs-markdown-frozen)
+                     (goto-char (next-single-property-change
+                                 (point) 'dsh-emacs-markdown-frozen nil limit)))
+                    ((and (bolp)
+                          (looking-at
+                           "[ \t]*\\(?:file://\\|/\\|~[^/ \t\n]*/\\|\\.\\.?/\\)[^ \t\n]*[ \t]*$"))
+                     (let ((start (point)) (finish (match-end 0)))
+                       (push (list (copy-marker start) (copy-marker start)
+                                   (copy-marker finish t) (copy-marker finish t)
+                                   nil nil)
+                             resources)
+                       (goto-char finish)))
+                    ((eq (char-after) ?\\)
+                     (forward-char (min 2 (- limit (point)))))
+                    ((eq (char-after) ?`)
+                     (let ((ranges (save-restriction
+                                     (narrow-to-region (point) (min limit (line-end-position)))
+                                     (dsh-emacs-markdown--inline-code-ranges))))
+                       (if ranges
+                           (progn (goto-char (cdar ranges))
+                                  (skip-chars-forward "`" limit))
+                         (skip-chars-forward "`" limit))))
+                    ((or (and (eq (char-after) ?!) (eq (char-after (1+ (point))) ?\[))
+                         (and (not images-only) (eq (char-after) ?\[)))
+                     (let ((resource (dsh-emacs-markdown--resource-at-point
+                                      (min limit (line-end-position)))))
+                       (if (not resource)
+                           (forward-char)
+                         (pcase-let ((`(,start ,beg ,end ,finish ,url ,image) resource))
+                           (push (list (copy-marker start) (copy-marker beg)
+                                       (copy-marker end t) (copy-marker finish t)
+                                       url image)
+                                 resources)
+                           (when (and url (not image))
+                             (goto-char beg)
+                             (scan end t))
+                           (goto-char finish)))))
+                    (t (forward-char))))))))
         (goto-char (point-min))
         (scan (point-max) nil)))
     (nreverse resources)))

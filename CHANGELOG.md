@@ -97,6 +97,15 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Render Markdown across text fields**: resource scanning no longer stalls
+  when adjacent text has different `field` properties, and links spanning
+  those fields keep their full target.
+
+- **Scan resources without testing every character**: a long reply no longer
+  pays a per-character resource lookup, so link-free text and long
+  non-wrapping paragraphs stream faster. Rendering output is unchanged.
+  (rationale: [postmortem/172](postmortem/172-resource-scan-prefilter.md))
+
 - **Long link-heavy replies render faster**: resolved links release their
   parse markers before emphasis edits, so formatting a reply with many links
   no longer moves markers that text properties already replace. Other replies
