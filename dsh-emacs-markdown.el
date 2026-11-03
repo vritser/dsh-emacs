@@ -461,22 +461,23 @@ all stream markers.  Return the (START . END) formatted range."
                             (dsh-emacs-markdown--inline-resources
                              :avoid-ranges (dsh-emacs-markdown--sort-ranges
                                             source-ranges rendered-ranges))))
-                         ;; Strip resolved resources while their markers are
-                         ;; intact; emphasis may delete and reinsert labels.
+                         ;; Strip resolved resources before emphasis edits,
+                         ;; then release the markers they no longer need.
                          (raw-resources
-                          (let ((remaining resources))
-                            (when render-images
-                              (setq remaining
-                                    (cl-set-difference
-                                     remaining
-                                     (dsh-emacs-markdown--replace-images
-                                      :resources remaining :defer-freeze t)
-                                     :test #'eq)))
-                            (cl-set-difference
-                             remaining
-                             (dsh-emacs-markdown--replace-links
-                              :resources remaining :defer-freeze t)
-                             :test #'eq)))
+                          (let ((rendered
+                                 (nconc
+                                  (when render-images
+                                    (dsh-emacs-markdown--replace-images
+                                     :resources resources :defer-freeze t))
+                                  (dsh-emacs-markdown--replace-links
+                                   :resources resources :defer-freeze t))))
+                            (prog1 (cl-set-difference resources rendered
+                                                      :test #'eq)
+                              ;; Label properties now own resource identity.
+                              ;; Stop maintaining parse markers during edits.
+                              (dolist (resource rendered)
+                                (dolist (marker (seq-take resource 4))
+                                  (set-marker marker nil))))))
                          (destination-ranges
                           (mapcar (lambda (resource)
                                     (cons (if (nth 4 resource)
@@ -507,10 +508,11 @@ all stream markers.  Return the (START . END) formatted range."
                                     (goto-char (point-min))
                                     (re-search-forward "[*_~]" nil t))
                               (save-restriction
-                                ;; No opener precedes the first delimiter.  Retain
-                                ;; its previous character for whitespace/BOL rules.
-                                (narrow-to-region (max (point-min)
-                                                       (1- (match-beginning 0)))
+                                ;; Retain left context and the complete escape
+                                ;; run before the first delimiter.
+                                (goto-char (match-beginning 0))
+                                (skip-chars-backward "\\\\")
+                                (narrow-to-region (max (point-min) (1- (point)))
                                                   (point-max))
                                 (while (let ((italic-changed (dsh-emacs-markdown--replace-italics
                                                               :avoid-ranges avoid-ranges))
@@ -602,13 +604,44 @@ all stream markers.  Return the (START . END) formatted range."
           (set-marker watermark nil)
           (setf (plist-get stream-state :watermark) nil))))))
 
+(defun dsh-emacs-markdown--strong-delimiter-p (pos opening)
+  "Return whether the strong delimiter at POS may open or close.
+OPENING selects an opener; nil selects a closer.  Unicode whitespace and
+punctuation decide the boundary.  Underscores need an outer boundary;
+stars only need one when their inner character is punctuation.  An escaped
+delimiter is never eligible."
+  (let* ((inner (if opening (char-after (+ pos 2)) (char-before pos)))
+         (outer (if opening (char-before pos) (char-after (+ pos 2))))
+         (category (and inner
+                        (get-char-code-property inner 'general-category))))
+    (and inner
+         (not (or (memq inner '(?\t ?\n ?\r ?\f)) (eq category 'Zs)))
+         (or (and (eq (char-after pos) ?*)
+                  (not (memq category '(Pc Pd Pe Pf Pi Po Ps Sc Sk Sm So))))
+             (null outer)
+             (memq outer '(?\t ?\n ?\r ?\f))
+             (memq (get-char-code-property outer 'general-category)
+                   '(Zs Pc Pd Pe Pf Pi Po Ps Sc Sk Sm So)))
+         (or (not (eq (char-before pos) ?\\))
+             (save-excursion
+               (goto-char pos)
+               (skip-chars-backward "\\\\")
+               (zerop (% (- pos (point)) 2)))))))
+
 (cl-defun dsh-emacs-markdown--replace-bolds (&key avoid-ranges)
   "Replace `**X**' / `__X__' spans in current buffer with bold X.
 
 Markup characters are deleted; remaining inner text carries face
 `dsh-emacs-markdown-bold' layered on top of any existing face
-properties.  Spans that fall inside any of AVOID-RANGES are left
-untouched.  Returns non-nil if at least one replacement was made.
+properties.  A delimiter must be unescaped and must open or close under
+CommonMark's flanking rules (see
+`dsh-emacs-markdown--strong-delimiter-p'); otherwise the span stays
+literal.  Spans that fall inside any of AVOID-RANGES are left untouched.
+Returns non-nil if at least one replacement was made.
+
+The pass pairs exactly two delimiters at a time rather than resolving
+CommonMark delimiter runs, so a run of three or more stars is matched
+pairwise.
 
 For example, the buffer \"hello **world**.\" becomes \"hello
 world.\" with face `dsh-emacs-markdown-bold' on \"world\"."
@@ -616,18 +649,18 @@ world.\" with face `dsh-emacs-markdown-bold' on \"world\"."
         (changed nil))
     (goto-char (point-min))
     (while (re-search-forward
-            (rx (or line-start (syntax whitespace))
-                (group
+            (rx (group
                  (or (seq "**" (group (one-or-more (not (any "\n*")))) "**")
-                     (seq "__" (group (one-or-more (not (any "\n_")))) "__")))
-                (or (syntax punctuation) (syntax whitespace) line-end))
+                     (seq "__" (group (one-or-more (not (any "\n_")))) "__"))))
             nil t)
       (let* ((markup-start (match-beginning 1))
              (markup-end (match-end 1))
              (avoid (dsh-emacs-markdown--in-avoid-range-p
                      markup-start markup-end avoid-ranges)))
-        (if avoid
-            (goto-char (cdr avoid))
+        (cond
+         (avoid (goto-char (cdr avoid)))
+         ((and (dsh-emacs-markdown--strong-delimiter-p markup-start t)
+               (dsh-emacs-markdown--strong-delimiter-p (- markup-end 2) nil))
           (let ((text (buffer-substring
                        (or (match-beginning 2) (match-beginning 3))
                        (or (match-end 2) (match-end 3)))))
@@ -637,7 +670,8 @@ world.\" with face `dsh-emacs-markdown-bold' on \"world\"."
             (add-face-text-property markup-start
                                     (+ markup-start (length text))
                                     'dsh-emacs-markdown-bold)
-            (setq changed t)))))
+            (setq changed t)))
+         (t (goto-char (+ markup-start 2))))))
     changed))
 
 (cl-defun dsh-emacs-markdown--replace-italics (&key avoid-ranges)

@@ -77,6 +77,37 @@
                        (member 'dsh-emacs-markdown-bold
                                (if (listp bold-face) bold-face (list bold-face))))))))))
 
+(ert-deftest dsh-emacs-test-render-streamed-bold-beside-chinese-text ()
+  :tags '(dsh-unit)
+  (dolist (limit '(nil 1))
+    (with-temp-buffer
+      (dsh-emacs-mode)
+      (let ((dsh-emacs-stream-markdown-limit limit)
+            (event '((data . ((turn . 1) (step . 1)))))
+            (source "这是**重点**内容（**说明**）。`**literal**`"))
+        (dolist (chunk '("这是*" "*重" "点*" "*内容（*"
+                         "*说" "明**）。`**literal**`"))
+          (dsh-emacs-render--start-assistant-stream event chunk))
+        (dsh-emacs-render-event
+         `((type . "assistant/message") (seq . 2)
+           (data . ((turn . 1) (step . 1)
+                    (message . ((content . [((type . "text")
+                                             (text . ,source))])))))))
+        (while dsh-emacs--markdown-pending
+          (dsh-emacs-render--run-markdown (current-buffer)))
+        (goto-char (point-min))
+        (should (search-forward "这是重点内容（说明）。**literal**" nil t))
+        (dolist (word '("重点" "说明"))
+          (goto-char (point-min))
+          (should (search-forward word nil t))
+          (should (memq 'dsh-emacs-markdown-bold
+                        (ensure-list (get-text-property (1- (point)) 'face)))))
+        (goto-char (point-min))
+        (should (search-forward "**literal**" nil t))
+        (should (memq 'dsh-emacs-markdown-inline-code
+                      (ensure-list (get-text-property
+                                    (1- (point)) 'face))))))))
+
 ;; Packed stream records reconstruct in order, tool calls included.
 (ert-deftest dsh-emacs-test-render-attempt-stream-text-reconstructs ()
   :tags '(dsh-unit)

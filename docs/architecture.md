@@ -1312,13 +1312,18 @@ See [decision record 031](../postmortem/031-stream-frontier-and-screen-rows.md)
 and [032](../postmortem/032-partial-line-styling-and-burst-follow.md), and the
 [performance audit](streaming-performance.md).
 
-Partial-line emphasis passes narrow to the first delimiter plus its preceding
-character, preserving the existing whitespace/line-start grammar. Other
-Markdown passes retain the full ready range. The renderer supplies its assistant
-base face to Markdown's final face pass, which keeps one copy at the lowest
-priority and mirrors the complete result to `font-lock-face` in one traversal.
-The renderer
-then applies read-only, stickiness and event identity properties together.
+Partial-line emphasis passes narrow to the first delimiter and back over the
+backslash run that escapes it, plus one more character for left context.
+Bold delimiters then apply CommonMark's Unicode flanking rules: stars may sit
+inside a word, and Chinese punctuation counts as punctuation. Each check
+computes only the requested opening or closing eligibility, without allocating
+a pair, and scans escape runs only after a backslash. Italics and
+strikethrough keep the whitespace/line-start grammar, so arithmetic such as
+`5*3 and 6*4` stays literal. Other Markdown passes retain the full ready range.
+The renderer supplies its assistant base face to Markdown's final face pass,
+which keeps one copy at the lowest priority and mirrors the complete result to
+`font-lock-face` in one traversal. The renderer then applies read-only,
+stickiness and event identity properties together.
 Repeated tail formatting cannot grow the face list. A stable named yank handler
 keeps repeated formatting from rewriting an otherwise identical property.
 See [033](../postmortem/033-final-face-pass-and-pixel-probes.md).
@@ -1365,9 +1370,11 @@ or an alternate parser. See [036](../postmortem/036-bounded-stream-markdown.md).
 `dsh-emacs-markdown.el` owns inline link/image syntax, independently of
 filesystem resolution. Resource scanning captures destinations before prose
 styling can consume their punctuation. Rendered resources retain their click
-identity instead of reparsing label text. Single-line and code-span boundaries
-apply equally to full and streamed rendering; a bare image cannot freeze on
-an unfinished path fragment.
+identity in text properties; after images and links are stripped, their parse
+markers are detached before emphasis edits. Raw destinations retain their
+markers for protection. Single-line and code-span boundaries apply equally to
+full and streamed rendering; a bare image cannot freeze on an unfinished path
+fragment. See [171](../postmortem/171-markdown-marker-lifetime.md).
 
 The shared local-path decoder rejects remote authorities and unsafe input,
 then links validate existing targets and optional one-based line/column

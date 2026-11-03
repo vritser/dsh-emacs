@@ -97,6 +97,18 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Long link-heavy replies render faster**: resolved links release their
+  parse markers before emphasis edits, so formatting a reply with many links
+  no longer moves markers that text properties already replace. Other replies
+  are unaffected, and bold, italic and link output is unchanged.
+  (rationale: [postmortem/171](postmortem/171-markdown-marker-lifetime.md))
+
+- **Bold follows CommonMark's flanking rules**: assistant replies now format
+  `这是**重点**内容`, `（**重点**）` and `word**bold**tail` without leaving
+  literal stars, including when delimiters arrive in separate streaming chunks.
+  Space-padded and escaped delimiters stay literal, as do code spans; italics
+  and strikethrough keep their existing boundary rules.
+
 - **Broken event JSON is diagnosed**: malformed JSON on chat and core
   sockets reports the failing decode layer; valid unrelated frames remain
   silent. (rationale: [postmortem/170](postmortem/170-event-and-menu-boundaries.md))

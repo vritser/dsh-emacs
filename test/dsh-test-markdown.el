@@ -39,6 +39,40 @@
                      (memq 'dsh-emacs-markdown-bold both-face)
                      (memq 'dsh-emacs-markdown-italic both-face)))))))
 
+(ert-deftest dsh-emacs-test-markdown-bold-next-to-text-and-punctuation ()
+  :tags '(dsh-unit)
+  (dolist (fixture '(("这是**重点**内容" "这是重点内容" "重点")
+                     ("（**重点**）" "（重点）" "重点")
+                     ("**重点**（说明）" "重点（说明）" "重点")
+                     ("word**bold**tail" "wordboldtail" "bold")
+                     ("\\\\**重点**" "\\\\重点" "重点")
+                     ("（__重点__）" "（重点）" "重点")
+                     ("(**one**),**two**!" "(one),two!" "two")))
+    (pcase-let* ((`(,source ,plain ,body) fixture)
+                 (rendered (dsh-emacs-markdown-render source))
+                 (start (string-match (regexp-quote body) rendered)))
+      (ert-info ((format "source: %S" source))
+        (should (equal (substring-no-properties rendered)
+                       (concat plain "\n")))
+        (should start)
+        (dotimes (offset (length body))
+          (should (memq 'dsh-emacs-markdown-bold
+                        (ensure-list
+                         (get-text-property (+ start offset)
+                                            'face rendered)))))))))
+
+(ert-deftest dsh-emacs-test-markdown-bold-keeps-literal-delimiters ()
+  :tags '(dsh-unit)
+  (dolist (source '("word__literal__tail" "** leading**" "**trailing **"
+                    "a**\"quoted\"**b" "\\**literal**" "**literal\\**"
+                    "**unclosed"))
+    (let ((rendered (dsh-emacs-markdown-render source)))
+      (ert-info ((format "source: %S" source))
+        (should (equal (substring-no-properties rendered)
+                       (concat source "\n")))
+        (should-not (text-property-not-all 0 (length rendered)
+                                           'face nil rendered))))))
+
 (ert-deftest dsh-emacs-test-markdown-markdown-table-render ()
   :tags '(dsh-unit)
   (let ((rendered (dsh-emacs-markdown-render
@@ -205,7 +239,8 @@
 
 (ert-deftest dsh-emacs-test-markdown-emphasis-keeps-real-left-context-case ()
   :tags '(dsh-unit)
-  (dolist (text '("word*literal*" "word_underscore_" "word**literal**"))
+  (dolist (text '("word*literal*" "word_underscore_" "word__literal__"
+                  "5*3 and 6*4"))
     (with-temp-buffer
       (insert text)
       (dsh-emacs-markdown-replace-markup)
@@ -504,6 +539,40 @@
               (should (null (dsh-emacs-markdown--parse-local-link
                              "https://example.com/path"))))))
       (delete-directory tmpdir t))))
+
+(ert-deftest dsh-emacs-test-markdown-resource-markers-end-before-emphasis ()
+  :tags '(dsh-unit)
+  (let ((scan (symbol-function 'dsh-emacs-markdown--inline-resources))
+        (bold (symbol-function 'dsh-emacs-markdown--replace-bolds))
+        resources checked opened)
+    (with-temp-buffer
+      (insert "[**label**](https://example.test) ![raw](missing**file**.png)")
+      (cl-letf (((symbol-function 'dsh-emacs-markdown--inline-resources)
+                 (lambda (&rest args)
+                   (setq resources (apply scan args))))
+                ((symbol-function 'dsh-emacs-markdown--replace-bolds)
+                 (lambda (&rest args)
+                   (should (= (length resources) 2))
+                   ;; Resolved labels carry identity in text properties;
+                   ;; only raw destinations still need moving parse markers.
+                   (dolist (marker (seq-take (car resources) 4))
+                     (should-not (marker-buffer marker)))
+                   (dolist (marker (seq-take (cadr resources) 4))
+                     (should (eq (marker-buffer marker) (current-buffer))))
+                   (setq checked t)
+                   (apply bold args))))
+        (dsh-emacs-markdown-replace-markup :render-images nil))
+      (should checked)
+      (should (equal (buffer-string) "label ![raw](missing**file**.png)"))
+      (should (memq 'dsh-emacs-markdown-bold
+                    (ensure-list (get-text-property 1 'face))))
+      (should (get-text-property 1 'dsh-emacs-markdown-frozen))
+      (let ((command (lookup-key (get-text-property 1 'keymap) (kbd "RET"))))
+        (should (commandp command))
+        (cl-letf (((symbol-function 'browse-url)
+                   (lambda (url &rest _) (setq opened url))))
+          (call-interactively command)))
+      (should (equal opened "https://example.test")))))
 
 ;; Markdown destinations in angle brackets are syntax, not part of the path.
 ;; Exercise the rendered RET command, including a destination containing `)'.
