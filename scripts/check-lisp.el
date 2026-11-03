@@ -44,7 +44,7 @@
      "dsh-emacs-ui.el" "dsh-emacs-faces.el" "dsh-emacs-tokens.el"
      "dsh-emacs-modeline.el" "dsh-emacs-queue.el" "dsh-emacs-jobs.el"
      "dsh-emacs-server.el" "dsh-emacs-provider.el" "dsh-emacs-model.el"
-     "dsh-emacs-plan.el" "dsh-emacs-subagent.el"
+     "dsh-emacs-plan.el" "dsh-emacs-subagent.el" "dsh-emacs-interaction.el"
      "dsh-emacs-command.el" "dsh-emacs-skill.el" "dsh-emacs-reference.el"
      "dsh-emacs-composer.el" "dsh-emacs-history.el"
      "dsh-emacs-shell.el" "dsh-emacs-reload.el"

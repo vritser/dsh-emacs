@@ -6,6 +6,84 @@
 
 (defvar vertico-preselect)
 
+(ert-deftest dsh-emacs-test-questions-owner-loads-without-consumers ()
+  :tags '(dsh-unit)
+  (pcase-let ((`(,status . ,output)
+               (dsh-test--fresh-process
+                '(progn
+                   (require 'ert)
+                   (require 'dsh-emacs-interaction)
+                   (should (equal (dsh-emacs--question-session-label "raw-id")
+                                  "raw-id"))
+                   (should-not (featurep 'dsh-emacs))
+                   (should-not (featurep 'dsh-emacs-events))
+                   (should-not (featurep 'dsh-emacs-render))))))
+    (ert-info (output)
+      (should (equal status 0))
+      (should (equal output "")))))
+
+(ert-deftest dsh-emacs-test-questions-autoload-initializes-coordinator ()
+  :tags '(dsh-unit)
+  (let* ((directory (make-temp-file "dsh-interaction-autoload-" t))
+         (source (expand-file-name "dsh-emacs-interaction.el" directory))
+         (loaddefs (expand-file-name "dsh-interaction-autoloads.el" directory)))
+    (unwind-protect
+        (progn
+          (copy-file (expand-file-name "dsh-emacs-interaction.el"
+                                       dsh-emacs-test-root)
+                     source)
+          (dsh-test--generate-autoloads source loaddefs)
+          (dolist (command '(dsh-emacs-question-preview dsh-emacs-answer-question))
+            (pcase-let ((`(,status . ,output)
+                         (dsh-test--fresh-process
+                          `(progn
+                             (require 'ert)
+                             (require 'cl-lib)
+                             (require 'crm)
+                             (load ,loaddefs nil t)
+                             (should (autoloadp (symbol-function ',command)))
+                             (should-not (featurep 'dsh-emacs))
+                             (if (eq ',command 'dsh-emacs-answer-question)
+                                 (should
+                                  (equal
+                                   (should-error (call-interactively ',command)
+                                                 :type 'user-error)
+                                   '(user-error "Not in a dsh chat buffer")))
+                               (let ((choices 0) (texts 0))
+                                 (cl-letf (((symbol-function 'completing-read-multiple)
+                                            (lambda (&rest _)
+                                              (cl-incf choices) nil))
+                                           ((symbol-function 'read-string)
+                                            (lambda (&rest _)
+                                              (cl-incf texts) "")))
+                                   (call-interactively ',command))
+                                 (should (= choices 2))
+                                 (should (= texts 1))))
+                             (should (featurep 'dsh-emacs))))))
+              (ert-info ((format "%s: %s" command output))
+                (should (equal status 0))))))
+      (delete-directory directory t))))
+
+(ert-deftest dsh-emacs-test-questions-events-cancel-without-entry-point ()
+  :tags '(dsh-unit)
+  (pcase-let ((`(,status . ,output)
+               (dsh-test--fresh-process
+                '(progn
+                   (require 'ert)
+                   (require 'dsh-emacs-events)
+                   (setq dsh-emacs--question-queue
+                         '((nil "discard" "s") (nil "keep" "s"))
+                         dsh-emacs--approval-queue '((nil "discard" "s")))
+                   (dsh-emacs-events--host-item
+                    nil '((type . "cancel") (eventId . "discard")))
+                   (should (equal (mapcar #'cadr dsh-emacs--question-queue)
+                                  '("keep")))
+                   (should-not dsh-emacs--approval-queue)
+                   (should-not (featurep 'dsh-emacs))))))
+    (ert-info (output)
+      (should (equal status 0))
+      (should (equal output "")))))
+
 ;; --- Test 31f: an ask row renders dsh web's question card — the questions
 ;; and their numbered options with descriptions replace the argument JSON, and
 ;; the settled answers check the chosen options and carry free-text answers ---

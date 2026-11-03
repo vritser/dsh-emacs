@@ -12,6 +12,28 @@
 (add-to-list 'load-path dsh-emacs-test-root)
 (require 'dsh-emacs)
 
+(defun dsh-test--fresh-process (form)
+  "Evaluate FORM in a fresh Emacs; return (STATUS . OUTPUT)."
+  (with-temp-buffer
+    (let ((status
+           (call-process
+            (expand-file-name invocation-name invocation-directory)
+            nil (list t t) nil "-Q" "--batch" "-L" dsh-emacs-test-root
+            "--eval" (prin1-to-string form))))
+      (cons status (buffer-string)))))
+
+(defun dsh-test--generate-autoloads (source loaddefs)
+  "Generate LOADDEFS for SOURCE in its temporary directory.
+Use the current generator when available, with the Emacs 28 fallback."
+  (let ((inhibit-message t))
+    (if (require 'loaddefs-gen nil t)
+        (loaddefs-generate (file-name-directory source) loaddefs)
+      (require 'autoload)
+      (with-temp-buffer
+        (insert ";;; -*- lexical-binding: t; -*-\n")
+        (autoload-generate-file-autoloads source (current-buffer) loaddefs)
+        (write-region (point-min) (point-max) loaddefs nil 'silent)))))
+
 (defun dsh-test-equal-text-p (left right)
   "Compare text and property values in LEFT and RIGHT structurally.
 Emacs 28's `equal-including-properties' compares string property values

@@ -92,7 +92,7 @@
 (declare-function dsh-emacs-command-parse "dsh-emacs-command" (line))
 (defvar dsh-emacs--input-marker)
 (defvar dsh-emacs--composer-top-marker)
-;; Latest decoded question projection, owned by dsh-emacs.el.
+;; Latest decoded question projection, owned by dsh-emacs-interaction.el.
 (defvar dsh-emacs--session-questions)
 
 ;;; ---------------------------------------------------------------------------

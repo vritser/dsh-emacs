@@ -21,6 +21,7 @@ dsh-emacs/
 ├── dsh-emacs-server.el       # HTTP/RPC client, server bootstrap, authentication, configuration entry
 ├── dsh-emacs-provider.el     # Minibuffer provider setup through settings and credential RPCs
 ├── dsh-emacs-model.el        # Model/effort catalog readers, picker options and selection RPCs
+├── dsh-emacs-interaction.el  # Question/approval readers, prompt slot, waits and late answers
 ├── dsh-emacs-command.el      # Slash surface: commands/list + commands/execute, "/" completion and menu
 ├── dsh-emacs-skill.el        # Skill catalog (skills/list) and /name gestures
 ├── dsh-emacs-shell.el        # Client-side `!command` shell commands (local execution)
@@ -131,9 +132,9 @@ effort when reselecting the model, otherwise the catalog default or first
 available effort. Callback boundaries catch quit and apply successful choices,
 then refresh the session cache; internal reader errors still propagate.
 
-The entry point continues to own input editing, attachments and question /
-approval interactions pending separate ownership changes. This extraction
-does not expand Composer's read-only-row responsibility. See
+The entry point continues to own input editing and attachments pending
+separate ownership changes. This extraction does not expand Composer's
+read-only-row responsibility. See
 [decision 174](../postmortem/174-model-selection-owner.md).
 
 ## Provider setup (`dsh-emacs-provider.el`)
@@ -881,9 +882,9 @@ Durable event payloads still reach their event-specific consumers as raw data.
 Control and follow projection consumers read decoded values; Composer receives
 a goal struct or nil directly.
 
-The question reader in `dsh-emacs.el` answers each ordinary `ask` question in one
-minibuffer read. The question text and a hint are the prompt, the numbered
-options are the completion candidates, and each
+The question reader in `dsh-emacs-interaction.el` answers each ordinary `ask`
+question in one minibuffer read. The question text and a hint are the prompt,
+the numbered options are the completion candidates, and each
 candidate's description is delivered as a completion annotation through
 `completion-extra-properties`, so descriptions appear in whatever list UI the
 user has — no tooltip, geometry inspection, or frontend state is involved.
@@ -919,6 +920,20 @@ Remote cancellation must match both kind and event id before closing a
 minibuffer. Plan documents bypass this slot. See
 [decision record 124](../postmortem/124-shared-interaction-owner.md).
 
+`dsh-emacs-interaction.el` owns those queues and the slot, reader options,
+cancellation, foreground wait claims, late answers and the buffer-local
+question projection mirror. Events requires this owner directly and supplies
+decoded data; transport stream operations and transcript updates remain lazy
+declared seams to avoid require cycles. Plan review retains its document
+workflow. Both public command autoloads still target `dsh-emacs` so they keep
+their initialized session context. Loading the interaction module alone stays
+silent and does not load the coordinator, events or renderer. Standalone events
+use is limited to cancellation handling. Actual question/approval requests and
+settled projections require the full entry point's session context,
+notification handler and renderer. Session labels can use the raw session id
+when the coordinator's name formatter is not loaded. See
+[decision record 175](../postmortem/175-interaction-module-owner.md).
+
 Prompts are scheduled outside the WebSocket dispatcher: while a message batch
 is dispatching, `dsh-emacs--interaction-run` starts the reader from a
 zero-delay timer so a host `cancel` frame (another client answered) can still
@@ -939,8 +954,9 @@ the `userQuestions` projection — is answered later by
 `userQuestions/answer`. The picker and reader reserve the same global prompt
 slot as foreground questions and approvals, draining queued work on exit.
 Only a true answer response reports acceptance. The questions come from the
-projection, which `dsh-emacs-events.el` keeps buffer-local per chat (the `session/control`
-increment, the control baseline, and the follow snapshot all feed it).
+projection, which the interaction module keeps buffer-local per chat. Events
+feeds it from the `session/control` increment, control baseline and follow
+snapshot.
 The decoded sequence orders these updates, including absent capabilities;
 a new host generation resets the watermark. The late answer is steered as a
 `user-question-reply` user message, which the transcript

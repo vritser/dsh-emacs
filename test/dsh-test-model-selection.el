@@ -9,8 +9,6 @@
 
 (ert-deftest dsh-emacs-test-model-selection-autoload-initializes-coordinator ()
   :tags '(dsh-unit)
-  (unless (require 'loaddefs-gen nil t)
-    (require 'autoload))
   (let* ((directory (make-temp-file "dsh-model-autoload-" t))
          (source (expand-file-name "dsh-emacs-model.el" directory))
          (loaddefs (expand-file-name "dsh-model-autoloads.el" directory)))
@@ -18,36 +16,25 @@
         (progn
           (copy-file (expand-file-name "dsh-emacs-model.el" dsh-emacs-test-root)
                      source)
-          (let ((inhibit-message t))
-            (if (fboundp 'loaddefs-generate)
-                (loaddefs-generate directory loaddefs)
-              (with-temp-buffer
-                (insert ";;; -*- lexical-binding: t; -*-\n")
-                (autoload-generate-file-autoloads source (current-buffer) loaddefs)
-                (write-region (point-min) (point-max) loaddefs nil 'silent))))
+          (dsh-test--generate-autoloads source loaddefs)
           (dolist (command '(dsh-emacs-select-model dsh-emacs-select-effort))
-            (ert-info ((format "Cold autoload: %s" command))
-              (with-temp-buffer
-                (let ((status
-                       (call-process
-                        (expand-file-name invocation-name invocation-directory)
-                        nil (list t t) nil "-Q" "--batch"
-                        "-L" dsh-emacs-test-root "--eval"
-                        (prin1-to-string
-                         `(progn
-                            (require 'ert)
-                            (should-not (featurep 'dsh-emacs))
-                            (load ,loaddefs nil t)
-                            (should (autoloadp (symbol-function ',command)))
-                            (should-not (featurep 'dsh-emacs))
-                            (should
-                             (equal
-                              (should-error (call-interactively ',command)
-                                            :type 'user-error)
-                              '(user-error "Open or select a session first")))
-                            (should (featurep 'dsh-emacs)))))))
-                  (ert-info ((buffer-string))
-                    (should (equal status 0))))))))
+            (let ((form
+                   `(progn
+                      (require 'ert)
+                      (should-not (featurep 'dsh-emacs))
+                      (load ,loaddefs nil t)
+                      (should (autoloadp (symbol-function ',command)))
+                      (should-not (featurep 'dsh-emacs))
+                      (should
+                       (equal
+                        (should-error (call-interactively ',command)
+                                      :type 'user-error)
+                        '(user-error "Open or select a session first")))
+                      (should (featurep 'dsh-emacs)))))
+              (pcase-let ((`(,status . ,output)
+                           (dsh-test--fresh-process form)))
+                (ert-info ((format "Cold autoload %s: %s" command output))
+                  (should (equal status 0)))))))
       (delete-directory directory t))))
 
 (ert-deftest dsh-emacs-test-model-selection-reader-returns-choice-without-rpc ()

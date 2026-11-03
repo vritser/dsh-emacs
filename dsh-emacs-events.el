@@ -18,7 +18,7 @@
 ;; shared caches, and `$events' frames to session-list updates plus the
 ;; question / approval waterfalls (answered via `$events/result', see
 ;; `dsh-emacs--question-requested' / `dsh-emacs--approval-requested' in
-;; dsh-emacs.el).
+;; dsh-emacs-interaction.el).
 
 ;;; Code:
 
@@ -27,6 +27,7 @@
 (require 'dsh-emacs-protocol)
 (require 'dsh-emacs-server)
 (require 'dsh-emacs-subagent)
+(require 'dsh-emacs-interaction)
 
 (defvar-local dsh-emacs--event-process nil)
 (defvar-local dsh-emacs--event-ready nil)
@@ -134,8 +135,8 @@ generation and a new clientId.")
 (defvar dsh-emacs--buffer-session)
 (defvar dsh-emacs--buffer-subagent)
 (defvar dsh-emacs--subagent-departure)
-;; Owned by dsh-emacs.el (`defvar-local'); the `userQuestions' projection
-;; consumer and the late-answer command share it with the result renderer.
+;; Owned by dsh-emacs-interaction.el (`defvar-local'); projection consumers
+;; and the late-answer command share it with the result renderer.
 (defvar dsh-emacs--session-questions)
 (defvar dsh-emacs--modeline-run-start)
 (defvar dsh-emacs-history-window)
@@ -146,15 +147,7 @@ generation and a new clientId.")
 (declare-function dsh-emacs--chat-buffer-sync "dsh-emacs" (session-id))
 (declare-function dsh-emacs--chat-buffer-model-sync "dsh-emacs"
                   (session-id buf &optional selection))
-(declare-function dsh-emacs--question-requested "dsh-emacs" (chat event-id session-id questions &optional wait))
-(declare-function dsh-emacs--session-questions-apply "dsh-emacs" (questions))
-(declare-function dsh-emacs--question-cancelled "dsh-emacs" (event-id))
 (declare-function dsh-emacs-plan--cancel "dsh-emacs-plan" (&optional event-id))
-(declare-function dsh-emacs--approval-requested "dsh-emacs" (chat event-id session-id tool-name reason call-id))
-(declare-function dsh-emacs--approval-display-reason "dsh-emacs" (request))
-(declare-function dsh-emacs--approval-cancelled "dsh-emacs" (event-id))
-(declare-function dsh-emacs--events-result-async "dsh-emacs" (client-id event-id outcome callback))
-(declare-function dsh-emacs--waterfall-generation-retired "dsh-emacs" ())
 (declare-function dsh-emacs-session--render "dsh-emacs-session" ())
 (declare-function dsh-emacs--normalize-archived "dsh-emacs" (archived))
 (declare-function dsh-emacs-modeline-set-context-snapshot "dsh-emacs-modeline" (pressure window))
@@ -1539,7 +1532,7 @@ retires a pending waterfall by `eventId'."
       ("waterfall"
        ;; Approval / question waterfalls arrive on `$events' and are answered
        ;; via POST /api/$events/result (see `dsh-emacs--events-result-async' in
-       ;; dsh-emacs.el).  Resolve the target before decoding the request.
+       ;; dsh-emacs-interaction.el).  Resolve before decoding the request.
        (pcase-let* (((cl-struct dsh-protocol-waterfall
                                 (name event-name) event-id agent-id request) value)
                     (chat (and agent-id

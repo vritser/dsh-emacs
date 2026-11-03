@@ -1,5 +1,8 @@
 # 124 — One owner for the question and approval prompt slot
 
+Module placement superseded by [175](175-interaction-module-owner.md);
+the shared-slot and service-order decisions remain in effect.
+
 ## Background
 
 At `3c4f069`, questions and approvals kept separate active-frame variables and

@@ -21,7 +21,7 @@
 (require 'dsh-emacs-protocol)
 (require 'dsh-emacs-markdown)
 
-(declare-function dsh-emacs--events-result-async "dsh-emacs"
+(declare-function dsh-emacs--events-result-async "dsh-emacs-interaction"
                   (client-id event-id outcome callback))
 (declare-function dsh-emacs-notify--post "dsh-emacs-render"
                   (session-id body &optional buffer))

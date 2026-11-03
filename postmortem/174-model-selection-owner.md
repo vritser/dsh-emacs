@@ -1,5 +1,9 @@
 # 174 — Give model selection its own owner
 
+The deferred question/approval extraction is addressed by
+[175](175-interaction-module-owner.md); the model ownership decision remains
+in effect.
+
 ## Background
 
 On baseline `26782bc`, the entry point owned model catalog presentation,
