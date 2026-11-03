@@ -54,10 +54,6 @@
 ;; `yank-media-preferred-types' is Emacs 31+ and is not declared here: a
 ;; load-time `defvar' would shadow the package's default.  Its one use site
 ;; guards on `boundp' and suppresses the byte-compiler warning instead.
-;; Emacs 31-only; the 28.1 baseline falls back to
-;; `dsh-emacs--completion-table-with-metadata'.  The declaration only keeps
-;; byte-compile on Emacs <=30 from warning about an unknown function.
-(declare-function completion-table-with-metadata "minibuffer" (table metadata))
 (declare-function dsh-emacs-command--completion-prefix-p "dsh-emacs-command"
                   (text))
 (declare-function dsh-emacs-reference--at-token "dsh-emacs-reference"
@@ -439,15 +435,25 @@ is unavailable does `dsh-emacs-default-cwd' apply."
 
 (defun dsh-emacs--chat-session-item (session-id)
   "Return the cached session item for SESSION-ID, or nil."
-  (catch 'found
-    (dolist (item dsh-emacs--sessions)
-      (when (equal session-id (dsh-protocol-session-session-id item))
-        (throw 'found item)))))
+  (cl-find session-id dsh-emacs--sessions
+           :test #'equal :key #'dsh-protocol-session-session-id))
 
 (defun dsh-emacs--chat-title (session-id)
   "Display title for SESSION-ID, identical to the session list row, or nil."
   (let ((item (dsh-emacs--chat-session-item session-id)))
     (and item (dsh-emacs-session--display-title item))))
+
+(defun dsh-emacs--workspace-by-id (workspace-id)
+  "Return the cached workspace struct with WORKSPACE-ID, or nil."
+  (cl-find workspace-id dsh-emacs--workspaces
+           :test #'equal :key #'dsh-protocol-workspace-workspace-id))
+
+(defun dsh-emacs--workspace-containing (session-id)
+  "Return the cached workspace struct listing SESSION-ID, or nil."
+  (cl-find-if (lambda (ws)
+                (member session-id
+                        (dsh-protocol-workspace-session-ids ws)))
+              dsh-emacs--workspaces))
 
 (defun dsh-emacs--chat-cwd (session-id)
   "Directory of SESSION-ID: the session's `cwd' from session/list.
@@ -455,13 +461,10 @@ Falls back to the path of the workspace that accounts for the session
 (a freshly created workspace session may not be in the session cache yet
 but is already in `dsh-emacs--workspaces').  Returns nil when the session
 is not known at all."
-  (or (let ((item (dsh-emacs--chat-session-item session-id)))
-        (and item (dsh-protocol-session-cwd item)))
-      (catch 'found
-        (dolist (ws dsh-emacs--workspaces)
-          (when (member session-id
-                        (dsh-protocol-workspace-session-ids ws))
-            (throw 'found (dsh-protocol-workspace-path ws)))))))
+  (or (when-let* ((item (dsh-emacs--chat-session-item session-id)))
+        (dsh-protocol-session-cwd item))
+      (when-let* ((ws (dsh-emacs--workspace-containing session-id)))
+        (dsh-protocol-workspace-path ws))))
 
 (defun dsh-emacs--sanitize-buffer-name (title)
   "Sanitize TITLE for use as a buffer name.
@@ -759,15 +762,13 @@ matches the workspace registered for it under any spelling."
 
 (defun dsh-emacs--workspace-id-by-path (dir workspaces)
   "Id from WORKSPACES whose canonical path equals DIR, or nil."
-  (let ((want (dsh-emacs--workspace-canonical-path dir)))
-    (and want
-         (catch 'found
-           (dolist (ws workspaces)
-             (when (equal want
-                          (dsh-emacs--workspace-canonical-path
-                           (dsh-protocol-workspace-path ws)))
-               (throw 'found
-                      (dsh-protocol-workspace-workspace-id ws))))))))
+  (when-let* ((want (dsh-emacs--workspace-canonical-path dir))
+              (ws (cl-find want workspaces
+                           :test #'equal
+                           :key (lambda (workspace)
+                                  (dsh-emacs--workspace-canonical-path
+                                   (dsh-protocol-workspace-path workspace))))))
+    (dsh-protocol-workspace-workspace-id ws)))
 
 (declare-function dsh-emacs-events--host-upsert-workspace
                   "dsh-emacs-events" (workspace))
@@ -1445,22 +1446,15 @@ Raise and focus the selected frame when Emacs is graphical."
   "Return SESSIONS belonging to WORKSPACE-ID, excluding archived,
 subagent and blank rows.  Returns a list of session structs in recency
 order."
-  (let ((ws-by-id
-         (catch 'found
-           (dolist (ws dsh-emacs--workspaces)
-             (when (equal workspace-id
-                            (dsh-protocol-workspace-workspace-id ws))
-               (throw 'found ws))))))
-    (if (null ws-by-id)
-        nil
-      (let ((session-ids (dsh-protocol-workspace-session-ids ws-by-id)))
-        (dsh-emacs-session--sort-by-recency
-         (cl-remove-if
-          (lambda (s)
-            (or (not (dsh-emacs-session--visible-p s))
-                (not (member (dsh-protocol-session-session-id s)
-                             session-ids))))
-          dsh-emacs--sessions))))))
+  (when-let* ((ws (dsh-emacs--workspace-by-id workspace-id)))
+    (let ((session-ids (dsh-protocol-workspace-session-ids ws)))
+      (dsh-emacs-session--sort-by-recency
+       (cl-remove-if
+        (lambda (s)
+          (or (not (dsh-emacs-session--visible-p s))
+              (not (member (dsh-protocol-session-session-id s)
+                           session-ids))))
+        dsh-emacs--sessions)))))
 
 (defun dsh-emacs--workspace-label (workspace-id)
   "Human label of WORKSPACE-ID: title, else path basename, else the id."
@@ -1481,71 +1475,19 @@ across all workspaces."
 
 (defun dsh-emacs--workspace-title (workspace-id)
   "Return the title of the workspace with WORKSPACE-ID, or nil."
-  (catch 'found
-    (dolist (ws dsh-emacs--workspaces)
-      (when (equal workspace-id (dsh-protocol-workspace-workspace-id ws))
-        (throw 'found (dsh-protocol-workspace-title ws))))))
+  (when-let* ((ws (dsh-emacs--workspace-by-id workspace-id)))
+    (dsh-protocol-workspace-title ws)))
 
 (defun dsh-emacs--workspace-path (workspace-id)
   "Return the path of the workspace with WORKSPACE-ID, or nil."
-  (catch 'found
-    (dolist (ws dsh-emacs--workspaces)
-      (when (equal workspace-id (dsh-protocol-workspace-workspace-id ws))
-        (throw 'found (dsh-protocol-workspace-path ws))))))
+  (when-let* ((ws (dsh-emacs--workspace-by-id workspace-id)))
+    (dsh-protocol-workspace-path ws)))
 
 (defun dsh-emacs--workspace-for-session (session-id)
   "Return the workspace id SESSION-ID belongs to, or nil when ungrouped."
-  (catch 'found
-    (dolist (ws dsh-emacs--workspaces)
-      (when (member session-id (dsh-protocol-workspace-session-ids ws))
-        (throw 'found (dsh-protocol-workspace-workspace-id ws))))))
+  (when-let* ((ws (dsh-emacs--workspace-containing session-id)))
+    (dsh-protocol-workspace-workspace-id ws)))
 
-;; With `ivy-mode' on, `ivy-sort-functions-alist' takes over
-;; sorting; we adapt to whichever completion framework the user
-;; actually enabled (see `dsh-emacs--completing-read-ordered').
-;; The defvar only silences a byte-compile warning and guarantees
-;; dynamic binding; it has no effect when the framework is not
-;; loaded.
-(defvar ivy-sort-functions-alist)
-
-(defun dsh-emacs--completion-table-with-metadata (collection metadata)
-  "Return COLLECTION as a completion table carrying METADATA.
-METADATA is an alist of completion metadata (see `completion-metadata'),
-e.g. `display-sort-function' pinned to identity to stop a frontend from
-reordering the candidates.  Uses the Emacs 31 built-in when present and
-the equivalent table lambda otherwise; the built-in is Emacs 31-only,
-while the package baseline is 28.1."
-  (if (fboundp 'completion-table-with-metadata)
-      (completion-table-with-metadata collection metadata)
-    (lambda (string pred action)
-      (if (eq action 'metadata)
-          `(metadata . ,metadata)
-        (complete-with-action action collection string pred)))))
-
-(defun dsh-emacs--completing-read-ordered (prompt collection &rest args)
-  "`completing-read', but keep COLLECTION's incoming order from
-  being reordered by the completion framework.
-  Adapts to whichever framework the user actually enabled, without
-  hardcoding any of them:
-  - vertico / corfu / stock minibuffer: reads the completion
-    metadata's `display-sort-function' (vertico--sort-function /
-    corfu both take priority over their own sort toggles); set it to
-    identity here and the framework drops the reorder by itself;
-  - ivy: does not read that metadata and takes the sort function per
-    collection/caller from `ivy-sort-functions-alist' — bound
-    dynamically to ((t . nil)) (docstring: nil = no sorting),
-    effective for this call only;
-  - other frameworks (selectrum etc.) also honor the
-    display-sort-function convention.
-  PROMPT/COLLECTION/ARGS have exactly the same semantics as
-  `completing-read'."
-  (let ((ordered (dsh-emacs--completion-table-with-metadata
-                  collection
-                  '((display-sort-function . identity)))))
-    (if (bound-and-true-p ivy-mode)
-        (let ((ivy-sort-functions-alist '((t))))
-          (apply #'completing-read prompt ordered args))
-      (apply #'completing-read prompt ordered args))))
 
 (defun dsh-emacs--sessions-index ()
   "Hash table session-id → session struct for `dsh-emacs--sessions'.
@@ -1738,7 +1680,7 @@ results in bounded increments."
              (id-table (dsh-emacs--switch-id-table vec))
              (table (dsh-emacs--switch-table
                      vec dsh-emacs-switch-max-candidates))
-             (picked (dsh-emacs--completing-read-ordered
+             (picked (dsh-emacs-ui--completing-read-ordered
                       (dsh-emacs--switch-prompt workspace-id all)
                       table nil t)))
         (when picked
@@ -1834,10 +1776,8 @@ streams, user messages and transcript controls are not fork boundaries."
 
 (defun dsh-emacs--session-preset (session-id)
   "Return the agentPreset cached for SESSION-ID, or nil when unknown."
-  (catch 'found
-    (dolist (item dsh-emacs--sessions)
-      (when (equal session-id (dsh-protocol-session-session-id item))
-        (throw 'found (dsh-protocol-session-agent-preset item))))))
+  (when-let* ((item (dsh-emacs--chat-session-item session-id)))
+    (dsh-protocol-session-agent-preset item)))
 
 (defun dsh-emacs--link-session-preset (session-id)
   "Fill the mode-line agent preset for SESSION-ID.
@@ -2386,7 +2326,7 @@ metadata preserves nearest-first ordering for display and cycling."
           (save-excursion
             (skip-chars-forward dsh-emacs--word-completion-chars)
             (point))
-          (dsh-emacs--completion-table-with-metadata
+          (dsh-emacs-ui--completion-table-with-metadata
            candidates '((display-sort-function . identity)
                         (cycle-sort-function . identity)))
           :exclusive 'no)))
@@ -3837,8 +3777,8 @@ NOT lost while searching."
           ;; [g2|Qwen]" (display hides the rest); typing "m2"
           ;; makes orderless/basic put completion-match-face on
           ;; the key's first [0,2) — spreading the whole key
-          ;; through vertico--display-string would paint the
-          ;; entire line background, and stripping every
+          ;; through the frontend's display transform would paint
+          ;; the entire line background, and stripping every
           ;; property loses the highlight; the right move is to
           ;; embed a face-carrying substring into the visible
           ;; "  " + id text
@@ -3856,7 +3796,7 @@ NOT lost while searching."
                     c))
               (let ((parts (dsh-emacs--model-key-parts cand)))
                 (and parts (substring-no-properties (nth 2 parts)))))))
-         (table (dsh-emacs--completion-table-with-metadata
+         (table (dsh-emacs-ui--completion-table-with-metadata
                  rows
                  ;; Emacs 31's completion-table-with-metadata wants
                  ;; the metadata without the (metadata ...) prefix —
@@ -4023,16 +3963,15 @@ the filter as \"error in process filter: Quit\"."
                                          name)))
                                 candidates))
                   current-provider))
-             ;; Modern vertico (>=2.0) natively supports group-function
-             ;; metadata: it recomputes groups and redraws sticky group
-             ;; headers on every input (no vertico-group.el/group-mode)
-             ;; → take the metadata grouping path; otherwise fall back
-             ;; to candidate header rows + suffixes on duplicate rows
-             ;; (header rows get filtered out).  Old vertico +
-             ;; vertico-group use the same protocol.
+             ;; Vertico applies `group-function' metadata only while its
+             ;; public `vertico-group-format' option is non-nil; that is
+             ;; the capability check, no internal variables.  Grouped
+             ;; rows are flat and the metadata redraws sticky headers on
+             ;; every input.  Otherwise fall back to candidate header
+             ;; rows + suffixes on duplicate rows (header rows get
+             ;; filtered out).
              (grouped (and (bound-and-true-p vertico-mode)
-                           (or (boundp 'vertico--groups)
-                               (boundp 'vertico-group--groups))))
+                           (bound-and-true-p vertico-group-format)))
              (grouped-pair (and grouped
                                 (dsh-emacs--model-grouped-collection
                                  candidates)))

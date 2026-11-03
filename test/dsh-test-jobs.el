@@ -146,32 +146,34 @@
       (setq dsh-emacs-jobs--roster old-roster)
       (kill-buffer chat))))
 
-;; The stop control is two-press: the first press only arms it, the second
-;; kills.  This is dsh web's armed-stop semantics, and it is what keeps a
-;; single stray `k' from killing the model's background work.
-(ert-deftest dsh-emacs-test-jobs-job-kill-first-press-arms ()
+;; The stop control is two-press: the action arms the stop, and only a
+;; confirming `k' inside `dsh-emacs-jobs-kill-arm-seconds' kills.  An arm that
+;; expires leaves the job running.
+(ert-deftest dsh-emacs-test-jobs-stop-expiry-keeps-job-running ()
   :tags '(dsh-unit)
-  (let* ((chat (get-buffer-create " *dsh-test-jobs-kill*"))
-         (job (dsh-protocol-job--from-alist
-               (json-read-from-string
-                (concat "{\"id\":\"bash-9\",\"kind\":\"bash\","
-                        "\"status\":\"running\"}"))))
-         (killed nil))
-    (unwind-protect
-        (with-current-buffer chat
-          (cl-letf (((symbol-function 'dsh-emacs-jobs-kill)
-                     (lambda (j) (setq killed (dsh-protocol-job-id j)))))
-            (dsh-emacs-jobs--request-kill job)
-            (ert-info ((format "%s" "job-kill-first-press-arms"))
-              (should (and (equal dsh-emacs-jobs--kill-armed "bash-9")
-                           (null killed))))
-            (dsh-emacs-jobs--request-kill job)
-            (ert-info ((format "%s" "job-kill-second-press-kills"))
-              (should (equal killed "bash-9")))
-            (ert-info ((format "%s" "job-kill-disarms-after-kill"))
-              (should (null dsh-emacs-jobs--kill-armed)))))
-      (with-current-buffer chat (dsh-emacs-jobs--disarm))
-      (kill-buffer chat))))
+  (with-temp-buffer
+    (let ((job (dsh-protocol-job--from-alist
+                (json-read-from-string
+                 (concat "{\"id\":\"bash-9\",\"kind\":\"bash\","
+                         "\"status\":\"running\"}"))))
+          (messages nil))
+      (cl-letf (((symbol-function 'read-char-choice)
+                 (lambda (&rest _)
+                   (dsh-emacs-jobs--disarm)
+                   ?k))
+                ((symbol-function 'dsh-emacs-jobs-kill)
+                 (lambda (_job) (ert-fail "Expired stop confirmation killed")))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (push (apply #'format fmt args) messages))))
+        (dsh-emacs-jobs--stop-picked job))
+      (ert-info ("job-stop-expiry-keeps-running")
+        (should (cl-some (lambda (msg)
+                           (string-match-p "expired" msg))
+                         messages)))
+      (ert-info ("job-stop-expiry-disarms")
+        (should (null dsh-emacs-jobs--kill-armed))
+        (should (null dsh-emacs-jobs--kill-timer))))))
 
 ;; A stream teardown leaves the roster as last seen, so a reconnect (whose
 ;; first frame is the whole truth) does not empty the job chooser.
@@ -288,40 +290,51 @@
             (should (= (point) 2))))
       (kill-buffer buf))))
 
-;; The menu's `k' is the only place the two-press stop runs, so the arming
-;; press must NOT close the menu: the confirming press is a second `k' on the
-;; same menu, and exiting on the armed press leaves the user no way to reach
-;; the confirmation inside the arm window.  The menu is exercised through its
-;; command with the minibuffer boundary stubbed, since batch has no recursive
-;; minibuffer edit to exit.
-(ert-deftest dsh-emacs-test-jobs-job-menu-kill-arm-keeps-menu-open ()
+;; The stop action arms on its first press and confirms at its own prompt, so
+;; the entry pick (typing) and the verb are separate steps; the confirming
+;; press still runs through the arm window and the kill disarms afterwards.
+(ert-deftest dsh-emacs-test-jobs-job-stop-confirms-at-its-own-prompt ()
   :tags '(dsh-unit)
-  (let* ((chat (get-buffer-create " *dsh-test-job-menu-kill*"))
+  (let* ((chat (get-buffer-create " *dsh-test-job-stop*"))
          (job (dsh-protocol-job--from-alist
                (json-read-from-string
                 (concat "{\"id\":\"bash-11\",\"kind\":\"bash\","
                         "\"label\":\"verify.sh\",\"status\":\"running\"}"))))
-         (exits 0)
-         (killed nil))
+         (killed nil)
+         (prompts 0))
     (unwind-protect
         (with-current-buffer chat
-          (cl-letf (((symbol-function 'dsh-emacs-jobs--menu-chat) (lambda () chat))
-                    ((symbol-function 'dsh-emacs-jobs--menu-item) (lambda () job))
-                    ((symbol-function 'exit-minibuffer) (lambda () (setq exits (1+ exits))))
-                    ((symbol-function 'dsh-emacs-jobs-kill)
-                     (lambda (j) (setq killed (dsh-protocol-job-id j)))))
-            (dsh-emacs-jobs--menu-kill)
-            (ert-info ((format "%s" "job-menu-kill-arm-keeps-menu-open"))
-              (should (and (equal dsh-emacs-jobs--kill-armed "bash-11")
-                           (null killed)
-                           (= exits 0))))
-            (dsh-emacs-jobs--menu-kill)
-            (ert-info ((format "%s" "job-menu-kill-second-press-kills"))
-              (should (and (equal killed "bash-11") (= exits 1))))
-            (ert-info ((format "%s" "job-menu-kill-disarms-after-confirm"))
+          (cl-letf (((symbol-function 'dsh-emacs-jobs-kill)
+                     (lambda (j) (setq killed (dsh-protocol-job-id j))))
+                    ((symbol-function 'read-char-choice)
+                     (lambda (&rest _) (setq prompts (1+ prompts)) ?k)))
+            (dsh-emacs-jobs--stop-picked job)
+            (ert-info ((format "%s" "job-stop-confirms-at-its-own-prompt"))
+              (should (and (equal killed "bash-11") (= prompts 1))))
+            (ert-info ((format "%s" "job-stop-disarms-after-confirm"))
               (should (null dsh-emacs-jobs--kill-armed)))))
       (with-current-buffer chat (dsh-emacs-jobs--disarm))
       (kill-buffer chat))))
+
+(ert-deftest dsh-emacs-test-jobs-job-stop-cancel-clears-confirmation ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (let ((job (dsh-protocol-job--from-alist
+                '((id . "cancel-job") (kind . "bash") (status . "running"))))
+          cancelled)
+      (unwind-protect
+          (progn
+            (cl-letf (((symbol-function 'read-char-choice)
+                       (lambda (&rest _) (signal 'quit nil)))
+                      ((symbol-function 'dsh-emacs-jobs-kill)
+                       (lambda (_) (ert-fail "Cancelled stop killed a job"))))
+              (condition-case nil
+                  (dsh-emacs-jobs--stop-picked job)
+                (quit (setq cancelled t))))
+            (should cancelled)
+            (should-not dsh-emacs-jobs--kill-armed)
+            (should-not dsh-emacs-jobs--kill-timer))
+        (dsh-emacs-jobs--disarm)))))
 
 ;; `q' in an output buffer must cancel that buffer's subscription (the host
 ;; keeps the ring, so re-opening re-reads it) while leaving the text in place
@@ -531,6 +544,48 @@
         (when (buffer-live-p chat-b) (kill-buffer chat-b))
         (delete-process proc-a)
         (delete-process proc-b)))))
+
+;; The roster list runs each action on the picked job: RET shows output,
+;; C-c k starts the stop confirmation, and C-c r refreshes without a pick.
+(ert-deftest dsh-emacs-test-jobs-list-jobs-runs-picked-action ()
+  :tags '(dsh-unit)
+  (let* ((job (dsh-protocol-job--from-alist
+               '((id . "job-1") (kind . "bash") (label . "verify")
+                 (status . "running"))))
+         (label (caar (dsh-emacs-jobs--table (list job)))))
+    (dolist (case '(("RET" . show) ("C-c k" . stop) ("C-c r" . refresh)))
+      (ert-info ((format "%s" (format "list-jobs-%s-runs-%s"
+                                      (car case) (cdr case))))
+        (let ((chat (generate-new-buffer " *t-jobs-action*"))
+              (seen nil))
+          (unwind-protect
+              (with-current-buffer chat
+                (setq dsh-emacs-jobs--roster (list job))
+                (cl-letf (((symbol-function 'completing-read)
+                           (lambda (&rest _)
+                             (cl-letf (((symbol-function 'this-command-keys-vector)
+                                        (lambda () (kbd (car case)))))
+                               (dsh-emacs-ui--menu-record-action))
+                             (if (eq (cdr case) 'refresh)
+                                 (dsh-emacs-ui--menu-global-action)
+                               label)))
+                          ((symbol-function 'dsh-emacs-jobs-show-output)
+                           (lambda (j)
+                             (push (list 'show (dsh-protocol-job-id j)) seen)))
+                          ((symbol-function 'dsh-emacs-jobs--stop-picked)
+                           (lambda (j)
+                             (push (list 'stop (dsh-protocol-job-id j)) seen)))
+                          ((symbol-function 'dsh-emacs-jobs-close)
+                           (lambda (&rest _) (push 'close seen)))
+                          ((symbol-function 'dsh-emacs-jobs-open)
+                           (lambda (&rest _) (push 'open seen))))
+                  (dsh-emacs-list-jobs))
+                (should (equal (nreverse seen)
+                               (pcase (cdr case)
+                                 ('show (list (list 'show "job-1")))
+                                 ('stop (list (list 'stop "job-1")))
+                                 ('refresh (list 'close 'open))))))
+            (when (buffer-live-p chat) (kill-buffer chat))))))))
 
 (provide 'dsh-test-jobs)
 ;;; dsh-test-jobs.el ends here

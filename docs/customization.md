@@ -143,7 +143,7 @@ The most commonly used options, straight in your config:
 (setq dsh-emacs-shell-max-output 50000)             ; cap on a `!` command's captured output shown in the transcript
 (setq dsh-emacs-shell-null-stdin t)                 ; close `!` commands' input pipe immediately (EOF, independent of shell syntax)
 (setq dsh-emacs-shell-timeout nil)                  ; nil = no limit; positive integer seconds only (surviving background children are untracked)
-(setq dsh-emacs-jobs-kill-arm-seconds 3)           ; how long the `k' press in the `C-c C-j' background-job menu stays armed before a second press stops the job (matches dsh web's two-press stop)
+(setq dsh-emacs-jobs-kill-arm-seconds 3)           ; how long the stop confirmation after C-c k waits for a confirming k
 ```
 
 ## Render style
@@ -499,13 +499,29 @@ resume, `✎` edit and `✕` clear.
 Steering items take priority in the separate Next Message preview; hover for
 the full text, and click or press RET on the cells just after the preview: the
 up arrow sends that message now (steering the running turn, or submitting a
-text-only item literally while idle — the same verb RET runs in `C-c C-q`; the
-queued text is never re-parsed and the current draft stays in the input), `✎`
-edits its text in the minibuffer (text-only messages; the manager's `e`), and
-`✕` deletes it (the manager's `d`). Before the server confirms a newly
-queued item, its preview has no action cells. Sending an item with
-attachments while idle reports an error and leaves the original item queued.
+text-only item literally while idle). In `C-c C-q`, select the entry and
+press RET for the same action. Queued text is never re-parsed and the draft
+stays in the input. `✎` edits its text in the minibuffer (text-only messages;
+the manager's `C-c e`), and `✕` deletes it (the manager's `C-c d`). Before the
+server confirms a newly queued item, its preview has no action cells. Sending
+an item with attachments while idle reports an error and leaves it queued.
 `C-c C-q` manages the whole queue and applies the same send-now restriction.
+
+## Queue and job menus
+
+`C-c C-q` opens the pending-message list. Type to filter it or use your
+completion frontend's normal navigation. `RET` or `C-c s` sends the selected
+entry now, `C-c e` edits it, `C-c d` deletes it, and `C-c x` deletes the whole
+queue after confirmation. The last action needs no matching entry.
+
+An entry that carries an image or file cannot be edited: the edit replaces its
+content with a single text block, so `C-c e` reports that and leaves it queued.
+
+`C-c C-j` opens the background-job list, with live jobs first. `RET` shows
+the selected job's output. `C-c k` stops it after a confirming `k` within
+`dsh-emacs-jobs-kill-arm-seconds`; `C-c r` refreshes the roster without
+selecting a job. `C-g` cancels a picker or confirmation. Plain letters never
+trigger menu actions.
 
 ## Markdown responsiveness
 

@@ -67,6 +67,7 @@
 (require 'cl-lib)
 (require 'dsh-emacs-protocol)
 (require 'dsh-emacs-server)
+(require 'dsh-emacs-ui)
 
 (declare-function dsh-emacs--active-session-id "dsh-emacs.el" ())
 ;; The "/" completion and the slash menu also list the skill catalog (see
@@ -77,11 +78,6 @@
                   (session-id))
 (declare-function dsh-emacs-skill-label "dsh-emacs-skill.el" (skill))
 (declare-function dsh-emacs-skill-open "dsh-emacs-skill.el" (skill))
-;; The completion table carries the "/" category (see `dsh-emacs-mode'); the
-;; helper lives in dsh-emacs.el (Emacs 31 built-in, else a table lambda).
-(declare-function dsh-emacs--completion-table-with-metadata
-                  "dsh-emacs.el" (collection metadata))
-
 ;; Buffer-local in dsh-emacs.el: the start of the editable input area.
 (defvar dsh-emacs--input-marker)
 
@@ -593,7 +589,7 @@ rows that overflow the popup width.  A user-only skill (no
            ;; below passes this same table, so it matches under exactly the
            ;; styles the front-end will use.
            (table (and candidates
-                       (dsh-emacs--completion-table-with-metadata
+                       (dsh-emacs-ui--completion-table-with-metadata
                         candidates '((category . dsh-emacs-command)))))
            (token (buffer-substring-no-properties start (point))))
       (when (and table

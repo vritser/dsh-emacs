@@ -5,7 +5,6 @@
 (require 'dsh-test-support)
 
 (defvar vertico-mode)
-(defvar vertico--groups)
 (defvar vertico-group-format)
 
 ;; --- Test 47: model catalog expansion + sorting + selectModel call ---
@@ -459,7 +458,7 @@
     (unwind-protect
         (progn
           (when saved (fmakunbound 'completion-table-with-metadata))
-          (let ((table (dsh-emacs--completion-table-with-metadata
+          (let ((table (dsh-emacs-ui--completion-table-with-metadata
                         '("alpha" "beta" "gamma")
                         '((display-sort-function . identity)
                           (cycle-sort-function . identity)
@@ -514,7 +513,7 @@
                     ((symbol-function 'message)
                      (lambda (fmt &rest args)
                        (push (apply #'format fmt args) msgs))))
-            (let ((vertico-mode t) (vertico--groups nil))
+            (let ((vertico-mode t) (vertico-group-format "%s"))
               (dsh-emacs-select-model))
             (let* ((call (car calls))
                    (params (cadr call)))
@@ -1218,6 +1217,64 @@
     (ert-info ((format "%s" "permission-set-fetches-catalog-and-switches"))
       (should (equal '("permissionPresets/catalog") methods))
       (should (equal "/permission workspace-write" executed)))))
+
+;; The picker groups only when Vertico will actually apply `group-function',
+;; which is gated on the option's VALUE (nil = no group titles).  The fallback
+;; keeps provider headers and suffixes duplicate ids so they stay distinct.
+(defun dsh-test--model-picker-rows (group-format)
+  "Return the model picker's candidate keys when GROUP-FORMAT is in effect."
+  (let ((buf (generate-new-buffer " *dsh-model-rows*"))
+        (rows nil))
+    (unwind-protect
+        (with-current-buffer buf
+          (setq dsh-emacs--current-session "sess-g")
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (method params cb)
+                       (unless (string= method "session/list")
+                         (funcall
+                          cb t
+                          (cond
+                           ((string= method "session/modelCatalog")
+                            '((current . ((provider . "g1") (model . "m1")))
+                              (groups
+                               . [((id . "g1") (name . "DeepSeek")
+                                   (models . [((id . "m2") (name . "Dup-1"))]))
+                                  ((id . "g2") (name . "Qwen")
+                                   (models . [((id . "m2") (name . "Dup-2"))]))])))
+                           (t nil))))))
+                    ((symbol-function 'completing-read)
+                     (lambda (_prompt collection &rest _)
+                       (setq rows (all-completions "" collection nil))
+                       (signal 'quit nil)))
+                    ((symbol-function 'message) (lambda (&rest _) nil)))
+            (let ((vertico-mode t)
+                  (vertico-group-format group-format))
+              (condition-case nil (dsh-emacs-select-model) (quit nil)))))
+      (kill-buffer buf))
+    rows))
+
+(ert-deftest dsh-emacs-test-model-selection-grouped-rows-with-group-format ()
+  :tags '(dsh-unit)
+  (let ((rows (dsh-test--model-picker-rows "%s")))
+    (ert-info ("model-grouped-rows-have-no-header-candidates")
+      (should-not (member "Qwen" rows))
+      (should-not (member "DeepSeek" rows)))
+    (ert-info ("model-grouped-rows-show-bare-ids")
+      (should (cl-some (lambda (row)
+                         (equal "  m2" (get-text-property 0 'display row)))
+                       rows)))))
+
+(ert-deftest dsh-emacs-test-model-selection-fallback-rows-without-group-format ()
+  :tags '(dsh-unit)
+  (let ((rows (dsh-test--model-picker-rows nil)))
+    (ert-info ("model-fallback-rows-carry-provider-headers")
+      (should (member "Qwen" rows))
+      (should (member "DeepSeek" rows)))
+    (ert-info ("model-fallback-rows-suffix-duplicate-ids")
+      (should (cl-some (lambda (row)
+                         (equal "  m2 (Qwen)"
+                                (get-text-property 0 'display row)))
+                       rows)))))
 
 (provide 'dsh-test-model-selection)
 ;;; dsh-test-model-selection.el ends here

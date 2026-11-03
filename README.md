@@ -78,7 +78,7 @@ theme's `shadow` face (grey by default); running session dots are orange.
 | `C-c C-c` | Send; while busy, queue input or interrupt if input and attachments are empty |
 | `C-u C-c C-c` | Steer the running turn (default configuration) |
 | `C-c C-b` | Interrupt the running turn |
-| `C-c C-q` / `C-c C-j` | Manage pending messages / background jobs |
+| `C-c C-q` / `C-c C-j` | [Manage pending messages / background jobs](docs/customization.md#queue-and-job-menus) |
 | `C-c C-m` / `C-c C-e` | Select a model / change reasoning effort |
 | `C-c C-a` | Stage a file; repeat to add more |
 | `C-c C-v` / `C-c C-d` | Paste a clipboard image / discard staged attachments |

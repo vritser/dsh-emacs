@@ -26,11 +26,9 @@
 ;;
 ;; Emacs-native interaction (no panels, no overlays, same shape as the pending
 ;; queue in `dsh-emacs-queue.el'):
-;;   - `dsh-emacs-list-jobs' (`C-c C-j') opens the roster as a minibuffer
-;;     candidate list and acts on the CURRENTLY highlighted entry with single
-;;     keys (vertico up/down picks the row — no numbering): RET shows the
-;;     job's retained output, k kills it (two presses, like dsh web's armed
-;;     stop), r refreshes;
+;;   - `dsh-emacs-list-jobs' (`C-c C-j') opens one completion list:
+;;     RET shows retained output, C-c k stops, C-c r refreshes;
+;;     stopping requires a confirming k, like dsh web's armed stop;
 ;;   - each job's output lives in its own read-only `*dsh-job: …*' buffer,
 ;;     appended as the `job/follow' stream delivers batches; `q' buries it.
 ;;
@@ -479,20 +477,9 @@ the owning agent its completion notice; the roster converges through the
              (message "Could not stop %s: %s" job-id
                       (dsh-emacs-rpc-error-text value)))))))))
 
-(defun dsh-emacs-jobs--request-kill (job)
-  "Two-press stop for JOB: arm on the first press, kill on the second.
-Returns non-nil only when JOB was actually killed; nil means this press
-armed the confirmation (`dsh-emacs-jobs--menu-kill' keeps the menu open
-for the confirming press rather than exiting on the armed one)."
-  (let ((job-id (dsh-protocol-job-id job)))
-    (if (equal job-id dsh-emacs-jobs--kill-armed)
-        (progn (dsh-emacs-jobs--disarm)
-               (dsh-emacs-jobs-kill job)
-               t)
-      (dsh-emacs-jobs--arm job-id)
-      (message "Press k again within %ss to stop %s"
-               dsh-emacs-jobs-kill-arm-seconds job-id)
-      nil)))
+(defun dsh-emacs-jobs--armed-p (job)
+  "Return non-nil when JOB's stop is armed for a confirming press."
+  (equal (dsh-protocol-job-id job) dsh-emacs-jobs--kill-armed))
 
 ;;; ---------------------------------------------------------------------------
 ;;; The roster menu (`C-c C-j')
@@ -500,152 +487,59 @@ for the confirming press rather than exiting on the armed one)."
 
 (defun dsh-emacs-jobs--table (jobs)
   "Return ((LABEL . JOB) ...) for JOBS with unique LABELs.
-Live jobs lead, each group in the
-host's own order; colliding labels get a numeric suffix so a label maps
-back to exactly one job however the minibuffer picked it.  The suffix is
-tracked on the FINAL labels, not just the raw descriptions: a job whose
-description already looks like a generated suffix (\"same [2]\") must not
-reuse a label another job already claimed — the candidate keeps
-incrementing until it is free.  Every final label therefore maps to
-exactly one job, and the job rides in the cdr the menu verbs act on."
-  (let ((live (cl-remove-if-not #'dsh-emacs-jobs--live-p jobs))
-        (settled (cl-remove-if #'dsh-emacs-jobs--live-p jobs))
-        (seen (make-hash-table :test 'equal))
-        (used (make-hash-table :test 'equal)))
-    (mapcar
-     (lambda (job)
-       (let* ((base (dsh-emacs-jobs--describe job))
-              (n (1+ (gethash base seen 0)))
-              (label (if (= n 1) base (format "%s [%d]" base n))))
-         (while (gethash label used)
-           (setq n (1+ n)
-                 label (format "%s [%d]" base n)))
-         (puthash base n seen)
-         (puthash label t used)
-         (cons label job)))
-     (append live settled))))
+Live jobs lead, each group in the host's own order; colliding labels
+are suffixed by `dsh-emacs-ui-menu-entries' so a label maps back to
+exactly one job however the minibuffer picked it."
+  (dsh-emacs-ui-menu-entries
+   (append (cl-remove-if-not #'dsh-emacs-jobs--live-p jobs)
+           (cl-remove-if #'dsh-emacs-jobs--live-p jobs))
+   #'dsh-emacs-jobs--describe))
 
-(defvar dsh-emacs-jobs--pick-table nil
-  "((LABEL . JOB) ...): the entries of the open job menu.
-A DYNAMIC binding set by `dsh-emacs-list-jobs' around the
-`completing-read'; the menu's single-key commands resolve the entry they
-act on through this table — the same pattern as the queue chooser.")
-
-(defun dsh-emacs-jobs--menu-item ()
-  "Return the item selected by highlight, typed label/prefix, or menu order.
-The UI module supplies the optional frontend's highlighted label; this menu
-owns its item lookup and fallback policy."
-  (let* ((hl (dsh-emacs-ui-completion-highlighted))
-         (typed (condition-case nil (minibuffer-contents) (error nil)))
-         (entry (or (and hl (assoc hl dsh-emacs-jobs--pick-table))
-                    (and typed (assoc typed dsh-emacs-jobs--pick-table))
-                    (and typed
-                         (let ((hit (car (all-completions
-                                          typed
-                                          (mapcar #'car
-                                                  dsh-emacs-jobs--pick-table)))))
-                           (and hit (assoc hit dsh-emacs-jobs--pick-table))))
-                    (car dsh-emacs-jobs--pick-table))))
-    (cdr entry)))
-
-(defun dsh-emacs-jobs--menu-chat ()
-  "The chat buffer the job menu was opened from."
-  (window-buffer (minibuffer-selected-window)))
-
-(defun dsh-emacs-jobs--menu-run (fn)
-  "Close the job minibuffer and run FN on the picked job in the chat buffer.
-FN is deferred through `run-at-time 0': inside a minibuffer command nothing
-after `exit-minibuffer' is ever executed — the exit THROWS out of the
-recursive minibuffer edit — so the action must be scheduled BEFORE the exit
-and fired once the minibuffer is gone."
-  (let* ((chat (dsh-emacs-jobs--menu-chat))
-         (job (dsh-emacs-jobs--menu-item)))
-    (run-at-time 0 nil
-                 (lambda ()
-                   (when (and (buffer-live-p chat) job)
-                     (with-current-buffer chat
-                       (funcall fn job)))))
-    (exit-minibuffer)))
-
-(defun dsh-emacs-jobs--menu-show ()
-  "Show the picked job's output (`RET')."
-  (interactive)
-  (dsh-emacs-jobs--menu-run #'dsh-emacs-jobs-show-output))
-
-(defun dsh-emacs-jobs--menu-kill ()
-  "Stop the picked job (`k'), with the two-press confirmation.
-The arming press KEEPS the menu open: the confirmation is a second `k' on
-the same menu, so the armed state stays reachable — the menu is the only
-place that runs the two-press logic, and closing on the arming press would
-leave no way to press `k' again inside the arm window.  Only the killing
-press closes the menu."
-  (interactive)
-  (let* ((chat (dsh-emacs-jobs--menu-chat))
-         (job (dsh-emacs-jobs--menu-item)))
-    (when (and (buffer-live-p chat) job)
-      (when (with-current-buffer chat (dsh-emacs-jobs--request-kill job))
-        (exit-minibuffer)))))
-
-(defun dsh-emacs-jobs--menu-refresh ()
-  "Re-open the roster stream for the menu's session (`r')."
-  (interactive)
-  (let ((chat (dsh-emacs-jobs--menu-chat)))
-    (run-at-time 0 nil
-                 (lambda ()
-                   (when (buffer-live-p chat)
-                     (with-current-buffer chat
-                       (dsh-emacs-jobs-close chat)
-                       (dsh-emacs-jobs-open chat)
-                       (message "Refreshing background jobs…")))))
-    (exit-minibuffer)))
-
-(defun dsh-emacs-jobs--chooser-keymap ()
-  "Minibuffer keymap for the job menu.
-`RET' shows the picked job's output, `k' stops it, `r' refreshes; built
-exactly like the queue chooser's keymap (a copy of the minibuffer's
-current local map — vertico's when active — plus our single keys), mounted
-last in the setup-hook chain so the keys win."
-  (let ((map (copy-keymap (or (current-local-map) (make-sparse-keymap)))))
-    (define-key map (kbd "RET") #'dsh-emacs-jobs--menu-show)
-    (define-key map (kbd "k") #'dsh-emacs-jobs--menu-kill)
-    (define-key map (kbd "r") #'dsh-emacs-jobs--menu-refresh)
-    map))
-
-(defun dsh-emacs-jobs--chooser-setup-hook ()
-  "Job-menu minibuffer setup: stable order, first entry preselected.
-Mirrors the queue chooser: pins the frontend's own sort variables (the
-candidates carry no completion metadata to pin) and preselects the first
-row, with live jobs ordered before settled jobs.  Returns nil
-explicitly — `minibuffer-with-setup-hook' funcalls the setup value."
-  (when (boundp 'vertico-sort-function)
-    (setq-local vertico-sort-function nil))
-  (when (boundp 'vertico-sort-override-function)
-    (setq-local vertico-sort-override-function nil))
-  (when (boundp 'vertico-preselect)
-    (setq-local vertico-preselect 'first))
-  (use-local-map (dsh-emacs-jobs--chooser-keymap))
-  nil)
+(defun dsh-emacs-jobs--stop-picked (job)
+  "Stop JOB with the two-press confirmation.
+The stop action is already a deliberate choice, so the confirming press
+gets its own prompt naming the arm window; no letter doubles as an action
+while typing."
+  (let ((job-id (dsh-protocol-job-id job)))
+    (unwind-protect
+        (progn
+          (dsh-emacs-jobs--arm job-id)
+          (read-char-choice
+           (format "Stop %s: press k again within %ss: "
+                   job-id dsh-emacs-jobs-kill-arm-seconds)
+           '(?k))
+          (if (dsh-emacs-jobs--armed-p job)
+              (progn
+                (dsh-emacs-jobs--disarm)
+                (dsh-emacs-jobs-kill job))
+            (message "Stop confirmation expired; %s is still running"
+                     job-id)))
+      (dsh-emacs-jobs--disarm))))
 
 (defun dsh-emacs-list-jobs ()
-  "Manage this session's background jobs (minibuffer menu).
-Opens the roster the `job/list' stream has mirrored as a candidate list
-(live jobs first; vertico/icomplete up/down moves) and acts on the picked
-job with SINGLE keys bound inside the minibuffer: `RET' show its retained
-output in a read-only buffer, `k' stop it (press twice within
-`dsh-emacs-jobs-kill-arm-seconds'), `r' re-subscribe the roster.  A session
-with no jobs offers nothing to pick, so this reports that instead of
-opening an empty menu."
+  "Manage this session's background jobs in one completion list.
+RET shows the selected job's output, C-c k stops it after confirmation,
+and C-c r refreshes the roster.  Ordinary letters filter the list;
+C-g cancels.  A session with no jobs reports that instead of opening
+an empty menu."
   (interactive)
   (let ((jobs dsh-emacs-jobs--roster))
     (when (null jobs)
       (user-error "No background jobs for this session"))
-    (let ((dsh-emacs-jobs--pick-table (dsh-emacs-jobs--table jobs)))
-      (minibuffer-with-setup-hook
-          #'dsh-emacs-jobs--chooser-setup-hook
-        (completing-read
-         (format "Job (%d live): " (car (dsh-emacs-jobs-counts)))
-         (mapcar #'car dsh-emacs-jobs--pick-table)
-         nil t nil nil (caar dsh-emacs-jobs--pick-table))))))
+    (pcase-let ((`(,action ,job)
+                 (dsh-emacs-ui-menu-read
+                  (format "Job (%d live; RET show, C-c k stop, C-c r refresh): "
+                          (car (dsh-emacs-jobs-counts)))
+                  (dsh-emacs-jobs--table jobs) 'show
+                  '(("C-c k" stop) ("C-c r" refresh t)))))
+      (pcase action
+        ('show (dsh-emacs-jobs-show-output job))
+        ('stop (dsh-emacs-jobs--stop-picked job))
+        ('refresh
+         (dsh-emacs-jobs-close (current-buffer))
+         (dsh-emacs-jobs-open (current-buffer))
+         (message "Refreshing background jobs…"))
+        (_ (user-error "Unknown job menu action: %s" action))))))
 
 (provide 'dsh-emacs-jobs)
 

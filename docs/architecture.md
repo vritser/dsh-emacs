@@ -145,11 +145,30 @@ settings RPC path. See [decision record 079](../postmortem/079-config-file-entry
 
 ## Transcript fragments (`dsh-emacs-ui.el`)
 
-The UI module also owns optional completion-frontend integration. Queue and
-job menus obtain the highlighted label through
-`dsh-emacs-ui-completion-highlighted`; each menu retains its typed-label,
-prefix and default-item policy. Only this UI boundary reads Vertico's private
-candidate state.
+The UI module also owns optional completion-frontend integration, so the
+ordered-read helper (`dsh-emacs-ui--completing-read-ordered`) lives here and
+feature modules do not depend back on the entry point. Queue and job menus
+use one `completing-read` list with modified action keys.
+`dsh-emacs-ui-menu-entries` assigns unique labels and
+`dsh-emacs-ui-menu-read` returns `(ACTION ITEM)` after selection. Item action
+keys bind directly to the frontend's original RET command, keeping its
+command preparation hooks. A buffer-local pre-command hook records the action
+in a dynamically bound context owned by that read; each command resets it to
+its own action or the default. Global actions exit without accepting a
+candidate (ITEM is nil). One action spec per menu carries the keys, their
+actions and the global flag, so keymap, recorder and dispatch cannot drift;
+the queue/job owner executes the result after the read returns.
+Candidate order is declared through collection metadata
+(`display-sort-function`, via `dsh-emacs-ui--completing-read-ordered`) rather
+than by poking a frontend's sort variables, so stock completion, Vertico and
+Ivy all keep the menu's order (Ivy through its public
+`ivy-sort-functions-alist`, bound inside
+`dsh-emacs-ui--completing-read-ordered`).  Vertico's
+`vertico-sort-override-function` outranks that metadata, so the menu setup
+binds it away buffer-locally (`dsh-emacs-ui--menu-keep-order`).  No frontend
+internal state is read, and the selected label comes from
+`completing-read`'s return value. Each menu retains its labels, ordering,
+key table and actions.
 
 The renderer supplies a complete alist snapshot: identity, labels, body,
 border style, optional header/body faces, and the non-foldable flag. Optional
@@ -1018,10 +1037,10 @@ fitting and buffer geometry.
 Our steer/delete/edit RPCs still update the mirror optimistically on success,
 so Composer refreshes immediately. Queue-triggered repaints
 are coalesced per frame burst with the existing zero-delay timer, preserving
-transient suppression. The manager's minibuffer keys `e`/`s`/`d`/`RET` act on the
-highlighted item; `x` deletes the whole queue. `context`
-items (host-injected next-step content) are mirrored but never counted,
-previewed, or listed; `steering` items count and list, and — as the
+transient suppression. The manager uses one list: RET or `C-c s` sends now,
+`C-c e` edits, `C-c d` deletes, and `C-c x` deletes all after confirmation.
+`context` items (host-injected next-step content) are mirrored but never
+counted, previewed, or listed; `steering` items count and list, and — as the
 next thing the host injects — head the preview.
 
 The echo feedback is silenced for the client's OWN empty-queue submit:
@@ -1104,11 +1123,11 @@ clearing would temporarily empty the job chooser.
 The wire views are normalized in `dsh-emacs-protocol.el`
 (`dsh-protocol-job` with symbol `status`, `dsh-protocol-job-list`,
 `dsh-protocol-job-frame`/`-chunk`), and the namespace's CLI surface is
-Emacs-native: `C-c C-j` opens the roster as a
-minibuffer menu whose single keys show output (`RET`), stop a job (`k`,
-two presses within `dsh-emacs-jobs-kill-arm-seconds`) and re-subscribe
-(`r`).  A kill is a human action: the host records `cancelled by the
-user` and the owning agent still receives its completion notice.
+Emacs-native: `C-c C-j` opens one list. RET shows output, `C-c k` stops the
+selected job after a confirming `k` within
+`dsh-emacs-jobs-kill-arm-seconds`, and `C-c r` re-subscribes. A kill is a
+human action: the host records `cancelled by the user` and the owning agent
+still receives its completion notice.
 
 Job status stays in transcript tool rows. The mode line does not consume the
 job roster, and roster updates do not request a mode-line redraw.

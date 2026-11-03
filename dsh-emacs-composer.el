@@ -489,7 +489,8 @@ name (`grey70') that is no CSS color.")
 KIND is `steer' (send the item now — dsh web's `IconSendOutlineRegular'),
 `edit' (rewrite its text; absent for a non-text item, whose content the edit
 RPC would flatten) or `delete'.  The cell carries the item itself, so RET or a
-click runs the same queue verb the `C-c C-q' manager binds to `s', `e' or `d'."
+click runs the same queue verb the `C-c C-q' manager binds to `C-c s',
+`C-c e' or `C-c d'."
   (pcase kind
     ('steer
      (dsh-emacs-composer--action-cell

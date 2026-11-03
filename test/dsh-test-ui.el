@@ -1570,19 +1570,67 @@ both followers' prompts above their viewports."
           (should (string-match-p (format "width %d" width) (buffer-string))))
         (should (= calls 2))))))
 
-(ert-deftest dsh-emacs-test-ui-completion-highlight-preserves-label ()
+(defvar dsh-emacs-ui--menu-context)
+(defvar vertico-sort-override-function)
+
+(ert-deftest dsh-emacs-test-ui-menu-action-uses-native-accept ()
   :tags '(dsh-unit)
-  (let ((label (propertize "Beta" 'face 'highlight)))
-    (cl-progv '(vertico-mode vertico--index vertico--candidates)
-        (list t 1 (list "Alpha" label))
-      (should (eq label (dsh-emacs-ui-completion-highlighted)))
-      (set 'vertico--index -1)
-      (should-not (dsh-emacs-ui-completion-highlighted))
-      (set 'vertico--index 8)
-      (should-not (dsh-emacs-ui-completion-highlighted))
-      (set 'vertico-mode nil)
-      (set 'vertico--index 0)
-      (should-not (dsh-emacs-ui-completion-highlighted)))))
+  (let ((vertico-sort-override-function #'reverse)
+        (dsh-emacs-ui--menu-context
+         (list :action 'send :default-action 'send
+               :bindings '(("C-c d" . delete)))))
+    (with-temp-buffer
+      (use-local-map (make-sparse-keymap))
+      (local-set-key (kbd "RET")
+                     (lambda () (interactive) (throw 'accepted "delta")))
+      (let ((accept (key-binding (kbd "RET"))))
+        (dsh-emacs-ui--menu-setup)
+        (should (eq (key-binding (kbd "C-c d")) accept))
+        (should (eq (key-binding (kbd "d")) #'self-insert-command))
+        (should-not vertico-sort-override-function)
+        (cl-letf (((symbol-function 'this-command-keys-vector)
+                   (lambda () (kbd "C-c d"))))
+          (run-hooks 'pre-command-hook)
+          (should (equal (catch 'accepted
+                           (call-interactively (key-binding (kbd "C-c d"))))
+                         "delta"))))
+      (should (eq (plist-get dsh-emacs-ui--menu-context :action) 'delete)))
+    (should (eq vertico-sort-override-function #'reverse))))
+
+(ert-deftest dsh-emacs-test-ui-menu-incomplete-accept-keeps-default-action ()
+  :tags '(dsh-unit)
+  (let ((dsh-emacs-ui--menu-context
+         (list :action 'send :default-action 'send
+               :bindings '(("C-c d" . delete)))))
+    (cl-letf (((symbol-function 'this-command-keys-vector)
+               (lambda () (kbd "C-c d"))))
+      (dsh-emacs-ui--menu-record-action))
+    (should (eq (plist-get dsh-emacs-ui--menu-context :action) 'delete))
+    (cl-letf (((symbol-function 'this-command-keys-vector)
+               (lambda () (kbd "RET"))))
+      (dsh-emacs-ui--menu-record-action))
+    (should (eq (plist-get dsh-emacs-ui--menu-context :action) 'send))))
+
+(ert-deftest dsh-emacs-test-ui-menu-global-action-needs-no-selection ()
+  :tags '(dsh-unit)
+  (let ((dsh-emacs-ui--menu-context
+         (list :action 'show :default-action 'show
+               :bindings '(("C-c r" . refresh)) :global-actions '(refresh))))
+    (cl-letf (((symbol-function 'this-command-keys-vector)
+               (lambda () (kbd "C-c r"))))
+      (dsh-emacs-ui--menu-record-action)
+      (should (equal (catch 'dsh-emacs-ui-menu-result
+                       (dsh-emacs-ui--menu-global-action))
+                     '(refresh nil))))))
+
+(ert-deftest dsh-emacs-test-ui-menu-read-resolves-returned-label ()
+  :tags '(dsh-unit)
+  (cl-letf (((symbol-function 'completing-read)
+             (lambda (&rest _) "delta")))
+    (should (equal (dsh-emacs-ui-menu-read
+                    "Queue: " '(("alpha" . first) ("delta" . second)) 'send
+                    '(("C-c d" delete)))
+                   '(send second)))))
 
 (provide 'dsh-test-ui)
 ;;; dsh-test-ui.el ends here

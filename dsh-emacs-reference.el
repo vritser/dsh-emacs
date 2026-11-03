@@ -66,9 +66,8 @@
 (require 'subr-x)
 (require 'dsh-emacs-protocol)
 (require 'dsh-emacs-server)
+(require 'dsh-emacs-ui)
 
-(declare-function dsh-emacs--completing-read-ordered
-                  "dsh-emacs.el" (prompt collection &rest args))
 ;; Corfu's native auto path is the same integration seam installed by
 ;; `dsh-emacs-mode'; use it for async refreshes instead of generic CAPF
 ;; dispatch, which treats a sole non-exact candidate differently.
@@ -1440,7 +1439,7 @@ again once results arrive.  Requires a chat buffer with a session."
           (progn
             (condition-case nil
                 (let ((pairs (dsh-emacs-reference--display-pairs)))
-                  (when-let* ((picked (dsh-emacs--completing-read-ordered
+                  (when-let* ((picked (dsh-emacs-ui--completing-read-ordered
                                        "Reference: " pairs nil t))
                               (pair (assoc picked pairs)))
                     (dsh-emacs-reference--insert-at-point (cdr pair))))

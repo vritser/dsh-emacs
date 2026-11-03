@@ -1,5 +1,8 @@
 # 170 — Keep event health and frontend knowledge with their owners
 
+> Superseded by [173](173-native-menu-selection.md), which removes the private
+> Vertico read.
+
 ## Background
 
 On the `108ea2b` baseline, chat and core dispatch wrapped JSON parsing in an

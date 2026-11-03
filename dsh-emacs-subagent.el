@@ -17,6 +17,7 @@
 (require 'dsh-emacs-protocol)
 (require 'dsh-emacs-server)
 (require 'dsh-emacs-tokens)
+(require 'dsh-emacs-ui)
 ;; Icon playback uses the mode-line animation facade, which is optional:
 ;; without a backend the icon keeps its static tint.
 
@@ -34,7 +35,6 @@
 (declare-function dsh-emacs-modeline-animation-stop "dsh-emacs-modeline" (slot))
 (declare-function dsh-emacs-modeline-animation-text "dsh-emacs-modeline" (slot))
 (declare-function dsh-emacs-modeline-set-subagent-activity "dsh-emacs-modeline" (active))
-(declare-function dsh-emacs--completing-read-ordered "dsh-emacs" (prompt collection &rest args))
 (declare-function dsh-emacs--chat-session-item "dsh-emacs" (session-id))
 (declare-function dsh-emacs--chat-title "dsh-emacs" (session-id))
 (declare-function dsh-emacs--active-session-id "dsh-emacs" ())
@@ -471,7 +471,7 @@ Use the current completion frontend with no additional minibuffer keys."
                     (lambda (candidate)
                       (when-let* ((entry (cdr (assoc candidate table))))
                         (dsh-emacs-subagent--annotation parent entry)))))
-             (choice (dsh-emacs--completing-read-ordered
+             (choice (dsh-emacs-ui--completing-read-ordered
                       "Subagent: " table nil t)))
         (unless (assoc choice table) (user-error "No subagent selected"))
         (cons parent (cdr (assoc choice table)))))))

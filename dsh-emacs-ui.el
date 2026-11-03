@@ -26,17 +26,183 @@
 (require 'text-property-search)
 (require 'dsh-emacs-faces)
 
-(defun dsh-emacs-ui-completion-highlighted ()
-  "Return the current Vertico candidate, or nil when none is selected.
-Keep optional frontend internals at this UI boundary.  Callers own typed
-input, label matching and their menu's default selection."
-  (when (bound-and-true-p vertico-mode)
-    (let ((index (and (boundp 'vertico--index)
-                      (symbol-value 'vertico--index)))
-          (candidates (and (boundp 'vertico--candidates)
-                           (symbol-value 'vertico--candidates))))
-      (when (and (natnump index) (listp candidates))
-        (nth index candidates)))))
+;;; ---------------------------------------------------------------------------
+;;; Ordered completion
+;;; ---------------------------------------------------------------------------
+;;
+;; Completion-framework adaptation belongs here with the menus, so feature
+;; modules call it directly instead of declaring into the entry point.
+
+;; Emacs 31-only; the 28.1 baseline falls back to
+;; `dsh-emacs-ui--completion-table-with-metadata'.  The declaration only keeps
+;; byte-compile on Emacs <=30 from warning about an unknown function.
+(declare-function completion-table-with-metadata "minibuffer" (table metadata))
+
+;; With `ivy-mode' on, `ivy-sort-functions-alist' takes over sorting; the
+;; defvar only silences a byte-compile warning and guarantees dynamic
+;; binding; it has no effect when the framework is not loaded.
+(defvar ivy-sort-functions-alist)
+
+(defun dsh-emacs-ui--completion-table-with-metadata (collection metadata)
+  "Return COLLECTION as a completion table carrying METADATA.
+METADATA is an alist of completion metadata (see `completion-metadata'),
+e.g. `display-sort-function' pinned to identity to stop a frontend from
+reordering the candidates.  Uses the Emacs 31 built-in when present and
+the equivalent table lambda otherwise; the built-in is Emacs 31-only,
+while the package baseline is 28.1."
+  (if (fboundp 'completion-table-with-metadata)
+      (completion-table-with-metadata collection metadata)
+    (lambda (string pred action)
+      (if (eq action 'metadata)
+          `(metadata . ,metadata)
+        (complete-with-action action collection string pred)))))
+
+(defun dsh-emacs-ui--completing-read-ordered (prompt collection &rest args)
+  "`completing-read', but keep COLLECTION's incoming order.
+Adapts to whichever framework the user actually enabled, without
+hardcoding any of them:
+- vertico / corfu / stock minibuffer: reads the completion metadata's
+  `display-sort-function' (Vertico's sort function and Corfu both take
+  priority over their own sort toggles); set it to identity here and the
+  framework drops the reorder by itself;
+- ivy: does not read that metadata and takes the sort function per
+  collection/caller from `ivy-sort-functions-alist' — bound dynamically to
+  ((t . nil)) (docstring: nil = no sorting), effective for this call only;
+- other frameworks (selectrum etc.) also honor the display-sort-function
+  convention.
+PROMPT/COLLECTION/ARGS have exactly the same semantics as
+`completing-read'."
+  (let ((ordered (dsh-emacs-ui--completion-table-with-metadata
+                  collection
+                  '((display-sort-function . identity)))))
+    (if (bound-and-true-p ivy-mode)
+        (let ((ivy-sort-functions-alist '((t))))
+          (apply #'completing-read prompt ordered args))
+      (apply #'completing-read prompt ordered args))))
+
+;;; ---------------------------------------------------------------------------
+;;; Minibuffer menus
+;;; ---------------------------------------------------------------------------
+;;
+;; Queue and job menus share one shape: unique labels for a plain
+;; `completing-read' pick, modified action keys that leave typing alone,
+;; and the host's own order.  A single action spec per menu carries the
+;; keys, their actions and the global flag, so the keymap, the pre-command
+;; recorder and the caller's dispatch cannot drift apart.  Order is declared
+;; as completion metadata by the caller; the one frontend accommodation here
+;; (`--menu-keep-order') neutralizes Vertico's sort override, which outranks
+;; that metadata.  The menus own their prompts and actions; this boundary
+;; delegates selection to the frontend's normal RET command.
+
+(defun dsh-emacs-ui-menu-entries (items label-function)
+  "Return ((LABEL . ITEM) ...) for ITEMS with unique LABELs.
+LABEL-FUNCTION returns each item's base label.  A collision takes a
+\"[N]\" suffix; a candidate that would still collide with an already
+assigned label (for example a row literally named \"same [2]\") keeps
+incrementing until it is free.  Every final label therefore maps to
+exactly one item, and the item rides in the cdr the menu verbs act on."
+  (let ((seen (make-hash-table :test 'equal))
+        (used (make-hash-table :test 'equal)))
+    (mapcar
+     (lambda (item)
+       (let* ((base (funcall label-function item))
+              (n (1+ (gethash base seen 0)))
+              (label (if (= n 1) base (format "%s [%d]" base n))))
+         (while (gethash label used)
+           (setq n (1+ n)
+                 label (format "%s [%d]" base n)))
+         (puthash base n seen)
+         (puthash label t used)
+         (cons label item)))
+     items)))
+
+(defun dsh-emacs-ui--menu-keep-order ()
+  "Keep the menu's own candidate order against a frontend sort override.
+The collection metadata already declares `display-sort-function', which
+frontends honor over their default sort.  Vertico's
+`vertico-sort-override-function' is the one exception: it is consulted
+before the metadata, so a global override would reorder a menu whose
+order is part of its meaning.  Bind it away buffer-locally here."
+  (when (boundp 'vertico-sort-override-function)
+    (setq-local vertico-sort-override-function nil)))
+
+(defvar dsh-emacs-ui--menu-context nil
+  "Dynamically bound action and key bindings of the current menu.
+Each `dsh-emacs-ui-menu-read' owns its context, including recursive reads.")
+
+(defun dsh-emacs-ui--menu-setup ()
+  "Keep menu order and add modified actions to the active frontend map.
+The map is copied from the one the frontend installed.  Ordering matters:
+`minibuffer-with-setup-hook' prepends, so this hook is added before
+`completing-read' runs; a frontend that installs its map from a setup hook
+added during that call (Vertico, Ivy) then runs first, and the copy below
+sees its map."
+  (dsh-emacs-ui--menu-keep-order)
+  (let ((accept (key-binding (kbd "RET")))
+        (map (copy-keymap (current-local-map))))
+    (unless (commandp accept)
+      (error "Completion frontend has no RET command"))
+    (dolist (binding (plist-get dsh-emacs-ui--menu-context :bindings))
+      (define-key map (kbd (car binding))
+                  (if (memq (cdr binding)
+                            (plist-get dsh-emacs-ui--menu-context :global-actions))
+                      #'dsh-emacs-ui--menu-global-action
+                    accept)))
+    (use-local-map map)
+    (add-hook 'pre-command-hook #'dsh-emacs-ui--menu-record-action nil t))
+  nil)
+
+(defun dsh-emacs-ui--menu-action-for-key (keys)
+  "Return the menu action bound to the canonical key description KEYS.
+Bindings are written in `kbd' syntax; canonicalizing them here keeps the
+recorder in step with `key-description' of the pressed keys."
+  (cdr (cl-find-if (lambda (binding)
+                     (equal (key-description (kbd (car binding))) keys))
+                   (plist-get dsh-emacs-ui--menu-context :bindings))))
+
+(defun dsh-emacs-ui--menu-record-action ()
+  "Record the current menu key's action before the native command runs.
+Every other key restores the default action, including RET after an
+incomplete modified acceptance.  The frontend sees its original command
+and runs its usual candidate preparation and acceptance hooks."
+  (setf (plist-get dsh-emacs-ui--menu-context :action)
+        (or (dsh-emacs-ui--menu-action-for-key
+             (key-description (this-command-keys-vector)))
+            (plist-get dsh-emacs-ui--menu-context :default-action))))
+
+(defun dsh-emacs-ui--menu-global-action ()
+  "Close the current menu with an action that needs no selected item."
+  (interactive)
+  (let ((action (plist-get dsh-emacs-ui--menu-context :action)))
+    (unless (memq action (plist-get dsh-emacs-ui--menu-context :global-actions))
+      (error "Unknown global menu action"))
+    (throw 'dsh-emacs-ui-menu-result (list action nil))))
+
+(defun dsh-emacs-ui-menu-read (prompt entries default-action actions)
+  "Read ENTRIES with PROMPT and return (ACTION ITEM).
+ENTRIES maps unique labels to items.  RET uses DEFAULT-ACTION.  ACTIONS is
+((KEY ACTION &optional GLOBAL) ...): KEY is a `kbd' sequence, an item
+action runs after the frontend accepts the selected label, and a non-nil
+GLOBAL makes KEY exit without a selected item (ITEM is then nil).  Callers
+run ACTION after this read returns."
+  (let* ((bindings (mapcar (lambda (action)
+                             (cons (car action) (cadr action)))
+                           actions))
+         (global-actions (delq nil
+                               (mapcar (lambda (action)
+                                         (and (nth 2 action) (cadr action)))
+                                       actions)))
+         (dsh-emacs-ui--menu-context
+          (list :action default-action :default-action default-action
+                :bindings bindings :global-actions global-actions)))
+    (catch 'dsh-emacs-ui-menu-result
+      (let* ((label (minibuffer-with-setup-hook #'dsh-emacs-ui--menu-setup
+                      (dsh-emacs-ui--completing-read-ordered
+                       prompt (mapcar #'car entries) nil t nil nil
+                       (caar entries))))
+             (entry (assoc label entries)))
+        (unless entry (user-error "Unknown menu item: %s" label))
+        (list (plist-get dsh-emacs-ui--menu-context :action) (cdr entry))))))
 
 (defvar-local dsh-emacs-ui--following-windows-function nil
   "Optional function returning this buffer's windows that follow new output.

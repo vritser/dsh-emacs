@@ -97,6 +97,14 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Queue edit refuses attachment items**: `C-c e` on a queued message that
+  carries an image or file now reports that and leaves it queued, instead of
+  replacing its content with one text block and dropping the attachment.
+
+- **Model picker keeps duplicate ids distinct without group titles**: when
+  `vertico-group-format` is nil the picker falls back to provider header rows
+  and `id (Provider)` suffixes instead of drawing identical rows.
+
 - **Render Markdown across text fields**: resource scanning no longer stalls
   when adjacent text has different `field` properties, and links spanning
   those fields keep their full target.
@@ -331,6 +339,12 @@ minor) and stay undated until the release is cut.
   dismiss. (rationale: [postmortem/165](postmortem/165-prompt-dispatcher.md))
 
 ### Changed
+
+- **Queue and job menus keep typing separate from actions**: `C-c C-q` and
+  `C-c C-j` open one normal completion list. `RET` sends a queued message or
+  shows job output; `C-c` action keys edit, delete, stop or refresh. Actions
+  use the frontend's confirmed selection, so ordinary letters remain input.
+  (rationale: [postmortem/173](postmortem/173-native-menu-selection.md))
 
 - **Group render options with the renderer**: `dsh-emacs-stream-markdown-limit`
   and `dsh-emacs-reply-footer-items` now appear in the `dsh-emacs-render` Custom
