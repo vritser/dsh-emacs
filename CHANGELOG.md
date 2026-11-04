@@ -97,6 +97,11 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Highlight only the attachment remove glyph**: surrounding spaces stay
+  outside the hover and click target; clicking the cross or RET removes that
+  file.
+  (rationale: [postmortem/176](postmortem/176-attachment-state-owner.md))
+
 - **Model commands initialize the package on first use**: autoloading
   `dsh-emacs-select-model` or `dsh-emacs-select-effort` loads the session
   coordinator before running the command, preserving startup behavior after

@@ -21,9 +21,9 @@
 ;;
 ;; Goal data comes from the goal projection; its actions carry a CAS ref.
 ;; Queue data stays in dsh-emacs-queue.el, which determines which pending
-;; message is visible and when burst updates repaint.  Staged attachments stay
-;; in dsh-emacs.el (the acquisition and submit paths own them).  Composer reads
-;; that mirror without copying it; a row's per-file remove cell only calls back
+;; message is visible and when burst updates repaint.  Staged attachments live
+;; in dsh-emacs-attachments.el; the coordinator owns send/rollback timing.
+;; Composer reads that list without copying it; a row's remove cell calls back
 ;; into `dsh-emacs--remove-attachment'.  All rows fold line breaks and fit the
 ;; narrowest viewing window.  No row is transcript or editable input, and none
 ;; is included when sending.
@@ -44,6 +44,7 @@
 (require 'dsh-emacs-protocol)
 (require 'dsh-emacs-server)
 (require 'dsh-emacs-faces)
+(require 'dsh-emacs-attachments)
 
 ;; render.el calls back through this seam.  Declare it without requiring
 ;; render here to avoid a cycle.  Input-marker geometry remains owned by
@@ -55,8 +56,6 @@
 (declare-function dsh-emacs-queue--send-now "dsh-emacs-queue" (item))
 (declare-function dsh-emacs-queue--edit "dsh-emacs-queue" (item new-text))
 (declare-function dsh-emacs-queue--delete "dsh-emacs-queue" (item))
-(declare-function dsh-emacs-pending-attachments "dsh-emacs" ())
-(declare-function dsh-emacs--remove-attachment "dsh-emacs" (attachment))
 (defvar dsh-emacs--input-marker)
 (defvar dsh-emacs-queue--optimistic-submit)
 (defvar-local dsh-emacs--composer-goal-pending nil
@@ -621,11 +620,13 @@ Clicking it drops only that entry (`dsh-emacs--remove-attachment');
          (map (make-sparse-keymap)))
     (define-key map (kbd "RET") remove)
     (define-key map [mouse-1] remove)
-    (propertize " ✕"
-                'face 'dsh-emacs-composer-attachment-face
-                'keymap map
-                'mouse-face 'highlight
-                'help-echo (format "Remove %s · C-c C-d discards all" name))))
+    (concat " "
+            (propertize "✕"
+                        'face 'dsh-emacs-composer-attachment-face
+                        'keymap map
+                        'mouse-face 'highlight
+                        'help-echo (format "Remove %s · C-c C-d discards all" name))
+            " ")))
 
 (defun dsh-emacs-composer--render-attachments-row (attachments)
   "Return the single-line staged-attachments row for ATTACHMENTS.

@@ -1,5 +1,8 @@
 # 063 — Clipboard image paste into the chat input
 
+Attachment module placement superseded by [176](176-attachment-state-owner.md);
+clipboard staging and paste behavior remain in effect.
+
 Superseded by [094](094-staged-file-attachments.md) for the file-picker and
 drag-and-drop immediate-send policy; clipboard behavior remains in effect.
 

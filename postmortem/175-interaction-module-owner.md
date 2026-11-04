@@ -1,5 +1,8 @@
 # 175 — Keep question and approval state with their interaction owner
 
+The deferred attachment boundary is addressed by
+[176](176-attachment-state-owner.md); interaction ownership remains in effect.
+
 ## Background
 
 Baseline `972e6e6` had extracted model selection as recorded in

@@ -22,6 +22,7 @@ dsh-emacs/
 ├── dsh-emacs-provider.el     # Minibuffer provider setup through settings and credential RPCs
 ├── dsh-emacs-model.el        # Model/effort catalog readers, picker options and selection RPCs
 ├── dsh-emacs-interaction.el  # Question/approval readers, prompt slot, waits and late answers
+├── dsh-emacs-attachments.el  # Acquisition, staged attachment state, media setup and file uploads
 ├── dsh-emacs-command.el      # Slash surface: commands/list + commands/execute, "/" completion and menu
 ├── dsh-emacs-skill.el        # Skill catalog (skills/list) and /name gestures
 ├── dsh-emacs-shell.el        # Client-side `!command` shell commands (local execution)
@@ -132,8 +133,8 @@ effort when reselecting the model, otherwise the catalog default or first
 available effort. Callback boundaries catch quit and apply successful choices,
 then refresh the session cache; internal reader errors still propagate.
 
-The entry point continues to own input editing and attachments pending
-separate ownership changes. This extraction does not expand Composer's
+The entry point continues to own input editing and send transactions.
+This extraction does not expand Composer's
 read-only-row responsibility. See
 [decision 174](../postmortem/174-model-selection-owner.md).
 
@@ -394,10 +395,13 @@ input geometry (the `❯ ` prompt,
 `dsh-emacs.el`; `dsh-emacs-composer.el` owns all three chrome rows and the seam
 that keeps streamed transcript above them. The queue module supplies the
 visible next item directly from its mirror; Composer keeps no second queue.
-Staged attachments stay in `dsh-emacs.el` (file/drop acquisition, clipboard
-paste and the submit path own them); Composer reads them, exactly as it reads
-the queue mirror, and a row's per-file remove cell only calls back into
-`dsh-emacs--remove-attachment`.
+`dsh-emacs-attachments.el` owns the single buffer-local staged attachment
+list, file/drop and clipboard acquisition, validation and uploads. Composer
+requires that owner and reads the list, as it reads the queue mirror; a row's
+remove cell calls `dsh-emacs--remove-attachment`. The entry point owns send
+timing, input/undo and rollback eligibility. It changes staging through
+`dsh-emacs--set-pending-attachments`, which owns the state update and repaint.
+No second Composer list or attachment-specific input state is introduced.
 
 Word and region kills are clipped to both editable input boundaries while
 preserving their direction. Backward word motion over punctuation such as
@@ -478,15 +482,22 @@ the SVG Repo `attachment' icon (tinted from the attachment face; a text glyph
 when Emacs lacks SVG) and each staged attachment's name followed by its own
 clickable `✕` (`dsh-emacs--remove-attachment`, which drops only that entry;
 `C-c C-d`, `dsh-emacs-clear-attachments`, clears the whole list).
-Staging is owned by `dsh-emacs.el`: `dsh-emacs-attach-file` takes only `file`;
-its interactive `C-c C-a` entry calls standard `read-file-name` once with
-`mustmatch` t, then appends one attachment through
+Staging is owned by `dsh-emacs-attachments.el`. `dsh-emacs-attach-file` takes
+only `file`; its interactive `C-c C-a` entry calls standard `read-file-name`
+once with `mustmatch` t, then appends one attachment through
 `dsh-emacs--stage-attachments`. Repeating it adds more files without a caption
 prompt or server/network activity. Drag-and-drop retains its `y-or-n-p`
 confirmation and existing filtering, then appends all valid files in their
 existing order through the same staging function. Neither entry submits.
 There is no new selector or command; see
 [decision record 094](../postmortem/094-staged-file-attachments.md).
+[176](../postmortem/176-attachment-state-owner.md) supersedes only its file
+placement: the send transaction stays in the coordinator. Per-buffer media
+registration is installed by `dsh-emacs--setup-attachments` from chat-mode
+initialization, never when the attachment module is loaded. Public command
+autoloads still target `dsh-emacs`; interactive acquisition, row updates and
+sending use the assembled package, while file/image data preparation can be
+loaded independently.
 `C-c C-v` (`dsh-emacs-attach-clipboard-image`) reads the system
 clipboard, `s-v` (`dsh-emacs-paste`) does the same but falls back to
 `yank` when the clipboard holds no image, and

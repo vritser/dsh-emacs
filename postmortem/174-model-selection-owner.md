@@ -3,6 +3,8 @@
 The deferred question/approval extraction is addressed by
 [175](175-interaction-module-owner.md); the model ownership decision remains
 in effect.
+The deferred attachment boundary is addressed by
+[176](176-attachment-state-owner.md).
 
 ## Background
 

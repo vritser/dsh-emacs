@@ -1,5 +1,8 @@
 # 094 — Stage file attachments before sending
 
+File placement superseded by [176](176-attachment-state-owner.md);
+the staging, submit timing, receipt and rollback behavior remains in effect.
+
 Builds on `b58c8c2` (clipboard staging,
 [063](063-clipboard-image-paste.md)) and `1cf0c05` (arbitrary files,
 [092](092-arbitrary-file-attachments.md)); input consumption and undo remain

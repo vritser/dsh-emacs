@@ -7,6 +7,72 @@
 ;; Terminal-only Emacs builds omit this graphical capability variable.
 (defvar image-types)
 
+(ert-deftest dsh-emacs-test-attachments-data-preparation-without-entry-point ()
+  :tags '(dsh-unit)
+  (let ((file (make-temp-file "dsh-attachment-owner-" nil ".log")))
+    (unwind-protect
+        (progn
+          (with-temp-file file (insert "payload"))
+          (pcase-let ((`(,status . ,output)
+                       (dsh-test--fresh-process
+                        `(progn
+                           (require 'ert)
+                           (require 'dsh-emacs-attachments)
+                           (should-not (featurep 'dsh-emacs))
+                           (should-not (featurep 'dsh-emacs-composer))
+                           (should-not (dsh-emacs-pending-attachments))
+                           (should
+                            (equal (dsh-emacs--attachable-file ,file)
+                                   '((file . ,file)
+                                     (name . ,(file-name-nondirectory file))
+                                     (bytes . 7))))
+                           (should (equal (dsh-emacs--binary-file-string ,file)
+                                          "payload"))))))
+            (ert-info (output)
+              (should (equal status 0))
+              (should (equal output "")))))
+      (delete-file file))))
+
+(ert-deftest dsh-emacs-test-attachments-autoload-initializes-coordinator ()
+  :tags '(dsh-unit)
+  (let* ((directory (make-temp-file "dsh-attachment-autoload-" t))
+         (source (expand-file-name "dsh-emacs-attachments.el" directory))
+         (loaddefs (expand-file-name "dsh-attachment-autoloads.el" directory)))
+    (unwind-protect
+        (progn
+          (copy-file (expand-file-name "dsh-emacs-attachments.el"
+                                       dsh-emacs-test-root)
+                     source)
+          (dsh-test--generate-autoloads source loaddefs)
+          (dolist (command '(dsh-emacs-attach-file dsh-emacs-attach-clipboard-image
+                                                   dsh-emacs-paste dsh-emacs-clear-attachments))
+            (let ((form
+                   `(progn
+                      (require 'ert)
+                      (load ,loaddefs nil t)
+                      (should-not (featurep 'dsh-emacs))
+                      (should (autoloadp (symbol-function ',command)))
+                      (should
+                       (equal (should-error (call-interactively ',command)
+                                            :type 'user-error)
+                              '(user-error "Not in a dsh chat buffer")))
+                      (should (featurep 'dsh-emacs)))))
+              (pcase-let ((`(,status . ,output)
+                           (dsh-test--fresh-process form)))
+                (ert-info ((format "%s: %s" command output))
+                  (should (equal status 0)))))))
+      (delete-directory directory t))))
+
+(ert-deftest dsh-emacs-test-attachments-mode-reinitialization-clears-staging ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (dsh-emacs--stage-attachments
+     '(((file . "/tmp/not-uploaded") (name . "draft.log") (bytes . 7))))
+    (should (dsh-emacs-pending-attachments))
+    (dsh-emacs-mode)
+    (should-not (dsh-emacs-pending-attachments))))
+
 (defun dsh-test--has-text-property-p (prop)
   "Non-nil when some character in the current buffer carries PROP."
   (let ((pos (point-min))
@@ -433,7 +499,21 @@
                                            (get-text-property pos 'keymap))
                                  collect pos)))
             (ert-info ((format "%s" "attachments-row-has-one-remove-cell-per-file"))
-              (should (= 4 (length cells))))
+              (should (= 2 (length
+                            (cl-delete-duplicates
+                             (mapcar (lambda (pos)
+                                       (get-text-property pos 'keymap)) cells)
+                             :test #'eq)))))
+            (let* ((start (car cells))
+                   (end (next-single-property-change start 'mouse-face))
+                   (label (buffer-substring-no-properties start end)))
+              (ert-info ("Only the remove glyph highlights and accepts clicks")
+                (should (eq (get-text-property start 'mouse-face) 'highlight))
+                (should (equal label "✕"))
+                (dolist (pos (list (1- start) end))
+                  (should (eq (char-after pos) ?\s))
+                  (should-not (get-text-property pos 'mouse-face))
+                  (should-not (get-text-property pos 'keymap)))))
             ;; Click the second file's ✕: only that file leaves the set.
             (let* ((cell (car (last cells)))
                    (cmd (lookup-key (get-text-property cell 'keymap) [mouse-1])))
