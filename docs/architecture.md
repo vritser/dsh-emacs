@@ -356,6 +356,13 @@ independent of the mode-line accumulator, survives reconnects and merges
 older pages; full reload clears it and transcript trimming discards summaries
 whose completed replies are gone.
 
+`dsh-emacs-render--reply-footer-label` builds the propertized label from a
+turn summary, the configured item list and the subagent flag. Its data tests
+cover usage completeness, elapsed time, item order and button payloads.
+`dsh-emacs-render--reply-footer` owns transcript boundaries, visibility
+reconciliation, tail resolution, fragment insertion and spacing. See
+[decision record 178](../postmortem/178-reply-footer-label-boundary.md).
+
 Visibility is a renderer policy, separate from those per-turn facts. Between
 rendered human messages, only the latest completed turn with a nonempty text
 reply keeps its footer. Replacing earlier footer chrome leaves reply text

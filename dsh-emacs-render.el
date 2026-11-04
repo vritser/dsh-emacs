@@ -3912,15 +3912,72 @@ unfold preserve the styling."
      (dsh-emacs-fork-session dsh-emacs--buffer-session
                              (button-get button 'dsh-emacs-reply-seq)))))
 
+(defun dsh-emacs-render--reply-footer-label (turn state items subagent)
+  "Return TURN's footer label from STATE and configured ITEMS, or nil.
+SUBAGENT suppresses Fork.  Buttons retain the reply text and sequence from
+STATE.  Build the propertized string without accessing transcript state."
+  (let ((seq (plist-get state :reply-seq))
+        (usage (list :input 0 :output 0 :cache-read 0 :cache-write 0))
+        (complete (plist-get state :start-seq))
+        reported parts)
+    (dolist (entry (plist-get state :messages))
+      (if (null (cdr entry))
+          (setq complete nil)
+        (setq reported t)
+        (dolist (key '(:input :output :cache-read :cache-write))
+          (cl-incf (plist-get usage key) (plist-get (cdr entry) key)))))
+    (dolist (item (delete-dups (copy-sequence items)))
+      (pcase item
+        ((or 'copy 'fork)
+         (unless (and (eq item 'fork) subagent)
+           (push (make-text-button
+                  (if (eq item 'copy) "Copy" "Fork") nil
+                  'follow-link t
+                  'mouse-face 'highlight 'action #'dsh-emacs-render--reply-action
+                  'help-echo (if (eq item 'copy) "Copy this reply as Markdown"
+                               "Branch through this reply")
+                  'dsh-emacs-reply-action item 'dsh-emacs-reply-seq seq
+                  'dsh-emacs-reply-text (plist-get state :text)) parts)))
+        ('usage
+         (push (propertize
+                (if reported
+                    (format "Tokens %s%s" (if complete "" "≥")
+                            (dsh-emacs-format-tokens
+                             (apply #'+ (cl-loop for (_key value) on usage by #'cddr
+                                                 collect value))))
+                  "Tokens —")
+                'help-echo
+                (format "Turn %s: input %d, output %d, cache read %d, cache write %d%s"
+                        turn (plist-get usage :input) (plist-get usage :output)
+                        (plist-get usage :cache-read) (plist-get usage :cache-write)
+                        (if (and complete reported) ""
+                          "; incomplete history or missing reported usage"))) parts))
+        ('duration
+         (let ((start (plist-get state :start-time))
+               (finish (plist-get state :end-time)))
+           (push (propertize
+                  (if (and (numberp start) (numberp finish) (>= finish start))
+                      (let ((seconds (/ (- finish start) 1000.0)))
+                        (if (< seconds 60) (format "Time %.1fs" seconds)
+                          (format "Time %dm%02ds" (/ (floor seconds) 60)
+                                  (% (floor seconds) 60))))
+                    "Time —")
+                  'help-echo "Turn elapsed time, including tools and waits; server timestamps")
+                 parts)))))
+    (when parts
+      (let ((label (mapconcat #'identity (nreverse parts) "  ·  ")))
+        ;; Prepend to the title face `dsh-emacs-ui--top-border' appends;
+        ;; its explicit normal weight keeps the row muted.
+        (add-face-text-property 0 (length label)
+                                'dsh-emacs-reply-meta-face t label)
+        label))))
+
 (defun dsh-emacs-render--reply-footer (turn state)
   "Paint TURN's footer from STATE, after its final transcript content."
   (when (and (plist-get state :end-seq) (plist-get state :reply-seq))
     (let ((pos (point-min))
           (seq (plist-get state :reply-seq))
-          (usage (list :input 0 :output 0 :cache-read 0 :cache-write 0))
-          (complete (plist-get state :start-seq))
-          (reported nil)
-          end parts)
+          end)
       ;; A reply may have several text segments separated by Think cards.
       ;; Find its final segment without treating the toolbar as reply text.
       (while (setq pos (text-property-any pos (point-max)
@@ -3979,86 +4036,38 @@ unfold preserve the styling."
                                                'dsh-emacs-event-block id #'equal)))
                              (prop-match-end match)))))))
           (setq end (max end tail)))
-        (dolist (entry (plist-get state :messages))
-          (if (null (cdr entry))
-              (setq complete nil)
-            (setq reported t)
-            (dolist (key '(:input :output :cache-read :cache-write))
-              (cl-incf (plist-get usage key) (plist-get (cdr entry) key)))))
-        (dolist (item (delete-dups (copy-sequence dsh-emacs-reply-footer-items)))
-          (pcase item
-            ((or 'copy 'fork)
-             (unless (and (eq item 'fork) (bound-and-true-p dsh-emacs--buffer-subagent))
-               (push (make-text-button
-                      (if (eq item 'copy) "Copy" "Fork") nil
-                      'follow-link t
-                      'mouse-face 'highlight 'action #'dsh-emacs-render--reply-action
-                      'help-echo (if (eq item 'copy) "Copy this reply as Markdown"
-                                   "Branch through this reply")
-                      'dsh-emacs-reply-action item 'dsh-emacs-reply-seq seq
-                      'dsh-emacs-reply-text (plist-get state :text)) parts)))
-            ('usage
-             (push (propertize
-                    (if reported
-                        (format "Tokens %s%s" (if complete "" "≥")
-                                (dsh-emacs-format-tokens
-                                 (apply #'+ (cl-loop for (_key value) on usage by #'cddr
-                                                     collect value))))
-                      "Tokens —")
-                    'help-echo
-                    (format "Turn %s: input %d, output %d, cache read %d, cache write %d%s"
-                            turn (plist-get usage :input) (plist-get usage :output)
-                            (plist-get usage :cache-read) (plist-get usage :cache-write)
-                            (if (and complete reported) ""
-                              "; incomplete history or missing reported usage"))) parts))
-            ('duration
-             (let ((start (plist-get state :start-time))
-                   (finish (plist-get state :end-time)))
-               (push (propertize
-                      (if (and (numberp start) (numberp finish) (>= finish start))
-                          (let ((seconds (/ (- finish start) 1000.0)))
-                            (if (< seconds 60) (format "Time %.1fs" seconds)
-                              (format "Time %dm%02ds" (/ (floor seconds) 60)
-                                      (% (floor seconds) 60))))
-                        "Time —")
-                      'help-echo "Turn elapsed time, including tools and waits; server timestamps")
-                     parts)))))
-        (when parts
-          (setq parts (nreverse parts))
-          (let ((label (mapconcat #'identity parts "  ·  ")))
-            ;; Prepend to the title face `dsh-emacs-ui--top-border' appends;
-            ;; its explicit normal weight keeps the row muted.
-            (add-face-text-property 0 (length label)
-                                    'dsh-emacs-reply-meta-face t label)
-            (let ((range
-                   (dsh-emacs-ui-update-fragment
-                    (dsh-emacs-ui-make-fragment
-                     :namespace-id (dsh-emacs-render--make-namespace)
-                     :block-id (format "reply-footer-%s" turn)
-                     :label-left label
-                     ;; Keep a trailing gap when history adds this row after
-                     ;; the next user message reserved its leading whitespace.
-                     :padding t
-                     :style 'minimal :status 'reply-footer :non-foldable t
-                     :header-face 'dsh-emacs-reply-meta-face)
-                    :insert-before (save-excursion
-                                     (goto-char end)
-                                     (unless (bolp) (forward-line 1))
-                                     (point)))))
-              ;; This padded row already ends with its own blank line.  When a
-              ;; following message reserved one before the row existed, drop
-              ;; the duplicate so the next question keeps a single blank line.
-              ;; Never touch an authored leading blank line or a fragment.
-              (when (and (eq (char-after (cdr range)) ?\n)
-                         (not (get-text-property
-                               (cdr range) 'dsh-emacs-ui-state))
-                         (not (get-text-property
-                               (cdr range) 'dsh-emacs-user-message))
-                         (not (get-text-property
-                               (cdr range) 'dsh-emacs-assistant-message)))
-                (let ((inhibit-read-only t)
-                      (buffer-undo-list t))
-                  (delete-region (cdr range) (1+ (cdr range))))))))))))
+        (when-let* ((label (dsh-emacs-render--reply-footer-label
+                            turn state dsh-emacs-reply-footer-items
+                            (bound-and-true-p dsh-emacs--buffer-subagent))))
+          (let ((range
+                 (dsh-emacs-ui-update-fragment
+                  (dsh-emacs-ui-make-fragment
+                   :namespace-id (dsh-emacs-render--make-namespace)
+                   :block-id (format "reply-footer-%s" turn)
+                   :label-left label
+                   ;; Keep a trailing gap when history adds this row after
+                   ;; the next user message reserved its leading whitespace.
+                   :padding t
+                   :style 'minimal :status 'reply-footer :non-foldable t
+                   :header-face 'dsh-emacs-reply-meta-face)
+                  :insert-before (save-excursion
+                                   (goto-char end)
+                                   (unless (bolp) (forward-line 1))
+                                   (point)))))
+            ;; This padded row already ends with its own blank line.  When a
+            ;; following message reserved one before the row existed, drop
+            ;; the duplicate so the next question keeps a single blank line.
+            ;; Never touch an authored leading blank line or a fragment.
+            (when (and (eq (char-after (cdr range)) ?\n)
+                       (not (get-text-property
+                             (cdr range) 'dsh-emacs-ui-state))
+                       (not (get-text-property
+                             (cdr range) 'dsh-emacs-user-message))
+                       (not (get-text-property
+                             (cdr range) 'dsh-emacs-assistant-message)))
+              (let ((inhibit-read-only t)
+                    (buffer-undo-list t))
+                (delete-region (cdr range) (1+ (cdr range)))))))))))
 
 (defun dsh-emacs-render--activity-summary (calls)
   "Summarize CALLS, an ordered list of (ID . NAME), as in Web's processTitle.

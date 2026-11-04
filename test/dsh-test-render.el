@@ -1726,6 +1726,81 @@ so the turn owns a foldable activity."
                                   (gethash 7 dsh-emacs-render--reply-turns)
                                   :work-overlay))))))))
 
+(ert-deftest dsh-emacs-test-render-footer-label-usage-completeness ()
+  :tags '(dsh-unit)
+  (let ((usage '(:input 10 :output 20 :cache-read 30 :cache-write 40)))
+    (dolist (case '((1 (reported reported) "Tokens 200")
+                    (nil (reported) "Tokens ≥100")
+                    (1 (reported missing) "Tokens ≥100")
+                    (1 (missing) "Tokens —")
+                    (1 (zero) "Tokens 0")))
+      (pcase-let* ((`(,start ,reports ,expected) case)
+                   (state
+                    (list :start-seq start :messages
+                          (cl-loop for report in reports for seq from 1
+                                   collect (cons seq
+                                                 (pcase report
+                                                   ('reported usage)
+                                                   ('zero '(:input 0 :output 0
+                                                                   :cache-read 0
+                                                                   :cache-write 0)))))))
+                   (original (copy-tree state t))
+                   (label (dsh-emacs-render--reply-footer-label
+                           7 state '(usage) nil)))
+        (ert-info ((format "Usage %S" case))
+          (should (equal (substring-no-properties label) expected))
+          (should (string-match-p
+                   (if (string-match-p "≥\\|—" expected)
+                       "incomplete history or missing reported usage"
+                     "input [0-9]+, output [0-9]+, cache read [0-9]+, cache write [0-9]+$")
+                   (get-text-property 0 'help-echo label)))
+          (should (equal state original)))))))
+
+(ert-deftest dsh-emacs-test-render-footer-label-duration ()
+  :tags '(dsh-unit)
+  (dolist (case '((1000 3500 "Time 2.5s")
+                  (0 61000 "Time 1m01s")
+                  (1000 1000 "Time 0.0s")
+                  (1000 999 "Time —")
+                  (nil 3500 "Time —")
+                  (1000 nil "Time —")))
+    (pcase-let ((`(,start ,end ,expected) case))
+      (should (equal (substring-no-properties
+                      (dsh-emacs-render--reply-footer-label
+                       7 (list :start-time start :end-time end)
+                       '(duration) nil))
+                     expected)))))
+
+(ert-deftest dsh-emacs-test-render-footer-label-actions-and-order ()
+  :tags '(dsh-unit)
+  (let ((state '(:reply-seq 102 :text "**final reply**"))
+        (items '(duration fork copy fork copy)))
+    (with-temp-buffer
+      (insert "existing transcript")
+      (let ((label (dsh-emacs-render--reply-footer-label 7 state items nil)))
+        (should (equal (substring-no-properties label)
+                       "Time —  ·  Fork  ·  Copy"))
+        (dolist (action '(copy fork))
+          (let ((pos (string-match (if (eq action 'copy) "Copy" "Fork") label)))
+            (should (eq (get-text-property pos 'action label)
+                        #'dsh-emacs-render--reply-action))
+            (should (eq (get-text-property pos 'dsh-emacs-reply-action label)
+                        action))
+            (should (equal (get-text-property pos 'dsh-emacs-reply-seq label)
+                           102))
+            (should (equal (get-text-property pos 'dsh-emacs-reply-text label)
+                           "**final reply**"))
+            (should (eq (get-text-property pos 'mouse-face label) 'highlight))))
+        (should (equal (buffer-string) "existing transcript"))
+        (should (= (point) (point-max)))))
+    (should (equal items '(duration fork copy fork copy)))
+    (should (equal (substring-no-properties
+                    (dsh-emacs-render--reply-footer-label
+                     7 state '(fork copy) t))
+                   "Copy"))
+    (should-not (dsh-emacs-render--reply-footer-label 7 state '(fork) t))
+    (should-not (dsh-emacs-render--reply-footer-label 7 state nil nil))))
+
 ;; Reply footers summarize a turn, not the session or just its last step.
 (ert-deftest dsh-emacs-test-render-footer-option-can-disable-row ()
   :tags '(dsh-unit)
