@@ -1436,6 +1436,39 @@ window's own point behind, which the session list now preserves per window."
         (ert-info ((format "%s" "session-row-cache-hidden-descendants-pruned"))
           (should (= (hash-table-count dsh-emacs-session--row-cache) 1)))))))
 
+(ert-deftest dsh-emacs-test-session-row-publication ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (insert (propertize "same row\n" 'dsh-emacs-row-id "row"
+                        'dsh-emacs-subagent 'stale))
+    (setq dsh-emacs-session--row-cache (make-hash-table :test #'equal))
+    (let ((target (current-buffer))
+          (old-cache dsh-emacs-session--row-cache)
+          (marker (copy-marker 3)))
+      (unwind-protect
+          (with-temp-buffer
+            (insert (propertize "same row\n" 'dsh-emacs-row-id "row"
+                                'dsh-emacs-workspace-id "new-workspace"))
+            (setq dsh-emacs-session--row-cache
+                  (make-hash-table :test #'equal))
+            (let ((source (current-buffer))
+                  (expected (buffer-string))
+                  (new-cache dsh-emacs-session--row-cache))
+              (with-current-buffer target
+                ;; Identical text still needs fresh command metadata.  A
+                ;; failed property update must leave the old cache published.
+                (cl-letf (((symbol-function 'set-text-properties)
+                           (lambda (&rest _) (error "Property update failed"))))
+                  (should-error (dsh-emacs-session--update-rows source)
+                                :type 'error))
+                (should (eq dsh-emacs-session--row-cache old-cache))
+                (dsh-emacs-session--update-rows source)
+                (should (dsh-test-equal-text-p (buffer-string) expected))
+                (should (eq dsh-emacs-session--row-cache new-cache))
+                (should (= marker 3))
+                (should (eq (marker-buffer marker) target)))))
+        (set-marker marker nil)))))
+
 (ert-deftest dsh-emacs-test-session-reorder-multibyte-rows-preserves-markers ()
   :tags '(dsh-unit)
   ;; Moving the last row across multibyte text used to enter the broken

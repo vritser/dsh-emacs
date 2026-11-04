@@ -362,9 +362,10 @@ instead move point to the middle of the window."
 
 (defun dsh-emacs-session--update-rows (source)
   "Install SOURCE's rows in the current buffer, preserving surviving markers.
-Move existing rows by identity before updating their text.  Text diffs are
-limited to one line: a whole-buffer diff is prohibitively slow when workspace
-baselines regroup hundreds of multibyte rows."
+Move existing rows by identity before updating their text, then publish
+SOURCE's row properties and visual cache.  Text diffs are limited to one line.
+A whole-buffer diff is prohibitively slow when workspace baselines regroup
+hundreds of multibyte rows."
   (let ((target (current-buffer))
         (rows (make-hash-table :test #'equal))
         (case-fold-search nil)
@@ -379,7 +380,7 @@ baselines regroup hundreds of multibyte rows."
               (while (not (eobp))
                 (when-let* ((id (get-text-property (point) 'dsh-emacs-row-id)))
                   (puthash (cons id (get-text-property
-                                    (point) 'dsh-emacs-workspace-group-id))
+                                     (point) 'dsh-emacs-workspace-group-id))
                            nil rows))
                 (forward-line 1))))
           (save-excursion
@@ -445,7 +446,50 @@ baselines regroup hundreds of multibyte rows."
           (delete-region dest (point-max)))
       (maphash (lambda (_key marker)
                  (when marker (set-marker marker nil)))
-               rows))))
+               rows))
+    (let ((end (with-current-buffer source (point-max))))
+      ;; The text diff retains old properties on matching characters.
+      ;; Reapply row metadata, especially in reused padding, so a
+      ;; collapsed child's address cannot survive on its parent row.
+      (let ((pos 1)
+            (offset (1- (point-min))))
+        (while (< pos end)
+          (let ((next (next-property-change pos source end)))
+            (set-text-properties (+ offset pos) (+ offset next)
+                                 (text-properties-at pos source))
+            (setq pos next))))
+      (setq dsh-emacs-session--row-cache
+            (buffer-local-value 'dsh-emacs-session--row-cache source)))))
+
+(defun dsh-emacs-session--build-rows (target groups empty)
+  "Build list rows in the current temporary buffer using TARGET's UI state.
+GROUPS already reflects jump preparation.  EMPTY requests the no-sessions
+hint.  Reuse TARGET's visual rows while building a fresh local row cache."
+  (let ((dsh-emacs-session--previous-row-cache
+         (buffer-local-value 'dsh-emacs-session--row-cache target)))
+    (setq dsh-emacs-session--row-cache (make-hash-table :test #'equal))
+    (dolist (variable '(dsh-emacs-session--workspace-fold-default
+                        dsh-emacs-session--workspace-fold-overrides
+                        dsh-emacs-session--expanded-subagents
+                        dsh-emacs-session--auto-jump-session
+                        dsh-emacs-session--filter-ws-title))
+      (set (make-local-variable variable)
+           (buffer-local-value variable target)))
+    (insert (propertize "Sessions" 'face 'dsh-emacs-header-face))
+    (when dsh-emacs-session--filter-ws-title
+      (insert (propertize
+               (format " | Filter: %s" dsh-emacs-session--filter-ws-title)
+               'face 'dsh-emacs-session-model-face)))
+    (insert "\n")
+    (insert (propertize (make-string 50 ?─) 'face 'dsh-emacs-separator-face))
+    (insert "\n\n")
+    (if empty
+        (progn
+          (insert (propertize "No sessions. " 'face 'dsh-emacs-muted-face))
+          (insert (propertize "Press 'c' to create one."
+                              'face 'dsh-emacs-hint-face)))
+      (dolist (group groups)
+        (dsh-emacs-session--render-group group)))))
 
 (defun dsh-emacs-session--render ()
   "Render Recents followed by the session list's workspace groups."
@@ -532,48 +576,13 @@ baselines regroup hundreds of multibyte rows."
                       nil))))))
       ;; Preserve xref departure markers in surviving child rows.  Erasing
       ;; the list would collapse them to point-min before a follow completes.
-      (let ((target (current-buffer))
-            (dsh-emacs-session--previous-row-cache dsh-emacs-session--row-cache))
+      (let ((target (current-buffer)))
         (with-temp-buffer
-          (setq dsh-emacs-session--row-cache (make-hash-table :test #'equal))
-          (dolist (variable '(dsh-emacs-session--workspace-fold-default
-                              dsh-emacs-session--workspace-fold-overrides
-                              dsh-emacs-session--expanded-subagents
-                              dsh-emacs-session--auto-jump-session
-                              dsh-emacs-session--filter-ws-title))
-            (set (make-local-variable variable)
-                 (buffer-local-value variable target)))
-          (insert (propertize "Sessions" 'face 'dsh-emacs-header-face))
-          (when dsh-emacs-session--filter-ws-title
-            (insert (propertize
-                     (format " | Filter: %s" dsh-emacs-session--filter-ws-title)
-                     'face 'dsh-emacs-session-model-face)))
-          (insert "\n")
-          (insert (propertize (make-string 50 ?─) 'face 'dsh-emacs-separator-face))
-          (insert "\n\n")
-          (if (and (null sessions) (null workspaces))
-              (progn
-                (insert (propertize "No sessions. " 'face 'dsh-emacs-muted-face))
-                (insert (propertize "Press 'c' to create one."
-                                    'face 'dsh-emacs-hint-face)))
-            (dolist (group groups)
-              (dsh-emacs-session--render-group group)))
-          (let ((source (current-buffer))
-                (cache dsh-emacs-session--row-cache)
-                (end (point-max)))
+          (dsh-emacs-session--build-rows
+           target groups (and (null sessions) (null workspaces)))
+          (let ((source (current-buffer)))
             (with-current-buffer target
-              (dsh-emacs-session--update-rows source)
-              ;; The text diff retains old properties on matching characters.
-              ;; Reapply row metadata, especially in reused padding, so a
-              ;; collapsed child's address cannot survive on its parent row.
-              (let ((pos 1)
-                    (offset (1- (point-min))))
-                (while (< pos end)
-                  (let ((next (next-property-change pos source end)))
-                    (set-text-properties (+ offset pos) (+ offset next)
-                                         (text-properties-at pos source))
-                    (setq pos next))))
-              (setq dsh-emacs-session--row-cache cache))))))
+              (dsh-emacs-session--update-rows source))))))
     ;; Where point goes now that the list is rebuilt.  The buffer point is
     ;; the list's focus (commands read it); other windows each keep their own
     ;; captured row and are restored separately.

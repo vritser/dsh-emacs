@@ -1833,7 +1833,13 @@ If the focused row disappears, both buffer and window focus use the previous
 row order to find the next surviving row, then the preceding row. Only a list
 with no surviving candidate falls back to its first new row. See
 [082](../postmortem/082-session-list-focus.md).
-The list renders into a temporary buffer, deletes rows that are no longer visible,
+`dsh-emacs-session--build-rows` builds the temporary list and its fresh visual
+cache using the target buffer's fold, expansion and pending-jump state.
+`dsh-emacs-session--update-rows` installs its text and fresh properties, then
+publishes that cache after installation succeeds. The render coordinator
+prepares jumps and restores buffer focus, window positions and highlighting.
+See [decision record 179](../postmortem/179-session-row-build-boundary.md).
+The list updater deletes rows that are no longer visible,
 moves surviving rows by identity with
 `transpose-regions`, and diffs only individual changed lines. This preserves
 xref departure markers even when workspaces reorder, without a whole-list diff.
