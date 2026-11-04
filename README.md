@@ -51,8 +51,10 @@ before connecting. A `use-package` example is in
 ## Using it
 
 `M-x dsh-emacs` opens the session list with **Recents** first: the 15 most
-recently updated visible sessions, followed by their usual workspace groups.
+recently updated visible sessions with workspace labels, followed by their
+usual workspace groups.
 Set `dsh-emacs-session-recents-limit` to change the count (zero hides Recents).
+Set `dsh-emacs-session-recents-show-workspace` to nil to hide workspace labels.
 Press `RET` to open a session, `c` to create one, and `TAB` to fold a group
 or expand available subagents.
 From a local project, the command locates its existing workspace; from a chat,

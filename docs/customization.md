@@ -127,6 +127,7 @@ The most commonly used options, straight in your config:
 (setq dsh-emacs-session-auto-refresh-interval nil) ; seconds between automatic session-list refreshes (nil = off)
 (setq dsh-emacs-session-jump-target 'recents)      ; recents (default) or workspace: chat-to-list jump destination
 (setq dsh-emacs-session-recents-limit 15)          ; latest updated sessions in the leading Recents group (0 = hide)
+(setq dsh-emacs-session-recents-show-workspace t)  ; prefix Recents titles with [workspace] (nil = hide)
 (setq dsh-emacs-workspaces-collapsed-by-default nil) ; workspace and Ungrouped groups start expanded (t = collapsed); TAB/RET overrides a group in the current list buffer
 (setq dsh-emacs-composer-goal-actions t)             ; show pause/resume/edit/clear buttons on the Goal Row (nil = hide them; C-c C-g keys still work; C-c C-g a / dsh-emacs-goal-actions-toggle toggles the current buffer)
 (setq dsh-emacs-reference-auto-complete t)          ; typing "@" in the input pops the file/directory/session reference menu (TAB and M-x dsh-emacs-reference always work; see docs/reference.md)
@@ -366,7 +367,11 @@ the session with completion.
 
 `Recents` leads the list with the 15 most recently updated visible sessions,
 newest first. `dsh-emacs-session-recents-limit` changes the count; zero hides
-the group. The same sessions remain in their workspace or `Ungrouped` group.
+the group. Each recent row prefixes its title with `[workspace]`; workspaces
+without a title use their directory basename, and unassigned sessions show
+`Ungrouped`. The same sessions remain in their workspace or `Ungrouped` group.
+Set `dsh-emacs-session-recents-show-workspace` to nil to hide the prefix
+(default: t). Changes take effect on the next list redraw; `g` refreshes it.
 The `w` workspace filter hides Recents entirely; clearing the filter restores
 it. Recents excludes archived sessions,
 sessions of subagent origin and blank sessions other than the current one. Its rows

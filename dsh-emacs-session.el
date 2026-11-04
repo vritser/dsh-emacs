@@ -127,7 +127,8 @@ command in the list cancels pending project and session targets.")
 
 (defvar-local dsh-emacs-session--row-cache nil
   "Visual rows emitted by the last successful render of this list buffer.
-Each id maps to (DISPLAY-INPUTS . ROW); no session or command metadata is
+Each row id maps to (DISPLAY-INPUTS . ROW); Recents titles use scoped ids.
+No session or command metadata is
 retained.  Every render replaces the table, dropping rows no longer visible.")
 
 (defvar dsh-emacs-session--previous-row-cache nil
@@ -174,6 +175,13 @@ Sessions are ordered by their latest update, newest first, and remain
 listed in their workspace as well.  Recents is hidden while a workspace
 filter is active and otherwise follows the list's usual visibility rules."
   :type 'natnum
+  :group 'dsh-emacs)
+
+(defcustom dsh-emacs-session-recents-show-workspace t
+  "Whether Recents rows prefix their titles with the workspace name.
+Untitled workspaces use their directory basename; unassigned sessions
+show Ungrouped.  Takes effect on the next session-list redraw."
+  :type 'boolean
   :group 'dsh-emacs)
 
 (defcustom dsh-emacs-session-jump-target 'recents
@@ -774,7 +782,8 @@ Archived sessions are always excluded."
                         (or (dsh-protocol-workspace-title workspace)
                             (dsh-emacs-session--workspace-basename
                              (dsh-protocol-workspace-path workspace))))
-                 (and ws-id label)))
+                 (and ws-id label))
+               nil (and recent-p dsh-emacs-session-recents-show-workspace))
               ;; Recents is a second occurrence of the same subtree.  Scope
               ;; row identities, including child notices, so reconciliation,
               ;; xref markers and window focus cannot switch occurrences.
@@ -950,16 +959,19 @@ rows, otherwise the generated summary title, else a cwd-derived name."
      (t (dsh-emacs-session--generate-name session)))))
 
 (defun dsh-emacs-session--render-session (session &optional indent workspace-id
-                                                  workspace-title child)
+                                                  workspace-title child
+                                                  show-workspace)
   "Render a single SESSION row, optionally indented by INDENT spaces.
 When WORKSPACE-ID is given (rendering inside a workspace group), the row
 carries `dsh-emacs-workspace-id' / `dsh-emacs-workspace-title' text
 properties as well, so commands like `c' (new session) started on ANY row
 of that workspace create the session inside it — matching dsh web, where
 the workspace context applies to the whole group.
-CHILD is (DIRECT-PARENT . CATALOG-ENTRY); SESSION may be nil for a cold child."
+CHILD is (DIRECT-PARENT . CATALOG-ENTRY); SESSION may be nil for a cold child.
+SHOW-WORKSPACE prefixes the title with its workspace in a Recents row."
   (let* ((session-id (if child (dsh-protocol-subagent-entry-id (cdr child))
                        (or (dsh-protocol-session-session-id session) "")))
+         (cache-id (if show-workspace (list :recents session-id) session-id))
          (activity (and child (dsh-emacs-subagent--activity session-id)))
          (running (if child (equal activity "running")
                     (dsh-protocol-session-running session)))
@@ -973,8 +985,14 @@ CHILD is (DIRECT-PARENT . CATALOG-ENTRY); SESSION may be nil for a cold child."
 
          ;; Format fields: the display title is the auto-generated summary
          ;; (`values.title') like dsh web; blank sessions show "New Session".
-         (title-str (if child (dsh-emacs-subagent--label (cdr child))
-                      (dsh-emacs-session--display-title session)))
+         (title-str
+          (concat
+           (when show-workspace
+             (propertize (format "[%s] " (or workspace-title "Ungrouped"))
+                         'face 'dsh-emacs-muted-face))
+           (propertize (if child (dsh-emacs-subagent--label (cdr child))
+                         (dsh-emacs-session--display-title session))
+                       'face 'dsh-emacs-session-title-face)))
          (detail (if child
                      (format "%s · %s"
                              (dsh-protocol-subagent-address-mode
@@ -992,9 +1010,9 @@ CHILD is (DIRECT-PARENT . CATALOG-ENTRY); SESSION may be nil for a cold child."
                        (copy-sequence title-str)
                        (and detail (copy-sequence detail))))
          (cached (or (and dsh-emacs-session--row-cache
-                          (gethash session-id dsh-emacs-session--row-cache))
+                          (gethash cache-id dsh-emacs-session--row-cache))
                      (and dsh-emacs-session--previous-row-cache
-                          (gethash session-id
+                          (gethash cache-id
                                    dsh-emacs-session--previous-row-cache))))
          ;; indent + disclosure + dot/separator + title + gap.  :align-to
          ;; keeps the time column stable with proportional and CJK fonts.
@@ -1003,13 +1021,12 @@ CHILD is (DIRECT-PARENT . CATALOG-ENTRY); SESSION may be nil for a cold child."
                 (concat
                  (make-string (or indent 0) ?\s) disclosure
                  (dsh-emacs-session--status-dot status) " "
-                 (propertize (dsh-emacs-session--pad-right title-str 46)
-                             'face 'dsh-emacs-session-title-face)
+                 (dsh-emacs-session--pad-right title-str 46)
                  (propertize " " 'display
                              `(space :align-to ,(+ (or indent 0) 3 49)))
                  (propertize (or detail "") 'face 'dsh-emacs-muted-face)))))
     (when dsh-emacs-session--row-cache
-      (puthash session-id (cons inputs row) dsh-emacs-session--row-cache))
+      (puthash cache-id (cons inputs row) dsh-emacs-session--row-cache))
 
     ;; Insert row with text properties for selection and (optionally) the
     ;; containing workspace

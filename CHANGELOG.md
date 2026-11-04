@@ -39,6 +39,11 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Show workspace names in Recents**: recent session rows display their
+  workspace before the title, using the directory basename when untitled or
+  `Ungrouped` for unassigned sessions. Enabled by default; set
+  `dsh-emacs-session-recents-show-workspace` to nil to hide the prefix.
+
 - **Click notifications to reopen their chat**: a run-finished, question or
   approval notification now switches back to that session when clicked.
   Closed child conversations reopen through their direct parent's catalog,

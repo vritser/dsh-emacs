@@ -164,6 +164,56 @@ window's own point behind, which the session list now preserves per window."
     (should (equal (mapcar #'dsh-protocol-session-session-id sessions)
                    (mapcar #'number-to-string (number-sequence 1 25))))))
 
+(ert-deftest dsh-emacs-test-session-recents-show-workspace-context ()
+  :tags '(dsh-unit)
+  (let* ((dsh-emacs-session-recents-limit 15)
+         (dsh-emacs-session-recents-show-workspace t)
+         (dsh-emacs-workspaces-collapsed-by-default nil)
+         (dsh-emacs--archived-sessions nil)
+         (dsh-emacs--current-session nil)
+         (dsh-emacs--subagent-catalogs (make-hash-table :test #'equal))
+         (dsh-emacs--sessions
+          (dsh-emacs-test--session-items
+           '(((sessionId . "a") (projections (values (title . "One"))))
+             ((sessionId . "b") (projections (values (title . "Two"))))
+             ((sessionId . "c") (projections (values (title . "Three")))))))
+         (dsh-emacs--workspaces
+          (mapcar #'dsh-protocol-workspace--from-alist
+                  '(((workspaceId . "named") (title . "Project")
+                     (sessionIds . ["a"]))
+                    ((workspaceId . "path") (path . "/tmp/another-project/")
+                     (sessionIds . ["b"]))))))
+    (save-window-excursion
+      (with-temp-buffer
+        (set-window-buffer (selected-window) (current-buffer))
+        ;; Renames and option changes must update previously cached rows.
+        (dolist (state '(("Project" t) ("Renamed" t)
+                         ("Renamed" nil) ("Renamed" t)))
+          (pcase-let ((`(,title ,show-workspace) state))
+            (setq dsh-emacs-session-recents-show-workspace show-workspace)
+            (setf (dsh-protocol-workspace-title (car dsh-emacs--workspaces)) title)
+            (dsh-emacs-session--render)
+            (dolist (entry `(("a" ,title "named")
+                             ("b" "another-project" "path")
+                             ("c" "Ungrouped" nil)))
+              (pcase-let ((`(,id ,label ,workspace-id) entry))
+                (goto-char (dsh-emacs-session--row-pos
+                            'dsh-emacs-row-id (list :recents id)))
+                (forward-char 6) ; indentation, disclosure and status dot
+                (should (eq (not (null (looking-at
+                                        (regexp-quote (concat "[" label "] ")))))
+                            show-workspace))
+                (should (eq (get-text-property (point) 'face)
+                            (if show-workspace 'dsh-emacs-muted-face
+                              'dsh-emacs-session-title-face)))
+                (should (equal (dsh-emacs-session-id-at-point) id))
+                (should (equal (dsh-emacs-workspace-id-at-point) workspace-id))
+                (goto-char (dsh-emacs-session--row-pos 'dsh-emacs-row-id id))
+                (should-not (string-match-p
+                             (regexp-quote (concat "[" label "] "))
+                             (buffer-substring-no-properties
+                              (line-beginning-position) (line-end-position))))))))))))
+
 (ert-deftest dsh-emacs-test-session-recents-row-identity-and-commands ()
   :tags '(dsh-unit)
   (let* ((dsh-emacs-session-recents-limit 15)
@@ -1394,12 +1444,15 @@ window's own point behind, which the session list now preserves per window."
                         (should (= builds (plist-get report :session-row-builds))))))
                   (child-pos () (dsh-emacs-session--row-pos
                                  'dsh-emacs-session-id "cache-child")))
-        (check "cold-child-layout" 2)
+        ;; Recents and workspace roots have different labels; children share
+        ;; their unchanged visual row between the two occurrences.
+        (check "cold-child-layout" 3)
         (setf (dsh-protocol-subagent-cell-value cell)
               (list (copy-dsh-protocol-subagent-entry
                      (car (dsh-protocol-subagent-cell-value cell)))))
-        (setf (dsh-protocol-workspace-title workspace) "Renamed workspace")
         (check "equal-child-replacement-reuses-layout" 0)
+        (setf (dsh-protocol-workspace-title workspace) "Renamed workspace")
+        (check "workspace-rename-rebuilds-recent-prefix" 1)
         (ert-info ((format "%s" "session-row-cache-current-child-and-workspace-metadata"))
           (should (eq (cdr (get-text-property (child-pos) 'dsh-emacs-subagent))
                       (car (dsh-protocol-subagent-cell-value cell))))
@@ -1442,9 +1495,9 @@ window's own point behind, which the session list now preserves per window."
         (ert-info ((format "%s" "session-row-cache-error-notice-visible"))
           (should (string-match-p "Cannot load subagents" (buffer-string))))
         (setq dsh-emacs-session--expanded-subagents nil)
-        (check "collapse-updates-disclosure-and-prunes-descendants" 1)
+        (check "collapse-updates-disclosure-and-prunes-descendants" 2)
         (ert-info ((format "%s" "session-row-cache-hidden-descendants-pruned"))
-          (should (= (hash-table-count dsh-emacs-session--row-cache) 1)))))))
+          (should (= (hash-table-count dsh-emacs-session--row-cache) 2)))))))
 
 (ert-deftest dsh-emacs-test-session-row-publication ()
   :tags '(dsh-unit)
