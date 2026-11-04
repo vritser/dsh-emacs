@@ -1,5 +1,7 @@
 # 093 — One consumed-input undo lifetime
 
+_Input-state file ownership is superseded by [180](180-input-state-owner.md)._
+
 Implementation commit: `fix: keep sent input undoable through later writes`.
 
 ## Background

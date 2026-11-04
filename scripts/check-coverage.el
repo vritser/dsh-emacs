@@ -29,7 +29,7 @@
     "dsh-emacs-events.el" "dsh-emacs-ui.el"
     "dsh-emacs-faces.el" "dsh-emacs-tokens.el" "dsh-emacs-modeline.el"
     "dsh-emacs-composer.el" "dsh-emacs-model.el" "dsh-emacs-interaction.el"
-    "dsh-emacs-attachments.el")
+    "dsh-emacs-attachments.el" "dsh-emacs-input.el")
   "Product source files (relative to the repo root), each instrumented with
 testcover-start.  Note: dsh-emacs-protocol.el is not listed — testcover's
 edebug-after runs testcover--copy-object on cl-defstruct return values,

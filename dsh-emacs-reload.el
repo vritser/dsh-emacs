@@ -16,7 +16,7 @@
 
 (declare-function dsh-emacs-composer-refresh "dsh-emacs-composer" ())
 (declare-function dsh-emacs-events-host-restore "dsh-emacs-events" ())
-(declare-function dsh-emacs--composer-delete-guard-install "dsh-emacs" ())
+(declare-function dsh-emacs--composer-delete-guard-install "dsh-emacs-input" ())
 (declare-function dsh-emacs-modeline-refresh "dsh-emacs-modeline" ())
 (declare-function dsh-emacs-session--render "dsh-emacs-session" ())
 (defvar dsh-emacs--interaction-active)

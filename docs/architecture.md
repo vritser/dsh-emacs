@@ -27,6 +27,7 @@ dsh-emacs/
 ├── dsh-emacs-skill.el        # Skill catalog (skills/list) and /name gestures
 ├── dsh-emacs-shell.el        # Client-side `!command` shell commands (local execution)
 ├── dsh-emacs-reference.el    # @ reference completion, chips and navigation
+├── dsh-emacs-input.el        # Input geometry, editing/undo, completion and prompt history
 ├── dsh-emacs-composer.el     # Composer chrome: Next Message and Goal rows above the input
 ├── dsh-emacs-reload.el       # Local source reload and bounded presentation refresh
 └── dsh-emacs-session.el      # Session list card view
@@ -133,7 +134,7 @@ effort when reselecting the model, otherwise the catalog default or first
 available effort. Callback boundaries catch quit and apply successful choices,
 then refresh the session cache; internal reader errors still propagate.
 
-The entry point continues to own input editing and send transactions.
+The input module owns editing and undo. The entry point owns send transactions.
 This extraction does not expand Composer's
 read-only-row responsibility. See
 [decision 174](../postmortem/174-model-selection-owner.md).
@@ -391,6 +392,24 @@ configured item order without stretch spaces. See
 [decision record 084](../postmortem/084-reply-footer.md) and the placement
 correction in [086](../postmortem/086-reply-footer-turn-tail.md).
 
+## Input (`dsh-emacs-input.el`)
+
+The input module owns the editable region marker, boundary guards, consumed
+text and undo reconstruction, local path/word CAPFs and prompt history.
+Chat mode calls its completion and editing setup at their existing positions
+so reference-chip protection and undo hooks retain their execution order.
+Layout setup creates the input marker. The coordinator applies subagent
+availability, chooses send timing and decides whether failed input can be
+restored through the input operations.
+
+History state and its mutation live together, including per-session seeding
+from decoded transcript events. Slash and reference modules own their token
+semantics and frontend adapters. Input installs them alongside its local
+CAPFs. Loading input alone registers definitions and completion categories.
+Mode setup installs editing hooks and boundary advice. Interactive history
+navigation uses the assembled package's session identity. See
+[180](../postmortem/180-input-state-owner.md).
+
 ## Composer (`dsh-emacs-composer.el`)
 
 The bottom of a chat buffer is a **Composer**: a persistent, non-transcript UI
@@ -399,14 +418,15 @@ region with optional read-only **Next Message**, **Goal Row** and
 input geometry (the `❯ ` prompt,
 `dsh-emacs--input-marker` /
 `dsh-emacs--input-end`, cursor clamps, delete guards) is owned by
-`dsh-emacs.el`; `dsh-emacs-composer.el` owns all three chrome rows and the seam
-that keeps streamed transcript above them. The queue module supplies the
+`dsh-emacs-input.el`; `dsh-emacs-composer.el` owns all three chrome rows and
+the seam that keeps streamed transcript above them. The queue module supplies the
 visible next item directly from its mirror; Composer keeps no second queue.
 `dsh-emacs-attachments.el` owns the single buffer-local staged attachment
 list, file/drop and clipboard acquisition, validation and uploads. Composer
 requires that owner and reads the list, as it reads the queue mirror; a row's
-remove cell calls `dsh-emacs--remove-attachment`. The entry point owns send
-timing, input/undo and rollback eligibility. It changes staging through
+remove cell calls `dsh-emacs--remove-attachment`. The input module owns text
+consumption and undo. The entry point owns send timing and rollback
+eligibility. It changes staging through
 `dsh-emacs--set-pending-attachments`, which owns the state update and repaint.
 No second Composer list or attachment-specific input state is introduced.
 

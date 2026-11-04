@@ -1,5 +1,7 @@
 # 176 — Own staged attachments separately from the send transaction
 
+_Input-state file ownership is superseded by [180](180-input-state-owner.md)._
+
 ## Background
 
 Baseline `972e6e6`, followed by the interaction extraction in

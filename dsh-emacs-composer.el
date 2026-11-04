@@ -17,7 +17,7 @@
 ;;       ├── Next Message      -- optional pending-message preview
 ;;       ├── Goal Row          -- optional goal, phase and actions
 ;;       ├── Attachments       -- optional staged-attachment row
-;;       └── Input Area        -- editing/geometry owned by dsh-emacs.el
+;;       └── Input Area        -- editing/geometry owned by dsh-emacs-input.el
 ;;
 ;; Goal data comes from the goal projection; its actions carry a CAS ref.
 ;; Queue data stays in dsh-emacs-queue.el, which determines which pending
@@ -47,8 +47,8 @@
 (require 'dsh-emacs-attachments)
 
 ;; render.el calls back through this seam.  Declare it without requiring
-;; render here to avoid a cycle.  Input-marker geometry remains owned by
-;; dsh-emacs.el; this module only reads the shared variable.
+;; render here to avoid a cycle.  Input-marker geometry is owned by
+;; dsh-emacs-input.el; this module only reads the shared variable.
 (declare-function dsh-emacs-render--input-insert-point "dsh-emacs-render" ())
 (declare-function dsh-emacs-reference-fontify "dsh-emacs-reference"
                   (string &optional references))

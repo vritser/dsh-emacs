@@ -4,6 +4,33 @@
 
 (require 'dsh-test-support)
 
+(ert-deftest dsh-emacs-test-input-owner-load-and-consumption ()
+  :tags '(dsh-unit)
+  (pcase-let ((`(,status . ,output)
+               (dsh-test--fresh-process
+                '(progn
+                   (require 'ert)
+                   (let ((before pre-command-hook))
+                     (require 'dsh-emacs-input)
+                     (should-not (featurep 'dsh-emacs))
+                     (should (equal pre-command-hook before))
+                     (should-not
+                      (advice-member-p #'dsh-emacs--composer-kill-region
+                                       'kill-region)))
+                   (with-temp-buffer
+                     (insert "prefix ")
+                     (setq dsh-emacs--input-marker (point-marker))
+                     (insert "draft")
+                     (should (equal (dsh-emacs--get-input) "draft"))
+                     (dsh-emacs--clear-input)
+                     (should (equal (buffer-string) "prefix "))
+                     (should (equal dsh-emacs--undo-consumed "draft"))
+                     (dsh-emacs--replace-input "replacement")
+                     (should (equal (dsh-emacs--get-input) "replacement")))))))
+    (ert-info (output)
+      (should (equal status 0))
+      (should (equal output "")))))
+
 (defun dsh-emacs-test--read-char-insert-command ()
   "Read one interactive character, then insert it."
   (interactive)

@@ -78,7 +78,7 @@
                   (session-id))
 (declare-function dsh-emacs-skill-label "dsh-emacs-skill.el" (skill))
 (declare-function dsh-emacs-skill-open "dsh-emacs-skill.el" (skill))
-;; Buffer-local in dsh-emacs.el: the start of the editable input area.
+;; Buffer-local in dsh-emacs-input.el: the start of the editable input area.
 (defvar dsh-emacs--input-marker)
 
 ;; Optional completion-frontend variables: corfu-auto-trigger is defined by

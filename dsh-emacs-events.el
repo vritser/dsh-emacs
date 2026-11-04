@@ -143,7 +143,7 @@ generation and a new clientId.")
 (declare-function dsh-emacs-history--start-load "dsh-emacs-history"
                   (count &optional visit))
 (declare-function dsh-emacs--chat-session-item "dsh-emacs" (session-id))
-(declare-function dsh-emacs--seed-input-history "dsh-emacs" (events session-id &optional older))
+(declare-function dsh-emacs--seed-input-history "dsh-emacs-input" (events session-id &optional older))
 (declare-function dsh-emacs--chat-buffer-sync "dsh-emacs" (session-id))
 (declare-function dsh-emacs--chat-buffer-model-sync "dsh-emacs"
                   (session-id buf &optional selection))

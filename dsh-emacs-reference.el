@@ -78,7 +78,7 @@
 (declare-function dsh-emacs-session--visible-p
                   "dsh-emacs-session.el" (session &optional current-session-id))
 
-;; dsh-emacs.el's input-area anchor (buffer-local), borrowed read-only here
+;; dsh-emacs-input.el's input-area anchor (buffer-local), read-only here
 (defvar dsh-emacs--input-marker)
 (defvar dsh-emacs--archived-sessions)
 ;; Optional corfu variables (corfu-auto-trigger is defined by corfu-auto.el).

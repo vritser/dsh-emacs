@@ -52,10 +52,10 @@
 
 (require 'dsh-emacs-render)
 
-;; dsh-emacs.el holds the input-area state and history; like command/queue,
+;; dsh-emacs-input.el owns input state and history; like command/queue,
 ;; this module is called declaratively (dsh-emacs.el guarantees load order).
-(declare-function dsh-emacs--push-input-history "dsh-emacs" (text))
-(declare-function dsh-emacs--clear-input "dsh-emacs" ())
+(declare-function dsh-emacs--push-input-history "dsh-emacs-input" (text))
+(declare-function dsh-emacs--clear-input "dsh-emacs-input" ())
 
 (defgroup dsh-emacs-shell nil
   "Local `!command' shell commands."

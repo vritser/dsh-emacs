@@ -21,7 +21,7 @@
 (defvar dsh-emacs--buffer-session)
 (defvar dsh-emacs--buffer-subagent)
 (defvar dsh-emacs--input-marker)
-(declare-function dsh-emacs--seed-input-history "dsh-emacs"
+(declare-function dsh-emacs--seed-input-history "dsh-emacs-input"
                   (events session-id &optional older))
 (declare-function dsh-emacs--active-session-id "dsh-emacs" ())
 

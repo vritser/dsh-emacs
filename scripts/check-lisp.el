@@ -47,7 +47,7 @@
      "dsh-emacs-plan.el" "dsh-emacs-subagent.el" "dsh-emacs-interaction.el"
      "dsh-emacs-command.el" "dsh-emacs-skill.el" "dsh-emacs-reference.el"
      "dsh-emacs-composer.el" "dsh-emacs-history.el" "dsh-emacs-attachments.el"
-     "dsh-emacs-shell.el" "dsh-emacs-reload.el"
+     "dsh-emacs-shell.el" "dsh-emacs-reload.el" "dsh-emacs-input.el"
      "test/dsh-test.el" "test/dsh-e2e.el" "test/dsh-gui.el"
      "test/check-lisp-test.el" "scripts/render-report.el"
      "scripts/check-lisp.el" "scripts/check-coverage.el")
