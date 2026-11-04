@@ -2,7 +2,7 @@
 
 ;; Copyright (C) 2026
 ;; Author: dsh-emacs contributors
-;; Version: 0.7.0
+;; Version: 0.8.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; License: GPL-3.0-or-later
 

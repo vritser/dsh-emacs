@@ -1,7 +1,7 @@
 ;;; dsh-emacs-events.el --- dsh WebSocket event stream -*- lexical-binding: t; no-native-compile: t -*-
 
 ;; Copyright (C) 2026 vritser
-;; Version: 0.7.0
+;; Version: 0.8.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; License: GPL-3.0-or-later
 

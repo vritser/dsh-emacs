@@ -10,7 +10,7 @@ mandatory third-party Emacs packages.
 
 https://github.com/user-attachments/assets/9ee9fc66-1997-49b7-a921-5753690edafa
 
-dsh-emacs **0.7.0** is compatible with **dsh 0.2.1-rc.2**, the
+dsh-emacs **0.8.0** is compatible with **dsh 0.2.1-rc.2**, the
 [latest upstream release](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.1-rc.2)
 as of **2026-10-18** (npm `next`; npm `latest` still points to 0.2.0-rc.2).
 The client includes compatibility fixes for the **dsh 0.2.1 protocol**:
