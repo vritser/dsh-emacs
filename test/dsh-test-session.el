@@ -1111,6 +1111,7 @@ window's own point behind, which the session list now preserves per window."
     ;; workspace path (magit et al. locate the project this way).
     (let ((calls nil)
           (draft nil)
+          (ready nil)
           (buf (generate-new-buffer " *dsh-empty-ws-create*")))
       (unwind-protect
           (with-current-buffer buf
@@ -1118,7 +1119,9 @@ window's own point behind, which the session list now preserves per window."
             (put-text-property (point-min) (point-max)
                                'dsh-emacs-workspace-id "w-empty")
             (goto-char (point-min))
-            (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+            (cl-letf (((symbol-function 'dsh-emacs-server-ensure-async)
+                       (lambda (callback) (setq ready callback)))
+                      ((symbol-function 'dsh-emacs--rpc-async)
                        (lambda (method params cb)
                          (push (list method params) calls)
                          (funcall cb t `((sessionId . ,(cdr (assq 'sessionId
@@ -1135,6 +1138,13 @@ window's own point behind, which the session list now preserves per window."
                       ((symbol-value 'dsh-emacs--current-buffer) buf)
                       (dsh-emacs--workspaces empty-ws))
               (setq draft (call-interactively #'dsh-emacs-new-session))
+              (should (functionp ready))
+              (should-not calls)
+              (with-current-buffer draft
+                (should (derived-mode-p 'dsh-emacs-draft-mode))
+                (should dsh-emacs--creation-pending))
+              (funcall ready nil)
+              (should (= (length calls) 1))
               (let* ((call (car calls))
                      (params (cadr call)))
                 (ert-info ((format "%s" "new-session-in-workspace-uses-workspace-id"))
