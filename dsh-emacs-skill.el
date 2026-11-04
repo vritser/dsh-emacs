@@ -52,6 +52,7 @@
 (require 'cl-lib)
 (require 'dsh-emacs-protocol)
 (require 'dsh-emacs-server)
+(require 'dsh-emacs-ui)
 
 (declare-function dsh-emacs--active-session-id "dsh-emacs.el" ())
 
@@ -265,7 +266,7 @@ SKILL is a `dsh-protocol-skill'; its PATH comes from the host (dsh
 0.1.6+) and is absent for providers that manage their own resources."
   (let ((path (dsh-protocol-skill-path skill)))
     (if path
-        (find-file path)
+        (dsh-emacs-ui-navigate (point-marker) #'find-file path)
       (user-error "Skill /%s has no SKILL.md path"
                   (dsh-protocol-skill-name skill)))))
 

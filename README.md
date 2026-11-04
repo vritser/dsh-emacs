@@ -166,8 +166,9 @@ queue.
 The default busy-send behavior is configurable with
 `dsh-emacs-busy-enter-behavior`.
 
-`M-x dsh-emacs-list-subagents` opens child conversations; `M-,` returns to the
-originating position. Continuable children accept follow-up input, while
+`M-,` returns to the originating position after opening files, sessions,
+plans, images or job output. `M-x dsh-emacs-list-subagents` opens child
+conversations. Continuable children accept follow-up input, while
 one-shot children are read-only. See [Subagents](docs/subagents.md).
 
 Agent questions use your normal minibuffer completion. Pick an option or type

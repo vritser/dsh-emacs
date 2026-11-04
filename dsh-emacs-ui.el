@@ -24,7 +24,23 @@
 (require 'button)
 (require 'map)
 (require 'text-property-search)
+(require 'xref)
 (require 'dsh-emacs-faces)
+
+(defun dsh-emacs-ui-navigate (departure function &rest arguments)
+  "Call FUNCTION with ARGUMENTS, recording DEPARTURE for xref return.
+DEPARTURE is a marker captured when navigation is requested, including for
+asynchronous actions.  Record it only after a successful change of buffer
+or position.  Errors, cancelled actions and no-op visits leave history alone.
+This function takes ownership of the marker and returns FUNCTION's value."
+  (unwind-protect
+      (prog1 (apply function arguments)
+        (when (and (marker-buffer departure)
+                   (not (and (eq (marker-buffer departure) (current-buffer))
+                             (= departure (point)))))
+          (xref-push-marker-stack departure)
+          (setq departure nil)))
+    (when departure (set-marker departure nil))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Ordered completion

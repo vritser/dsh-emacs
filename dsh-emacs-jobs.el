@@ -426,7 +426,7 @@ therefore also the recovery path after a drop."
                    (and (dsh-protocol-job-owner job) session-id))
                   "job/follow"
                   (dsh-emacs-jobs--output-item buffer)))))
-    (pop-to-buffer buffer)))
+    (dsh-emacs-ui-navigate (point-marker) #'pop-to-buffer buffer)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Kill (human stop, two-press confirmation)

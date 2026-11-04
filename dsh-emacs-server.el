@@ -41,6 +41,9 @@
 (require 'url-parse)
 (require 'dsh-emacs-protocol)
 
+(declare-function dsh-emacs-ui-navigate "dsh-emacs-ui"
+                  (departure function &rest arguments))
+
 (defgroup dsh-emacs-server nil
   "dsh server bootstrap: probe, auto-start, and on-demand install."
   :group 'dsh-emacs
@@ -1049,7 +1052,8 @@ file handling; dsh owns configuration loading and validation."
                                   nil previous t)))))
     (unless (file-regular-p file)
       (user-error "Not a regular configuration file: %s" file))
-    (find-file file)
+    (require 'dsh-emacs-ui)
+    (dsh-emacs-ui-navigate (point-marker) #'find-file file)
     (setf (alist-get server dsh-emacs--config-files nil nil #'equal) file)))
 
 ;;;###autoload

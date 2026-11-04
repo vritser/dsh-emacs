@@ -802,7 +802,7 @@ may still appear in the session list.  Return the draft buffer."
       (setq-local default-directory (file-name-as-directory dir)
                   dsh-emacs--creation-context
                   (list dir workspace-id preset server id)))
-    (pop-to-buffer buf)
+    (dsh-emacs-ui-navigate (point-marker) #'pop-to-buffer buf)
     (with-current-buffer buf (dsh-emacs-retry-session-creation))
     buf))
 
@@ -980,7 +980,8 @@ was created.  Reopening never reconnects a live buffer; use
   (when (and address
              (equal (dsh-protocol-subagent-address-mode address) "external"))
     (user-error "External subagents have no local conversation"))
-  (let* ((existing (gethash session-id dsh-emacs--chat-buffers))
+  (let* ((departure (point-marker))
+         (existing (gethash session-id dsh-emacs--chat-buffers))
          (live (buffer-live-p existing))
          (buf (if live
                   existing
@@ -994,8 +995,14 @@ was created.  Reopening never reconnects a live buffer; use
           dsh-emacs--current-buffer buf)
     (unless live
       (dsh-emacs--activate-chat-buffer session-id buf address))
-    (pop-to-buffer buf
-                   (when other-window '(display-buffer-pop-up-window)))))
+    (if (and address (not live))
+        (prog1
+          (pop-to-buffer buf
+                         (when other-window '(display-buffer-pop-up-window)))
+          (setq dsh-emacs--subagent-departure departure))
+      (dsh-emacs-ui-navigate
+       departure #'pop-to-buffer buf
+       (when other-window '(display-buffer-pop-up-window))))))
 
 (defun dsh-emacs--activate-chat-buffer (session-id buf &optional address)
   "Initialize BUF and connect it to SESSION-ID, optionally at ADDRESS.
@@ -1064,11 +1071,8 @@ The caller owns server readiness and window selection."
 
 (defun dsh-emacs-open-subagent (parent entry &optional other-window)
   "Open catalog ENTRY through its direct PARENT, optionally in OTHER-WINDOW."
-  (let ((marker (point-marker))
-        (address (dsh-emacs-subagent-address parent entry)))
+  (let ((address (dsh-emacs-subagent-address parent entry)))
     (dsh-emacs-open-session (dsh-protocol-subagent-entry-id entry) address other-window)
-    (with-current-buffer dsh-emacs--current-buffer
-      (setq dsh-emacs--subagent-departure marker))
     (dsh-emacs-subagent--refresh-summaries)))
 
 (defun dsh-emacs-notify--open (session-id)
@@ -2566,7 +2570,7 @@ and fetches any missing catalogs.  A cold session cache is fetched as before;
     ;; Select before arming/rendering: the jump excludes this window from
     ;; row restoration, and centering must operate on the window just opened.
     ;; Without a jump, the render restores this window's existing row.
-    (pop-to-buffer buf)
+    (dsh-emacs-ui-navigate (point-marker) #'pop-to-buffer buf)
     (with-current-buffer buf
       ;; Arm the target after the mode/connect step: entering a major mode
       ;; would erase a buffer-local target armed earlier.

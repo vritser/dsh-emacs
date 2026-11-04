@@ -20,6 +20,7 @@
 (require 'dsh-emacs-faces)
 (require 'dsh-emacs-protocol)
 (require 'dsh-emacs-markdown)
+(require 'dsh-emacs-ui)
 
 (declare-function dsh-emacs--events-result-async "dsh-emacs-interaction"
                   (client-id event-id outcome callback))
@@ -132,7 +133,7 @@
                        (buffer-local-value 'dsh-emacs-plan--pending chat)))
          (review (car pending)))
     (unless review (user-error "No pending plan review in this chat"))
-    (pop-to-buffer
+    (dsh-emacs-ui-navigate (point-marker) #'pop-to-buffer
      (dsh-emacs-plan--show
       chat (plist-get review :identity)
       (dsh-protocol-question-detail (plist-get review :question)) review))))
@@ -142,8 +143,10 @@
   (interactive)
   (unless (buffer-live-p dsh-emacs-plan--chat)
     (user-error "This plan's chat is closed"))
-  (pop-to-buffer dsh-emacs-plan--chat)
-  (goto-char (point-max)))
+  (let ((chat dsh-emacs-plan--chat))
+    (dsh-emacs-ui-navigate
+     (point-marker)
+     (lambda () (pop-to-buffer chat) (goto-char (point-max))))))
 
 (defun dsh-emacs-plan--request (chat event-id session-id questions)
   "Handle a supported plan review from QUESTIONS; return nil for ordinary asks.
@@ -262,6 +265,7 @@ its own outcome answers the waterfall."
 (defun dsh-emacs-plan--answer (approve)
   "Answer this document's live request; APPROVE nil requests changes."
   (let* ((review dsh-emacs-plan--review)
+         (departure (point-marker))
          (chat (plist-get review :chat))
          (client (plist-get review :client-id))
          ;; A response only settles the waterfall it was sent for.  The host
@@ -301,8 +305,9 @@ its own outcome answers the waterfall."
                       (dsh-emacs-plan--retire
                        review (if approve "Approved" "Changes requested"))
                       (unless approve
-                        (pop-to-buffer chat)
-                        (goto-char (point-max))
+                        (dsh-emacs-ui-navigate
+                         departure
+                         (lambda () (pop-to-buffer chat) (goto-char (point-max))))
                         (message "Describe the changes in the chat input")))
                   (unless (plist-get review :retired)
                     (setf (plist-get review :busy) nil

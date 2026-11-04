@@ -1109,7 +1109,7 @@ session span carrying the real SESSION-ID."
             (cwd (and sid (dsh-emacs--chat-cwd sid)))
             (abs (and cwd value (expand-file-name value cwd))))
        (if (and abs (file-exists-p abs))
-           (find-file abs)
+           (dsh-emacs-ui-navigate (point-marker) #'find-file abs)
          (user-error "Reference file not found locally: %s"
                      (or value "")))))))
 

@@ -65,6 +65,7 @@
 (require 'org-faces)
 (require 'url-parse)
 (require 'url-util)
+(require 'dsh-emacs-ui)
 
 (defgroup dsh-emacs-markdown nil
   "Render Markdown text into propertized form."
@@ -1065,7 +1066,10 @@ Preserve positions so an enclosing link can supply its own click target."
                  start end
                  (list 'display image
                        'keymap (dsh-emacs-markdown--make-ret-binding-map
-                                (lambda () (interactive) (find-file path)))
+                                (lambda ()
+                                  (interactive)
+                                  (dsh-emacs-ui-navigate
+                                   (point-marker) #'find-file path)))
                        'mouse-face 'highlight
                        (if defer-freeze 'dsh-emacs-markdown-resource
                          'dsh-emacs-markdown-frozen) t
@@ -1136,7 +1140,8 @@ renders the image in place of that text."
                 (put-text-property path-start path-end 'keymap
                                    (dsh-emacs-markdown--make-ret-binding-map
                                     (lambda () (interactive)
-                                      (find-file resolved))))
+                                      (dsh-emacs-ui-navigate
+                                       (point-marker) #'find-file resolved))))
                 (put-text-property path-start path-end 'mouse-face 'highlight)
                 (add-text-properties path-start path-end
                                      '(dsh-emacs-markdown-frozen t
@@ -2702,13 +2707,17 @@ A missing local target or unsupported scheme is an error, not a browser URL."
 Return non-nil if handled, nil otherwise."
   (when-let* ((parsed (dsh-emacs-markdown--parse-local-link url)))
     (pcase-let ((`(,file ,line ,column) parsed))
-      (find-file file)
-      (when line
-        (widen)
-        (goto-char (point-min))
-        (forward-line (1- line))
-        (when column
-          (forward-char (min (1- column) (- (line-end-position) (point)))))))
+      (dsh-emacs-ui-navigate
+       (point-marker)
+       (lambda ()
+         (find-file file)
+         (when line
+           (widen)
+           (goto-char (point-min))
+           (forward-line (1- line))
+           (when column
+             (forward-char (min (1- column)
+                                (- (line-end-position) (point)))))))))
     t))
 
 (defun dsh-emacs-markdown--local-path (url)

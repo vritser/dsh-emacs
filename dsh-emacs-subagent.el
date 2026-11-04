@@ -13,7 +13,6 @@
 ;;; Code:
 (require 'cl-lib)
 (require 'color)
-(require 'xref)
 (require 'dsh-emacs-protocol)
 (require 'dsh-emacs-server)
 (require 'dsh-emacs-tokens)
@@ -491,9 +490,7 @@ Use the current completion frontend with no additional minibuffer keys."
      dsh-emacs--subagent-catalogs)
     (if owner
         (dsh-emacs-open-subagent (car owner) (cdr owner))
-      (let ((marker (point-marker)))
-        (dsh-emacs-open-session id)
-        (xref-push-marker-stack marker)))))
+      (dsh-emacs-open-session id))))
 
 (defun dsh-emacs-subagent-stop ()
   "Choose and request interruption of a continuable child."

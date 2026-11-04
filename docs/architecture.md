@@ -6,7 +6,7 @@ Module ownership:
 dsh-emacs/
 ├── dsh-emacs.el              # Entry point, chat mode and session/submit coordination
 ├── dsh-emacs-protocol.el     # Typed views of dsh RPC payloads (cl-defstruct)
-├── dsh-emacs-ui.el           # Fragment snapshots, folding, faces, completion frontend
+├── dsh-emacs-ui.el           # Fragment snapshots, folding, faces, completion frontend and xref return navigation
 ├── dsh-emacs-faces.el        # Shared faces and palette defaults
 ├── dsh-emacs-tokens.el       # Token tracking and formatting
 ├── dsh-emacs-markdown.el     # Markdown syntax highlighting
@@ -1506,6 +1506,20 @@ that path. Web's authenticated server-file endpoint is not used by Emacs.
 See [the user-facing file/image contract](reference.md#assistant-markdown-file-links)
 and [decision 150](../postmortem/150-markdown-resource-boundaries.md), including
 the intentionally bounded syntax and differences from the Web renderer.
+
+## Navigation return history (`dsh-emacs-ui.el`)
+
+`dsh-emacs-ui-navigate` owns explicit navigation that changes the current
+buffer or point: file/session references, local Markdown links, session-list
+and new-chat visits, plans, images, job output, skills and configuration
+files. Callers capture the departure marker before the operation; the helper
+pushes it to Emacs's xref history only after the operation succeeds and the
+buffer or point changed. Errors, cancellation and no-ops discard it. Async
+callers retain the marker across the fetch or plan decision and pass it to
+the same entry after success. Session opening records ordinary and live
+chats directly; a first-time child visit keeps the follow-snapshot success
+gate in `dsh-emacs-events.el`. See
+[181](../postmortem/181-navigation-return-history.md).
 
 ## Event-stream reliability
 

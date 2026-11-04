@@ -211,6 +211,9 @@ is no separate tree mode or display timer. Xref's public marker stack is suffici
 `M-.` backend is not installed. On Emacs 28.1 the default return command is
 `xref-pop-marker-stack`; Emacs 29+ may use `xref-go-back`. Existing
 user bindings are left intact.
+Revisiting an already open child records the departure immediately; the first
+visit records it after the follow snapshot succeeds. Returning to the parent
+adds one entry, so `M-,` can return to the child too.
 
 ## Metrics
 

@@ -1954,8 +1954,8 @@ or the display cannot render images (terminal Emacs keeps the placeholder)."
         (ignore-errors
           (create-image data type t :max-width box :max-height box))))))
 
-(defun dsh-emacs-render--open-image-data (data name)
-  "Show raw image DATA (unibyte string) in a dedicated image buffer."
+(defun dsh-emacs-render--open-image-data (data name &optional departure)
+  "Show raw image DATA in its buffer, with optional xref DEPARTURE marker."
   (let ((buffer (get-buffer-create
                  (format " *dsh image: %s*" (or name "image")))))
     (with-current-buffer buffer
@@ -1964,7 +1964,7 @@ or the display cannot render images (terminal Emacs keeps the placeholder)."
         (set-buffer-multibyte nil)
         (insert data))
       (image-mode))
-    (pop-to-buffer buffer)))
+    (dsh-emacs-ui-navigate (or departure (point-marker)) #'pop-to-buffer buffer)))
 
 (defun dsh-emacs-render--image-open ()
   "Open the image under point in its own buffer.
@@ -1973,16 +1973,17 @@ re-fetches them via `session/attachment'."
   (interactive)
   (let* ((data (get-text-property (point) 'dsh-emacs-image-data))
          (attachment-id (get-text-property (point) 'dsh-emacs-attachment-id))
-         (name (get-text-property (point) 'dsh-emacs-image-name)))
+         (name (get-text-property (point) 'dsh-emacs-image-name))
+         (departure (point-marker)))
     (cond
-     (data (dsh-emacs-render--open-image-data data name))
+     (data (dsh-emacs-render--open-image-data data name departure))
      (attachment-id
       (message "Fetching image…")
       (dsh-emacs-render--request-attachment
        (dsh-emacs--active-session-id) attachment-id
        (lambda (bytes)
          (if bytes
-             (dsh-emacs-render--open-image-data bytes name)
+             (dsh-emacs-render--open-image-data bytes name departure)
            (message "Image fetch failed")))))
      (t (message "Image bytes unavailable")))))
 
@@ -2778,7 +2779,7 @@ transcript; they are removed with the buffer on a session reset/replay."
 
 (defun dsh-emacs-render--open-plan (button)
   "Open the historical document carried by BUTTON."
-  (pop-to-buffer
+  (dsh-emacs-ui-navigate (point-marker) #'pop-to-buffer
    (dsh-emacs-plan--show
     (current-buffer) (button-get button 'dsh-emacs-plan--call-id)
     (button-get button 'dsh-emacs-plan--markdown))))

@@ -1,5 +1,10 @@
 # @ References (file & session mentions)
 
+After opening a file or session reference, `M-,` returns to the exact departure
+position through Emacs's xref history. Local Markdown links, including line
+and column targets within the same file, support the same return command.
+Missing targets and cancelled navigation leave the return history unchanged.
+
 The `@` directive brings relevant work from the current workspace or from
 **another conversation** into a new message without resuming or forking the
 source session — dsh web's cross-session reference feature, mirrored in

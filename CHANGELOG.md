@@ -39,6 +39,13 @@ minor) and stay undated until the release is cut.
 
 ### Added
 
+- **Return from navigation with `M-,`**: file and session references, local
+  Markdown links, session-list visits, new chats, skills/configuration files,
+  plans, images and job output now record their departure in Emacs's xref
+  history. Live child visits record immediately; first child visits still
+  wait for their follow snapshot. Failed and no-op visits add no entry.
+  (rationale: [postmortem/181](postmortem/181-navigation-return-history.md))
+
 - **Show workspace names in Recents**: recent session rows display their
   workspace before the title, using the directory basename when untitled or
   `Ungrouped` for unassigned sessions. Enabled by default; set

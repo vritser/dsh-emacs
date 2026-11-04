@@ -24,6 +24,7 @@
 
 (require 'cl-lib)
 (require 'url-parse)
+(require 'xref)
 (require 'dsh-emacs-protocol)
 (require 'dsh-emacs-server)
 (require 'dsh-emacs-subagent)
@@ -751,7 +752,8 @@ VALUE may already be a decoded `dsh-protocol-follow-snapshot'."
         (dsh-emacs-events--apply-snapshot-projections
          session-id projections)
         (when (markerp dsh-emacs--subagent-departure)
-          (xref-push-marker-stack dsh-emacs--subagent-departure)
+          (when (marker-buffer dsh-emacs--subagent-departure)
+            (xref-push-marker-stack dsh-emacs--subagent-departure))
           (setq dsh-emacs--subagent-departure nil))
         (setq dsh-emacs--ws-last-event-time (float-time))
         ;; Complete only the latest human round on opening.  A snapshot that
