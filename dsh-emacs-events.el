@@ -153,6 +153,7 @@ generation and a new clientId.")
 (declare-function dsh-emacs-modeline-set-context-snapshot "dsh-emacs-modeline" (pressure window))
 (declare-function dsh-emacs-modeline-set-permission "dsh-emacs-modeline" (permission))
 (declare-function dsh-emacs-queue-apply "dsh-emacs-queue" (chat process items))
+(defvar dsh-emacs--queue-process)
 (declare-function dsh-emacs-composer-set-goal "dsh-emacs-composer" (goal))
 (declare-function dsh-emacs-jobs-reopen "dsh-emacs-jobs" (chat))
 
@@ -1154,6 +1155,18 @@ reconnect is re-armed and another connect scheduled."
              (run-start (and was-busy dsh-emacs--modeline-run-start))
              (process nil))
         (dsh-emacs-events-disconnect chat)
+        ;; The core stream can outlive this chat.  Reopening does not send
+        ;; another control baseline, so seed from its latest inbox cell.
+        ;; A follow-only reconnect must preserve this core's existing mirror,
+        ;; including successful edits awaiting their confirming projection.
+        (when-let* ((core dsh-emacs-events--host-process)
+                    ((process-live-p core))
+                    ((not (eq core dsh-emacs--queue-process)))
+                    (inboxes (process-get core 'dsh-emacs-inboxes)))
+          (let ((items (gethash dsh-emacs--buffer-session inboxes 'missing)))
+            (unless (eq items 'missing)
+              (dsh-emacs-queue-apply
+               chat core (mapcar #'copy-dsh-protocol-queue-item items)))))
         ;; Teardown clears busy, but a failed connection is not a turn end.
         ;; Restore before opening the socket so every retry retains liveness;
         ;; a bounded snapshot after compaction may omit the original start.
@@ -1425,7 +1438,10 @@ Unknown trailing ids (a workspace appearing in the payload before its
       (dsh-emacs-events--host-repaint))))
 
 (defun dsh-emacs-events--host-session-removed (session-id)
-  "Drop SESSION-ID from the cached session list."
+  "Drop SESSION-ID from the cached session list and retained inboxes."
+  (when-let* ((core dsh-emacs-events--host-process)
+              (inboxes (process-get core 'dsh-emacs-inboxes)))
+    (remhash session-id inboxes))
   (setq dsh-emacs--sessions
         (cl-remove-if-not
          (lambda (s)
@@ -1633,6 +1649,15 @@ only reach their session's live chat; other cells update the shared caches."
              (with-current-buffer chat
                (dsh-emacs-modeline-set-plan value)))))
         ("inbox"
+         ;; Keep closed sessions current too.  Process ownership prevents a
+         ;; replacement connection from seeding chats with an old snapshot.
+         (when (processp process)
+           (let ((inboxes (or (process-get process 'dsh-emacs-inboxes)
+                              (make-hash-table :test #'equal))))
+             (process-put process 'dsh-emacs-inboxes inboxes)
+             ;; Queue actions may mutate the chat's items optimistically.
+             (puthash session-id
+                      (mapcar #'copy-dsh-protocol-queue-item value) inboxes)))
          (let ((chat (dsh-emacs-events--chat-buffer session-id)))
            (when (buffer-live-p chat)
              (dsh-emacs-queue-apply chat process value))))

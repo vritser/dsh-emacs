@@ -588,8 +588,8 @@
 ;; by `dsh-emacs-events--host-item' via session-id to that session's chat
 ;; buffer's dsh-emacs-queue-apply --- the mirror and the [next] preview row
 ;; update immediately; an inbox cell for another session (no open chat
-;; buffer) is dropped instead of landing in whatever buffer happens to be
-;; current.
+;; buffer) is retained on the core connection without painting the current
+;; buffer.
 (ert-deftest dsh-emacs-test-queue-queue-frame-dispatch-routes-to-chat ()
   :tags '(dsh-unit)
   (let* ((old-chats dsh-emacs--chat-buffers)
@@ -630,7 +630,7 @@
                 (should (equal "dispatched"
                                (dsh-protocol-queue-item-text (car dsh-emacs--queue-items))))
                 (should (dsh-test-composer-next-row))))
-            ;; Another session's inbox cell (no open chat buffer) → dropped:
+            ;; Another session's inbox cell must not paint an unrelated chat:
             ;; this mirror and preview row stay as they were, and the current
             ;; buffer does not silently adopt the foreign queue.
             (with-current-buffer neutral
@@ -657,6 +657,169 @@
       (when (buffer-live-p chat) (kill-buffer chat))
       (when (buffer-live-p neutral) (kill-buffer neutral))
       (when (process-live-p proc) (delete-process proc)))))
+
+(ert-deftest dsh-emacs-test-queue-reopen-seeds-current-control-inbox ()
+  :tags '(dsh-unit)
+  (dolist (closed-update '(unchanged replaced cleared local-edit new-connection))
+    (ert-info ((format "Closed chat update: %s" closed-update))
+      (let* ((dsh-emacs--chat-buffers (make-hash-table :test #'equal))
+             (dsh-emacs--sessions nil)
+             (dsh-emacs--current-session nil)
+             (dsh-emacs--current-buffer nil)
+             (dsh-emacs--sessions-buffer
+              (generate-new-buffer " *queue-owner-list*"))
+             (dsh-emacs-events--host-process
+              (make-pipe-process :name "queue-owner-core" :noquery t))
+             (processes (list dsh-emacs-events--host-process))
+             (stream-buffers nil)
+             (announcements nil)
+             chat)
+        (save-window-excursion
+          (unwind-protect
+              (cl-letf (((symbol-function 'dsh-emacs-server-ensure) #'ignore)
+                        ((symbol-function 'dsh-emacs--rpc-async) #'ignore)
+                        ((symbol-function 'dsh-emacs--link-session-preset) #'ignore)
+                        ((symbol-function 'dsh-emacs-command-catalog-prefetch) #'ignore)
+                        ((symbol-function 'dsh-emacs-skill-prefetch) #'ignore)
+                        ((symbol-function 'dsh-emacs-reference-prefetch) #'ignore)
+                        ((symbol-function 'dsh-emacs-queue--announce)
+                         (lambda (events) (push events announcements)))
+                        ((symbol-function 'open-network-stream)
+                         (lambda (name buffer &rest _args)
+                           (push buffer stream-buffers)
+                           (let ((process (make-pipe-process
+                                           :name name :buffer buffer
+                                           :noquery t)))
+                             (push process processes)
+                             process))))
+                (dsh-emacs-open-session "queue-reopen")
+                (setq chat dsh-emacs--current-buffer)
+                (dsh-emacs-events--host-control-baseline
+                 dsh-emacs-events--host-process
+                 `((projections
+                    . ((queue-reopen
+                        . ((values
+                            . ((inbox
+                                . ((next-turn
+                                    . ,(vector
+                                        (dsh-emacs-test--inbox-message
+                                         "original" "Pending original")))))))))))))
+                (with-current-buffer chat
+                  (should (equal (mapcar #'dsh-protocol-queue-item-id
+                                         (dsh-emacs-queue-items))
+                                 '("original")))
+                  (when (eq closed-update 'local-edit)
+                    ;; Optimistic chat edits must not mutate the retained
+                    ;; server snapshot before its confirming frame arrives.
+                    (setf (dsh-protocol-queue-item-text
+                           (car (dsh-emacs-queue-items))) "Local edit")))
+                (kill-buffer chat)
+                (should (process-live-p dsh-emacs-events--host-process))
+                (pcase closed-update
+                  ((or 'replaced 'cleared)
+                   (dsh-emacs-events--host-apply-projection
+                    dsh-emacs-events--host-process
+                    `((sessionId . "queue-reopen") (key . "inbox")
+                      (value . ((next-turn
+                                 . ,(if (eq closed-update 'cleared) []
+                                      (vector (dsh-emacs-test--inbox-message
+                                               "replacement" "Pending replacement")))))))))
+                  ('new-connection
+                   (setq dsh-emacs-events--host-process
+                         (make-pipe-process :name "queue-new-core" :noquery t))
+                   (push dsh-emacs-events--host-process processes)))
+                (setq announcements nil)
+                (dsh-emacs-open-session "queue-reopen")
+                (setq chat dsh-emacs--current-buffer)
+                (with-current-buffer chat
+                  (let ((expected (pcase closed-update
+                                    ((or 'unchanged 'local-edit) '("original"))
+                                    ('replaced '("replacement")))))
+                    (should (equal (mapcar #'dsh-protocol-queue-item-id
+                                           (dsh-emacs-queue-items))
+                                   expected))
+                    ;; Yield to the real zero-delay paint timer.  Calling
+                    ;; refresh here would hide broken repaint scheduling.
+                    (sleep-for 0.01)
+                    (should-not dsh-emacs-queue--paint-timer)
+                    (should (eq (not (null (dsh-test-composer-next-row)))
+                                (not (null expected))))
+                  (should
+                   (equal (mapcar #'dsh-protocol-queue-item-text
+                                  (dsh-emacs-queue-items))
+                          (pcase closed-update
+                            ((or 'unchanged 'local-edit) '("Pending original"))
+                            ('replaced '("Pending replacement")))))))
+                (should-not announcements))
+            (when (buffer-live-p chat) (kill-buffer chat))
+            (when (buffer-live-p dsh-emacs--sessions-buffer)
+              (kill-buffer dsh-emacs--sessions-buffer))
+            (dolist (process processes)
+              (when (process-live-p process) (delete-process process)))
+            (dolist (buffer stream-buffers)
+              (when (buffer-live-p buffer) (kill-buffer buffer)))))))))
+
+(ert-deftest dsh-emacs-test-queue-follow-reconnect-preserves-local-delete ()
+  :tags '(dsh-unit)
+  (let* ((core (make-pipe-process :name "queue-reconnect-core" :noquery t))
+         (dsh-emacs-events--host-process core)
+         (dsh-emacs--chat-buffers (make-hash-table :test #'equal))
+         (dsh-emacs--sessions nil)
+         stream-buffer announcements)
+    (unwind-protect
+        (with-temp-buffer
+          (dsh-emacs-mode)
+          (setq-local dsh-emacs--buffer-session "queue-reconnect")
+          (puthash "queue-reconnect" (current-buffer) dsh-emacs--chat-buffers)
+          (dsh-emacs-events--host-apply-projection
+           core `((sessionId . "queue-reconnect") (key . "inbox")
+                  (value . ((next-turn
+                             . ,(vector (dsh-emacs-test--inbox-message
+                                         "deleted" "Remove this")))))))
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (_method _args callback) (funcall callback t nil)))
+                    ((symbol-function 'dsh-emacs-queue--announce)
+                     (lambda (events) (push events announcements)))
+                    ((symbol-function 'open-network-stream)
+                     (lambda (name buffer &rest _args)
+                       (setq stream-buffer buffer)
+                       (make-pipe-process :name name :buffer buffer :noquery t))))
+            (dsh-emacs-queue--delete (car (dsh-emacs-queue-items)))
+            (should-not (dsh-emacs-queue-items))
+            ;; The delete RPC completed, but its control projection has not.
+            ;; Reconnecting only session/follow must not replay the old cell.
+            (dsh-emacs-events-connect (current-buffer))
+            (should-not (dsh-emacs-queue-items))
+            (should-not (dsh-test-composer-next-row))
+            (should (equal dsh-emacs--queue-deleted '("deleted")))
+            (should (eq dsh-emacs--queue-process core))
+            (should-not announcements)))
+      (when (process-live-p core) (delete-process core))
+      (when (buffer-live-p stream-buffer) (kill-buffer stream-buffer)))))
+
+(ert-deftest dsh-emacs-test-queue-session-removal-releases-cached-inbox ()
+  :tags '(dsh-unit)
+  (let* ((core (make-pipe-process :name "queue-removal-core" :noquery t))
+         (dsh-emacs-events--host-process core)
+         (dsh-emacs--chat-buffers (make-hash-table :test #'equal))
+         (dsh-emacs--sessions nil))
+    (unwind-protect
+        (progn
+          (dolist (session '("removed" "kept"))
+            (dsh-emacs-events--host-apply-projection
+             core `((sessionId . ,session) (key . "inbox")
+                    (value . ((next-turn
+                               . ,(vector (dsh-emacs-test--inbox-message
+                                           session session))))))))
+          (let ((inboxes (process-get core 'dsh-emacs-inboxes)))
+            (should (= (hash-table-count inboxes) 2))
+            (dsh-emacs-events--host-session-removed "removed")
+            (should (eq (gethash "removed" inboxes 'missing) 'missing))
+            (should (equal (mapcar #'dsh-protocol-queue-item-id
+                                   (gethash "kept" inboxes))
+                           '("kept")))
+            (should (= (hash-table-count inboxes) 1))))
+      (when (process-live-p core) (delete-process core)))))
 
 ;; JSON level: a real `/api/remote.mux' `item' frame carrying the `inbox'
 ;; projection cell (the exact 0.1.7 wire form, `next-turn'/'next-step' as

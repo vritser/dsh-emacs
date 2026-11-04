@@ -97,6 +97,11 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Restore pending messages when reopening a chat**: the queue preview and
+  `C-c C-q` retain the latest server queue state when the shared connection
+  stays open, including changes received while the chat was closed.
+  Reconnecting an open chat preserves pending queue edits and deletions.
+
 - **Highlight only the attachment remove glyph**: surrounding spaces stay
   outside the hover and click target; clicking the cross or RET removes that
   file.

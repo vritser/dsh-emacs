@@ -1098,8 +1098,14 @@ this source works against 0.1.5+ servers.  The wire cell (`next-turn` /
 `dsh-protocol-queue-item` (`id`, `placement` =
 `queued`/`steering`/`context`, `text`, `kind`) by
 `dsh-protocol-queue-items-from-inbox` in `dsh-emacs-protocol.el`; an
-`inbox` cell for a session with no live chat buffer is dropped rather than
-applied to whatever buffer is current.  The baseline's `projections` record
+`inbox` cell is retained on the core connection even when its chat is closed.
+Opening a chat seeds its mirror silently from that connection's latest cell;
+closed-chat updates and explicit empty cells replace the retained value.
+A follow-only reconnect preserves a mirror already seeded by the same core
+connection, including local queue actions awaiting their confirming projection.
+Session removal releases its cached cell; a replacement connection starts
+with no retained cells. Only the matching live chat is repainted.
+The baseline's `projections` record
 is keyed by session id, and JSON decoding interns object keys as symbols,
 so `dsh-protocol-control-session--from-alist` normalizes each record key to a
 string before the chat-buffer and projection lookups — the same identity the

@@ -310,8 +310,8 @@ current one and no minibuffer session is active."
   "Replace CHAT's pending-input mirror with ITEMS arriving on PROCESS.
 ITEMS is the `dsh-protocol-queue-item' list derived from the session's
 `inbox' projection (`dsh-protocol-queue-items-from-inbox') — the events
-dispatcher resolves CHAT by session id and drops frames for any other
-session.  The first frame of a connection is the connect-time snapshot
+dispatcher resolves CHAT by session id and retains the latest cell on the
+core connection for closed chats.  The first frame of a connection is a snapshot
 and seeds the mirror silently; later frames diff against the mirror to
 emit the enqueue / steer / consumption feedback.
 
