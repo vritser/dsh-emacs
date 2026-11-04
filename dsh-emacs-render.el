@@ -4665,6 +4665,63 @@ when visible content was removed."
       (dsh-emacs-render--follow-stream windows)
       t)))
 
+(defun dsh-emacs-render--attempt-cards (facts)
+  "Classify one turn's decoded FACTS without reading or changing buffer state.
+FACTS is a seq-ordered alist of (SEQ . EXECUTION-EVENT), already merged by
+`dsh-emacs-render--note-attempt-outcome'.  Return fresh card plists, newest
+attempt first, with :event, :label and :cause.  Event objects remain borrowed
+from FACTS; neither they nor the input alist are modified."
+  (let (pending waiting cards)
+    (dolist (entry facts)
+      (let* ((fact (cdr entry))
+             (type (dsh-protocol-execution-event-type fact)))
+        ;; Recovery plugins can retry directly without an llm/retry event.
+        ;; Another response in the same step proves the request resumed.
+        (when (and (member type '("assistant/attempt" "assistant/message"))
+                   (or pending waiting)
+                   (equal (dsh-protocol-execution-event-step fact)
+                          (dsh-protocol-execution-event-step
+                           (plist-get (or pending waiting) :event))))
+          (if pending
+              (setf (plist-get pending :cause) fact
+                    (plist-get pending :label) "Retried")
+            (setf (plist-get waiting :label) "started")))
+        (pcase type
+          ("assistant/attempt"
+           (setq pending (list :event fact :label "Incomplete reply"
+                               :cause nil)
+                 waiting nil)
+           (push pending cards))
+          ("assistant/message" (setq pending nil waiting nil))
+          ("llm/retry"
+           (when (and pending
+                      (equal (dsh-protocol-execution-event-step fact)
+                             (dsh-protocol-execution-event-step
+                              (plist-get pending :event))))
+             (setf (plist-get pending :cause) fact
+                   (plist-get pending :label) "scheduled")
+             (setq waiting pending pending nil)))
+          ("llm/retry-started"
+           (when-let* ((retry (plist-get waiting :cause)))
+             (when (and (equal (dsh-protocol-execution-event-id fact)
+                               (dsh-protocol-execution-event-id retry))
+                        (equal (dsh-protocol-execution-event-step fact)
+                               (dsh-protocol-execution-event-step retry))
+                        (equal (dsh-protocol-execution-event-attempt fact)
+                               (dsh-protocol-execution-event-attempt retry)))
+               (setf (plist-get waiting :label) "started")
+               (setq waiting nil))))
+          ("turn/end"
+           (let ((card (or pending waiting))
+                 (reason (dsh-protocol-execution-event-reason fact)))
+             (when (and card (member reason '("error" "aborted")))
+               (setf (plist-get card :cause) fact
+                     (plist-get card :label)
+                     (if (equal reason "error") "Failed reply"
+                       (if waiting "Retry cancelled" "Cancelled reply")))))
+           (setq pending nil waiting nil)))))
+    cards))
+
 (defun dsh-emacs-render--note-attempt-outcome (event)
   "Merge decoded EVENT and classify this turn's visible attempt cards.
 Replay by seq, not arrival order: an older page may arrive after its outcome.
@@ -4682,63 +4739,12 @@ settles the last unresolved attempt; it never relabels earlier started retries."
            (seq (dsh-protocol-execution-event-seq event))
            (state (or (gethash turn dsh-emacs-render--attempt-turns)
                       (list :facts nil :position (make-marker) :seq nil)))
-           (facts (plist-get state :facts))
-           (pending nil)
-           (waiting nil)
-           (cards nil))
+           (facts (plist-get state :facts)))
       (setf (alist-get seq facts) event)
       (setq facts (sort facts (lambda (a b) (< (car a) (car b)))))
       (setf (plist-get state :facts) facts)
       (puthash turn state dsh-emacs-render--attempt-turns)
-      (dolist (entry facts)
-        (let* ((fact (cdr entry))
-               (type (dsh-protocol-execution-event-type fact)))
-          ;; Recovery plugins can retry directly without an llm/retry event.
-          ;; Another response in the same step proves the request resumed.
-          (when (and (member type '("assistant/attempt" "assistant/message"))
-                     (or pending waiting)
-                     (equal (dsh-protocol-execution-event-step fact)
-                            (dsh-protocol-execution-event-step
-                             (plist-get (or pending waiting) :event))))
-            (if pending
-                (setf (plist-get pending :cause) fact
-                      (plist-get pending :label) "Retried")
-              (setf (plist-get waiting :label) "started")))
-          (pcase type
-            ("assistant/attempt"
-             (setq pending (list :event fact :label "Incomplete reply"
-                                 :cause nil)
-                   waiting nil)
-             (push pending cards))
-            ("assistant/message" (setq pending nil waiting nil))
-            ("llm/retry"
-             (when (and pending
-                        (equal (dsh-protocol-execution-event-step fact)
-                               (dsh-protocol-execution-event-step
-                                (plist-get pending :event))))
-               (setf (plist-get pending :cause) fact
-                     (plist-get pending :label) "scheduled")
-               (setq waiting pending pending nil)))
-            ("llm/retry-started"
-             (when-let* ((retry (plist-get waiting :cause)))
-               (when (and (equal (dsh-protocol-execution-event-id fact)
-                                 (dsh-protocol-execution-event-id retry))
-                          (equal (dsh-protocol-execution-event-step fact)
-                                 (dsh-protocol-execution-event-step retry))
-                          (equal (dsh-protocol-execution-event-attempt fact)
-                                 (dsh-protocol-execution-event-attempt retry)))
-                 (setf (plist-get waiting :label) "started")
-                 (setq waiting nil))))
-            ("turn/end"
-             (let ((card (or pending waiting))
-                   (reason (dsh-protocol-execution-event-reason fact)))
-               (when (and card (member reason '("error" "aborted")))
-                 (setf (plist-get card :cause) fact
-                       (plist-get card :label)
-                       (if (equal reason "error") "Failed reply"
-                         (if waiting "Retry cancelled" "Cancelled reply")))))
-             (setq pending nil waiting nil)))))
-      (dolist (card cards)
+      (dolist (card (dsh-emacs-render--attempt-cards facts))
         (let* ((attempt (plist-get card :event))
                (cause (plist-get card :cause))
                (label (plist-get card :label))

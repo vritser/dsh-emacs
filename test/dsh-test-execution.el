@@ -252,6 +252,136 @@
       (kill-buffer first)
       (kill-buffer second))))
 
+(ert-deftest dsh-emacs-test-execution-attempt-card-terminal-reasons ()
+  :tags '(dsh-unit)
+  (should-not (dsh-emacs-render--attempt-cards nil))
+  (let ((attempt (dsh-protocol-execution-event--from-alist
+                  (dsh-test--execution-event
+                   "assistant/attempt" 1 '((turn . 1) (step . 1))))))
+    (dolist (case '(("error" "Failed reply" t)
+                    ("aborted" "Cancelled reply" t)
+                    ("completed" "Incomplete reply" nil)
+                    ("future-reason" "Incomplete reply" nil)
+                    (nil "Incomplete reply" nil)))
+      (pcase-let* ((`(,reason ,label ,settled) case)
+                   (end (dsh-protocol-execution-event--from-alist
+                         (dsh-test--execution-event
+                          "turn/end" 2 `((turn . 1) (reason . ((kind . ,reason)))))))
+                   (cards (dsh-emacs-render--attempt-cards
+                           (list (cons 1 attempt) (cons 2 end)))))
+        (ert-info ((format "Terminal reason %S" reason))
+          (should (equal cards
+                         (list (list :event attempt :label label
+                                     :cause (and settled end))))))))))
+
+(ert-deftest dsh-emacs-test-execution-attempt-card-retry-identity ()
+  :tags '(dsh-unit)
+  (let* ((attempt (dsh-protocol-execution-event--from-alist
+                   (dsh-test--execution-event
+                    "assistant/attempt" 1 '((turn . 1) (step . 1)))))
+         (retry (dsh-protocol-execution-event--from-alist
+                 (dsh-test--execution-event
+                  "llm/retry" 2 '((turn . 1) (step . 1)
+                                  (retryId . "chain") (retry . 1)))))
+         (end (dsh-protocol-execution-event--from-alist
+               (dsh-test--execution-event
+                "turn/end" 4 '((turn . 1) (reason . ((kind . "aborted"))))))))
+    (dolist (case '(("chain" 1 1 "started")
+                    ("other" 1 1 "scheduled")
+                    ("chain" 2 1 "scheduled")
+                    ("chain" 1 2 "scheduled")))
+      (pcase-let* ((`(,id ,step ,number ,label) case)
+                   (started (dsh-protocol-execution-event--from-alist
+                             (dsh-test--execution-event
+                              "llm/retry-started" 3
+                              `((turn . 1) (step . ,step)
+                                (retryId . ,id) (retry . ,number)))))
+                   (facts (list (cons 1 attempt) (cons 2 retry) (cons 3 started)))
+                   (expected (list (list :event attempt :label label :cause retry)))
+                   (cards (dsh-emacs-render--attempt-cards facts)))
+        (ert-info ((format "Started identity %S" case))
+          (should (equal cards expected))
+          (should
+           (equal (dsh-emacs-render--attempt-cards
+                   (append facts (list (cons 4 end))))
+                  (if (equal label "started") expected
+                    (list (list :event attempt :label "Retry cancelled"
+                                :cause end)))))
+          (should (equal cards expected)))))))
+
+(ert-deftest dsh-emacs-test-execution-attempt-card-recovery-step-boundary ()
+  :tags '(dsh-unit)
+  (dolist (type '("assistant/message" "assistant/attempt"))
+    (dolist (step '(1 2))
+      (let* ((attempt (dsh-protocol-execution-event--from-alist
+                       (dsh-test--execution-event
+                        "assistant/attempt" 1 '((turn . 1) (step . 1)))))
+             (response (dsh-protocol-execution-event--from-alist
+                        (dsh-test--execution-event
+                         type 2 `((turn . 1) (step . ,step)))))
+             (expected
+              (list (list :event attempt
+                          :label (if (= step 1) "Retried" "Incomplete reply")
+                          :cause (and (= step 1) response)))))
+        (when (equal type "assistant/attempt")
+          (push (list :event response :label "Incomplete reply" :cause nil)
+                expected))
+        (ert-info ((format "Recovery %s in step %d" type step))
+          (should (equal (dsh-emacs-render--attempt-cards
+                          (list (cons 1 attempt) (cons 2 response)))
+                         expected)))))))
+
+(ert-deftest dsh-emacs-test-execution-attempt-card-retry-requires-attempt-step ()
+  :tags '(dsh-unit)
+  (dolist (step '(1 2))
+    (let* ((attempt (dsh-protocol-execution-event--from-alist
+                     (dsh-test--execution-event
+                      "assistant/attempt" 1 '((turn . 1) (step . 1)))))
+           (retry (dsh-protocol-execution-event--from-alist
+                   (dsh-test--execution-event
+                    "llm/retry" 2 `((turn . 1) (step . ,step)
+                                    (retryId . "chain") (retry . 1))))))
+      (should-not (dsh-emacs-render--attempt-cards (list (cons 2 retry))))
+      (should (equal (dsh-emacs-render--attempt-cards
+                      (list (cons 1 attempt) (cons 2 retry)))
+                     (list (list :event attempt
+                                 :label (if (= step 1) "scheduled" "Incomplete reply")
+                                 :cause (and (= step 1) retry))))))))
+
+(ert-deftest dsh-emacs-test-execution-attempt-card-failure-and-purity ()
+  :tags '(dsh-unit)
+  (let* ((facts
+          (cl-loop
+           for event in
+           (list (dsh-test--execution-event
+                  "assistant/attempt" 1 '((turn . 1) (step . 1)))
+                 (dsh-test--execution-event
+                  "llm/retry" 2 '((turn . 1) (step . 1)
+                                  (retryId . "chain") (retry . 1)))
+                 (dsh-test--execution-event
+                  "llm/retry-started" 3 '((turn . 1) (step . 1)
+                                          (retryId . "chain") (retry . 1)))
+                 (dsh-test--execution-event
+                  "assistant/attempt" 4 '((turn . 1) (step . 1)))
+                 (dsh-test--execution-event
+                  "turn/end" 5 '((turn . 1) (reason . ((kind . "error"))))))
+           for decoded = (dsh-protocol-execution-event--from-alist event)
+           collect (cons (dsh-protocol-execution-event-seq decoded) decoded)))
+         (original (copy-tree facts t))
+         (dsh-emacs-render--attempt-turns 'untouched)
+         (expected
+          (list (list :event (cdr (nth 3 facts)) :label "Failed reply"
+                      :cause (cdr (nth 4 facts)))
+                (list :event (cdar facts) :label "started"
+                      :cause (cdr (nth 1 facts)))))
+         (cards (dsh-emacs-render--attempt-cards facts)))
+    (should (equal cards expected))
+    (should (equal facts original))
+    (should (eq dsh-emacs-render--attempt-turns 'untouched))
+    ;; Presentation may modify its result without contaminating the next replay.
+    (setf (plist-get (car cards) :label) "caller changed this result")
+    (should (equal (dsh-emacs-render--attempt-cards facts) expected))))
+
 (ert-deftest dsh-emacs-test-execution-attempt-outcomes ()
   :tags '(dsh-unit)
   (dolist (delivery '(live history prepend reverse))

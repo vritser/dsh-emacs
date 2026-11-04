@@ -1226,6 +1226,15 @@ retry labels. The existing attempt fragment is updated in place with explicit
 retry/failure/cancellation labels, tool-row styling and failure hover details.
 Unknown outcomes retain **Incomplete reply**. Live output is taken over once,
 with expanded-live/folded-history behavior and user folding preserved.
+
+`dsh-emacs-render--attempt-cards` classifies one turn's decoded, seq-ordered
+facts into fresh card plists, newest attempt first, without accessing buffer
+state or modifying its input. `dsh-emacs-render--note-attempt-outcome` owns
+merging and sorting those facts, updating the existing fragments and retaining
+the marker boundary. This keeps the correlation rules directly testable as
+data while preserving the rendering and trimming lifecycle. See
+[177](../postmortem/177-attempt-card-classification.md).
+
 Model errors and automatic compaction failures use `dsh-emacs-render-info`:
 the same status dot, title face and compact spacing, with muted
 metadata and an initially expanded explanation.
