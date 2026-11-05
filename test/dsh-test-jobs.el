@@ -16,7 +16,7 @@
 ;; follow stream on the same socket keeps its frames.
 (ert-deftest dsh-emacs-test-jobs-job-stream-routed-to-handler ()
   :tags '(dsh-unit)
-  (let* ((proc (make-pipe-process :name "t-jobs-router" :buffer nil))
+  (let* ((proc (dsh-test--event-process :name "t-jobs-router" :buffer nil))
          (job-seen nil)
          (job-torn nil))
     (unwind-protect
@@ -53,7 +53,7 @@
 ;; frame for a stream this client already dropped).
 (ert-deftest dsh-emacs-test-jobs-unknown-stream-frame-dropped ()
   :tags '(dsh-unit)
-  (let ((proc (make-pipe-process :name "t-jobs-unknown" :buffer nil)))
+  (let ((proc (dsh-test--event-process :name "t-jobs-unknown" :buffer nil)))
     (unwind-protect
         (should-not
          (dsh-emacs-events--dispatch-json
@@ -66,7 +66,7 @@
 ;; never receive anything.
 (ert-deftest dsh-emacs-test-jobs-open-stream-registers-its-id ()
   :tags '(dsh-unit)
-  (let ((proc (make-pipe-process :name "t-jobs-open" :buffer nil))
+  (let ((proc (dsh-test--event-process :name "t-jobs-open" :buffer nil))
         (sent nil))
     (unwind-protect
         (progn
@@ -343,7 +343,7 @@
   :tags '(dsh-unit)
   (let* ((buf (get-buffer-create " *dsh-test-job-quit*"))
          (chat (get-buffer-create " *dsh-test-job-quit-chat*"))
-         (proc (make-pipe-process :name "t-jobs-quit" :buffer nil))
+         (proc (dsh-test--event-process :name "t-jobs-quit" :buffer nil))
          (cancelled nil))
     (unwind-protect
         (progn
@@ -431,7 +431,7 @@
   :tags '(dsh-unit)
   (let* ((buf (get-buffer-create " *dsh-test-job-kill*"))
          (chat (get-buffer-create " *dsh-test-job-kill-chat*"))
-         (proc (make-pipe-process :name "t-jobs-kill-buffer" :buffer nil))
+         (proc (dsh-test--event-process :name "t-jobs-kill-buffer" :buffer nil))
          (closed nil)
          (stream-after-cleanup 'unset))
     (unwind-protect
@@ -471,8 +471,8 @@
   :tags '(dsh-unit)
   (let* ((chat-a (get-buffer-create " *dsh-test-job-viewer-a*"))
          (chat-b (get-buffer-create " *dsh-test-job-viewer-b*"))
-         (proc-a (make-pipe-process :name "t-jobs-viewer-a" :buffer nil))
-         (proc-b (make-pipe-process :name "t-jobs-viewer-b" :buffer nil))
+         (proc-a (dsh-test--event-process :name "t-jobs-viewer-a" :buffer nil))
+         (proc-b (dsh-test--event-process :name "t-jobs-viewer-b" :buffer nil))
          (job (dsh-protocol-job--from-alist
                (json-read-from-string
                 (concat "{\"id\":\"shared-job\",\"kind\":\"bash\","
@@ -512,8 +512,8 @@
   :tags '(dsh-unit)
   (let* ((chat-a (get-buffer-create " *dsh-test-job-close-a*"))
          (chat-b (get-buffer-create " *dsh-test-job-close-b*"))
-         (proc-a (make-pipe-process :name "t-jobs-close-a" :buffer nil))
-         (proc-b (make-pipe-process :name "t-jobs-close-b" :buffer nil))
+         (proc-a (dsh-test--event-process :name "t-jobs-close-a" :buffer nil))
+         (proc-b (dsh-test--event-process :name "t-jobs-close-b" :buffer nil))
          (job (dsh-protocol-job--from-alist
                (json-read-from-string
                 (concat "{\"id\":\"shared-job\",\"kind\":\"bash\","

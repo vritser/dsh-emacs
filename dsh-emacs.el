@@ -467,7 +467,10 @@ not roll the cache back below a newer one.")
 (defun dsh-emacs-list-sessions--fetch ()
   "Fetch the session list via RPC and populate `dsh-emacs--sessions'."
   ;; This callback owns global caches, not the lifetime of the caller's chat.
+  (dsh-emacs--server-capture-owner)
   (with-current-buffer (get-buffer-create " *dsh-session-cache*")
+    (setq-local dsh-emacs--server-buffer-owner (dsh-emacs--server-capture-owner))
+    (setq dsh-emacs--connection-session-status 'loading)
     (dsh-emacs-events--host-refresh-begin)
     (let ((generation (setq dsh-emacs--session-list-fetch-generation
                             (1+ dsh-emacs--session-list-fetch-generation))))
@@ -476,6 +479,16 @@ not roll the cache back below a newer one.")
                               (unwind-protect
                                   (when (= generation
                                            dsh-emacs--session-list-fetch-generation)
+                                    (setq dsh-emacs--connection-session-status
+                                          (cond ((not ok) 'failed)
+                                                ((and dsh-emacs-events--host-ready
+                                                      dsh-emacs-events--host-process
+                                                      dsh-emacs-events--client-id
+                                                      (process-get dsh-emacs-events--host-process
+                                                                   'dsh-control-baseline)
+                                                      (process-get dsh-emacs-events--host-process
+                                                                   'dsh-workspace-baseline)) 'ready)
+                                                (t 'stale)))
                                     (if ok
                                         (progn
                                           ;; JSON arrays arrive as vectors; normalize
@@ -507,25 +520,27 @@ not roll the cache back below a newer one.")
                                 ;; snapshot must not touch the caches.
                                 (dsh-emacs-events--host-refresh-drain)))))))
 
-(defun dsh-emacs-list-sessions--fetch-when-ready (deadline)
+(defun dsh-emacs-list-sessions--fetch-when-ready (deadline generation base)
   "Poll until the server is alive, then fetch the session list.
 DEADLINE is a `float-time' value: retry every 0.5 s until it passes,
 then report why the list stayed empty.  The chain is non-blocking (a
 `run-at-time' timer per retry), so a cold server boot never freezes the
 UI, and the grace period is the same `dsh-emacs-server-wait-seconds' a
 blocking start uses — a first `dsh web' boot composes the profile and
-loads the plugin tree, which does not fit in a fixed few seconds."
-  (if (dsh-emacs--server-alive-p)
-      (dsh-emacs-list-sessions--fetch)
-    (if (< (float-time) deadline)
-        (run-at-time 0.5 nil #'dsh-emacs-list-sessions--fetch-when-ready
-                     deadline)
-      (message "dsh: server did not become ready within %ds%s — retry with M-x dsh-emacs"
-               dsh-emacs-server-wait-seconds
-               (if (and dsh-emacs--server-process
-                        (not (process-live-p dsh-emacs--server-process)))
-                   " (the server process this package started has exited; see `*dsh-server*')"
-                 " (see `*dsh-server*')")))))
+loads the plugin tree, which does not fit in a fixed few seconds.
+GENERATION and BASE capture the startup that this poll belongs to."
+  (when (dsh-emacs--server-current-p generation base)
+    (if (dsh-emacs--server-alive-p)
+        (dsh-emacs-list-sessions--fetch)
+      (if (< (float-time) deadline)
+          (dsh-emacs--server-run-later 0.5 nil #'dsh-emacs-list-sessions--fetch-when-ready
+                                       deadline generation base)
+        (message "dsh: server did not become ready within %ds%s — retry with M-x dsh-emacs"
+                 dsh-emacs-server-wait-seconds
+                 (if (and dsh-emacs--server-process
+                          (not (process-live-p dsh-emacs--server-process)))
+                     " (the server process this package started has exited; see `*dsh-server*')"
+                   " (see `*dsh-server*')"))))))
 
 (defun dsh-emacs-list-sessions ()
   "Fetch the session list and refresh workspaces.
@@ -535,22 +550,24 @@ instructions instead.  A managed process already being started by the
 user is still awaited; an explicit `dsh-emacs-server-start' is
 unaffected."
   (interactive)
+  (dsh-emacs--server-capture-owner)
   ;; Non-blocking: launch the server in the background if auto-start is
   ;; allowed.  When the server is starting, poll until it is ready before
   ;; firing the RPC to avoid a 404 race.
   (when (and (not dsh-emacs-server-auto-start)
              (not (dsh-emacs--server-alive-p))
-             (not (and dsh-emacs--server-process
-                       (process-live-p dsh-emacs--server-process))))
+             (not (dsh-emacs--server-managed-p)))
     (dsh-emacs--server-unreachable-error))
-  (let ((alive (dsh-emacs-server-start)))
+  (let* ((generation dsh-emacs--server-generation)
+         (base (dsh-emacs--server-base-url))
+         (alive (dsh-emacs-server-start)))
     (if alive
         (dsh-emacs-list-sessions--fetch)
       ;; Server just launched — wait for it within the same grace period a
       ;; blocking start would use (see `dsh-emacs-server-wait-seconds'); a
       ;; cold boot regularly outlives a fixed few seconds.
       (dsh-emacs-list-sessions--fetch-when-ready
-       (+ (float-time) dsh-emacs-server-wait-seconds)))))
+       (+ (float-time) dsh-emacs-server-wait-seconds) generation base))))
 
 ;;;###autoload
 (defun dsh-emacs--new-session-workspace ()
@@ -634,6 +651,7 @@ matches the workspace registered for it under any spelling."
 Sending and session commands are unavailable until creation succeeds.
 After failure, `\\[dsh-emacs-retry-session-creation]' retries without
 clearing the draft, using the last session identity confirmed by the server."
+  (setq-local dsh-emacs--server-buffer-owner (dsh-emacs--server-capture-owner))
   (setq-local header-line-format nil))
 
 (defun dsh-emacs-retry-session-creation ()
@@ -977,6 +995,7 @@ applies only to that initialization; a live buffer was addressed when it
 was created.  Reopening never reconnects a live buffer; use
 \\[dsh-emacs-refresh] to force a resync."
   (interactive)
+  (dsh-emacs--server-capture-owner)
   (when (and address
              (equal (dsh-protocol-subagent-address-mode address) "external"))
     (user-error "External subagents have no local conversation"))
@@ -997,8 +1016,8 @@ was created.  Reopening never reconnects a live buffer; use
       (dsh-emacs--activate-chat-buffer session-id buf address))
     (if (and address (not live))
         (prog1
-          (pop-to-buffer buf
-                         (when other-window '(display-buffer-pop-up-window)))
+            (pop-to-buffer buf
+                           (when other-window '(display-buffer-pop-up-window)))
           (setq dsh-emacs--subagent-departure departure))
       (dsh-emacs-ui-navigate
        departure #'pop-to-buffer buf
@@ -1075,39 +1094,47 @@ The caller owns server readiness and window selection."
     (dsh-emacs-open-session (dsh-protocol-subagent-entry-id entry) address other-window)
     (dsh-emacs-subagent--refresh-summaries)))
 
-(defun dsh-emacs-notify--open (session-id)
+(defun dsh-emacs-notify--open (session-id instance generation &optional endpoint-key)
   "Open SESSION-ID's chat after its desktop notification was clicked.
 Reuse a live chat or resolve a closed child's direct parent from the catalog.
-Raise and focus the selected frame when Emacs is graphical."
+Raise and focus the selected frame when Emacs is graphical.
+ENDPOINT-KEY is the endpoint fingerprint captured with the action; a nil
+fingerprint (an action created before fingerprints existed) has expired."
   (condition-case err
-      (let* ((live (buffer-live-p (gethash session-id dsh-emacs--chat-buffers)))
-             (owner
-              (unless live
-                (catch 'found
-                  (maphash
-                   (lambda (parent _state)
-                     (when-let* ((entry
-                                  (cl-find session-id
-                                           (dsh-emacs-subagent--value
-                                            parent 'subagentCatalog)
-                                           :test #'equal
-                                           :key #'dsh-protocol-subagent-entry-id)))
-                       (throw 'found (cons parent entry))))
-                   dsh-emacs--subagent-catalogs)
-                  nil)))
-             (session (unless (or live owner)
-                        (dsh-emacs--chat-session-item session-id))))
-        (if (or live owner
-                (and session
-                     (not (equal (dsh-protocol-session-origin session)
-                                 "subagent"))))
-            (progn
-              (if owner
-                  (dsh-emacs-open-subagent (car owner) (cdr owner))
-                (dsh-emacs-open-session session-id))
-              (when (display-graphic-p)
-                (select-frame-set-input-focus (selected-frame))))
-          (message "dsh: the notified session is no longer available")))
+      (progn
+        (unless (and (equal instance dsh-emacs--connection-instance)
+                     (equal endpoint-key
+                            (secure-hash 'sha256 (dsh-emacs--server-base-url)))
+                     (dsh-emacs--server-current-p generation (dsh-emacs--server-base-url)))
+          (user-error "This dsh notification has expired"))
+        (let* ((live (buffer-live-p (gethash session-id dsh-emacs--chat-buffers)))
+               (owner
+                (unless live
+                  (catch 'found
+                    (maphash
+                     (lambda (parent _state)
+                       (when-let* ((entry
+                                    (cl-find session-id
+                                             (dsh-emacs-subagent--value
+                                              parent 'subagentCatalog)
+                                             :test #'equal
+                                             :key #'dsh-protocol-subagent-entry-id)))
+                         (throw 'found (cons parent entry))))
+                     dsh-emacs--subagent-catalogs)
+                    nil)))
+               (session (unless (or live owner)
+                          (dsh-emacs--chat-session-item session-id))))
+          (if (or live owner
+                  (and session
+                       (not (equal (dsh-protocol-session-origin session)
+                                   "subagent"))))
+              (progn
+                (if owner
+                    (dsh-emacs-open-subagent (car owner) (cdr owner))
+                  (dsh-emacs-open-session session-id))
+                (when (display-graphic-p)
+                  (select-frame-set-input-focus (selected-frame))))
+            (message "dsh: the notified session is no longer available"))))
     (error (message "dsh: cannot open the notified session (%s)"
                     (error-message-string err)))))
 
@@ -1748,6 +1775,7 @@ after every text or property edit; session statistics refresh separately."
 (define-derived-mode dsh-emacs-mode fundamental-mode "DSH"
   "DeepSeek Harness chat mode.
 \\{dsh-emacs-mode-map}"
+  (setq-local dsh-emacs--server-buffer-owner (dsh-emacs--server-capture-owner))
   (setq-local mode-name '(:eval (dsh-emacs-modeline--mode-name)))
   (setq buffer-read-only nil)
   (setq truncate-lines nil)
@@ -1839,7 +1867,15 @@ here rather than reading the global directly: with several session buffers
 open, the global points at the last-opened session while the user may be
 editing inside an earlier one.  Pending drafts never use that fallback."
   (unless (derived-mode-p 'dsh-emacs-draft-mode)
+    (dsh-emacs--server-capture-owner)
     (or dsh-emacs--buffer-session dsh-emacs--current-session)))
+
+(defun dsh-emacs-current-session ()
+  "Return this buffer's active session id, or the last selected id.
+Return nil for an unconnected client or a pending draft.  Retired buffer
+contexts signal `user-error'; this accessor never starts network work."
+  (unless (memq dsh-emacs--connection-status '(disconnected disconnecting failed))
+    (dsh-emacs--active-session-id)))
 
 (defun dsh-emacs--busy-p ()
   "Return non-nil when this chat buffer is generating.
@@ -1938,15 +1974,20 @@ replaying it as text would drop them."
         ;; after the echo for ordinary messages, before uploading for files.
         ;; A synchronous exception restores the exact original caption.
         (cl-labels ((submit (mode)
-                      (when (dsh-emacs-pending-attachments)
-                        (dsh-emacs--set-pending-attachments nil))
-                      (condition-case err
-                          (dsh-emacs--submit-prompt text attachments mode)
-                        ((error quit)
-                         (dsh-emacs--replace-input input)
-                         (when attachments
-                           (dsh-emacs--set-pending-attachments attachments))
-                         (signal (car err) (cdr err))))))
+                      (dsh-emacs--submit-track
+                       (lambda (complete)
+                         (condition-case err
+                             (progn
+                               (when (dsh-emacs-pending-attachments)
+                                 (dsh-emacs--set-pending-attachments nil))
+                               (dsh-emacs--submit-prompt text attachments mode))
+                           ((error quit)
+                            (dsh-emacs--replace-input input)
+                            (when attachments
+                              (dsh-emacs--set-pending-attachments attachments))
+                            (signal (car err) (cdr err))))
+                         (funcall complete))
+                       #'ignore)))
           (cond
            ((and steer-p (not empty-p)) (submit 'steer))
            (busy
@@ -1986,6 +2027,44 @@ ambiguous and are not accepted by the dsh API."
         (when (dsh-emacs--valid-iana-time-zone-p local-zone)
           local-zone)))
      (t "UTC"))))
+
+(defvar-local dsh-emacs--pending-submissions nil
+  "Identities of this buffer's unsettled upload and submission steps.
+Steps remain registered while their callbacks run, so handing an upload
+or slash admission result to another request never exposes an idle gap.")
+
+(defun dsh-emacs--submit-track (start callback)
+  "Run START with a tracked completion callback in the originating buffer.
+START receives one callback accepting the arguments expected by CALLBACK.
+Register before START can consume input or yield.  Release only this step
+after CALLBACK finishes, including errors and quits; synchronous startup
+failures also release it and propagate.  Ignore repeated completions and
+completions whose originating buffer no longer owns the step."
+  (let ((origin (current-buffer))
+        (step (list t))
+        (finished nil))
+    (push step dsh-emacs--pending-submissions)
+    (cl-labels
+        ((finish ()
+           (setq finished t)
+           (when (buffer-live-p origin)
+             (with-current-buffer origin
+               (setq dsh-emacs--pending-submissions
+                     (delq step dsh-emacs--pending-submissions))))))
+      (condition-case err
+          (funcall start
+                   (lambda (&rest args)
+                     (unless finished
+                       (setq finished t)
+                       (unwind-protect
+                           (when (buffer-live-p origin)
+                             (with-current-buffer origin
+                               (when (memq step dsh-emacs--pending-submissions)
+                                 (apply callback args))))
+                         (finish)))))
+        ((error quit)
+         (finish)
+         (signal (car err) (cdr err)))))))
 
 (defun dsh-emacs--restore-draft (text attachments)
   "Restore TEXT and the STAGED attachments of a failed submit.
@@ -2037,9 +2116,11 @@ is not recorded for `M-p' recall: every submit path skips it."
       ;; Own a copy for this upload's display metadata.  Clear the draft
       ;; before the first round trip, then leave later edits alone.
       (let ((staged (copy-tree attachments)))
-        (dsh-emacs--clear-input)
-        (dsh-emacs--upload-attachments
-         (dsh-emacs--active-session-id) staged
+        (dsh-emacs--submit-track
+         (lambda (complete)
+           (dsh-emacs--clear-input)
+           (dsh-emacs--upload-attachments
+            (dsh-emacs--active-session-id) staged complete))
          (lambda (ok parts err)
            (if ok
                (dsh-emacs--submit-dispatch
@@ -2053,7 +2134,7 @@ is not recorded for `M-p' recall: every submit path skips it."
                         "transport error"))))))
     (dsh-emacs--submit-dispatch
      message :parts (delq nil (mapcar #'dsh-protocol-image-content-part
-                                    attachments))
+                                      attachments))
      :staged attachments :mode mode)))
 
 (cl-defun dsh-emacs--submit-dispatch
@@ -2086,24 +2167,26 @@ once every staged file has become a receipt."
      ((dsh-emacs-command-parse message)
       (let ((session-id (dsh-emacs--active-session-id))
             (input-buffer (current-buffer)))
-        ;; Clear the input and record it in history on submit —
-        ;; without waiting for the RPC round trip (the same feel as
-        ;; the web UI): whether the host admits the command is decided
-        ;; by the `commands.execute' response, and the result is
-        ;; rendered from the command/run + command/done session events.
-        (unless parts
-          (dsh-emacs--push-input-history (string-trim message)))
-        (unless input-consumed
-          (when (buffer-live-p input-buffer)
-            (with-current-buffer input-buffer
-              (dsh-emacs--clear-input))))
-        ;; Render the command line immediately (optimistic path) —
-        ;; without waiting for the RPC round trip.
-        (when (buffer-live-p input-buffer)
-          (with-current-buffer input-buffer
-            (dsh-emacs-render-command-optimistic message)))
-        (dsh-emacs-command-execute
-         session-id (string-trim message) parts
+        (dsh-emacs--submit-track
+         (lambda (complete)
+           ;; Clear the input and record it in history on submit —
+           ;; without waiting for the RPC round trip (the same feel as
+           ;; the web UI): whether the host admits the command is decided
+           ;; by the `commands.execute' response, and the result is
+           ;; rendered from the command/run + command/done session events.
+           (unless parts
+             (dsh-emacs--push-input-history (string-trim message)))
+           (unless input-consumed
+             (when (buffer-live-p input-buffer)
+               (with-current-buffer input-buffer
+                 (dsh-emacs--clear-input))))
+           ;; Render the command line immediately (optimistic path) —
+           ;; without waiting for the RPC round trip.
+           (when (buffer-live-p input-buffer)
+             (with-current-buffer input-buffer
+               (dsh-emacs-render-command-optimistic message)))
+           (dsh-emacs-command-execute
+            session-id (string-trim message) parts complete))
          (lambda (ok execution err)
            ;; The callback may run inside a process filter: swallow C-g's quit.
            (condition-case nil
@@ -2178,49 +2261,52 @@ against); genuinely parked items keep their feedback."
                     (dsh-protocol-session-prompt-request
                      session-id (dsh-emacs--rpc-id) mode content
                      (dsh-emacs--client-time-zone)))))
-    ;; Same web-style feel as the immediate path: the draft leaves the
-    ;; input area and lands in history right away, before the RPC settles.
-    (unless parts
-      (dsh-emacs--push-input-history text))
-    (unless input-consumed
-      (when (buffer-live-p input-buffer)
-        (with-current-buffer input-buffer
-          (dsh-emacs--clear-input))))
-    ;; Queue-empty submit (busy or idle): the host still splices the message
-    ;; into the inbox and claims it at the turn start; with nothing already
-    ;; parked those frames do not carry any ordering information, so their
-    ;; `queued:' / `running:' echoes are noise the submit path's own render
-    ;; already covers (see `dsh-emacs-queue--mark-submit-suppress').
-    (when (null (dsh-emacs-queue-items))
-      (dsh-emacs-queue--mark-submit-suppress))
-    ;; A queued message is real but its host `inbox' projection frame is still a
-    ;; round trip away; show it in the Next Message row now so the send does
-    ;; not feel sticky.  The host's frame or the failure branch clears it.
-    (dsh-emacs-queue--optimistic-submit-show text)
-    (dsh-emacs--rpc-async (if dsh-emacs--buffer-subagent
-                              "subagents/prompt" "session/prompt") payload
-                          (lambda (ok value)
-                            (if ok
-                                ;; Enqueue/steer feedback arrives via the
-                                ;; `inbox' projection frame diff — and the
-                                ;; transcript shows the message when the
-                                ;; host claims it (user/message).  Nothing
-                                ;; to render here; the optimistic Next row is
-                                ;; already up and is replaced by the host's
-                                ;; own item.
-                                nil
-                              ;; A failed prompt never produces the
-                              ;; splice/claim frames that would settle the
-                              ;; suppression: clear it here (idempotent).
-                              (dsh-emacs-queue--submit-suppress-clear)
-                              (message "Failed to submit: %s"
-                                       (dsh-emacs-rpc-error-text value))
-                              ;; Nothing will consume the text, put it back
-                              ;; (same restore as the command path).
-                              (when (buffer-live-p input-buffer)
-                                (with-current-buffer input-buffer
-                                  (dsh-emacs--restore-draft
-                                   message staged))))))))
+    (dsh-emacs--submit-track
+     (lambda (complete)
+       ;; Same web-style feel as the immediate path: the draft leaves the
+       ;; input area and lands in history right away, before the RPC settles.
+       (unless parts
+         (dsh-emacs--push-input-history text))
+       (unless input-consumed
+         (when (buffer-live-p input-buffer)
+           (with-current-buffer input-buffer
+             (dsh-emacs--clear-input))))
+       ;; Queue-empty submit (busy or idle): the host still splices the message
+       ;; into the inbox and claims it at the turn start; with nothing already
+       ;; parked those frames do not carry any ordering information, so their
+       ;; `queued:' / `running:' echoes are noise the submit path's own render
+       ;; already covers (see `dsh-emacs-queue--mark-submit-suppress').
+       (when (null (dsh-emacs-queue-items))
+         (dsh-emacs-queue--mark-submit-suppress))
+       ;; A queued message is real but its host `inbox' projection frame is still a
+       ;; round trip away; show it in the Next Message row now so the send does
+       ;; not feel sticky.  The host's frame or the failure branch clears it.
+       (dsh-emacs-queue--optimistic-submit-show text)
+       (dsh-emacs--rpc-async (if dsh-emacs--buffer-subagent
+                                 "subagents/prompt" "session/prompt") payload
+                                 complete))
+     (lambda (ok value)
+       (if ok
+           ;; Enqueue/steer feedback arrives via the
+           ;; `inbox' projection frame diff — and the
+           ;; transcript shows the message when the
+           ;; host claims it (user/message).  Nothing
+           ;; to render here; the optimistic Next row is
+           ;; already up and is replaced by the host's
+           ;; own item.
+           nil
+         ;; A failed prompt never produces the
+         ;; splice/claim frames that would settle the
+         ;; suppression: clear it here (idempotent).
+         (dsh-emacs-queue--submit-suppress-clear)
+         (message "Failed to submit: %s"
+                  (dsh-emacs-rpc-error-text value))
+         ;; Nothing will consume the text, put it back
+         ;; (same restore as the command path).
+         (when (buffer-live-p input-buffer)
+           (with-current-buffer input-buffer
+             (dsh-emacs--restore-draft
+              message staged))))))))
 
 (cl-defun dsh-emacs--submit-plain
     (message &key parts staged history-recorded input-consumed)
@@ -2270,94 +2356,96 @@ its trimmed form."
          ;; for the failure branch: the echo is tied to the submit that made it,
          ;; not re-found by text.
          (echo-entry nil))
-    ;; Track the optimistic echo BEFORE the RPC round-trip: the mux may
-    ;; deliver the canonical `user/message' at any moment — even before the
-    ;; HTTP response is processed — and `dsh-emacs-render--consume-pending-user-message'
-    ;; is the only dedup gate.  The entry must already exist when the event
-    ;; arrives, or the echo and the canonical copy would both render.
-    (when (buffer-live-p chat-buffer)
-      (with-current-buffer chat-buffer
-        ;; Register before the RPC round-trip: a fast run can end before its
-        ;; prompt callback is processed.
-        (setq dsh-emacs--turn-awaiting t)
-        (unless (string-empty-p text)
-          (setq dsh-emacs--pending-user-messages
-                (append dsh-emacs--pending-user-messages (list text)))
-          ;; Echo the message NOW, not in the response callback: the user
-          ;; pressed C-c C-c and the input is about to clear, so the
-          ;; transcript must show it without waiting for the HTTP round trip
-          ;; (a rejected prompt rolls the echo back, see the failure branch).
-          (setq echo-entry
-                (dsh-emacs--render-user-message-optimistic
-                 text staged)))
-        ;; A submit with an empty queue still passes through the host
-        ;; inbox (the wire knows only queue/steer modes): the host splices
-        ;; the message in and claims it again at the turn start, and the
-        ;; mirror would diff those two frames into `queued:' / `running:'
-        ;; echoes — the flash on sending a new message.  The message
-        ;; itself is already on screen, so this transient should stay
-        ;; silent.  Genuine queueing (items already parked) keeps its
-        ;; feedback.
-        (when (null (dsh-emacs-queue-items))
-          (dsh-emacs-queue--mark-submit-suppress))))
-    ;; Clear the input on submit (same feel as the
-    ;; command/deferred paths): a second C-c C-c during the RPC
-    ;; round trip then reads an empty input and never sends the
-    ;; same message twice; the text is restored in the
-    ;; transport-failure branch below.
-    (when (and (not input-consumed) (buffer-live-p input-buffer))
-      (with-current-buffer input-buffer
-        (dsh-emacs--clear-input)))
-    (dsh-emacs--rpc-async "session/prompt" payload
-                          (lambda (ok value)
-                            (if ok
-                                (progn
-                                  (unless (or history-recorded parts)
-                                    (dsh-emacs--push-input-history text))
-                                  (when (buffer-live-p chat-buffer)
-                                    (with-current-buffer chat-buffer
-                                      ;; A fast turn can end before HTTP accepts it.
-                                      ;; Never relight an already-finished turn.
-                                      (when dsh-emacs--turn-awaiting
-                                        (dsh-emacs--ml-busy-set t))
-                                      (dsh-emacs-render--follow-stream)
-                                      (dsh-emacs-events-ensure-follow))))
-                              (message "Failed to send: %s"
-                                       (dsh-emacs-rpc-error-text value))
-                              ;; The server rejected the prompt, so no
-                              ;; `user/message' will ever arrive to consume the
-                              ;; optimistic entry; drop it, lest the same text
-                              ;; sent again later swallow the real event.  Roll
-                              ;; back this submit's OWN echo by entry identity
-                              ;; (two in-flight copies of the same text are only
-                              ;; distinguishable by their entries); a no-op once
-                              ;; the canonical event consumed it, because
-                              ;; `forget' then already retired the entry.
-                              (when (buffer-live-p chat-buffer)
-                                (with-current-buffer chat-buffer
-                                  (setq dsh-emacs--turn-awaiting nil)
-                                  (when echo-entry
-                                    (dsh-emacs--discard-user-message-echo
-                                     echo-entry))
-                                  (setq dsh-emacs--pending-user-messages
-                                        (delq text
-                                              dsh-emacs--pending-user-messages))
-                                  ;; A failed prompt never produces the
-                                  ;; splice/claim frames that would settle
-                                  ;; the suppression: clear it here
-                                  ;; (idempotent).
-                                  (dsh-emacs-queue--submit-suppress-clear)))
-                              ;; The input was cleared on submit: on a
-                              ;; transport failure put the draft back into
-                              ;; the input area.  Restore only when the input
-                              ;; and staged attachments are still empty — a
-                              ;; newer draft composed during the RPC is left
-                              ;; alone (matching the failure restore in
-                              ;; `dsh-emacs--submit-deferred').
-                              (when (buffer-live-p input-buffer)
-                                (with-current-buffer input-buffer
-                                  (dsh-emacs--restore-draft
-                                   message staged))))))))
+    (dsh-emacs--submit-track
+     (lambda (complete)
+       ;; Track the optimistic echo BEFORE the RPC round-trip: the mux may
+       ;; deliver the canonical `user/message' at any moment — even before the
+       ;; HTTP response is processed — and `dsh-emacs-render--consume-pending-user-message'
+       ;; is the only dedup gate.  The entry must already exist when the event
+       ;; arrives, or the echo and the canonical copy would both render.
+       (when (buffer-live-p chat-buffer)
+         (with-current-buffer chat-buffer
+           ;; Register before the RPC round-trip: a fast run can end before its
+           ;; prompt callback is processed.
+           (setq dsh-emacs--turn-awaiting t)
+           (unless (string-empty-p text)
+             (setq dsh-emacs--pending-user-messages
+                   (append dsh-emacs--pending-user-messages (list text)))
+             ;; Echo the message NOW, not in the response callback: the user
+             ;; pressed C-c C-c and the input is about to clear, so the
+             ;; transcript must show it without waiting for the HTTP round trip
+             ;; (a rejected prompt rolls the echo back, see the failure branch).
+             (setq echo-entry
+                   (dsh-emacs--render-user-message-optimistic
+                    text staged)))
+           ;; A submit with an empty queue still passes through the host
+           ;; inbox (the wire knows only queue/steer modes): the host splices
+           ;; the message in and claims it again at the turn start, and the
+           ;; mirror would diff those two frames into `queued:' / `running:'
+           ;; echoes — the flash on sending a new message.  The message
+           ;; itself is already on screen, so this transient should stay
+           ;; silent.  Genuine queueing (items already parked) keeps its
+           ;; feedback.
+           (when (null (dsh-emacs-queue-items))
+             (dsh-emacs-queue--mark-submit-suppress))))
+       ;; Clear the input on submit (same feel as the
+       ;; command/deferred paths): a second C-c C-c during the RPC
+       ;; round trip then reads an empty input and never sends the
+       ;; same message twice; the text is restored in the
+       ;; transport-failure branch below.
+       (when (and (not input-consumed) (buffer-live-p input-buffer))
+         (with-current-buffer input-buffer
+           (dsh-emacs--clear-input)))
+       (dsh-emacs--rpc-async "session/prompt" payload complete))
+     (lambda (ok value)
+       (if ok
+           (progn
+             (unless (or history-recorded parts)
+               (dsh-emacs--push-input-history text))
+             (when (buffer-live-p chat-buffer)
+               (with-current-buffer chat-buffer
+                 ;; A fast turn can end before HTTP accepts it.
+                 ;; Never relight an already-finished turn.
+                 (when dsh-emacs--turn-awaiting
+                   (dsh-emacs--ml-busy-set t))
+                 (dsh-emacs-render--follow-stream)
+                 (dsh-emacs-events-ensure-follow))))
+         (message "Failed to send: %s"
+                  (dsh-emacs-rpc-error-text value))
+         ;; The server rejected the prompt, so no
+         ;; `user/message' will ever arrive to consume the
+         ;; optimistic entry; drop it, lest the same text
+         ;; sent again later swallow the real event.  Roll
+         ;; back this submit's OWN echo by entry identity
+         ;; (two in-flight copies of the same text are only
+         ;; distinguishable by their entries); a no-op once
+         ;; the canonical event consumed it, because
+         ;; `forget' then already retired the entry.
+         (when (buffer-live-p chat-buffer)
+           (with-current-buffer chat-buffer
+             (setq dsh-emacs--turn-awaiting nil)
+             (when echo-entry
+               (dsh-emacs--discard-user-message-echo
+                echo-entry))
+             (setq dsh-emacs--pending-user-messages
+                   (delq text
+                         dsh-emacs--pending-user-messages))
+             ;; A failed prompt never produces the
+             ;; splice/claim frames that would settle
+             ;; the suppression: clear it here
+             ;; (idempotent).
+             (dsh-emacs-queue--submit-suppress-clear)))
+         ;; The input was cleared on submit: on a
+         ;; transport failure put the draft back into
+         ;; the input area.  Restore only when the input
+         ;; and staged attachments are still empty — a
+         ;; newer draft composed during the RPC is left
+         ;; alone (matching the failure restore in
+         ;; `dsh-emacs--submit-deferred').
+         (when (buffer-live-p input-buffer)
+           (with-current-buffer input-buffer
+             (dsh-emacs--restore-draft
+              message staged))))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;;  Permission, input history and chat commands
@@ -2794,6 +2882,119 @@ matching runs only for a local server and a non-remote directory."
                               (message "dsh service is running")
                             (message "dsh service unreachable: %s"
                                      (dsh-emacs-rpc-error-text value))))))
+
+(defun dsh-emacs--connection-buffers ()
+  "Return the service buffers that disconnect must retire."
+  (cl-remove-if-not
+   (lambda (buffer)
+     (with-current-buffer buffer
+       (or dsh-emacs--server-buffer-owner
+           (derived-mode-p 'dsh-emacs-mode 'dsh-emacs-draft-mode
+                           'dsh-emacs-session-mode 'dsh-emacs-plan-mode
+                           'dsh-emacs-jobs-output-mode)
+           (member (buffer-name) '(" *dsh-session-cache*" " *dsh-subagent-state*"
+                                   " *dsh-host*" " *dsh-connection*")))))
+   (buffer-list)))
+
+(defun dsh-emacs--connection-preflight (buffers)
+  "Reject disconnect without changes when BUFFERS or active work need input."
+  (let (problems)
+    (when (or (active-minibuffer-window) dsh-emacs--interaction-active)
+      (push "active minibuffer, question or approval" problems))
+    (when (or dsh-emacs--server-callback-active dsh-emacs--server-sync-active
+              dsh-emacs-events--dispatching)
+      (push "a response is currently being processed" problems))
+    (dolist (request dsh-emacs--server-requests)
+      (when (plist-get request :write)
+        (push (format "pending server write in %s"
+                      (or (buffer-name (plist-get request :origin)) "closed buffer"))
+              problems)))
+    (dolist (buffer buffers)
+      (with-current-buffer buffer
+        (let (reasons)
+          (when (if (derived-mode-p 'dsh-emacs-draft-mode)
+                    (> (buffer-size) 0)
+                  (not (string-empty-p (or (dsh-emacs--get-input) ""))))
+            (push "unsent input" reasons))
+          (when (and dsh-emacs--input-history-pending
+                     (not (string-empty-p dsh-emacs--input-history-pending)))
+            (push "recalled draft" reasons))
+          (when dsh-emacs--pending-attachments (push "staged attachments" reasons))
+          (when dsh-emacs--creation-pending (push "session creation" reasons))
+          (when dsh-emacs--pending-submissions (push "submission or upload" reasons))
+          (when (cl-some (lambda (entry) (process-live-p (cdr entry)))
+                         dsh-emacs--shell-procs)
+            (push "running local shell command" reasons))
+          (when reasons
+            (push (format "%s: %s" (buffer-name) (string-join (nreverse reasons) ", "))
+                  problems)))))
+    (when problems
+      (user-error "Cannot disconnect: %s" (string-join (nreverse problems) "; ")))))
+
+(defun dsh-emacs--connection-cleanup ()
+  "Retire recorded buffers and clear state owned by each service module."
+  ;; Stop transport before feature hooks can deliver more events or hand off work.
+  (dsh-emacs-events--disconnect-state)
+  (dsh-emacs--waterfall-generation-retired)
+  (while dsh-emacs--connection-retiring
+    (let ((buffer (car dsh-emacs--connection-retiring)))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (dsh-emacs-session--auto-refresh-stop)
+          (dsh-emacs-reference--reset-fetch)
+          (dsh-emacs-queue--disconnect)
+          (dsh-emacs-events-disconnect)
+          (dsh-emacs-subagent--stop-animation)
+          (dsh-emacs-render--cancel-markdown)
+          (unless (kill-buffer buffer)
+            (error "Buffer refused connection cleanup: %s" (buffer-name buffer)))))
+      ;; Remove only completed work, so errors and quits can retry the rest.
+      (pop dsh-emacs--connection-retiring)))
+  (dsh-emacs-events--disconnect-state)
+  (dsh-emacs-command--disconnect)
+  (dsh-emacs-skill--disconnect)
+  (dsh-emacs-subagent--disconnect)
+  (dsh-emacs-input--disconnect)
+  (cl-incf dsh-emacs--session-list-fetch-generation)
+  (setq dsh-emacs--sessions nil dsh-emacs--workspaces nil
+        dsh-emacs--agent-presets nil dsh-emacs--archived-sessions nil
+        dsh-emacs--current-session nil dsh-emacs--current-buffer nil)
+  (clrhash dsh-emacs--chat-buffers)
+  (clrhash dsh-emacs--tool-calls)
+  (clrhash dsh-emacs--activity-groups))
+
+(defun dsh-emacs--connection-initialize (callback)
+  "Install a cold session snapshot and core baselines, then call CALLBACK."
+  (let ((owner (dsh-emacs--server-capture-owner)))
+    (with-current-buffer (get-buffer-create " *dsh-connection*")
+      (setq-local dsh-emacs--server-buffer-owner owner)
+      (dsh-emacs-events--host-refresh-begin)
+      (dsh-emacs-events-host-connect)
+      (dsh-emacs--rpc-async
+       "session/list" (dsh-protocol-session-list-request)
+       (lambda (ok value)
+         (if (not ok)
+             (progn (dsh-emacs-events--host-refresh-drain) (funcall callback nil))
+           (setq dsh-emacs--sessions (dsh-protocol-session-list--from-alist value))
+           (dsh-emacs-events--host-refresh-drain)
+           (let ((record (list :origin (current-buffer) :write nil)) timer)
+             (cl-labels
+                 ((cancel ()
+                    (when timer (cancel-timer timer))
+                    (setq dsh-emacs--server-requests
+                          (delq record dsh-emacs--server-requests)))
+                  (ready ()
+                    (if (not (dsh-emacs--server-current-p (car owner) (cdr owner)))
+                        (cancel)
+                      (when-let* ((process dsh-emacs-events--host-process)
+                                  ((process-get process 'dsh-control-baseline))
+                                  ((process-get process 'dsh-workspace-baseline))
+                                  (dsh-emacs-events--client-id))
+                        (cancel)
+                        (funcall callback t)))))
+               (setf (plist-get record :cancel) #'cancel)
+               (push record dsh-emacs--server-requests)
+               (setq timer (run-at-time 0 0.05 #'ready))))))))))
 
 (provide 'dsh-emacs)
 

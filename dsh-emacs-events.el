@@ -180,13 +180,21 @@ generation and a new clientId.")
   "Return the chat buffer attached to PROCESS."
   (process-get process 'dsh-emacs-chat-buffer))
 
+(defun dsh-emacs-events--process-current-p (process)
+  "Whether PROCESS still belongs to the current server work generation."
+  (let ((owner (process-get process 'dsh-server-owner)))
+    (and owner (not (process-get process 'dsh-emacs-event-retired))
+         (dsh-emacs--server-current-p (car owner) (cdr owner)))))
+
 (defun dsh-emacs-events--send-handshake (process)
   "Send the WebSocket upgrade request for PROCESS.
 Every logical Remote stream is multiplexed over one `/api/remote.mux'
 socket; the caller opens its specific stream (a chat's
 `session/follow', the session list's `session/control' +
 `workspace/follow' + `$events') right after the handshake."
-  (let* ((url (url-generic-parse-url dsh-emacs-base-url))
+  (let* ((dsh-emacs--server-work-owner (process-get process 'dsh-server-owner))
+         (_owner (dsh-emacs--server-capture-owner))
+         (url (url-generic-parse-url dsh-emacs-base-url))
          (host (url-host url))
          (default-port (if (equal (url-type url) "https") 443 80))
          (port (or (url-port url) default-port))
@@ -206,7 +214,9 @@ socket; the caller opens its specific stream (a chat's
                                           (car header) (cdr header)))
                                 headers "")
                      "\r\n")))
-      (process-send-string process request))))
+      (dsh-emacs--server-capture-owner)
+      (when (dsh-emacs-events--process-current-p process)
+        (process-send-string process request)))))
 
 (defun dsh-emacs-events--random-mask ()
   "Return four random bytes as a unibyte string."
@@ -245,7 +255,8 @@ socket; the caller opens its specific stream (a chat's
 
 (defun dsh-emacs-events--send-pong (process payload)
   "Reply to a WebSocket ping PAYLOAD on PROCESS."
-  (when (process-live-p process)
+  (when (and (process-live-p process)
+             (dsh-emacs-events--process-current-p process))
     (process-send-string process
                          (dsh-emacs-events--frame 10 payload))))
 
@@ -445,7 +456,8 @@ Returns the fresh stream id, or nil when PROCESS is not live — a caller
 must treat nil as \"could not subscribe\" rather than assume frames will
 arrive.  The stream is cancelled automatically when the socket drops,
 because the registration lives on the process."
-  (when (process-live-p process)
+  (when (and (process-live-p process)
+             (dsh-emacs-events--process-current-p process))
     (let ((stream-id (dsh-emacs-events--stream-id)))
       (process-put process 'dsh-emacs-stream-handlers
                    (cons (cons stream-id (cons name handler))
@@ -461,7 +473,8 @@ because the registration lives on the process."
 Sends the `cancel' uplink (so the host stops producing frames) and calls
 the handler once with nil, which is the same signal a server `end' gives.
 Safe on an unknown STREAM-ID or a dead PROCESS."
-  (when (and (processp process) (process-live-p process))
+  (when (and (processp process) (process-live-p process)
+             (dsh-emacs-events--process-current-p process))
     (process-send-string
      process
      (dsh-emacs-events--frame 1 (dsh-protocol-mux-cancel-json stream-id))))
@@ -479,16 +492,60 @@ Safe on an unknown STREAM-ID or a dead PROCESS."
         (when (functionp handler) (funcall handler nil))))))
 
 (defun dsh-emacs-events--close-streams (process)
-  "Retire every custom stream registered on PROCESS.
-Called from the socket teardown path: the server drops all logical
-streams with the connection, so each handler is told once (nil) to drop
-whatever it mirrored."
+  "Retire custom streams on PROCESS independently, with one cleanup retry.
+Run all handlers even if one fails.  Retain only failures for one retry;
+a second failure is reported and quarantined on the dead process so it
+cannot prevent transport recovery.  Ignore reentrant close-all requests."
+  (when (and (processp process)
+             (not (process-get process 'dsh-emacs-event-closing-streams)))
+    (process-put process 'dsh-emacs-event-closing-streams t)
+    (unwind-protect
+        (let (problem)
+          (dolist (entry (copy-sequence (process-get process 'dsh-emacs-stream-handlers)))
+            (when (memq entry (process-get process 'dsh-emacs-stream-handlers))
+              (let ((failed nil)
+                    (failures (process-get process 'dsh-emacs-stream-close-failures)))
+                (condition-case err
+                    (when (functionp (cddr entry)) (funcall (cddr entry) nil))
+                  ((error quit)
+                   (if (assq entry failures)
+                       (progn
+                         (process-put process 'dsh-emacs-quarantined-streams
+                                      (cons entry (process-get process 'dsh-emacs-quarantined-streams)))
+                         (message "dsh: quarantined failing %s stream cleanup: %s"
+                                  (cadr entry) (error-message-string err)))
+                     (setq failed t problem (or problem err))
+                     (process-put process 'dsh-emacs-stream-close-failures
+                                  (cons (cons entry t) failures)))))
+                (unless failed
+                  (process-put process 'dsh-emacs-stream-close-failures
+                               (assq-delete-all entry failures))
+                  (process-put process 'dsh-emacs-stream-handlers
+                               (delq entry (process-get process 'dsh-emacs-stream-handlers)))))))
+          (when problem (signal (car problem) (cdr problem))))
+      (process-put process 'dsh-emacs-event-closing-streams nil))))
+
+(defun dsh-emacs-events--retire-process (process)
+  "Invalidate PROCESS and release its transport resources.
+Mark it retired before callbacks or deletion can reenter the event layer.
+Delete the socket even if a feature's close handler fails; retain unfinished
+handlers on the process so the owner can retry cleanup."
   (when (processp process)
-    (let ((handlers (process-get process 'dsh-emacs-stream-handlers)))
-      (process-put process 'dsh-emacs-stream-handlers nil)
-      (dolist (entry handlers)
-        (let ((handler (cddr entry)))
-          (when (functionp handler) (funcall handler nil)))))))
+    (when (process-get process 'dsh-emacs-event-retiring)
+      (error "dsh event stream cleanup is already in progress"))
+    (process-put process 'dsh-emacs-event-retired t)
+    (process-put process 'dsh-emacs-event-retiring t)
+    (unwind-protect
+        (progn
+          (dsh-emacs-events--cancel-read-timer process)
+          (dsh-emacs-events--cancel-dispatch process)
+          (dolist (property '(dsh-emacs-event-input dsh-emacs-event-fragment
+                                                    dsh-emacs-event-ready dsh-emacs-follow-stream-id
+                                                    dsh-emacs-host-ws-stream-id dsh-emacs-inboxes))
+            (process-put process property nil))
+          (dsh-emacs-events--close-streams process))
+      (process-put process 'dsh-emacs-event-retiring nil)
+      (when (process-live-p process) (delete-process process)))))
 
 (defun dsh-emacs-events--follow-open (process)
   "Send the `session/follow' open frame for PROCESS's chat stream.
@@ -503,7 +560,8 @@ frames (dsh 0.1.5).  They are the only incremental text source left:
 opt-in a reply would appear only once its `assistant/message' settles.
 The opening snapshot replaces the local revision and attempt baseline."
   (let ((session-id (process-get process 'dsh-emacs-follow-session)))
-    (when (and session-id (process-live-p process))
+    (when (and session-id (process-live-p process)
+               (dsh-emacs-events--process-current-p process))
       (let* ((stream-id (or (process-get process 'dsh-emacs-follow-stream-id)
                             (let ((id (dsh-emacs-events--stream-id)))
                               (process-put process 'dsh-emacs-follow-stream-id id)
@@ -817,7 +875,8 @@ frame (sent when another client answers) until the local user acted.")
   (when-let* ((timer (process-get process 'dsh-emacs-event-dispatch-timer)))
     (cancel-timer timer))
   (process-put process 'dsh-emacs-event-dispatch-timer nil)
-  (if (and (process-live-p process)
+  (if (and (dsh-emacs-events--process-current-p process)
+           (process-live-p process)
            (buffer-live-p (process-buffer process)))
       (with-current-buffer (process-buffer process)
         (dsh-emacs-events--dispatch-pending process))
@@ -828,7 +887,8 @@ frame (sent when another client answers) until the local user acted.")
 Reentrant filters may enqueue messages and answer Pings, but only this
 consumer dispatches business messages.  Keep an already-pending timer's
 deadline when more input arrives."
-  (unless (or (process-get process 'dsh-emacs-event-draining)
+  (unless (or (process-get process 'dsh-emacs-event-retired)
+              (process-get process 'dsh-emacs-event-draining)
               (process-get process 'dsh-emacs-event-dispatch-timer))
     (let ((dsh-emacs-events--dispatching t)
           (deadline (+ (float-time) dsh-emacs-events--dispatch-budget)))
@@ -836,7 +896,8 @@ deadline when more input arrives."
       (unwind-protect
           (condition-case err
               (let (queue)
-                (while (and (< (float-time) deadline)
+                (while (and (dsh-emacs-events--process-current-p process)
+                            (< (float-time) deadline)
                             (setq queue
                                   (process-get process
                                                'dsh-emacs-event-messages)))
@@ -852,7 +913,8 @@ deadline when more input arrives."
                  (message "dsh WebSocket frame error: %S" err)
                (dsh-emacs-events--lost process))))
         (process-put process 'dsh-emacs-event-draining nil)
-        (when (and (process-live-p process)
+        (when (and (dsh-emacs-events--process-current-p process)
+                   (process-live-p process)
                    (buffer-live-p (process-buffer process))
                    (process-get process 'dsh-emacs-event-messages))
           (process-put process 'dsh-emacs-event-dispatch-timer
@@ -864,13 +926,15 @@ deadline when more input arrives."
   "Decode buffered WebSocket frames, then dispatch a bounded message batch.
 Answer control Pings before rendering business messages, so a busy chat
 cannot hold its own connection's heartbeat behind a rendering backlog."
-  (unless (process-get process 'dsh-emacs-event-parsing)
+  (unless (or (process-get process 'dsh-emacs-event-retired)
+              (process-get process 'dsh-emacs-event-parsing))
     (let ((offset 0) messages)
       (process-put process 'dsh-emacs-event-parsing t)
       (unwind-protect
           (condition-case err
               (let (input frame)
-                (while (and (setq input (process-get process 'dsh-emacs-event-input))
+                (while (and (dsh-emacs-events--process-current-p process)
+                            (setq input (process-get process 'dsh-emacs-event-input))
                             (setq frame (dsh-emacs-events--read-frame input offset)))
                   (setq offset (nth 3 frame))
                   (let ((opcode (nth 0 frame))
@@ -904,12 +968,15 @@ cannot hold its own connection's heartbeat behind a rendering backlog."
              (if (process-live-p process)
                  (message "dsh WebSocket frame error: %S" err)
                (dsh-emacs-events--lost process))))
-        (process-put process 'dsh-emacs-event-input
-                     (substring (or (process-get process 'dsh-emacs-event-input) "")
-                                offset))
-        (process-put process 'dsh-emacs-event-messages
-                     (nconc (process-get process 'dsh-emacs-event-messages)
-                            (nreverse messages)))
+        ;; Teardown can run while replying to a control frame.  Its cleared
+        ;; input and queues must stay cleared when this parser unwinds.
+        (when (dsh-emacs-events--process-current-p process)
+          (process-put process 'dsh-emacs-event-input
+                       (substring (or (process-get process 'dsh-emacs-event-input) "")
+                                  offset))
+          (process-put process 'dsh-emacs-event-messages
+                       (nconc (process-get process 'dsh-emacs-event-messages)
+                              (nreverse messages))))
         (process-put process 'dsh-emacs-event-parsing nil)))
     (dsh-emacs-events--dispatch-pending process)))
 
@@ -938,7 +1005,8 @@ No repeating timer is needed: a quiet socket stays normally readable."
 
 (defun dsh-emacs-events--filter (process string)
   "Process raw HTTP/WebSocket STRING received by PROCESS."
-  (when (buffer-live-p (process-buffer process))
+  (when (and (dsh-emacs-events--process-current-p process)
+             (buffer-live-p (process-buffer process)))
     ;; Each process read can make Emacs redisplay, even when the renderer
     ;; merely queues text.  Let the socket accumulate the next 50ms of bytes
     ;; instead.  A filter of t suspends reads without dropping data or
@@ -1001,45 +1069,54 @@ Reconnects after 1s via `dsh-emacs-events-connect', which runs the full
 teardown + rebuild cycle.  Guarded so concurrent loss/connect-error paths
 never stack parallel reconnect timers."
   (unless (timerp dsh-emacs--event-reconnect-timer)
-    (setq dsh-emacs--event-reconnect-timer
-          (run-at-time 1 nil
-                       (lambda (buffer)
-                         (when (buffer-live-p buffer)
-                           (with-current-buffer buffer
-                             (setq dsh-emacs--event-reconnect-timer nil)
-                             (dsh-emacs-events-connect buffer))))
-                       (current-buffer)))))
+    (let ((timer nil)
+          (buffer (current-buffer)))
+      (setq timer
+            (run-at-time 1 nil
+                         (lambda ()
+                           (when (buffer-live-p buffer)
+                             (with-current-buffer buffer
+                               (when (eq timer dsh-emacs--event-reconnect-timer)
+                                 (setq dsh-emacs--event-reconnect-timer nil)
+                                 (dsh-emacs-events-connect buffer)))))))
+      (setq dsh-emacs--event-reconnect-timer timer))))
 
 (defun dsh-emacs-events--lost (process)
   "Handle a closed event stream PROCESS and arrange a reconnect."
-  (dsh-emacs-events--cancel-dispatch process)
-  (dsh-emacs-events--cancel-read-timer process)
-  (if (process-get process 'dsh-emacs-host-stream)
-      (dsh-emacs-events--host-lost process)
-    (let ((chat (dsh-emacs-events--chat process)))
-      (when (and (buffer-live-p chat)
-                 (eq process (with-current-buffer chat dsh-emacs--event-process)))
-        (with-current-buffer chat
-          (setq dsh-emacs--event-process nil
-                dsh-emacs--event-ready nil)
-          (dsh-emacs-subagent--sync-animation)
-          (dsh-emacs-modeline-reset-execution)
-          ;; The connection carried every logical stream; tell each feature
-          ;; handler its stream is gone so no mirror outlives it.
-          (dsh-emacs-events--close-streams process)
-          (dsh-emacs-events--health-stop)
-          (dsh-emacs-events--watchdog-stop)
-          (dsh-emacs-events--schedule-reconnect))))))
+  (when (dsh-emacs-events--process-current-p process)
+    (dsh-emacs-events--cancel-dispatch process)
+    (dsh-emacs-events--cancel-read-timer process)
+    (if (process-get process 'dsh-emacs-host-stream)
+        (dsh-emacs-events--host-lost process)
+      (let ((chat (dsh-emacs-events--chat process)))
+        (when (and (buffer-live-p chat)
+                   (eq process (with-current-buffer chat dsh-emacs--event-process)))
+          (process-put process 'dsh-emacs-event-retired t)
+          (with-current-buffer chat
+            (setq dsh-emacs--event-ready nil)
+            (unwind-protect
+                (progn
+                  (dsh-emacs-subagent--sync-animation)
+                  (dsh-emacs-modeline-reset-execution))
+              (dsh-emacs-events--health-stop)
+              (dsh-emacs-events--watchdog-stop)
+              (dsh-emacs-events--schedule-reconnect)
+              ;; Keep the old handle if a feature needs its bounded retry.
+              ;; Recovery is already scheduled before invoking feature code.
+              (dsh-emacs-events--retire-process process)
+              (when (eq process dsh-emacs--event-process)
+                (setq dsh-emacs--event-process nil)))))))))
 
 (defun dsh-emacs-events--sentinel (process _event)
   "Handle PROCESS lifecycle changes."
-  (when (and (process-live-p process)
-             (eq (process-status process) 'open)
-             (not (process-get process 'dsh-emacs-event-handshake-sent)))
-    (process-put process 'dsh-emacs-event-handshake-sent t)
-    (dsh-emacs-events--send-handshake process))
-  (when (memq (process-status process) '(closed failed exit signal))
-    (dsh-emacs-events--lost process)))
+  (when (dsh-emacs-events--process-current-p process)
+    (when (and (process-live-p process)
+               (eq (process-status process) 'open)
+               (not (process-get process 'dsh-emacs-event-handshake-sent)))
+      (process-put process 'dsh-emacs-event-handshake-sent t)
+      (dsh-emacs-events--send-handshake process))
+    (when (memq (process-status process) '(closed failed exit signal))
+      (dsh-emacs-events--lost process))))
 
 (defun dsh-emacs-events--watchdog-tick (buffer)
   "Probe BUFFER's quiet WebSocket while a turn runs.
@@ -1078,14 +1155,19 @@ silent indefinitely while its transport continues to answer pings."
   "Start the mid-turn stream-health watchdog for the current buffer."
   (setq dsh-emacs--ws-last-event-time (float-time))
   (unless (timerp dsh-emacs--ws-watchdog-timer)
-    (setq-local dsh-emacs--ws-watchdog-timer
-                (let ((buffer (current-buffer)))
-                  ;; 1s probe cadence: probes are anchor-diffed and cheap.
-                  (run-with-timer 2 1.0
-                                  (lambda ()
-                                    (when (buffer-live-p buffer)
-                                      (dsh-emacs-events--watchdog-tick
-                                       buffer))))))))
+    (let ((buffer (current-buffer))
+          (timer nil))
+      (setq timer
+            ;; 1s probe cadence: probes are anchor-diffed and cheap.
+            (run-with-timer 2 1.0
+                            (lambda ()
+                              (when (and (buffer-live-p buffer)
+                                         (eq timer (buffer-local-value
+                                                    'dsh-emacs--ws-watchdog-timer
+                                                    buffer)))
+                                (dsh-emacs-events--watchdog-tick
+                                 buffer)))))
+      (setq-local dsh-emacs--ws-watchdog-timer timer))))
 
 (defun dsh-emacs-events--watchdog-stop ()
   "Cancel the stream-health watchdog timer."
@@ -1126,9 +1208,16 @@ wedged with no recovery scheduled — the exact limbo observed on this build."
 (defun dsh-emacs-events--health-start ()
   "Start the connect-handshake health check for the current buffer."
   (dsh-emacs-events--health-stop)
-  (setq-local dsh-emacs--event-connect-timer
-              (run-with-timer 2 2 #'dsh-emacs-events--health-tick
-                              (current-buffer))))
+  (let ((buffer (current-buffer))
+        (timer nil))
+    (setq timer
+          (run-with-timer
+           2 2 (lambda ()
+                 (when (and (buffer-live-p buffer)
+                            (eq timer (buffer-local-value
+                                       'dsh-emacs--event-connect-timer buffer)))
+                   (dsh-emacs-events--health-tick buffer)))))
+    (setq-local dsh-emacs--event-connect-timer timer)))
 
 (defun dsh-emacs-events--health-stop ()
   "Cancel the connect-handshake health check."
@@ -1147,7 +1236,10 @@ reconnect — while other sessions' sockets kept rendering.  On error the
 reconnect is re-armed and another connect scheduled."
   (when (buffer-live-p chat)
     (with-current-buffer chat
-      (let* ((session (and dsh-emacs--buffer-session
+      (dsh-emacs--server-capture-owner)
+      (let* ((owner (dsh-emacs--server-capture-owner))
+             (dsh-emacs--server-sync-active t)
+             (session (and dsh-emacs--buffer-session
                            (dsh-emacs--chat-session-item
                             dsh-emacs--buffer-session)))
              (was-busy (or (bound-and-true-p dsh-emacs--ml-busy)
@@ -1196,6 +1288,9 @@ reconnect is re-armed and another connect scheduled."
                                :nowait t)))
               (with-current-buffer buffer
                 (set-buffer-multibyte nil))
+              (process-put process 'dsh-server-owner owner)
+              (with-current-buffer (process-buffer process)
+                (setq-local dsh-emacs--server-buffer-owner owner))
               (set-process-query-on-exit-flag process nil)
               ;; Keep CRLF handshake bytes untouched.  On a REUSED events
               ;; buffer (the reconnect case: this buffer already served a
@@ -1211,12 +1306,12 @@ reconnect is re-armed and another connect scheduled."
               (set-process-coding-system process 'no-conversion
                                          'no-conversion)
               (process-put process 'dsh-emacs-chat-buffer chat)
-               ;; The chat's `session/follow' stream needs the session id at
-               ;; handshake completion (see `dsh-emacs-events--follow-open').
-               (process-put process 'dsh-emacs-follow-session
-                            (buffer-local-value 'dsh-emacs--buffer-session chat))
-               (process-put process 'dsh-emacs-follow-address
-                            dsh-emacs--buffer-subagent)
+              ;; The chat's `session/follow' stream needs the session id at
+              ;; handshake completion (see `dsh-emacs-events--follow-open').
+              (process-put process 'dsh-emacs-follow-session
+                           (buffer-local-value 'dsh-emacs--buffer-session chat))
+              (process-put process 'dsh-emacs-follow-address
+                           dsh-emacs--buffer-subagent)
               (process-put process 'dsh-emacs-event-input "")
               (process-put process 'dsh-emacs-event-ready nil)
               ;; Install the bytecode delegates, not the native subrs directly:
@@ -1248,26 +1343,23 @@ reconnect is re-armed and another connect scheduled."
            (dsh-emacs-events--schedule-reconnect)))))))
 
 (defun dsh-emacs-events-disconnect (&optional chat)
-  "Disconnect CHAT's dsh event stream."
+  "Disconnect CHAT's dsh event stream without scheduling recovery.
+If a close handler fails, keep the retired process handle for a retry."
   (let ((chat (or chat (current-buffer))))
     (when (buffer-live-p chat)
       (with-current-buffer chat
-        (dsh-emacs-render--flush-stream nil t)
         (when (timerp dsh-emacs--event-reconnect-timer)
           (cancel-timer dsh-emacs--event-reconnect-timer))
         (dsh-emacs-events--health-stop)
         (setq dsh-emacs--event-reconnect-timer nil)
         (dsh-emacs-events--watchdog-stop)
         (let ((process dsh-emacs--event-process))
-          (dsh-emacs-events--cancel-read-timer process)
-          (dsh-emacs-events--cancel-dispatch process)
-          ;; Clear ownership before deleting: the sentinel must not schedule a
-          ;; reconnect for an intentional session switch or buffer teardown.
-          (setq dsh-emacs--event-process nil
-                dsh-emacs--event-ready nil)
-          (dsh-emacs-events--close-streams process)
-          (when (process-live-p process)
-            (delete-process process)))
+          (setq dsh-emacs--event-ready nil)
+          (dsh-emacs-events--retire-process process)
+          ;; Preserve the retired handle on failure for a cleanup retry.
+          (when (eq process dsh-emacs--event-process)
+            (setq dsh-emacs--event-process nil)))
+        (dsh-emacs-render--flush-stream nil t)
         ;; Tearing down the stream: stop the mode-line running spinner so it
         ;; never keeps ticking in a detached conversation.
         (dsh-emacs--ml-busy-clear)))))
@@ -1497,8 +1589,11 @@ retires a pending waterfall by `eventId'."
     (pcase type
       ("baseline"
        (if (dsh-protocol-workspace-list-p value)
-           (dsh-emacs-events--host-workspace-baseline value)
-         (dsh-emacs-events--host-control-baseline process value)))
+           (progn
+             (dsh-emacs-events--host-workspace-baseline value)
+             (when (processp process) (process-put process 'dsh-workspace-baseline t)))
+         (dsh-emacs-events--host-control-baseline process value)
+         (when (processp process) (process-put process 'dsh-control-baseline t))))
       ("projection"
        (dsh-emacs-events--host-apply-projection process value))
       ("upsert"
@@ -1590,7 +1685,15 @@ retires a pending waterfall by `eventId'."
       ;; namespace's own streams (`dsh-emacs-jobs.el'); the 0.1.6
       ;; `session/control' `jobs' record is gone.  Intentionally dropped, not
       ;; wire-parity work — revisit when an error surface is added.
-      (_ nil))))
+      (_ nil))
+    (when (and (memq dsh-emacs--connection-status '(initial connected))
+               (eq dsh-emacs--connection-session-status 'stale)
+               (processp process)
+               (eq process dsh-emacs-events--host-process)
+               (process-get process 'dsh-control-baseline)
+               (process-get process 'dsh-workspace-baseline)
+               dsh-emacs-events--client-id)
+      (dsh-emacs-list-sessions--fetch))))
 
 (defun dsh-emacs-events--chat-buffer (session-id)
   "Live chat buffer of SESSION-ID, or nil."
@@ -1703,27 +1806,36 @@ snapshot.  UPDATED-AT is the host's timestamp in milliseconds."
 One-shot and idempotent: a drop and a failed connect never stack parallel
 timers, and the timer does nothing once the last owner is gone."
   (unless (timerp dsh-emacs-events--host-reconnect-timer)
-    (setq dsh-emacs-events--host-reconnect-timer
-          (run-at-time 1 nil
-                       (lambda ()
-                         (setq dsh-emacs-events--host-reconnect-timer nil)
-                         (when (dsh-emacs-events--host-needed-p)
-                           (dsh-emacs-events-host-connect)))))))
+    (let ((timer nil))
+      (setq timer
+            (run-at-time 1 nil
+                         (lambda ()
+                           (when (eq timer dsh-emacs-events--host-reconnect-timer)
+                             (setq dsh-emacs-events--host-reconnect-timer nil)
+                             (when (dsh-emacs-events--host-needed-p)
+                               (dsh-emacs-events-host-connect))))))
+      (setq dsh-emacs-events--host-reconnect-timer timer))))
 
 (defun dsh-emacs-events--host-lost (process)
   "Handle a closed core-stream PROCESS: reset and schedule reconnect.
 PROCESS need not be the current owner: a socket from before a reload can
 outlive its ownership, and losing it must still reconnect while the list or
 a chat needs the stream."
-  (dsh-emacs-events--cancel-dispatch process)
-  (when (eq process dsh-emacs-events--host-process)
-    (setq dsh-emacs-events--host-process nil
-          dsh-emacs-events--host-ready nil)
-    (dsh-emacs-subagent-host-reset)
-    (dsh-emacs-plan--cancel))
-  (when (and (not (dsh-emacs-events-host-connected-p))
-             (dsh-emacs-events--host-needed-p))
-    (dsh-emacs-events--host-schedule-reconnect)))
+  (when (dsh-emacs-events--process-current-p process)
+    (process-put process 'dsh-emacs-event-retired t)
+    (dsh-emacs-events--cancel-dispatch process)
+    (dsh-emacs-events--cancel-read-timer process)
+    (when (eq process dsh-emacs-events--host-process)
+      (setq dsh-emacs-events--host-process nil
+            dsh-emacs-events--host-ready nil
+            dsh-emacs-events--client-id nil)
+      (when (memq dsh-emacs--connection-status '(initial connected))
+        (setq dsh-emacs--connection-session-status 'stale))
+      (dsh-emacs-subagent-host-reset)
+      (dsh-emacs-plan--cancel))
+    (when (and (not (dsh-emacs-events-host-connected-p))
+               (dsh-emacs-events--host-needed-p))
+      (dsh-emacs-events--host-schedule-reconnect))))
 
 (defun dsh-emacs-events--host-adoptable-process ()
   "The single live core socket that completed its handshake, or nil.
@@ -1735,6 +1847,7 @@ ambiguous and force a rebuild."
     (catch 'one
       (dolist (process (process-list))
         (when (and (process-get process 'dsh-emacs-host-stream)
+                   (dsh-emacs-events--process-current-p process)
                    (process-live-p process)
                    (process-get process 'dsh-emacs-event-ready)
                    (process-get process 'dsh-emacs-host-ws-stream-id))
@@ -1752,7 +1865,7 @@ keep answering waterfalls with an outdated client id."
     (when (and (process-get process 'dsh-emacs-host-stream)
                (not (eq process dsh-emacs-events--host-process))
                (process-live-p process))
-      (delete-process process))))
+      (dsh-emacs-events--retire-process process))))
 
 (defun dsh-emacs-events-host-restore ()
   "Re-establish ownership of the client-wide core stream after a reload.
@@ -1777,13 +1890,16 @@ and rebuild the connection from the list or live chat that needs it."
 A live process covers a handshake still in flight: keeping it preserves the
 work already done instead of starting the connect over."
   (and (processp dsh-emacs-events--host-process)
+       (dsh-emacs-events--process-current-p dsh-emacs-events--host-process)
        (process-live-p dsh-emacs-events--host-process)))
 
 (defun dsh-emacs-events--host-needed-p (&optional except)
   "Return non-nil when the session list or a live chat needs the core stream.
 EXCEPT is a buffer to ignore, for a kill hook deciding whether its dying
 buffer was the last owner."
-  (or (let ((list (and (boundp 'dsh-emacs--sessions-buffer)
+  (or dsh-emacs--connection-attempt
+      (eq dsh-emacs--connection-status 'connected)
+      (let ((list (and (boundp 'dsh-emacs--sessions-buffer)
                        dsh-emacs--sessions-buffer
                        (get-buffer dsh-emacs--sessions-buffer))))
         (and (buffer-live-p list) (not (eq list except))))
@@ -1825,10 +1941,13 @@ synchronously (unresolvable host, malformed `dsh-emacs-base-url').  The
 error is reported and a retry armed instead of propagating, so a caller's
 chat activation still reaches its `session/follow' connect — the same
 contract as `dsh-emacs-events-connect'."
+  (dsh-emacs--server-capture-owner)
   (dsh-emacs-events--host-reap)
   (unless (dsh-emacs-events-host-connected-p)
     (dsh-emacs-events-host-disconnect)
-    (let ((process nil))
+    (let ((process nil)
+          (owner (dsh-emacs--server-capture-owner))
+          (dsh-emacs--server-sync-active t))
       (condition-case err
           (when (and (bound-and-true-p dsh-emacs-base-url)
                      (not (string-empty-p dsh-emacs-base-url)))
@@ -1847,6 +1966,9 @@ contract as `dsh-emacs-events-connect'."
                            :type (if (equal (url-type url) "https")
                                      'tls 'plain)
                            :nowait t)))
+                  (process-put process 'dsh-server-owner owner)
+                  (with-current-buffer (process-buffer process)
+                    (setq-local dsh-emacs--server-buffer-owner owner))
                   (set-process-query-on-exit-flag process nil)
                   ;; Keep CRLF handshake bytes untouched.  Without this the
                   ;; process coding system is inferred as nil (the stream
@@ -1885,7 +2007,8 @@ waterfalls.  Each stream uses a fresh stream id; the `workspace/follow'
 stream id is recorded on PROCESS so a later re-baseline
 (`dsh-emacs-events--core-workspace-rebaseline') can retire it before
 re-opening (never two live workspace streams on one socket)."
-  (when (process-live-p process)
+  (when (and (process-live-p process)
+             (dsh-emacs-events--process-current-p process))
     ;; A new Host generation may replay a Session in a new sequence space.
     ;; Drop Plan/question cuts before its baselines and increments arrive.
     (maphash (lambda (_session-id chat)
@@ -1918,6 +2041,7 @@ caller can leave the baseline to `dsh-emacs-events--host-open' instead of
 writing mux frames into the unfinished upgrade."
   (let ((proc dsh-emacs-events--host-process))
     (when (and (processp proc) (process-live-p proc)
+               (dsh-emacs-events--process-current-p proc)
                dsh-emacs-events--host-ready)
       ;; Retire the workspace/follow stream opened at connect (or by the last
       ;; re-baseline) so exactly one live workspace stream feeds the caches.
@@ -1934,19 +2058,36 @@ writing mux frames into the unfinished upgrade."
       t)))
 
 (defun dsh-emacs-events-host-disconnect ()
-  "Disconnect the client's core stream, if any."
+  "Disconnect the client's core stream without scheduling recovery.
+Clear its client id and transport queues.  A failed close handler retains
+the retired process handle so another call can finish cleanup."
   (when (timerp dsh-emacs-events--host-reconnect-timer)
     (cancel-timer dsh-emacs-events--host-reconnect-timer))
   (setq dsh-emacs-events--host-reconnect-timer nil)
   (let ((process dsh-emacs-events--host-process))
-    ;; Clear ownership before deleting: the host sentinel must not schedule a
-    ;; reconnect for an intentional teardown.
-    (setq dsh-emacs-events--host-process nil
-          dsh-emacs-events--host-ready nil)
+    (setq dsh-emacs-events--host-ready nil
+          dsh-emacs-events--client-id nil)
+    (dsh-emacs-events--retire-process process)
+    (when (eq process dsh-emacs-events--host-process)
+      (setq dsh-emacs-events--host-process nil))
     (when process (dsh-emacs-subagent-host-reset))
-    (dsh-emacs-plan--cancel)
-    (when (process-live-p process)
-      (delete-process process))))
+    (dsh-emacs-plan--cancel)))
+
+(defvar dsh-emacs-events--retiring-processes nil
+  "Transport handles retained across failed connection cleanup.")
+
+(defun dsh-emacs-events--disconnect-state ()
+  "Clear service-wide event replay state after all streams are closed."
+  (dolist (process (process-list))
+    (when (or (process-get process 'dsh-emacs-host-stream)
+              (process-get process 'dsh-emacs-chat-buffer))
+      (cl-pushnew process dsh-emacs-events--retiring-processes)))
+  (while dsh-emacs-events--retiring-processes
+    (dsh-emacs-events--retire-process (car dsh-emacs-events--retiring-processes))
+    (pop dsh-emacs-events--retiring-processes))
+  (dsh-emacs-events-host-disconnect)
+  (setq dsh-emacs--host-refresh-depth 0 dsh-emacs--host-refresh-frames nil
+        dsh-emacs-events--snapshot-model-slots nil))
 
 (provide 'dsh-emacs-events)
 

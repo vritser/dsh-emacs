@@ -610,9 +610,9 @@
           (dsh-emacs-test--session-items
            '(((sessionId . "sess-late-fetch") (cwd . "/tmp")))))
          (dsh-emacs--subagent-catalogs (make-hash-table :test 'equal))
-         (dsh-emacs-events--host-process (make-pipe-process
-                                   :name "dsh-test-late-preset-core"
-                                   :noquery t))
+         (dsh-emacs-events--host-process (dsh-test--event-process
+                                          :name "dsh-test-late-preset-core"
+                                          :noquery t))
          (dsh-emacs-events--host-ready t)
          (dsh-emacs-events--host-reconnect-timer nil)
          (dsh-emacs--host-refresh-depth 0)
@@ -625,7 +625,7 @@
                   ((symbol-function 'dsh-emacs-server-ensure) #'ignore)
                   ((symbol-function 'open-network-stream)
                    (lambda (_name buffer &rest _)
-                     (setq revived (make-pipe-process
+                     (setq revived (dsh-test--event-process
                                     :name "dsh-test-late-preset-revived"
                                     :buffer buffer :noquery t)))))
           (with-current-buffer chat
@@ -1251,7 +1251,7 @@
                                        (list (cons 'title "old title")))))))
          (chat-buf (generate-new-buffer " *dsh-test-title-chat*"))
          (list-buf (generate-new-buffer "*dsh-sessions*"))
-         (proc (make-pipe-process :name "t-title" :buffer nil))
+         (proc (dsh-test--event-process :name "t-title" :buffer nil))
          (old-sessions-buffer dsh-emacs--sessions-buffer)
          (json (concat "{\"type\":\"item\",\"streamId\":\"t1\","
                        "\"value\":{\"type\":\"event\","

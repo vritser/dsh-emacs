@@ -2616,7 +2616,11 @@ so the turn owns a foldable activity."
               ((symbol-function 'dbus-get-name-owner)
                (lambda (&rest _) ":1.7"))
               ((symbol-function 'dsh-emacs-notify--open)
-               (lambda (session-id) (setq opened session-id))))
+               (lambda (session-id instance generation endpoint-key)
+                 (should (equal instance dsh-emacs--connection-instance))
+                 (should (= generation dsh-emacs--server-generation))
+                 (should (equal endpoint-key (secure-hash 'sha256 (dsh-emacs--server-base-url))))
+                 (setq opened session-id))))
       (with-temp-buffer
         (rename-buffer " *dsh-notify-action*" t)
         (dsh-emacs-notify--post "sess-click" "Run finished")
@@ -2704,7 +2708,7 @@ so the turn owns a foldable activity."
                    '((asOfSeq . 1)
                      (values (subagentCatalog . [((id . "child")
                                                   (mode . "continuable"))])))))
-        (dsh-emacs-notify--open "child")
+        (dsh-emacs-notify--open "child" dsh-emacs--connection-instance dsh-emacs--server-generation (secure-hash 'sha256 (dsh-emacs--server-base-url)))
         (should-not regular)
         (should (equal opened (dsh-emacs-subagent-address "parent" entry)))))))
 
@@ -2719,7 +2723,7 @@ so the turn owns a foldable activity."
       (cl-letf (((symbol-function 'dsh-emacs-open-session)
                  (lambda (id &rest _) (setq opened id)))
                 ((symbol-function 'display-graphic-p) #'ignore))
-        (dsh-emacs-notify--open "child")
+        (dsh-emacs-notify--open "child" dsh-emacs--connection-instance dsh-emacs--server-generation (secure-hash 'sha256 (dsh-emacs--server-base-url)))
         (should (equal opened "child"))))))
 
 (ert-deftest dsh-emacs-test-render-notification-child-summary-is-not-root ()
@@ -2733,7 +2737,7 @@ so the turn owns a foldable activity."
         opened)
     (cl-letf (((symbol-function 'dsh-emacs-open-session)
                (lambda (&rest args) (setq opened args))))
-      (dsh-emacs-notify--open "child")
+      (dsh-emacs-notify--open "child" dsh-emacs--connection-instance dsh-emacs--server-generation (secure-hash 'sha256 (dsh-emacs--server-base-url)))
       (should-not opened))))
 
 (ert-deftest dsh-emacs-test-render-notification-open-unknown-session-messages ()
@@ -2747,7 +2751,7 @@ so the turn owns a foldable activity."
               ((symbol-function 'message)
                (lambda (format-string &rest args)
                  (setq notice (apply #'format format-string args)))))
-      (dsh-emacs-notify--open "sess-gone")
+      (dsh-emacs-notify--open "sess-gone" dsh-emacs--connection-instance dsh-emacs--server-generation (secure-hash 'sha256 (dsh-emacs--server-base-url)))
       (should-not opened)
       (should (equal notice "dsh: the notified session is no longer available")))))
 

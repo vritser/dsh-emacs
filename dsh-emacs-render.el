@@ -83,7 +83,7 @@
 (defvar dsh-emacs--buffer-subagent)
 ;; Notification backends are built into their respective Emacs ports.
 (declare-function dsh-emacs--chat-title "dsh-emacs" (session-id))
-(declare-function dsh-emacs-notify--open "dsh-emacs" (session-id))
+(declare-function dsh-emacs-notify--open "dsh-emacs" (session-id instance generation &optional endpoint-key))
 (declare-function notifications-notify "notifications" (&rest params))
 (declare-function ns-do-applescript "ns-win" (script))
 (declare-function w32-notification-notify "w32fns.c" (&rest params))
@@ -4405,12 +4405,13 @@ running spinner (idempotent — the send path already lit it, and a
        (processp server-process)
        (process-live-p server-process)))
 
-(defun dsh-emacs-notify--macos-arguments (session-id title body)
+(defun dsh-emacs-notify--macos-arguments (session-id title body instance owner)
   "Return `terminal-notifier' arguments for SESSION-ID with TITLE and BODY.
 The click action evaluates `dsh-emacs-notify--open' in this Emacs through
 `emacsclient', then activates the Emacs bundle."
   (let* ((client (executable-find "emacsclient"))
-         (form (format "(dsh-emacs-notify--open %S)" session-id)))
+         (form (format "(dsh-emacs-notify--open %S %S %S %S)" session-id
+                       instance (car owner) (secure-hash 'sha256 (cdr owner)))))
     (list "-title" title
           "-message" body
           "-group" (concat "dsh-" session-id)
@@ -4427,7 +4428,10 @@ where the backend supports notification actions: D-Bus on GNU/Linux, or
 `terminal-notifier' plus a running emacsclient server on macOS."
   (when (and dsh-emacs-enable-notifications
              (not (dsh-emacs-notify--visible-p buffer)))
-    (let* ((session (and (stringp session-id)
+    (let* ((owner (dsh-emacs--server-capture-owner))
+           (instance dsh-emacs--connection-instance)
+           (endpoint-key (secure-hash 'sha256 (cdr owner)))
+           (session (and (stringp session-id)
                          (not (string-empty-p session-id))
                          session-id))
            (title (or (and session (dsh-emacs--chat-title session))
@@ -4445,7 +4449,7 @@ where the backend supports notification actions: D-Bus on GNU/Linux, or
                  (executable-find "emacsclient"))
             (apply #'start-process "dsh-notification" nil
                    (executable-find "terminal-notifier")
-                   (dsh-emacs-notify--macos-arguments session title body)))
+                   (dsh-emacs-notify--macos-arguments session title body instance owner)))
            ((fboundp 'ns-do-applescript)
             (ns-do-applescript
              (format "display notification %S with title %S" body title)))
@@ -4464,7 +4468,7 @@ where the backend supports notification actions: D-Bus on GNU/Linux, or
                                    :on-action
                                    (lambda (_id action)
                                      (when (equal action "default")
-                                       (dsh-emacs-notify--open session))))))))
+                                       (dsh-emacs-notify--open session instance (car owner) endpoint-key))))))))
            ((executable-find "notify-send")
             (start-process "dsh-notification" nil "notify-send" title body))
            (t (message "dsh: %s — %s" title body)))

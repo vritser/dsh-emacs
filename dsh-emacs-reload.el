@@ -21,6 +21,7 @@
 (declare-function dsh-emacs-session--render "dsh-emacs-session" ())
 (defvar dsh-emacs--interaction-active)
 (defvar dsh-emacs--creation-pending)
+(defvar dsh-emacs--pending-submissions)
 (defvar dsh-emacs--history-loading)
 (defvar dsh-emacs-session--row-cache)
 
@@ -101,6 +102,14 @@ registered while loading this file."
   (when (timerp dsh-emacs-reload--finish-timer)
     (cancel-timer dsh-emacs-reload--finish-timer))
   (setq dsh-emacs-reload--finish-timer nil)
+  ;; Pre-0.9 sockets did not capture an endpoint.  Inferring their owner
+  ;; from today's URL could adopt another service's live stream.
+  (dolist (process (process-list))
+    (when (and (process-live-p process)
+               (or (process-get process 'dsh-emacs-host-stream)
+                   (process-get process 'dsh-emacs-chat-buffer))
+               (not (process-get process 'dsh-server-owner)))
+      (user-error "This upgrade requires dsh-emacs-disconnect, then reload and reconnect (or restart Emacs)")))
   (dsh-emacs-events-host-restore)
   (save-selected-window
     (dolist (buffer (buffer-list))
@@ -141,6 +150,9 @@ and reload again, or restart Emacs.  No server restart or prompt is sent."
     (user-error "Finish the active minibuffer interaction before reloading"))
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
+      (when (bound-and-true-p dsh-emacs--pending-submissions)
+        (user-error "Wait for the pending submission or upload in %s"
+                    (buffer-name buffer)))
       (when (and (derived-mode-p 'dsh-emacs-mode 'dsh-emacs-draft-mode)
                  (or (bound-and-true-p dsh-emacs--creation-pending)
                      (bound-and-true-p dsh-emacs--history-loading)))

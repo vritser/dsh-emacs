@@ -790,5 +790,9 @@ prompts when `dsh-emacs-input-history-cross-session' is nil."
   ;; also stops at the trailing boundary; `C-k' keeps standard line semantics.
   (dsh-emacs--composer-delete-guard-install))
 
+(defun dsh-emacs-input--disconnect ()
+  "Drop service-specific history; retain opt-in cross-session input history."
+  (clrhash dsh-emacs--input-history-by-session))
+
 (provide 'dsh-emacs-input)
 ;;; dsh-emacs-input.el ends here

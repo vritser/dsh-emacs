@@ -242,6 +242,7 @@ failure — the error is already reported).  A fetch already in flight
 for SESSION-ID is not duplicated, and a response whose fetch
 `dsh-emacs-command-catalog-invalidate' superseded is dropped instead of
 overwriting the newer catalog."
+  (dsh-emacs--server-capture-owner)
   (unless (member session-id dsh-emacs--command-fetch-inflight)
     (setq dsh-emacs--command-fetch-inflight
           (cons session-id dsh-emacs--command-fetch-inflight))
@@ -317,16 +318,22 @@ Called when a chat buffer opens: the catalog is fetched on a short
 timer (see `dsh-emacs-command-prefetch-delay') so the first
 \"/\" completion does not block on the network.  No-op unless
 `dsh-emacs-command-prefetch' is enabled, the catalog is not yet
-cached and no fetch is already in flight.  Returns the timer, or nil."
+cached and no fetch is already in flight.  Retain the calling buffer and
+server owner; do nothing if either expires.  Returns the timer, or nil."
   (when (and dsh-emacs-command-prefetch
              session-id
              (not (dsh-emacs-command-catalog session-id)))
     (unless (member session-id dsh-emacs--command-fetch-inflight)
-      (run-at-time
-       dsh-emacs-command-prefetch-delay nil
-       (lambda (sid)
-         (dsh-emacs-command-catalog-fetch sid))
-       session-id))))
+      (let ((origin (current-buffer))
+            (owner (dsh-emacs--server-capture-owner)))
+        (dsh-emacs--server-run-later
+         dsh-emacs-command-prefetch-delay nil
+         (lambda ()
+           (when (and (buffer-live-p origin)
+                      (dsh-emacs--server-current-p (car owner) (cdr owner)))
+             (with-current-buffer origin
+               (let ((dsh-emacs--server-work-owner owner))
+                 (dsh-emacs-command-catalog-fetch session-id))))))))))
 
 (defun dsh-emacs-command-catalog-refresh (&optional session-id)
   "Re-fetch and re-cache the `commands/list' catalog, then report.
@@ -746,6 +753,12 @@ company needs no contribution (it reaches this buffer's capf via
              (boundp 'corfu-auto-trigger)
              (not (string-match-p "/" corfu-auto-trigger)))
     (setq-local corfu-auto-trigger (concat corfu-auto-trigger "/"))))
+
+(defun dsh-emacs-command--disconnect ()
+  "Clear all command catalogs and invalidate pending fetch identities."
+  (cl-incf dsh-emacs--command-fetch-generation)
+  (setq dsh-emacs--command-catalogs nil dsh-emacs--command-fetch-inflight nil
+        dsh-emacs--command-fetch-stamps nil))
 
 (provide 'dsh-emacs-command)
 

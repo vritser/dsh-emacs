@@ -6,6 +6,94 @@ All notable changes to this project are documented here. Format follows
 sections carry the planned next version (pre-1.0: `fix` → patch, features →
 minor) and stay undated until the release is cut.
 
+## 0.9.0 - Unreleased
+
+### Added
+
+- **Switch services through an explicit connection lifecycle**: connect waits
+  for authentication, core baselines and a session snapshot; disconnect protects
+  unsent work, retires old buffers, cancels reads and clears service state while
+  leaving servers running. Public state and session queries support integrations;
+  stale requests and notification actions cannot act on a replacement service.
+  (rationale: [postmortem/187](postmortem/187-single-service-lifecycle.md))
+
+### Fixed
+
+- **Keep stream cleanup failures from blocking recovery indefinitely**:
+  every close handler runs independently; only failures are retried, and a
+  second failure is reported and quarantined. Lost sockets stop their health
+  checks and schedule recovery before running feature cleanup.
+  (rationale: [postmortem/188](postmortem/188-bounded-cleanup-and-upgrade-ownership.md))
+
+- **Allow managed process start and restart while disconnected**: explicit
+  process commands can launch and wait without authenticating or reconnecting
+  the client; cancelled startup work still cannot resume after stop.
+
+- **Prevent connection callbacks from reentering disconnect**: success and
+  deferred cancellation callbacks carry their original owner and the same
+  cleanup guard as HTTP callbacks, protecting a newer connection.
+
+- **Require reconnecting sockets from before the ownership upgrade**: reload
+  reports an explicit disconnect/reload/reconnect requirement for live 0.8.0
+  sockets instead of silently leaving chats deaf or guessing their endpoint.
+  (rationale: [postmortem/188](postmortem/188-bounded-cleanup-and-upgrade-ownership.md))
+
+- **Cancel inline-image reads on disconnect**: `session/attachment` reads no
+  longer incorrectly block switching as pending server writes.
+
+- **Expire notifications when the configured endpoint changes**: actions
+  capture endpoint identity as well as instance and generation, including in
+  the default connection flow, without embedding URL credentials in OS commands.
+
+- **Keep session snapshots unavailable during default-connection recovery**:
+  both connection entry paths mark the directory stale on stream loss; late
+  HTTP replies cannot mark it ready before fresh baselines and a list arrive.
+
+- **Retain failed authentication-response cleanup for retry**: a response
+  buffer that refuses to close or raises a cleanup error now fails the
+  connection, retains the resource and prevents a false success notification.
+
+- **Reject HTTP results from stopped server attempts**: RPC and upload
+  completions settle as failures after stop, without clearing newer auth or
+  continuing the old request chain. Delayed command/skill prefetch retains
+  its originating buffer and skips work after stop, an endpoint change or
+  buffer closure.
+  (rationale: [postmortem/186](postmortem/186-server-work-ownership.md))
+
+- **Keep explicitly disconnected event streams closed**: retired core/chat
+  sockets ignore late input and recovery callbacks, and cancelled timers cannot
+  affect replacement connections. Teardown releases queued transport data and
+  retains failed stream-close work for retry.
+  (rationale: [postmortem/185](postmortem/185-event-stream-retirement.md))
+
+- **Protect pending submissions during source reload**: reload now refuses
+  while a chat is uploading files or awaiting command/prompt acceptance,
+  including command fallback. Concurrent submissions settle independently;
+  ordinary streaming remains reloadable after acceptance.
+  (rationale: [postmortem/184](postmortem/184-pending-submissions.md))
+
+- **Report truncated HTTP responses as failed requests**: incomplete headers
+  now release the response buffer and notify the caller, allowing uploads and
+  submissions to finish their failure handling instead of remaining pending.
+
+- **Keep stopped startup attempts cancelled**: stopping the server invalidates
+  pending readiness checks, token exchanges, installation continuations and
+  list/init polling even at the same address. A fresh attempt can start normally;
+  late responses cannot authenticate or revive the cancelled attempt.
+  (rationale: [postmortem/183](postmortem/183-startup-cancellation.md))
+
+- **Keep managed server ownership tied to its endpoint**: a running local
+  server no longer supplies launch tokens or startup waits for another
+  address, and reachability caches are scoped to the probed endpoint.
+  Starting a second managed server requires explicitly stopping the first;
+  an already reachable external service leaves the managed process running.
+  (rationale: [postmortem/182](postmortem/182-managed-server-endpoint.md))
+
+- **Preserve newer authentication after a late HTTP 401**: synchronous and
+  asynchronous RPC/upload failures clear the cached cookie only when the
+  request sent that cookie to the still-current endpoint. Unauthenticated
+  requests and failures from a previous endpoint leave newer credentials intact.
+
 ## 0.8.0 - 2026-11-04
 
 ### Breaking Changes

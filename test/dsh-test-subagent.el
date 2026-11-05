@@ -1083,7 +1083,7 @@
         (dsh-emacs-events--apply-snapshot-projections "cached-parent" snapshot))
       (should dsh-emacs--modeline-subagent-active)
       (should (= dsh-emacs--modeline-run-start 200.0))
-      (let ((process (make-pipe-process :name "dsh-test-child-activity")))
+      (let ((process (dsh-test--event-process :name "dsh-test-child-activity")))
         (unwind-protect
             (progn
               (setq dsh-emacs--event-process process)

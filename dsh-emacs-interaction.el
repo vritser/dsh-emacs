@@ -212,7 +212,7 @@ another client already answered could never close here.  Schedule a
 zero-delay drain from the dispatcher; direct callers (tests, commands) keep
 opening the reader immediately."
   (if (bound-and-true-p dsh-emacs-events--dispatching)
-      (run-at-time 0 nil #'dsh-emacs--interaction-drain kind)
+      (dsh-emacs--server-run-later 0 nil #'dsh-emacs--interaction-drain kind)
     (dsh-emacs--interaction-drain kind)))
 
 (defun dsh-emacs--interaction-drain (kind)

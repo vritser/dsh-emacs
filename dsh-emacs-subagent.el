@@ -602,5 +602,11 @@ animation backend supplies PHASE from the elapsed clip time."
                      'help-echo (format "%d subagents, %d running; mouse-1 to choose"
                                         (length catalog) running)))))))
 
+(defun dsh-emacs-subagent--disconnect ()
+  "Drop all projections, catalogs and pending summary identities."
+  (cl-incf dsh-emacs--subagent-generation)
+  (setq dsh-emacs--subagent-host-live nil dsh-emacs--subagent-summary-request nil)
+  (clrhash dsh-emacs--subagent-catalogs))
+
 (provide 'dsh-emacs-subagent)
 ;;; dsh-emacs-subagent.el ends here

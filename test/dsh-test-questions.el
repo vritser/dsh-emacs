@@ -1915,7 +1915,7 @@
   (let* ((old-chats dsh-emacs--chat-buffers)
          (chat (get-buffer-create " *t-uq-dispatch*"))
          (neutral (get-buffer-create " *t-uq-neutral*"))
-         (proc (make-pipe-process :name "t-uq-proc" :buffer nil)))
+         (proc (dsh-test--event-process :name "t-uq-proc" :buffer nil)))
     (unwind-protect
         (progn
           (setq dsh-emacs--chat-buffers
@@ -1928,8 +1928,8 @@
           (dsh-emacs-events--host-apply-projection
            proc '((sessionId . "sess-uq") (key . "userQuestions")
                   (value . ((active . [((callId . "c1") (state . "continued")
-                                       (questions . [((id . "q1")
-                                                      (question . "Which?"))]))])
+                                        (questions . [((id . "q1")
+                                                       (question . "Which?"))]))])
                             (settled . [])))))
           (with-current-buffer chat
             (ert-info ((format "%s" "userQuestions-projection-stores-chat-state"))
@@ -1941,7 +1941,7 @@
             (dsh-emacs-events--host-apply-projection
              proc '((sessionId . "sess-other") (key . "userQuestions")
                     (value . ((active . [((callId . "x") (state . "continued")
-                                         (questions . []))])
+                                          (questions . []))])
                               (settled . [])))))
             (ert-info ((format "%s" "userQuestions-foreign-session-cell-dropped"))
               (should (null dsh-emacs--session-questions)))))
@@ -1953,7 +1953,7 @@
 (ert-deftest dsh-emacs-test-questions-question-claim-held-until-answer-acknowledged ()
   :tags '(dsh-unit)
   (let* ((chat (get-buffer-create " *t-uq-claim*"))
-         (proc (make-pipe-process :name "t-uq-claim-proc" :buffer nil))
+         (proc (dsh-test--event-process :name "t-uq-claim-proc" :buffer nil))
          (opened nil) (closed nil) (reply nil) (readers nil))
     (unwind-protect
         (progn
@@ -2011,7 +2011,7 @@
 (ert-deftest dsh-emacs-test-questions-question-drain-does-not-claim-untimed-wait ()
   :tags '(dsh-unit)
   (let* ((chat (get-buffer-create " *t-uq-untimed*"))
-         (proc (make-pipe-process :name "t-uq-untimed-proc" :buffer nil))
+         (proc (dsh-test--event-process :name "t-uq-untimed-proc" :buffer nil))
          (opened nil))
     (unwind-protect
         (progn
@@ -2391,7 +2391,7 @@
                                            (values . ((userQuestions
                                                        . ((active . [])
                                                           (settled . [])))))))))
-           (process (make-pipe-process :name "t-questions-seq" :buffer nil)))
+           (process (dsh-test--event-process :name "t-questions-seq" :buffer nil)))
       (unwind-protect
           (progn
             (puthash "questions-seq" (current-buffer) dsh-emacs--chat-buffers)
@@ -2540,7 +2540,8 @@
         (dsh-emacs-events--dispatching t)
         (dsh-emacs-enable-notifications nil))
     (unwind-protect
-        (cl-letf (((symbol-function 'run-at-time)
+        (cl-letf (((symbol-function 'cancel-timer) #'ignore)
+                  ((symbol-function 'run-at-time)
                    (lambda (_time _repeat function &rest args)
                      (setq scheduled (lambda () (apply function args)))
                      'scheduled-timer))
@@ -2615,7 +2616,8 @@
         (dsh-emacs-events--dispatching t)
         (dsh-emacs-enable-notifications nil))
     (unwind-protect
-        (cl-letf (((symbol-function 'run-at-time)
+        (cl-letf (((symbol-function 'cancel-timer) #'ignore)
+                  ((symbol-function 'run-at-time)
                    (lambda (_time _repeat function &rest args)
                      (setq scheduled (lambda () (apply function args)))
                      'scheduled-timer))

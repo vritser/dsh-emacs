@@ -4,6 +4,183 @@
 
 (require 'dsh-test-support)
 
+(ert-deftest dsh-emacs-test-events-intentional-core-disconnect-stays-closed ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (let* ((process (dsh-test--event-process :name "dsh-core-retire"
+                                             :buffer (current-buffer) :noquery t))
+           (dsh-emacs-events--host-process process)
+           (dsh-emacs-events--host-ready t)
+           (dsh-emacs-events--client-id "old-client")
+           (dsh-emacs-events--host-reconnect-timer nil)
+           (read-timer (run-at-time 3600 nil #'ignore))
+           (dispatch-timer (run-at-time 3600 nil #'ignore))
+           (closed 0) (delivered 0))
+      (unwind-protect
+          (cl-letf (((symbol-function 'dsh-emacs-events--host-needed-p) (lambda () t))
+                    ((symbol-function 'dsh-emacs-subagent-host-reset) #'ignore)
+                    ((symbol-function 'dsh-emacs-plan--cancel) #'ignore)
+                    ((symbol-function 'dsh-emacs-events--dispatch-json)
+                     (lambda (&rest _) (cl-incf delivered))))
+            (process-put process 'dsh-emacs-host-stream t)
+            (process-put process 'dsh-emacs-event-ready t)
+            (process-put process 'dsh-emacs-event-read-timer read-timer)
+            (process-put process 'dsh-emacs-event-dispatch-timer dispatch-timer)
+            (process-put process 'dsh-emacs-event-messages '((1 . "old")))
+            (process-put process 'dsh-emacs-stream-handlers
+                         (list (cons "stream" (cons "test"
+                                                    (lambda (value)
+                                                      (should-not value)
+                                                      (cl-incf closed))))))
+            (set-process-sentinel process #'dsh-emacs-events--sentinel)
+            (dsh-emacs-events-host-disconnect)
+            (should-not (process-live-p process))
+            (should-not dsh-emacs-events--host-process)
+            (should-not dsh-emacs-events--host-ready)
+            (should-not dsh-emacs-events--host-reconnect-timer)
+            (should-not dsh-emacs-events--client-id)
+            (should (= closed 1))
+            (should-not (memq read-timer timer-list))
+            (should-not (memq dispatch-timer timer-list))
+            (should-not (process-get process 'dsh-emacs-event-messages))
+            ;; Already-queued callbacks can arrive after local teardown.
+            (dsh-emacs-events--sentinel process "closed")
+            (dsh-emacs-events--filter process (dsh-emacs-events--frame 1 "late"))
+            (dsh-emacs-events--resume-dispatch process)
+            (should (= delivered 0))
+            (should (= closed 1))
+            (should-not dsh-emacs-events--host-reconnect-timer))
+        (set-process-sentinel process #'ignore)
+        (delete-process process)
+        (cancel-timer read-timer)
+        (cancel-timer dispatch-timer)
+        (when (timerp dsh-emacs-events--host-reconnect-timer)
+          (cancel-timer dsh-emacs-events--host-reconnect-timer))))))
+
+(ert-deftest dsh-emacs-test-events-cancelled-timer-cannot-touch-replacement ()
+  :tags '(dsh-unit)
+  (dolist (kind '(chat core watchdog health))
+    (with-temp-buffer
+      (let ((dsh-emacs-events--host-reconnect-timer nil)
+            (calls 0) old replacement)
+        (cl-labels
+            ((start ()
+               (pcase kind
+                 ('chat (dsh-emacs-events--schedule-reconnect)
+                        dsh-emacs--event-reconnect-timer)
+                 ('core (dsh-emacs-events--host-schedule-reconnect)
+                        dsh-emacs-events--host-reconnect-timer)
+                 ('watchdog (dsh-emacs-events--watchdog-start)
+                            dsh-emacs--ws-watchdog-timer)
+                 ('health (dsh-emacs-events--health-start)
+                          dsh-emacs--event-connect-timer)))
+             (stop ()
+               (pcase kind
+                 ('chat (cancel-timer dsh-emacs--event-reconnect-timer)
+                        (setq dsh-emacs--event-reconnect-timer nil))
+                 ('core (cancel-timer dsh-emacs-events--host-reconnect-timer)
+                        (setq dsh-emacs-events--host-reconnect-timer nil))
+                 ('watchdog (dsh-emacs-events--watchdog-stop))
+                 ('health (dsh-emacs-events--health-stop)))))
+          (unwind-protect
+              (cl-letf (((symbol-function 'dsh-emacs-events--host-needed-p) (lambda () t))
+                        ((symbol-function 'dsh-emacs-events-connect)
+                         (lambda (&rest _) (cl-incf calls)))
+                        ((symbol-function 'dsh-emacs-events-host-connect)
+                         (lambda () (cl-incf calls)))
+                        ((symbol-function 'dsh-emacs-events--watchdog-tick)
+                         (lambda (_buffer) (cl-incf calls)))
+                        ((symbol-function 'dsh-emacs-events--health-tick)
+                         (lambda (_buffer) (cl-incf calls))))
+                (setq old (start))
+                (stop)
+                (setq replacement (start))
+                (apply (timer--function old) (timer--args old))
+                (should (= calls 0))
+                (apply (timer--function replacement) (timer--args replacement))
+                (should (= calls 1)))
+            (when (timerp old) (cancel-timer old))
+            (when (timerp replacement) (cancel-timer replacement))))))))
+
+(ert-deftest dsh-emacs-test-events-disconnect-retries-failed-handler-cleanup ()
+  :tags '(dsh-unit)
+  (dolist (kind '(chat core))
+    (with-temp-buffer
+      (let* ((process (dsh-test--event-process :name "dsh-cleanup-retry"
+                                               :buffer (current-buffer) :noquery t))
+             (dsh-emacs-events--host-process (and (eq kind 'core) process))
+             (dsh-emacs-events--host-ready nil)
+             (dsh-emacs-events--client-id nil)
+             (dsh-emacs-events--host-reconnect-timer nil)
+             (attempts 0) (later 0))
+        (setq-local dsh-emacs--event-process (and (eq kind 'chat) process))
+        (process-put process 'dsh-emacs-host-stream (eq kind 'core))
+        (process-put process 'dsh-emacs-chat-buffer (current-buffer))
+        (process-put process 'dsh-emacs-stream-handlers
+                     (list (cons "first" (cons "test"
+                                               (lambda (_value)
+                                                 (cl-incf attempts)
+                                                 (when (= attempts 1)
+                                                   (error "cleanup failed")))))
+                           (cons "second" (cons "test"
+                                                (lambda (_value) (cl-incf later))))))
+        (unwind-protect
+            (cl-letf (((symbol-function 'dsh-emacs-subagent-host-reset) #'ignore)
+                      ((symbol-function 'dsh-emacs-plan--cancel) #'ignore)
+                      ((symbol-function 'dsh-emacs-render--flush-stream) #'ignore)
+                      ((symbol-function 'dsh-emacs--ml-busy-clear) #'ignore))
+              (cl-labels ((disconnect ()
+                            (if (eq kind 'chat)
+                                (dsh-emacs-events-disconnect)
+                              (dsh-emacs-events-host-disconnect))))
+                (let ((err (should-error (disconnect) :type 'error)))
+                  (should (equal (error-message-string err) "cleanup failed")))
+                (should-not (process-live-p process))
+                (should (= attempts 1))
+                (should (= later 1))
+                (disconnect)
+                (should (= attempts 2))
+                (should (= later 1))
+                (should-not (process-get process 'dsh-emacs-stream-handlers))
+                (should-not dsh-emacs--event-process)
+                (should-not dsh-emacs-events--host-process)
+                (disconnect)
+                (should (= attempts 2))
+                (should (= later 1))))
+          (set-process-sentinel process #'ignore)
+          (delete-process process))))))
+
+(ert-deftest dsh-emacs-test-events-disconnect-during-frame-parsing ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (let* ((chat (current-buffer))
+           (process (dsh-test--event-process :name "dsh-retire-during-parse"
+                                             :buffer chat :noquery t))
+           (delivered 0))
+      (setq-local dsh-emacs--event-process process)
+      (process-put process 'dsh-emacs-chat-buffer chat)
+      (process-put process 'dsh-emacs-event-input
+                   (concat (dsh-emacs-events--frame 1 "queued-before-ping")
+                           (dsh-emacs-events--frame 9 "ping")
+                           (dsh-emacs-events--frame 1 "queued-after-ping")))
+      (unwind-protect
+          (cl-letf (((symbol-function 'dsh-emacs-render--flush-stream) #'ignore)
+                    ((symbol-function 'dsh-emacs--ml-busy-clear) #'ignore)
+                    ((symbol-function 'dsh-emacs-events--dispatch-json)
+                     (lambda (&rest _) (cl-incf delivered)))
+                    ((symbol-function 'dsh-emacs-events--send-pong)
+                     (lambda (_process _payload)
+                       ;; A socket write can run a sentinel or timer.
+                       (dsh-emacs-events-disconnect chat))))
+            (dsh-emacs-events--consume-frames process)
+            (should (= delivered 0))
+            (should-not (process-live-p process))
+            (should-not (process-get process 'dsh-emacs-event-messages))
+            (should-not (process-get process 'dsh-emacs-event-input))
+            (should-not (process-get process 'dsh-emacs-event-fragment))
+            (should-not (process-get process 'dsh-emacs-event-parsing)))
+        (delete-process process)))))
+
 (ert-deftest dsh-emacs-test-events-activity-replay-keeps-newest-timestamp ()
   :tags '(dsh-unit)
   (dolist (snapshot-time '(nil 50 150))
@@ -356,7 +533,7 @@
       (dsh-emacs-mode)
       (dsh-emacs-modeline-setup)
       (setq-local dsh-emacs--buffer-session "s1")
-      (let ((fake-proc (make-pipe-process :name "dsh-test-proc" :noquery t))
+      (let ((fake-proc (dsh-test--event-process :name "dsh-test-proc" :noquery t))
             (dispatch-count 0)
             (dispatch (symbol-function 'dsh-emacs-events--dispatch-json)))
         (unwind-protect
@@ -418,8 +595,8 @@
           ;; Case 2: handshake in flight (process alive but not ready) → no duplicate
           ;; connect
           (setq connects nil)
-          (let ((proc (make-pipe-process :name " *t43c-proc*"
-                                         :buffer " *t43c-proc*")))
+          (let ((proc (dsh-test--event-process :name " *t43c-proc*"
+                                               :buffer " *t43c-proc*")))
             (unwind-protect
                 (progn
                   (with-current-buffer chat
@@ -447,7 +624,7 @@
 ;; --- Test 51h: connecting an already-connected host stream is a no-op ---
 (ert-deftest dsh-emacs-test-events-host-connect-is-idempotent ()
   :tags '(dsh-unit)
-  (let* ((proc (make-pipe-process :name "dsh-test-host" :noquery t))
+  (let* ((proc (dsh-test--event-process :name "dsh-test-host" :noquery t))
          (dsh-emacs-events--host-process proc)
          (disconnects 0))
     (unwind-protect
@@ -469,8 +646,8 @@
 ;; contract.
 (ert-deftest dsh-emacs-test-events-host-reap-keeps-only-the-owned-core ()
   :tags '(dsh-unit)
-  (let* ((owned (make-pipe-process :name "dsh-test-core-owned" :noquery t))
-         (stale (make-pipe-process :name "dsh-test-core-stale" :noquery t))
+  (let* ((owned (dsh-test--event-process :name "dsh-test-core-owned" :noquery t))
+         (stale (dsh-test--event-process :name "dsh-test-core-stale" :noquery t))
          (dsh-emacs-events--host-process owned))
     (unwind-protect
         (progn
@@ -484,10 +661,10 @@
       (when (process-live-p owned) (delete-process owned))
       (when (process-live-p stale) (delete-process stale)))))
 
-(ert-deftest dsh-emacs-test-events-host-restore-adopts-the-lone-legacy-core ()
+(ert-deftest dsh-emacs-test-events-host-restore-adopts-the-lone-owned-core ()
   :tags '(dsh-unit)
   (let* ((chat (generate-new-buffer " *t-host-adopt-chat*"))
-         (legacy (make-pipe-process :name "dsh-test-core-legacy" :noquery t))
+         (legacy (dsh-test--event-process :name "dsh-test-core-legacy" :noquery t))
          (dsh-emacs--sessions-buffer nil)
          (dsh-emacs--chat-buffers (make-hash-table :test 'equal))
          (dsh-emacs-events--host-process nil)
@@ -502,7 +679,7 @@
           (process-put legacy 'dsh-emacs-event-ready t)
           (process-put legacy 'dsh-emacs-host-ws-stream-id "emacs-1-2")
           (dsh-emacs-events-host-restore)
-          (ert-info ((format "%s" "host-restore-adopts-legacy-core"))
+          (ert-info ((format "%s" "host-restore-adopts-owned-core"))
             (should (eq legacy dsh-emacs-events--host-process))
             (should dsh-emacs-events--host-ready)
             (should (process-live-p legacy))
@@ -515,7 +692,7 @@
 (ert-deftest dsh-emacs-test-events-host-restore-rebuilds-without-a-handshake ()
   :tags '(dsh-unit)
   (let* ((chat (generate-new-buffer " *t-host-rebuild-chat*"))
-         (legacy (make-pipe-process :name "dsh-test-core-unready" :noquery t))
+         (legacy (dsh-test--event-process :name "dsh-test-core-unready" :noquery t))
          (dsh-emacs--sessions-buffer nil)
          (dsh-emacs--chat-buffers (make-hash-table :test 'equal))
          (dsh-emacs-events--host-process nil)
@@ -537,7 +714,7 @@
 (ert-deftest dsh-emacs-test-events-host-lost-reconnects-an-unowned-core ()
   :tags '(dsh-unit)
   (let* ((chat (generate-new-buffer " *t-host-unowned-chat*"))
-         (stale (make-pipe-process :name "dsh-test-core-unowned" :noquery t))
+         (stale (dsh-test--event-process :name "dsh-test-core-unowned" :noquery t))
          (dsh-emacs--sessions-buffer nil)
          (dsh-emacs--chat-buffers (make-hash-table :test 'equal))
          (dsh-emacs-events--host-process nil)
@@ -692,7 +869,7 @@
 ;; upgrade: the connect's own `workspace/follow' baseline covers that window.
 (ert-deftest dsh-emacs-test-events-core-rebaseline-waits-for-handshake ()
   :tags '(dsh-unit)
-  (let* ((proc (make-pipe-process :name "dsh-test-rebaseline" :noquery t))
+  (let* ((proc (dsh-test--event-process :name "dsh-test-rebaseline" :noquery t))
          (dsh-emacs-events--host-process proc)
          (dsh-emacs-events--host-ready nil)
          (sent nil))
@@ -734,8 +911,8 @@
                    b))
          (rendered-a nil)
          (rendered-b nil)
-         (proc-a (make-pipe-process :name "t69-proc-a" :buffer nil))
-         (proc-b (make-pipe-process :name "t69-proc-b" :buffer nil))
+         (proc-a (dsh-test--event-process :name "t69-proc-a" :buffer nil))
+         (proc-b (dsh-test--event-process :name "t69-proc-b" :buffer nil))
          (old-session dsh-emacs--current-session))
     (unwind-protect
         (progn
@@ -1092,7 +1269,9 @@
             (dsh-emacs--server-auth-cookie "dsh-auth-HASH=ok.sig"))
         (cl-letf (((symbol-function 'process-send-string)
                    (lambda (_proc string) (setq sent string))))
-          (dsh-emacs-events--send-handshake 'fake-sock))
+          (let ((process (dsh-test--event-process :name "handshake-test" :noquery t)))
+            (unwind-protect (dsh-emacs-events--send-handshake process)
+              (delete-process process))))
         (ert-info ((format "%s" (format "websocket-auth-authority-%s" dsh-emacs-base-url)))
           (should (string-match-p "Cookie: dsh-auth-HASH=ok\\.sig\r\n" sent))
           (should (string-match-p (regexp-quote (format "Host: %s\r\n" authority)) sent))
@@ -1178,7 +1357,7 @@
 
 (ert-deftest dsh-emacs-test-events-mux-custom-error-keeps-handler-until-end ()
   :tags '(dsh-unit)
-  (let ((process (make-pipe-process :name "dsh-custom-mux" :noquery t))
+  (let ((process (dsh-test--event-process :name "dsh-custom-mux" :noquery t))
         values messages)
     (unwind-protect
         (cl-letf (((symbol-function 'process-send-string) #'ignore)
@@ -1961,8 +2140,8 @@
 (ert-deftest dsh-emacs-test-events-watchdog-probes-before-disconnecting ()
   :tags '(dsh-unit)
   (with-temp-buffer
-    (let ((process (make-pipe-process :name "dsh-watchdog-test"
-                                      :buffer (current-buffer) :noquery t))
+    (let ((process (dsh-test--event-process :name "dsh-watchdog-test"
+                                            :buffer (current-buffer) :noquery t))
           sent deleted)
       (unwind-protect
           (progn
@@ -2012,8 +2191,8 @@
   (dolist (closed-before-error '(nil t))
     (with-temp-buffer
       (let* ((owner (current-buffer))
-             (process (make-pipe-process :name "dsh-watchdog-write-error"
-                                         :buffer owner :noquery t))
+             (process (dsh-test--event-process :name "dsh-watchdog-write-error"
+                                               :buffer owner :noquery t))
              (watchdog (run-at-time 3600 1 #'ignore))
              (health (run-at-time 3600 1 #'ignore))
              (reads (run-at-time 3600 nil #'ignore))
@@ -2092,8 +2271,8 @@
   (dolist (ending '(resume alternate disconnect lost))
     (with-temp-buffer
       (let* ((owner (current-buffer))
-             (process (make-pipe-process :name "dsh-read-batch-test"
-                                         :buffer owner :noquery t))
+             (process (dsh-test--event-process :name "dsh-read-batch-test"
+                                               :buffer owner :noquery t))
              (filter (if (eq ending 'alternate) #'ignore
                        dsh-emacs-events--filter-fn))
              (frame (dsh-emacs-events--frame 1 "second"))
@@ -2154,8 +2333,8 @@
 (ert-deftest dsh-emacs-test-events-host-stream-does-not-pause-for-chat-batching ()
   :tags '(dsh-unit)
   (with-temp-buffer
-    (let ((process (make-pipe-process :name "dsh-host-read-test"
-                                      :buffer (current-buffer) :noquery t)))
+    (let ((process (dsh-test--event-process :name "dsh-host-read-test"
+                                            :buffer (current-buffer) :noquery t)))
       (unwind-protect
           (progn
             (process-put process 'dsh-emacs-host-stream t)
@@ -2187,8 +2366,8 @@
 (ert-deftest dsh-emacs-test-events-websocket-consume-preserves-partial-tail ()
   :tags '(dsh-unit)
   (with-temp-buffer
-    (let* ((process (make-pipe-process :name "dsh-frame-test"
-                                       :buffer (current-buffer) :noquery t))
+    (let* ((process (dsh-test--event-process :name "dsh-frame-test"
+                                             :buffer (current-buffer) :noquery t))
            (first (concat (unibyte-string 129 3) "one"))
            (second (concat (unibyte-string 129 3) "two"))
            delivered)
@@ -2215,8 +2394,8 @@
   :tags '(dsh-unit)
   (dolist (fail '(nil t))
     (with-temp-buffer
-      (let* ((process (make-pipe-process :name "dsh-reentrant-frames"
-                                         :buffer (current-buffer) :noquery t))
+      (let* ((process (dsh-test--event-process :name "dsh-reentrant-frames"
+                                               :buffer (current-buffer) :noquery t))
              (first (concat (unibyte-string 129 3) "one"))
              (second (concat (unibyte-string 129 3) "two"))
              (third (concat (unibyte-string 129 5) "three"))
@@ -2256,8 +2435,8 @@
 (ert-deftest dsh-emacs-test-events-frame-error-after-close-is-silent ()
   :tags '(dsh-unit)
   (with-temp-buffer
-    (let* ((process (make-pipe-process :name "dsh-frame-closed-test"
-                                       :buffer (current-buffer) :noquery t))
+    (let* ((process (dsh-test--event-process :name "dsh-frame-closed-test"
+                                             :buffer (current-buffer) :noquery t))
            (messages nil)
            (lost 0))
       (unwind-protect
@@ -2289,8 +2468,8 @@
       (dsh-emacs-mode)
       (setq-local dsh-emacs--buffer-session "reentrant-history")
       (let* ((owner (current-buffer))
-             (process (make-pipe-process :name "dsh-reentrant-history"
-                                         :buffer owner :noquery t))
+             (process (dsh-test--event-process :name "dsh-reentrant-history"
+                                               :buffer owner :noquery t))
              (dsh-emacs-fold-work-details nil)
              (dsh-emacs-reply-footer-items '(copy fork))
              (dsh-emacs--chat-buffers (make-hash-table :test 'equal))
@@ -2592,7 +2771,7 @@
       (dsh-emacs-mode)
       (setq-local dsh-emacs--buffer-session "gap-session")
       (setq-local dsh-emacs--anchor-seq 7)
-      (let ((proc (start-process "dsh-gap" nil "/bin/cat"))
+      (let ((proc (dsh-test--event-process :name "dsh-gap" :noquery t))
             sent)
         (unwind-protect
             (progn
@@ -2704,13 +2883,12 @@
 ;; reply would only appear once its durable `assistant/message' settles.
 (ert-deftest dsh-emacs-test-events-follow-open-opts-into-assistant-stream ()
   :tags '(dsh-unit)
-  (let ((proc (start-process "dsh-test-followopen" (generate-new-buffer " *fo*")
-                             "/bin/cat"))
+  (let ((proc (dsh-test--event-process :name "dsh-test-followopen" :noquery t))
         (sent nil))
     (unwind-protect
         (progn
-          (accept-process-output proc 1)
-          (when (process-live-p proc)
+          (should (process-live-p proc))
+          (progn
             (process-put proc 'dsh-emacs-follow-session "sess-open")
             (cl-letf (((symbol-function 'dsh-emacs-events--frame)
                        (lambda (_op payload) (setq sent payload) ""))
@@ -2729,17 +2907,17 @@
   (let ((dsh-emacs-history-rounds 5)
         (dsh-emacs-history-window 7)
         sent)
-    (cl-letf (((symbol-function 'process-get)
-               (lambda (_process key)
-                 (pcase key
-                   ('dsh-emacs-follow-session "opening")
-                   ('dsh-emacs-follow-stream-id "follow"))))
-              ((symbol-function 'process-live-p) (lambda (_) t))
-              ((symbol-function 'process-send-string)
-               (lambda (_process text) (setq sent text)))
-              ((symbol-function 'dsh-emacs-events--frame)
-               (lambda (_opcode text) text)))
-      (dsh-emacs-events--follow-open 'test-process))
+    (let ((process (dsh-test--event-process :name "follow-open" :noquery t)))
+      (unwind-protect
+          (progn
+            (process-put process 'dsh-emacs-follow-session "opening")
+            (process-put process 'dsh-emacs-follow-stream-id "follow")
+            (cl-letf (((symbol-function 'process-send-string)
+                       (lambda (_process text) (setq sent text)))
+                      ((symbol-function 'dsh-emacs-events--frame)
+                       (lambda (_opcode text) text)))
+              (dsh-emacs-events--follow-open process)))
+        (delete-process process)))
     (let* ((frame (dsh-protocol-read-json sent))
            (request (alist-get 'request
                                (alist-get 'args (alist-get 'payload frame)))))
@@ -2752,8 +2930,8 @@
 (ert-deftest dsh-emacs-test-events-burst-yields-and-pongs-before-rendering ()
   :tags '(dsh-unit)
   (with-temp-buffer
-    (let ((process (make-pipe-process :name "dsh-burst-test"
-                                      :buffer (current-buffer) :noquery t))
+    (let ((process (dsh-test--event-process :name "dsh-burst-test"
+                                            :buffer (current-buffer) :noquery t))
           (clock 0.0) delivered pongs)
       (unwind-protect
           (cl-letf (((symbol-function 'float-time) (lambda (&rest _) clock))
@@ -2786,8 +2964,8 @@
 (ert-deftest dsh-emacs-test-events-pending-burst-still-answers-new-pings ()
   :tags '(dsh-unit)
   (with-temp-buffer
-    (let ((process (make-pipe-process :name "dsh-burst-ping"
-                                      :buffer (current-buffer) :noquery t))
+    (let ((process (dsh-test--event-process :name "dsh-burst-ping"
+                                            :buffer (current-buffer) :noquery t))
           (clock 0.0) delivered pongs)
       (unwind-protect
           (cl-letf (((symbol-function 'float-time) (lambda (&rest _) clock))
@@ -2822,8 +3000,8 @@
 (ert-deftest dsh-emacs-test-events-close-follows-queued-business-messages ()
   :tags '(dsh-unit)
   (with-temp-buffer
-    (let ((process (make-pipe-process :name "dsh-burst-close"
-                                      :buffer (current-buffer) :noquery t))
+    (let ((process (dsh-test--event-process :name "dsh-burst-close"
+                                            :buffer (current-buffer) :noquery t))
           delivered)
       (unwind-protect
           (cl-letf (((symbol-function 'dsh-emacs-events--dispatch-json)
@@ -2847,8 +3025,8 @@
   :tags '(dsh-unit)
   (with-temp-buffer
     (dsh-emacs-mode)
-    (let ((process (make-pipe-process :name "dsh-burst-disconnect"
-                                      :buffer (current-buffer) :noquery t))
+    (let ((process (dsh-test--event-process :name "dsh-burst-disconnect"
+                                            :buffer (current-buffer) :noquery t))
           (clock 0.0) delivered)
       (unwind-protect
           (cl-letf (((symbol-function 'float-time) (lambda (&rest _) clock))
@@ -2878,6 +3056,60 @@
               (should (equal delivered '("one")))))
         (dsh-emacs-events--cancel-dispatch process)
         (delete-process process)))))
+
+(ert-deftest dsh-emacs-test-events-persistent-close-failure-does-not-starve-recovery ()
+  :tags '(dsh-unit)
+  (dolist (lost '(nil t))
+    (with-temp-buffer
+      (let* ((chat (current-buffer))
+             (old (dsh-test--event-process :name "broken-close" :noquery t))
+             (attempts 0) (later 0) replacement stream-buffer)
+        (setq-local dsh-emacs--buffer-session "close-recovery"
+                    dsh-emacs--event-process old)
+        (process-put old 'dsh-emacs-chat-buffer chat)
+        (process-put old 'dsh-emacs-stream-handlers
+                     (list (cons "bad" (cons "broken" (lambda (_)
+                                                        (cl-incf attempts)
+                                                        (error "always fails"))))
+                           (cons "good" (cons "healthy" (lambda (_) (cl-incf later))))))
+        (unwind-protect
+            (cl-letf (((symbol-function 'open-network-stream)
+                       (lambda (_name buffer &rest _)
+                         (setq stream-buffer buffer
+                               replacement (dsh-test--event-process
+                                            :name "recovered" :buffer buffer :noquery t)))))
+              (dsh-emacs-events--health-start)
+              (dsh-emacs-events--watchdog-start)
+              (should-error (if lost (dsh-emacs-events--lost old)
+                              (dsh-emacs-events-disconnect)) :type 'error)
+              (should (= later 1))
+              (should (= attempts 1))
+              (should (eq dsh-emacs--event-process old))
+              (should-not dsh-emacs--event-connect-timer)
+              (should-not dsh-emacs--ws-watchdog-timer)
+              (should (= (length (process-get old 'dsh-emacs-stream-handlers)) 1))
+              (if lost
+                  (let ((timer dsh-emacs--event-reconnect-timer))
+                    (should (timerp timer))
+                    (cancel-timer timer)
+                    (apply (timer--function timer) (timer--args timer)))
+                (dsh-emacs-events-connect chat))
+              (should (= attempts 2))
+              (should (= later 1))
+              (should (eq dsh-emacs--event-process replacement))
+              (should (process-live-p replacement))
+              (should-not (process-get old 'dsh-emacs-stream-handlers))
+              (should (= (length (process-get old 'dsh-emacs-quarantined-streams)) 1))
+              (dsh-emacs-events--retire-process old)
+              (should (= attempts 2)))
+          (dsh-emacs-events--health-stop)
+          (dsh-emacs-events--watchdog-stop)
+          (when (timerp dsh-emacs--event-reconnect-timer)
+            (cancel-timer dsh-emacs--event-reconnect-timer))
+          (dolist (process (list old replacement))
+            (when (processp process)
+              (set-process-sentinel process #'ignore) (delete-process process)))
+          (when (buffer-live-p stream-buffer) (kill-buffer stream-buffer)))))))
 
 (provide 'dsh-test-events)
 ;;; dsh-test-events.el ends here

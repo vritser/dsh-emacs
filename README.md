@@ -47,6 +47,8 @@ coverage. Existing browser-cookie authentication is retained.
 For an existing server, configure [its address and authentication](#server-setup)
 before connecting. A `use-package` example is in
 [Customization](docs/customization.md#example-configuration).
+For multiple project services, use the development version’s
+[connection lifecycle](docs/server-switching.md).
 
 ## Using it
 
@@ -213,7 +215,8 @@ server, paste its printed launch URL (`http://host:port/?token=…`) into
 prompted. Successful prompted tokens are saved; a server restart may require
 a new one. Reverse-proxy Basic auth is separate from the dsh launch token.
 
-See [Server options](docs/customization.md#server-options) for configuration,
+See [Server options](docs/customization.md#server-options) for configuration
+and managed-process ownership,
 [Adding providers](docs/customization.md#adding-providers) for model setup,
 and [Editing dsh configuration](docs/customization.md#editing-dsh-configuration)
 for local or TRAMP configuration files.
@@ -237,9 +240,11 @@ tests, clean loading, and repository hygiene. CI runs the same gate on Emacs
 [real-server tests](docs/architecture.md#real-server-e2e-testing) cover display
 and transport behavior.
 
-After editing source, `M-x dsh-emacs-reload` reloads it while preserving chats
-and drafts. Removed definitions and changed struct layouts require a restart;
-see [Source reload](docs/customization.md#reloading-local-source).
+After editing source and finishing pending uploads/submissions,
+`M-x dsh-emacs-reload` reloads it while preserving chats and drafts.
+Upgrading live 0.8.0 connections requires disconnecting and reconnecting;
+removed definitions and changed struct layouts require a restart.
+See [Source reload](docs/customization.md#reloading-local-source).
 
 ## Acknowledgments
 

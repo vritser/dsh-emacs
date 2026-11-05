@@ -119,13 +119,130 @@ server is restarted."
 ;;; Internal state
 ;;; ---------------------------------------------------------------------------
 
+(defvar dsh-emacs--server-generation 0
+  "Connection/work generation advanced by connect, disconnect and server stop.
+Readiness, HTTP, service buffers, event streams and deferred work capture it
+with their endpoint.  Disconnect retires resources; stop preserves views.")
+
+(defvar dsh-emacs--server-work-owner nil
+  "Dynamically bound (GENERATION . BASE) for an HTTP completion chain.
+A failure callback still settles local work after its owner expires, but
+cannot start requests or readiness work on behalf of a newer attempt.")
+
+(defvar dsh-emacs--connection-status 'initial
+  "Lifecycle status; initial preserves first-use automatic connection.")
+(defvar dsh-emacs--connection-endpoint nil)
+(defvar dsh-emacs--connection-base nil
+  "Private immutable endpoint of the explicit connection, including userinfo.")
+(defvar dsh-emacs-base-url)
+(defvar dsh-emacs--connection-error nil)
+(defvar dsh-emacs--connection-cleanup-needed nil)
+(defvar dsh-emacs--connection-session-status 'unknown)
+(defvar dsh-emacs--connection-attempt nil)
+(defvar dsh-emacs--connection-retiring nil)
+(defvar dsh-emacs--server-requests nil
+  "Pending request records with :origin, :write and :cancel fields.")
+(defvar dsh-emacs--server-sync-active nil
+  "Non-nil while synchronous HTTP work owns the current call stack.")
+(defvar-local dsh-emacs--server-buffer-owner nil
+  "Connection owner of this service buffer, retained until it is closed.")
+(put 'dsh-emacs--server-buffer-owner 'permanent-local t)
+(defconst dsh-emacs--connection-instance
+  (md5 (format "%s:%s:%s:%s" (emacs-pid) (current-time) (random) (system-name)))
+  "Identity distinguishing notification actions across Emacs instances.")
+
+(declare-function dsh-emacs--connection-buffers "dsh-emacs" ())
+(declare-function dsh-emacs--connection-preflight "dsh-emacs" (buffers))
+(declare-function dsh-emacs--connection-cleanup "dsh-emacs" ())
+(declare-function dsh-emacs--connection-initialize "dsh-emacs" (callback))
+(defvar dsh-emacs--sessions)
+(defvar dsh-emacs-events--host-ready)
+(defvar dsh-emacs-events--host-process)
+
+(define-error 'dsh-emacs-session-state-unavailable
+              "Session directory is unavailable" 'user-error)
+
+(defun dsh-emacs--connection-copy (value)
+  "Copy mutable data in a public connection or protocol snapshot VALUE."
+  (cond
+   ((stringp value) (copy-sequence value))
+   ((consp value) (cons (dsh-emacs--connection-copy (car value))
+                        (dsh-emacs--connection-copy (cdr value))))
+   ((recordp value)
+    (let ((copy (copy-sequence value)))
+      (dotimes (index (length copy))
+        (aset copy index (dsh-emacs--connection-copy (aref copy index))))
+      copy))
+   ((vectorp value) (apply #'vector (mapcar #'dsh-emacs--connection-copy value)))
+   ((hash-table-p value)
+    (let ((copy (make-hash-table :test (hash-table-test value))))
+      (maphash (lambda (key item)
+                 (puthash (dsh-emacs--connection-copy key)
+                          (dsh-emacs--connection-copy item) copy)) value)
+      copy))
+   ((or (null value) (symbolp value) (numberp value)) value)
+   (t (error "Resource cannot appear in a connection snapshot"))))
+
+(defun dsh-emacs-connection-state ()
+  "Return an independent, credential-free connection state plist."
+  (let ((endpoint dsh-emacs--connection-endpoint))
+    ;; The default first-use flow predates explicit connect.  Describe its
+    ;; actual socket owner, not an address the user may have since edited.
+    (when (and (eq dsh-emacs--connection-status 'initial)
+               (processp dsh-emacs-events--host-process))
+      (when-let* ((owner (process-get dsh-emacs-events--host-process 'dsh-server-owner)))
+        (let ((parsed (url-generic-parse-url (cdr owner))))
+          (setf (url-user parsed) nil (url-password parsed) nil (url-target parsed) nil
+                (url-filename parsed)
+                (car (split-string (or (url-filename parsed) "") "[?#]")))
+          (setq endpoint (url-recreate-url parsed)))))
+    (dsh-emacs--connection-copy
+     (list :status (if (eq dsh-emacs--connection-status 'initial)
+                       (if (bound-and-true-p dsh-emacs-events--host-ready)
+                           'connected 'disconnected)
+                     dsh-emacs--connection-status)
+           :endpoint endpoint
+           :error dsh-emacs--connection-error
+           :cleanup-needed dsh-emacs--connection-cleanup-needed))))
+
+(defun dsh-emacs-session-snapshot ()
+  "Return an independent local session directory without network access."
+  (dsh-emacs--connection-copy
+   (list :endpoint (plist-get (dsh-emacs-connection-state) :endpoint)
+         :status dsh-emacs--connection-session-status
+         :sessions (and (eq dsh-emacs--connection-session-status 'ready)
+                        dsh-emacs--sessions)
+         :error dsh-emacs--connection-error)))
+
+(declare-function dsh-emacs-subagent--value "dsh-emacs-subagent" (id key))
+(declare-function dsh-emacs-subagent--cell "dsh-emacs-subagent" (id key))
+(defun dsh-emacs-session-exists-p (session-id &optional address)
+  "Whether SESSION-ID exists in the ready local directory.
+ADDRESS is a `dsh-protocol-subagent-address' for a child directory.
+Signal `dsh-emacs-session-state-unavailable' when the directory is unknown."
+  (unless (eq dsh-emacs--connection-session-status 'ready)
+    (signal 'dsh-emacs-session-state-unavailable
+            (list "Session directory is unavailable"
+                  dsh-emacs--connection-session-status)))
+  (if address
+      (let* ((parent (dsh-protocol-subagent-address-parent address))
+             (cell (dsh-emacs-subagent--cell parent 'subagentCatalog))
+             (catalog (and cell (dsh-protocol-subagent-cell-value cell))))
+        (unless (and cell (dsh-protocol-subagent-cell-present cell))
+          (signal 'dsh-emacs-session-state-unavailable
+                  '("Subagent directory is unknown" unknown)))
+        (and (cl-find session-id catalog :test #'equal
+                      :key #'dsh-protocol-subagent-entry-id) t))
+    (and (cl-find session-id dsh-emacs--sessions :test #'equal
+                  :key #'dsh-protocol-session-session-id) t)))
+
 (defvar dsh-emacs--server-process nil
   "Process object of the dsh server this package started (or nil).
 Only set when *this* package spawned the server, so
 `dsh-emacs-server-stop' never kills a server the user runs themselves.")
 
 (defvar dsh-emacs--server-alive-check nil
-  "Cons (ALIVE . TIMESTAMP) caching the last liveness probe result.
+  "List (BASE ALIVE TIMESTAMP) caching the last liveness probe result.
 The probe is a raw loopback round-trip (~1ms); the cache keeps repeated
 commands (and command chains like list → workspace-list) from re-probing
 on every single invocation.")
@@ -308,18 +425,92 @@ server is alive; it must not ask for Basic credentials."
   "Return non-nil when the dsh server answers at the base URL.
 Cached for `dsh-emacs--server-alive-ttl' seconds, so repeated guard calls
 in one command chain do not re-probe."
-  (let ((now (float-time)))
+  (let ((generation dsh-emacs--server-generation)
+        (now (float-time))
+        (base (dsh-emacs--server-base-url)))
     (if (and dsh-emacs--server-alive-check
-             (<= (- now (cdr dsh-emacs--server-alive-check))
+             (equal base (car dsh-emacs--server-alive-check))
+             (<= (- now (nth 2 dsh-emacs--server-alive-check))
                  dsh-emacs--server-alive-ttl))
-        (car dsh-emacs--server-alive-check)
+        (cadr dsh-emacs--server-alive-check)
       (let ((alive (dsh-emacs--server-probe)))
-        (setq dsh-emacs--server-alive-check (cons alive now))
+        (unless (dsh-emacs--server-startup-current-p generation base)
+          (user-error "Server startup cancelled or endpoint changed during probe"))
+        (setq dsh-emacs--server-alive-check (list base alive now))
         alive))))
+
+(defun dsh-emacs--server-startup-current-p (generation base)
+  "Whether a process startup still owns GENERATION and BASE.
+Process start is allowed while the client is offline; it does not authorize
+RPC, authentication or event work on a disconnected client."
+  (and (= generation dsh-emacs--server-generation)
+       (equal base (dsh-emacs--server-base-url))
+       (not dsh-emacs--connection-cleanup-needed)
+       (not (eq dsh-emacs--connection-status 'disconnecting))))
+
+(defun dsh-emacs--server-current-p (generation base)
+  "Whether server work captured with GENERATION and BASE is still current."
+  (and (= generation dsh-emacs--server-generation)
+       (memq dsh-emacs--connection-status '(initial connecting connected))
+       (or (eq dsh-emacs--connection-status 'initial)
+           (equal base dsh-emacs--connection-base))
+       (equal base (dsh-emacs--server-base-url))))
+
+(defun dsh-emacs--server-capture-owner ()
+  "Capture the owner for new server work, rejecting an expired caller.
+HTTP completion chains inherit their original owner instead of adopting
+the current generation.  Delayed callers must capture before scheduling."
+  (when-let* ((process (bound-and-true-p dsh-emacs-events--host-process))
+              ((process-live-p process))
+              (owner (process-get process 'dsh-server-owner)))
+    (unless (equal (cdr owner) (dsh-emacs--server-base-url))
+      (user-error "Disconnect before changing the dsh server address")))
+  (when (and dsh-emacs--server-buffer-owner
+             (not (dsh-emacs--server-current-p
+                   (car dsh-emacs--server-buffer-owner)
+                   (cdr dsh-emacs--server-buffer-owner))))
+    (user-error "This dsh buffer belongs to a retired connection"))
+  (let ((owner (or dsh-emacs--server-work-owner dsh-emacs--server-buffer-owner
+                   (cons dsh-emacs--server-generation
+                         (dsh-emacs--server-base-url)))))
+    (unless (dsh-emacs--server-current-p (car owner) (cdr owner))
+      (user-error "dsh request belongs to a cancelled server attempt"))
+    owner))
 
 (defun dsh-emacs--server-invalidate-alive ()
   "Drop the cached liveness result (after a start/stop/restart)."
   (setq dsh-emacs--server-alive-check nil))
+
+(defun dsh-emacs--server-run-later (delay repeat function &rest args)
+  "Schedule owned server work FUNCTION with ARGS after DELAY, with REPEAT.
+Retain the originating buffer, reject expired work and register cancellation
+with connection cleanup.  Return the timer for existing callers."
+  (let* ((owner (dsh-emacs--server-capture-owner))
+         (origin (current-buffer))
+         (record (list :origin origin :write nil)) timer)
+    (cl-labels
+        ((cancel ()
+           (when timer (cancel-timer timer))
+           (setq dsh-emacs--server-requests (delq record dsh-emacs--server-requests)))
+         (fire ()
+           (if (not (and (memq record dsh-emacs--server-requests)
+                         (buffer-live-p origin)
+                         (dsh-emacs--server-current-p (car owner) (cdr owner))))
+               (cancel)
+             (unless repeat (cancel))
+             (with-current-buffer origin
+               (let ((dsh-emacs--server-work-owner owner))
+                 (apply function args))))))
+      (setf (plist-get record :cancel) #'cancel)
+      (push record dsh-emacs--server-requests)
+      (setq timer (run-at-time delay repeat #'fire)))))
+
+(defun dsh-emacs--server-managed-p ()
+  "Non-nil when the live managed process belongs to the configured endpoint."
+  (and dsh-emacs--server-process
+       (process-live-p dsh-emacs--server-process)
+       (equal (process-get dsh-emacs--server-process 'dsh-server-base)
+              (dsh-emacs--server-base-url))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Browser session auth (launch token → dsh-auth-* cookie)
@@ -335,13 +526,14 @@ in one command chain do not re-probe."
 ;; (`dsh-emacs-events.el') via `dsh-emacs--server-auth-cookie-header'.
 
 (defun dsh-emacs--server-auth-capture-token ()
-  "Scan the managed `*dsh-server*' buffer for a `dsh web: ...?token=' line.
+  "Scan the current endpoint's managed process output for a launch token.
 When found, store the token in `dsh-emacs--server-auth-captured-token',
 reset any minted cookie (a fresh server means a fresh token), and return the
 token.  Returns nil if the line has not appeared yet — for a just-launched
 server the URL is printed once the plugin tree settles, which can follow the
 first successful probe."
-  (let ((buf (get-buffer "*dsh-server*")))
+  (let ((buf (and (dsh-emacs--server-managed-p)
+                  (process-buffer dsh-emacs--server-process))))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (goto-char (point-min))
@@ -354,15 +546,15 @@ first successful probe."
 
 (defun dsh-emacs--server-auth-token ()
   "Return the current launch token, or nil when none is known.
-Resolution order: a token just parsed from the managed `*dsh-server*' output
-(the capture is exact for the live process and therefore never goes stale),
-a previously captured token retained in the buffer variable, then the
-user-facing `dsh-emacs-server-auth-token'."
-  (or (dsh-emacs--server-auth-capture-token)
-      dsh-emacs--server-auth-captured-token
-      (when (and dsh-emacs-server-auth-token
-                 (not (string-empty-p dsh-emacs-server-auth-token)))
-        dsh-emacs-server-auth-token)))
+Only the default first-use flow reads managed or saved tokens.  Explicit
+connections supply credentials through `dsh-emacs-connect'."
+  (when (eq dsh-emacs--connection-status 'initial)
+    (or (and (dsh-emacs--server-managed-p)
+             (or (dsh-emacs--server-auth-capture-token)
+                 dsh-emacs--server-auth-captured-token))
+        (when (and dsh-emacs-server-auth-token
+                   (not (string-empty-p dsh-emacs-server-auth-token)))
+          dsh-emacs-server-auth-token))))
 
 (defun dsh-emacs--server-auth-reset ()
   "Drop any minted cookie after the base URL or token changed.
@@ -370,19 +562,15 @@ Safe to call whenever the server address or identity may have changed; the
 next authenticated call re-mints from the fresh token."
   (setq dsh-emacs--server-auth-cookie nil))
 
-(defun dsh-emacs--server-auth-maybe-expire ()
-  "Drop a stale cookie after an HTTP 401.
-An out-of-band (user-managed) `dsh web' mints a NEW per-process token on
-every restart, which invalidates the cookie this client cached from the
-previous process — but nothing tells the client the token changed, so it
-keeps sending the dead cookie and every RPC 401s until Emacs restarts.
-Call this when a request that carried our cookie came back HTTP 401: clear
-the cookie (so the next authenticated call re-mints from a fresh capture
-or configured token, or the next interactive command prompts again).
-Re-minting from a still-stale
-configured token simply 401s again, which is the correct, non-silent
-outcome (the hint points the user at the config)."
-  (when dsh-emacs--server-auth-cookie
+(defun dsh-emacs--server-auth-maybe-expire (base cookie)
+  "Drop COOKIE after an HTTP 401 from its request to BASE.
+BASE and COOKIE are captured at dispatch.  Clear only when both still
+match, so a late failure cannot discard newer credentials.  A request
+sent without a cookie cannot invalidate the cache.  The next authenticated
+request can mint a fresh cookie after an external server restart."
+  (when (and cookie
+             (equal base (dsh-emacs--server-base-url))
+             (equal cookie dsh-emacs--server-auth-cookie))
     (setq dsh-emacs--server-auth-cookie nil)))
 
 (defun dsh-emacs--server-auth-http-401-p (err)
@@ -444,7 +632,8 @@ returns it.  Returns nil otherwise — an older server that needs no cookie,
 or no token known.  Best-effort by design: a real authentication failure
 surfaces on the caller's own request as HTTP 401, which dsh-emacs reports
 with actionable instructions rather than failing the mint synchronously."
-  (let* ((token (or token
+  (let* ((generation dsh-emacs--server-generation)
+         (token (or token
                     (dsh-emacs--server-auth-token)
                     (dsh-emacs--server-auth-token-from-url
                      (dsh-emacs--server-base-url-raw))))
@@ -452,6 +641,8 @@ with actionable instructions rather than failing the mint synchronously."
     (setq dsh-emacs--server-auth-cookie nil)
     (when token
       (let ((cookie (dsh-emacs--server-auth-exchange base token)))
+        (unless (dsh-emacs--server-current-p generation base)
+          (user-error "Server startup cancelled or endpoint changed during authentication"))
         (when cookie
           (setq dsh-emacs--server-auth-cookie cookie)
           cookie)))))
@@ -636,40 +827,48 @@ instructions rather than proceeding to an unauthenticated request.
 Empty input, a failed exchange, or quitting leaves the next command free
 to prompt again."
   (when (not noninteractive)
-    (cond
-     ;; A cookie already exists: nothing to do.
-     (dsh-emacs--server-auth-cookie t)
-     ;; A server dsh-emacs manages itself: never prompt — the token is
-     ;; auto-captured and a not-yet-minted cookie is transient.
-     ((and dsh-emacs--server-process (process-live-p dsh-emacs--server-process))
-      t)
-     ;; A token is resolvable (captured / configured / base-url): mint it.
-     ((let ((token (or (dsh-emacs--server-auth-token)
-                       (dsh-emacs--server-auth-token-from-url
-                        (dsh-emacs--server-base-url-raw)))))
-        (when token (dsh-emacs--server-auth-ensure token)))
-      t)
-     ;; Server needs no cookie (or is https, handled by config): proceed.
-     ((not (dsh-emacs--server-auth-required-p)) t)
-     ;; A failed attempt aborts this command; the next command can retry.
-     (t
-      (let* ((default (dsh-emacs--server-auth-token))
-             (prompt (format "dsh server %s requires a launch token%s (paste the `token=' value from the `dsh web:' URL it printed): "
-                             (dsh-emacs--server-base-url)
-                             (if default " (last used token pre-filled)" "")))
-             ;; Pre-fill the last-known token so a stale value is easy to edit
-             ;; and retry; with no known token prompt plainly.
-             (token (if default (read-string prompt default) (read-string prompt))))
-        (if (string-empty-p token)
-            (user-error (concat "No launch token given.  Set `dsh-emacs-server-auth-token' "
-                                "(or put `?token=' in `dsh-emacs-base-url') to authenticate "
-                                "to the external dsh server"))
-          (unless (dsh-emacs--server-auth-ensure token)
-            (user-error "dsh token exchange failed; the token may be stale or the URL wrong — check `C-h v dsh-emacs-server-auth-token'"))
-          ;; The exchange succeeded: remember the working token so the next
-          ;; session reuses it instead of re-prompting.
-          (dsh-emacs--server-auth-remember-token token)))
-      t))))
+    (let ((generation dsh-emacs--server-generation)
+          (base (dsh-emacs--server-base-url)))
+      (cond
+       ;; A cookie already exists: nothing to do.
+       (dsh-emacs--server-auth-cookie t)
+       ;; A server dsh-emacs manages itself: never prompt — the token is
+       ;; auto-captured and a not-yet-minted cookie is transient.
+       ((dsh-emacs--server-managed-p)
+        t)
+       ;; A token is resolvable (captured / configured / base-url): mint it.
+       ((let ((token (or (dsh-emacs--server-auth-token)
+                         (dsh-emacs--server-auth-token-from-url
+                          (dsh-emacs--server-base-url-raw)))))
+          (when token (dsh-emacs--server-auth-ensure token)))
+        t)
+       ;; Server needs no cookie (or is https, handled by config): proceed.
+       ((let ((required (dsh-emacs--server-auth-required-p)))
+          (unless (dsh-emacs--server-current-p generation base)
+            (user-error "Server startup cancelled or endpoint changed during authentication"))
+          (not required))
+        t)
+       ;; A failed attempt aborts this command; the next command can retry.
+       (t
+        (let* ((default (dsh-emacs--server-auth-token))
+               (prompt (format "dsh server %s requires a launch token%s (paste the `token=' value from the `dsh web:' URL it printed): "
+                               (dsh-emacs--server-base-url)
+                               (if default " (last used token pre-filled)" "")))
+               ;; Pre-fill the last-known token so a stale value is easy to edit
+               ;; and retry; with no known token prompt plainly.
+               (token (if default (read-string prompt default) (read-string prompt))))
+          (unless (dsh-emacs--server-current-p generation base)
+            (user-error "Server startup cancelled or endpoint changed during token input"))
+          (if (string-empty-p token)
+              (user-error (concat "No launch token given.  Set `dsh-emacs-server-auth-token' "
+                                  "(or put `?token=' in `dsh-emacs-base-url') to authenticate "
+                                  "to the external dsh server"))
+            (unless (dsh-emacs--server-auth-ensure token)
+              (user-error "dsh token exchange failed; the token may be stale or the URL wrong — check `C-h v dsh-emacs-server-auth-token'"))
+            ;; The exchange succeeded: remember the working token so the next
+            ;; session reuses it instead of re-prompting.
+            (dsh-emacs--server-auth-remember-token token)))
+        t)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;;  RPC client
@@ -701,8 +900,12 @@ JSON; the caller chooses the RPC or upload envelope interpretation."
   "Send an RPC request to the dsh web service.
 METHOD is the `namespace/method' endpoint (e.g. \"session/list\") and
 PARAMS the wire `args' content (an alist, or nil for parameter-less
-methods).  Returns (ok-p . value) or nil."
-  (let* ((url (format "%s/api/%s" (dsh-emacs--server-base-url) method))
+methods).  Returns (ok-p . value) or nil.  An expired response is a failure;
+an expired caller is rejected before authentication or sending."
+  (let* ((dsh-emacs--server-sync-active t)
+         (owner (dsh-emacs--server-capture-owner))
+         (base (cdr owner))
+         (url (format "%s/api/%s" base method))
          (json-data (dsh-protocol-rpc-request-json
                      method (dsh-emacs--rpc-id) params))
          (url-request-noninteractive t)
@@ -710,29 +913,40 @@ methods).  Returns (ok-p . value) or nil."
          (url-request-extra-headers
           (append '(("Content-Type" . "application/json"))
                   (dsh-emacs--server-auth-header)))
-         (url-request-data (encode-coding-string json-data 'utf-8)))
+         (url-request-data (encode-coding-string json-data 'utf-8))
+         (cookie (cdr (assoc "Cookie" url-request-extra-headers))))
+    ;; Lazy authentication may have yielded to stop/restart or a URL change.
+    (unless (dsh-emacs--server-current-p (car owner) base)
+      (user-error "dsh request cancelled during authentication"))
     (condition-case err
         ;; Auth cookies are owned by dsh, not the global URL cookie jar.
         (let ((buf (url-retrieve-synchronously url nil t)))
           (unless (buffer-live-p buf)
             (error "No HTTP response from dsh server"))
-          (unwind-protect
-              (with-current-buffer buf
-                (when-let* ((status (bound-and-true-p url-http-response-status))
-                            ((>= status 400)))
-                  (signal 'error (list 'http status)))
-                (goto-char (point-min))
-                (re-search-forward "^$")
-                (delete-region (point) (point-min))
-                (dsh-protocol-rpc-result--from-alist
-                 (dsh-emacs--decode-response-body)))
-            (kill-buffer buf)))
+          (let ((result
+                 (unwind-protect
+                     (with-current-buffer buf
+                       (unless (dsh-emacs--server-current-p (car owner) base)
+                         (error "dsh request cancelled while awaiting response"))
+                       (when-let* ((status (bound-and-true-p url-http-response-status))
+                                   ((>= status 400)))
+                         (signal 'error (list 'http status)))
+                       (goto-char (point-min))
+                       (re-search-forward "^$")
+                       (delete-region (point) (point-min))
+                       (dsh-protocol-rpc-result--from-alist
+                        (dsh-emacs--decode-response-body)))
+                   (kill-buffer buf))))
+            (unless (dsh-emacs--server-current-p (car owner) base)
+              (error "dsh request cancelled while processing response"))
+            result))
       (error
        ;; A 401 while we sent a cookie means the cached cookie is stale (an
        ;; out-of-band server restarted and minted a new token): drop it so the
        ;; next call re-mints / re-prompts instead of 401-looping until restart.
-       (when (dsh-emacs--server-auth-http-401-p err)
-         (dsh-emacs--server-auth-maybe-expire))
+       (when (and (dsh-emacs--server-current-p (car owner) base)
+                  (dsh-emacs--server-auth-http-401-p err))
+         (dsh-emacs--server-auth-maybe-expire base cookie))
        (message "RPC error: %s%s" (error-message-string err)
                 (dsh-emacs--http-error-hint err))
        (cons nil nil)))))
@@ -770,79 +984,91 @@ authentication that was not satisfied."
             (format " (HTTP %S)" code))))
     ""))
 
-(defun dsh-emacs--http-post (url content-type body callback)
-  "POST BODY to URL as CONTENT-TYPE; CALLBACK receives the decoded JSON.
-BODY is the exact bytes to send (a unibyte string already encoded by
-the caller) and CALLBACK is called as (funcall CALLBACK VALUE) in the
-buffer that made the request.  VALUE is the decoded JSON body, or nil
-when the request failed: a transport/HTTP-status failure, a body that
-does not parse, or an empty body.  Every failure is reported here (a
-message plus the stale-cookie 401 drop), so a caller only has to decide
-what its own body means.
+(defvar dsh-emacs--server-callback-active nil
+  "Non-nil while a business HTTP callback is running.")
 
-Both the RPC envelope calls and the raw file-upload route post through
-here; `url-request-data' carries BODY verbatim (no coding conversion),
-which is what makes the octet-stream upload byte-exact."
-  (let ((url-request-noninteractive t)
-        (url-request-method "POST")
-        (url-request-extra-headers
-         (append (list (cons "Content-Type" content-type))
-                 (dsh-emacs--server-auth-header)))
-        (url-request-data body)
-        (callback-buffer (current-buffer)))
+(defun dsh-emacs--http-post (url content-type body callback)
+  "POST BODY to URL as CONTENT-TYPE and decode JSON for CALLBACK.
+Complete in the live origin with a value or nil on failure.  Explicit
+connection cleanup cancels read requests and resets their owning state;
+pending writes block disconnect.  Stop alone still settles expired responses."
+  (let* ((owner (dsh-emacs--server-capture-owner))
+         (base (cdr owner))
+         (url-request-noninteractive t)
+         (url-request-method "POST")
+         (url-request-extra-headers
+          (append (list (cons "Content-Type" content-type))
+                  (dsh-emacs--server-auth-header)))
+         (url-request-data body)
+         (origin (current-buffer))
+         (cookie (cdr (assoc "Cookie" url-request-extra-headers)))
+         (method (and (string-prefix-p (concat base "/api/") url)
+                      (substring url (+ (length base) 5))))
+         (record (list :origin origin :owner owner
+                       :write (not (member method
+                                           '("session/list" "session/page" "session/attachment"
+                                             "session/projections" "session/modelCatalog"
+                                             "commands/list" "skills/list" "job/list"
+                                             "agentPresets/list" "fileReferences/list"
+                                             "sessionReferenceResolver/candidates"
+                                             "permissionPresets/catalog"
+                                             "llm/listConfigurableProviders"
+                                             "credentials/describe" "settings/describe")))))
+         response done)
+    (unless (dsh-emacs--server-current-p (car owner) base)
+      (user-error "dsh request cancelled during authentication"))
     (cl-labels
-        ((dispatch (value)
-           (when (buffer-live-p callback-buffer)
-             (with-current-buffer callback-buffer
-               ;; Callback that interacts inside the filter
-               ;; (completing-read etc.) and hits C-g: swallow the
-               ;; quit instead of a process-filter error.
-               (condition-case nil
-                   (funcall callback value)
-                 (quit nil))))))
-      ;; Keep progress messages out of the minibuffer.  In particular,
-      ;; `Contacting host...' otherwise remains visible when a successful
-      ;; callback does not emit a follow-up message.
-      (url-retrieve
-       url
-       (lambda (status)
-         ;; JSON decode of big history windows allocates heavily;
-         ;; Profiler-measured on the default window (~30k raw events):
-         ;; Automatic GC took ~46% of the whole open.  Enlarge the GC
-         ;; threshold dynamically to defer the GC storm into one collection
-         ;; after parsing — parsing and the callback run in the same dynamic
-         ;; scope.
-         (let ((gc-cons-threshold (* 64 1024 1024))
-               (gc-cons-percentage 0.6))
-           (if (plist-get status :error)
-               (let ((err (plist-get status :error)))
-                 (kill-buffer)
-                 ;; A 401 while we sent a cookie means the cached cookie is
-                 ;; stale (an out-of-band server restarted and minted a new
-                 ;; per-process token): drop it so the next call re-mints /
-                 ;; re-prompts instead of 401-looping until Emacs restarts.
-                 (when (dsh-emacs--server-auth-http-401-p err)
-                   (dsh-emacs--server-auth-maybe-expire))
-                 (message "HTTP POST error: %S%s" status
-                          (dsh-emacs--http-error-hint err))
-                 (dispatch nil))
-             (goto-char (point-min))
-             (re-search-forward "^$")
-             (delete-region (point) (point-min))
-             (let ((value (condition-case err
-                              (dsh-emacs--decode-response-body)
-                            (error
-                             ;; Body cannot be parsed (non-JSON, cut stream,
-                             ;; ...): print the reason but still dispatch the
-                             ;; callback (nil), so callers always reach their
-                             ;; failure branch instead of being silently
-                             ;; dropped.
-                             (message "HTTP POST response error: %s"
-                                      (error-message-string err))
-                             nil))))
-               (kill-buffer)
-               (dispatch value)))))
-       nil t t))))
+        ((release ()
+           (setq done t)
+           (when (buffer-live-p response)
+             (when-let* ((process (get-buffer-process response)))
+               (delete-process process))
+             (unless (kill-buffer response)
+               (error "HTTP response buffer refused cleanup")))
+           (setq dsh-emacs--server-requests
+                 (delq record dsh-emacs--server-requests)))
+         (received (status)
+           (if done
+               (kill-buffer (current-buffer))
+             (setq response (current-buffer))
+             (unwind-protect
+                 (let ((gc-cons-threshold (* 64 1024 1024))
+                       (gc-cons-percentage 0.6)
+                       (err (plist-get status :error)) value)
+                   (cond
+                    ((not (dsh-emacs--server-current-p (car owner) base))
+                     (message "dsh request cancelled while awaiting response"))
+                    (err
+                     (when (dsh-emacs--server-auth-http-401-p err)
+                       (dsh-emacs--server-auth-maybe-expire base cookie))
+                     (message "HTTP POST error: %S%s" status
+                              (dsh-emacs--http-error-hint err)))
+                    (t
+                     (condition-case problem
+                         (progn
+                           (goto-char (point-min))
+                           (re-search-forward "^$")
+                           (delete-region (point) (point-min))
+                           (setq value (dsh-emacs--decode-response-body)))
+                       (error (message "HTTP POST response error: %s"
+                                       (error-message-string problem))))))
+                   ;; Buffer cleanup may itself yield through user hooks.
+                   (kill-buffer response)
+                   (when (and (not done) (buffer-live-p origin))
+                     (with-current-buffer origin
+                       (let ((dsh-emacs--server-work-owner owner)
+                             (dsh-emacs--server-callback-active t))
+                         (condition-case nil
+                             (funcall callback
+                                      (and (dsh-emacs--server-current-p
+                                            (car owner) base) value))
+                           (quit nil))))))
+               (release)))))
+      (setf (plist-get record :cancel) #'release)
+      (push record dsh-emacs--server-requests)
+      (condition-case err
+          (setq response (url-retrieve url #'received nil t t))
+        ((error quit) (release) (signal (car err) (cdr err)))))))
 
 (defun dsh-emacs--rpc-async (method params callback)
   "Asynchronous RPC request; CALLBACK receives (ok-p value-or-error).
@@ -907,42 +1133,52 @@ Interruptible by C-g (`sleep-for' polling)."
 
 (defun dsh-emacs--server-launch (bin host port)
   "Spawn the managed dsh server process: BIN web --host HOST --port PORT.
-Returns the process (killing any previous managed one).  The server's
-output goes to `*dsh-server*', kept for diagnosis; a non-query process so
-Emacs exit never prompts about it."
-  (with-current-buffer (get-buffer-create "*dsh-server*")
-    (erase-buffer))
-  (when (process-live-p dsh-emacs--server-process)
-    (delete-process dsh-emacs--server-process))
-  (setq dsh-emacs--server-process
-        (make-process
-         :name "dsh-server"
-         :buffer (get-buffer-create "*dsh-server*")
-         :noquery t
-         :command (list bin "web" "--host" host
-                        "--port" (number-to-string port)
-                        "--no-open")
-         :sentinel (lambda (proc _event)
-                     (when (memq (process-status proc) '(exit signal))
-                       (when (eq proc dsh-emacs--server-process)
-                         (setq dsh-emacs--server-process nil))))))
-  (set-process-query-on-exit-flag dsh-emacs--server-process nil)
-  ;; A fresh server process carries a fresh launch token; invalidate the
-  ;; captured token and any cookie minted from a previous process.
-  (setq dsh-emacs--server-auth-captured-token nil)
-  (dsh-emacs--server-auth-reset)
-  (dsh-emacs--server-invalidate-alive)
-  dsh-emacs--server-process)
+Returns the process; refuse while any managed process is still alive.
+Output goes to `*dsh-server*', kept for diagnosis; a non-query process
+so Emacs exit never prompts about it."
+  (let ((base (dsh-emacs--server-base-url)))
+    (when (process-live-p dsh-emacs--server-process)
+      (user-error "A managed dsh server is still running; stop it explicitly first"))
+    (with-current-buffer (get-buffer-create "*dsh-server*")
+      (erase-buffer))
+    (setq dsh-emacs--server-process
+          (make-process
+           :name "dsh-server"
+           :buffer (get-buffer-create "*dsh-server*")
+           :noquery t
+           :command (list bin "web" "--host" host
+                          "--port" (number-to-string port)
+                          "--no-open")
+           :sentinel (lambda (proc _event)
+                       (when (memq (process-status proc) '(exit signal))
+                         (when (eq proc dsh-emacs--server-process)
+                           (setq dsh-emacs--server-process nil))))))
+    (process-put dsh-emacs--server-process 'dsh-server-base
+                 base)
+    (set-process-query-on-exit-flag dsh-emacs--server-process nil)
+    ;; A fresh server process carries a fresh launch token; invalidate the
+    ;; captured token and any cookie minted from a previous process.
+    (setq dsh-emacs--server-auth-captured-token nil)
+    (dsh-emacs--server-auth-reset)
+    (dsh-emacs--server-invalidate-alive)
+    dsh-emacs--server-process))
 
 (defun dsh-emacs--server-wait-ready ()
   "Wait up to `dsh-emacs-server-wait-seconds' for the server to answer.
 Reports progress every second.  Returns t when a probe succeeds; fails
 fast when the spawned process already exited; otherwise signals
 `user-error' after the timeout, pointing at `*dsh-server*'."
-  (let ((start (float-time))
+  (when (and dsh-emacs--server-process
+             (process-live-p dsh-emacs--server-process)
+             (not (dsh-emacs--server-managed-p)))
+    (user-error "The managed dsh server belongs to another endpoint"))
+  (let ((generation dsh-emacs--server-generation)
+        (base (dsh-emacs--server-base-url))
+        (start (float-time))
         (deadline (+ (float-time) dsh-emacs-server-wait-seconds))
         (last-report -1))
-    (while (and (not (dsh-emacs--server-alive-p))
+    (while (and (dsh-emacs--server-startup-current-p generation base)
+                (not (dsh-emacs--server-alive-p))
                 (or (null dsh-emacs--server-process)
                     (process-live-p dsh-emacs--server-process))
                 (< (float-time) deadline))
@@ -953,6 +1189,8 @@ fast when the spawned process already exited; otherwise signals
                    last-report dsh-emacs-server-wait-seconds)))
       (sleep-for 0.1))
     (cond
+     ((not (dsh-emacs--server-startup-current-p generation base))
+      (user-error "Server startup cancelled or endpoint changed"))
      ((dsh-emacs--server-alive-p)
       (message "dsh server ready at %s" (dsh-emacs--server-base-url))
       ;; Best-effort exchange of the launch token for the browser-session
@@ -960,7 +1198,8 @@ fast when the spawned process already exited; otherwise signals
       ;; race against the captured token.  If the URL line has not reached
       ;; `*dsh-server*' yet (older dsh prints none), or the token is stale, the
       ;; cookie stays unset and the RPC/WS layers re-attempt lazily on demand.
-      (dsh-emacs--server-auth-ensure)
+      (when (dsh-emacs--server-current-p generation base)
+        (dsh-emacs--server-auth-ensure))
       t)
      ((and dsh-emacs--server-process
            (not (process-live-p dsh-emacs--server-process)))
@@ -981,46 +1220,84 @@ When WAIT is non-nil (or called from Lisp), block until the server
 answers; interactively launch and return immediately so the UI stays
 responsive."
   (interactive (list nil))
-  (cond
-   ((dsh-emacs--server-alive-p)
-    (message "dsh server already running at %s" (dsh-emacs--server-base-url))
-    ;; External server needing the browser-session cookie: prompt for the
-    ;; token so the caller's first RPC is authenticated instead of popping
-    ;; `url''s Basic username/password box (see
-    ;; `dsh-emacs--server-auth-ensure-interactive').
-    (dsh-emacs--server-auth-ensure-interactive)
-    t)
-   ((and dsh-emacs--server-process
-         (process-live-p dsh-emacs--server-process))
-    (if wait
-        (dsh-emacs--server-wait-ready)
-      (message "dsh server already starting at %s" (dsh-emacs--server-base-url))
-      nil))
-   (t
-    (let* ((bin (or (dsh-emacs--server-bin)
-                    (dsh-emacs--server-ensure-installed)))
-           (host-port (dsh-emacs--server-host-port)))
-      (dsh-emacs--server-launch bin (car host-port) (cdr host-port))
+  (when (or dsh-emacs--connection-cleanup-needed
+            (eq dsh-emacs--connection-status 'disconnecting))
+    (user-error "Finish connection cleanup before starting a server"))
+  (if (memq dsh-emacs--connection-status '(disconnected failed))
+      (progn
+        ;; A fresh explicit process command must not revive an expired callback.
+        (when (or dsh-emacs--server-work-owner dsh-emacs--server-buffer-owner)
+          (dsh-emacs--server-capture-owner))
+        (cl-incf dsh-emacs--server-generation)
+        (dsh-emacs--server-invalidate-alive))
+    (dsh-emacs--server-capture-owner))
+  (let ((generation dsh-emacs--server-generation)
+        (base (dsh-emacs--server-base-url)))
+    (cond
+     ((dsh-emacs--server-alive-p)
+      (message "dsh server already running at %s" (dsh-emacs--server-base-url))
+      ;; External server needing the browser-session cookie: prompt for the
+      ;; token so the caller's first RPC is authenticated instead of popping
+      ;; `url''s Basic username/password box (see
+      ;; `dsh-emacs--server-auth-ensure-interactive').
+      (when (dsh-emacs--server-current-p generation base)
+        (dsh-emacs--server-auth-ensure-interactive))
+      t)
+     ((dsh-emacs--server-managed-p)
       (if wait
-          (progn
-            (message "Starting dsh server: %s web --host %s --port %d --no-open"
-                     bin (car host-port) (cdr host-port))
-            (dsh-emacs--server-wait-ready))
-        (message "Starting dsh server in background: %s web --host %s --port %d --no-open"
-                 bin (car host-port) (cdr host-port))
-        nil)))))
+          (dsh-emacs--server-wait-ready)
+        (message "dsh server already starting at %s" (dsh-emacs--server-base-url))
+        nil))
+     ((process-live-p dsh-emacs--server-process)
+      (user-error "A managed dsh server belongs to another endpoint; stop it explicitly first"))
+     (t
+      (let* ((bin (or (dsh-emacs--server-bin)
+                      (dsh-emacs--server-ensure-installed)))
+             (host-port (dsh-emacs--server-host-port)))
+        (unless (dsh-emacs--server-startup-current-p generation base)
+          (user-error "Server startup cancelled or endpoint changed during installation"))
+        (dsh-emacs--server-launch bin (car host-port) (cdr host-port))
+        (if wait
+            (progn
+              (message "Starting dsh server: %s web --host %s --port %d --no-open"
+                       bin (car host-port) (cdr host-port))
+              (dsh-emacs--server-wait-ready))
+          (message "Starting dsh server in background: %s web --host %s --port %d --no-open"
+                   bin (car host-port) (cdr host-port))
+          nil))))))
 
 (defun dsh-emacs-server-stop ()
   "Stop the dsh server process this package started (if any).
 Servers started outside dsh-emacs (e.g. `dsh web' in a terminal) are not
-touched."
+touched.  Cancel pending startup work even if no process has launched yet;
+HTTP responses and delayed catalog prefetch from that attempt also expire.
+A later explicit start or command can begin fresh work.  This does not
+disconnect the client or stop an external server."
   (interactive)
-  (when (process-live-p dsh-emacs--server-process)
-    (delete-process dsh-emacs--server-process)
-    (setq dsh-emacs--server-process nil)
-    (dsh-emacs--server-invalidate-alive)
-    (message "dsh server stopped")
-    t))
+  (let ((previous dsh-emacs--server-generation))
+    (cl-incf dsh-emacs--server-generation)
+    ;; Stop cancels in-flight work but does not retire the client's views.
+    ;; Copy identities: mutating a captured cons would revive old callbacks.
+    (dolist (buffer (buffer-list))
+      (with-current-buffer buffer
+        (when (and dsh-emacs--server-buffer-owner
+                   (= (car dsh-emacs--server-buffer-owner) previous))
+          (setq dsh-emacs--server-buffer-owner
+                (cons dsh-emacs--server-generation (cdr dsh-emacs--server-buffer-owner))))))
+    (dolist (process (process-list))
+      (when-let* ((owner (process-get process 'dsh-server-owner))
+                  ((= (car owner) previous)))
+        (process-put process 'dsh-server-owner
+                     (cons dsh-emacs--server-generation (cdr owner))))))
+  (dsh-emacs--server-invalidate-alive)
+  (prog1
+      (when (process-live-p dsh-emacs--server-process)
+        (delete-process dsh-emacs--server-process)
+        (setq dsh-emacs--server-process nil)
+        (message "dsh server stopped")
+        t)
+    (when dsh-emacs--connection-attempt
+      (dsh-emacs--connection-finish dsh-emacs--connection-attempt 'cancelled))))
 
 (defun dsh-emacs-server-restart ()
   "Restart the managed dsh server process."
@@ -1121,6 +1398,8 @@ before the caller fires its first RPC: an external server that requires the
 browser-session cookie gets a token prompt here rather than letting
 the unauthenticated request pop `url''s Basic username/password box."
   (interactive)
+  ;; Ownership is enforced in batch too; only automatic network work is skipped.
+  (dsh-emacs--server-capture-owner)
   (when (not noninteractive)
     (if (dsh-emacs--server-alive-p)
         (dsh-emacs--server-auth-ensure-interactive)
@@ -1138,9 +1417,11 @@ the unauthenticated request pop `url''s Basic username/password box."
 Run CALLBACK in the calling buffer, if it still exists.  Probe, launch-token
 exchange and startup polling are asynchronous.  Initial CLI installation and
 an unknown authentication token still require the usual user interaction."
+  (dsh-emacs--server-capture-owner)
   (if noninteractive
       (funcall callback nil)
-    (let ((origin (current-buffer))
+    (let ((generation dsh-emacs--server-generation)
+          (origin (current-buffer))
           (base (dsh-emacs--server-base-url))
           (deadline (+ (float-time) dsh-emacs-server-wait-seconds))
           (token nil)
@@ -1148,19 +1429,28 @@ an unknown authentication token still require the usual user interaction."
           (prompted nil)
           (launched nil)
           (done nil)
+          (notified nil)
           (response nil)
           (timer nil)
-          (retry nil))
+          (retry nil)
+          (record (list :origin (current-buffer) :write nil)))
       (cl-labels
           ((finish (reason)
-             (unless done
-               (setq done t)
-               (when timer (cancel-timer timer))
-               (when retry (cancel-timer retry))
-               (when (buffer-live-p response) (kill-buffer response))
-               (when (buffer-live-p origin)
-                 (with-current-buffer origin
-                   (remove-hook 'kill-buffer-hook #'cancel t)
+             (setq done t)
+             (when timer (cancel-timer timer))
+             (when retry (cancel-timer retry))
+             (when (buffer-live-p response)
+               (when-let* ((process (get-buffer-process response))) (delete-process process))
+               (unless (kill-buffer response)
+                 (error "Readiness response buffer refused cleanup")))
+             (setq dsh-emacs--server-requests
+                   (delq record dsh-emacs--server-requests))
+             (when (and (not notified) (buffer-live-p origin))
+               (setq notified t)
+               (with-current-buffer origin
+                 (remove-hook 'kill-buffer-hook #'cancel t)
+                 (let ((dsh-emacs--server-work-owner (cons generation base))
+                       (dsh-emacs--server-callback-active t))
                    (funcall callback reason)))))
            (cancel ()
              (setq origin nil)
@@ -1169,8 +1459,8 @@ an unknown authentication token still require the usual user interaction."
              (cond
               (done nil)
               ((not (buffer-live-p origin)) (finish "Session draft closed"))
-              ((not (equal base (dsh-emacs--server-base-url)))
-               (finish "Server changed during startup"))
+              ((not (dsh-emacs--server-current-p generation base))
+               (finish "Server startup cancelled or endpoint changed"))
               (t
                (condition-case err
                    (let* ((url-request-method "GET")
@@ -1212,14 +1502,15 @@ an unknown authentication token still require the usual user interaction."
                  (condition-case err
                      (cond
                       ((not (buffer-live-p origin)) (finish "Session draft closed"))
-                      ((not (equal base (dsh-emacs--server-base-url)))
-                       (finish "Server changed during startup"))
+                      ((not (dsh-emacs--server-current-p generation base))
+                       (finish "Server startup cancelled or endpoint changed"))
                       ((or (= (or code 0) 200) (and cookie (eq code 303)))
                        (when cookie
                          (setq dsh-emacs--server-auth-cookie cookie)
                          (when prompted
                            (dsh-emacs--server-auth-remember-token token)))
-                       (setq dsh-emacs--server-alive-check (cons t (float-time)))
+                       (setq dsh-emacs--server-alive-check
+                             (list base t (float-time)))
                        (finish nil))
                       ((eq code 401)
                        (setq dsh-emacs--server-auth-cookie nil)
@@ -1241,6 +1532,9 @@ an unknown authentication token still require the usual user interaction."
                             (not (and dsh-emacs--server-process
                                       (process-live-p dsh-emacs--server-process))))
                        (finish "dsh server exited during startup; see *dsh-server*"))
+                      ((and (process-live-p dsh-emacs--server-process)
+                            (not (dsh-emacs--server-managed-p)))
+                       (finish "A managed dsh server belongs to another endpoint; stop it explicitly first"))
                       ((>= (float-time) deadline)
                        (finish "dsh server did not become ready before timeout"))
                       (t
@@ -1254,8 +1548,11 @@ an unknown authentication token still require the usual user interaction."
                           (done nil)
                           ((not (buffer-live-p origin))
                            (finish "Session draft closed"))
-                          ((not (equal base (dsh-emacs--server-base-url)))
-                           (finish "Server changed during startup"))
+                          ((not (dsh-emacs--server-current-p generation base))
+                           (finish "Server startup cancelled or endpoint changed"))
+                          ((and (process-live-p dsh-emacs--server-process)
+                                (not (dsh-emacs--server-managed-p)))
+                           (finish "A managed dsh server belongs to another endpoint; stop it explicitly first"))
                           ((>= (float-time) deadline)
                            (finish "dsh server did not become ready before timeout"))
                           (t
@@ -1267,13 +1564,17 @@ an unknown authentication token still require the usual user interaction."
                              (setq launched t))
                            (setq retry (run-at-time 0.1 nil #'request)))))))
                    ((error quit) (finish (error-message-string err))))))))
+        (setf (plist-get record :cancel)
+              (lambda () (finish "Connection disconnected")))
+        (push record dsh-emacs--server-requests)
         (add-hook 'kill-buffer-hook #'cancel nil t)
         (setq timer (run-at-time
                      dsh-emacs-server-wait-seconds nil
                      (lambda () (finish "dsh server readiness timed out"))))
         (if (and dsh-emacs--server-auth-cookie
-                 (car dsh-emacs--server-alive-check)
-                 (<= (- (float-time) (cdr dsh-emacs--server-alive-check))
+                 (equal base (car dsh-emacs--server-alive-check))
+                 (cadr dsh-emacs--server-alive-check)
+                 (<= (- (float-time) (nth 2 dsh-emacs--server-alive-check))
                      dsh-emacs--server-alive-ttl))
             (finish nil)
           (request))))))
@@ -1297,23 +1598,277 @@ from here (the CLI would start a local server; the remote one is managed
 where it runs).  The server process is spawned without waiting — the
 first `dsh-emacs-server-ensure' call will block until it is ready, so the
 user never sees a freeze at startup."
-  (when (and dsh-emacs-server-start-on-init
-             (not noninteractive)
-             (dsh-emacs--server-local-host-p)
-             (not (dsh-emacs--server-alive-p))
-             (not dsh-emacs--server-process))
-    (run-at-time 1 nil
-      (lambda ()
-        (condition-case nil
-            (when (and (not (dsh-emacs--server-alive-p))
-                       (not dsh-emacs--server-process))
-              (when-let* ((bin (or (dsh-emacs--server-bin)
-                                   (dsh-emacs--server-ensure-installed)))
-                          (host-port (dsh-emacs--server-host-port)))
-                (dsh-emacs--server-launch bin (car host-port) (cdr host-port))))
-          (error nil))))))
+  (let ((generation dsh-emacs--server-generation)
+        (base (dsh-emacs--server-base-url)))
+    (when (and (dsh-emacs--server-current-p generation base)
+               dsh-emacs-server-start-on-init
+               (not noninteractive)
+               (dsh-emacs--server-local-host-p)
+               (not (dsh-emacs--server-alive-p))
+               (not dsh-emacs--server-process))
+      (dsh-emacs--server-run-later 1 nil
+                                   (lambda ()
+                                     (condition-case err
+                                         (when (and (dsh-emacs--server-current-p generation base)
+                                                    (not (dsh-emacs--server-alive-p))
+                                                    (not dsh-emacs--server-process))
+                                           (when-let* ((bin (or (dsh-emacs--server-bin)
+                                                                (dsh-emacs--server-ensure-installed)))
+                                                       ((dsh-emacs--server-current-p generation base))
+                                                       (host-port (dsh-emacs--server-host-port)))
+                                             (dsh-emacs--server-launch bin (car host-port) (cdr host-port))))
+                                       (error (message "dsh startup failed: %s"
+                                                       (error-message-string err)))))))))
 
 (add-hook 'after-init-hook #'dsh-emacs-server--maybe-start-on-init)
+
+(defun dsh-emacs--connection-clean ()
+  "Finish local cleanup, retaining failed work for a subsequent retry."
+  (setq dsh-emacs--connection-status 'disconnecting)
+  (unless dsh-emacs--connection-cleanup-needed
+    (cl-incf dsh-emacs--server-generation))
+  (setq dsh-emacs--connection-cleanup-needed t
+        dsh-emacs--connection-session-status 'unknown)
+  (condition-case err
+      (progn
+        (when dsh-emacs--connection-attempt
+          (dsh-emacs--connection-release-attempt dsh-emacs--connection-attempt))
+        (while dsh-emacs--server-requests
+          (let ((record (car dsh-emacs--server-requests)))
+            (funcall (plist-get record :cancel))
+            (setq dsh-emacs--server-requests
+                  (delq record dsh-emacs--server-requests))))
+        (dsh-emacs--connection-cleanup)
+        (dsh-emacs--server-auth-reset)
+        (dsh-emacs--server-invalidate-alive)
+        (setq dsh-emacs--connection-status 'disconnected
+              dsh-emacs--connection-endpoint nil
+              dsh-emacs--connection-base nil
+              dsh-emacs--connection-error nil
+              dsh-emacs--connection-cleanup-needed nil))
+    ((error quit)
+     (setq dsh-emacs--connection-status 'failed
+           dsh-emacs--connection-error
+           '(:code cleanup-failed :message "Local connection cleanup failed; retry disconnect"))
+     (signal (car err) (cdr err)))))
+
+(defun dsh-emacs--connection-release-attempt (attempt)
+  "Release ATTEMPT's timers, authentication request and origin hook."
+  (setf (plist-get attempt :done) t)
+  (when-let* ((timer (plist-get attempt :timer))) (cancel-timer timer))
+  (when-let* ((response (plist-get attempt :response))
+              ((buffer-live-p response)))
+    (when-let* ((process (get-buffer-process response))) (delete-process process))
+    (unless (kill-buffer response)
+      (error "Authentication response buffer refused cleanup")))
+  (when-let* ((origin (plist-get attempt :origin)) ((buffer-live-p origin)))
+    (with-current-buffer origin
+      (remove-hook 'kill-buffer-hook #'dsh-emacs--connection-origin-closed t)))
+  (when (eq attempt dsh-emacs--connection-attempt)
+    (setq dsh-emacs--connection-attempt nil)))
+
+(defun dsh-emacs--connection-notify (attempt ok result)
+  "Deliver ATTEMPT's already determined OK and RESULT once in its live origin."
+  (when-let* ((origin (plist-get attempt :origin))
+              ((buffer-live-p origin))
+              (callback (plist-get attempt :callback))
+              ((not (plist-get attempt :notified))))
+    (setf (plist-get attempt :notified) t)
+    (with-current-buffer origin
+      (let ((dsh-emacs--server-callback-active t)
+            (dsh-emacs--server-work-owner (plist-get attempt :owner)))
+        (funcall callback ok result)))))
+
+;;;###autoload
+(defun dsh-emacs-disconnect ()
+  "Disconnect locally, preserving servers and refusing to discard user input.
+Return nil after complete cleanup.  Preflight errors change nothing.  Cleanup
+errors leave a failed state requiring another disconnect before connecting."
+  (interactive)
+  (when (eq dsh-emacs--connection-status 'disconnecting)
+    (user-error "Connection cleanup is already in progress"))
+  (unless dsh-emacs--connection-cleanup-needed
+    (let ((buffers (dsh-emacs--connection-buffers)))
+      (dsh-emacs--connection-preflight buffers)
+      (setq dsh-emacs--connection-retiring buffers)))
+  (let ((attempt dsh-emacs--connection-attempt))
+    (unwind-protect
+        (dsh-emacs--connection-clean)
+      ;; Cancellation must never run user code inside synchronous cleanup.
+      (when attempt
+        (run-at-time 0 nil #'dsh-emacs--connection-notify attempt nil
+                     '(:code cancelled :message "Connection cancelled")))))
+  nil)
+
+(defun dsh-emacs--connection-finish (attempt &optional code)
+  "Finish the current ATTEMPT successfully, or fail with a safe error CODE."
+  (when (and (eq attempt dsh-emacs--connection-attempt)
+             (not (plist-get attempt :done)))
+    (setf (plist-get attempt :done) t)
+    (condition-case err
+        (if code
+            (progn
+              (setq dsh-emacs--connection-retiring (dsh-emacs--connection-buffers))
+              (dsh-emacs--connection-clean))
+          (dsh-emacs--connection-release-attempt attempt))
+      ((error quit)
+       (unless dsh-emacs--connection-cleanup-needed
+         (cl-incf dsh-emacs--server-generation)
+         (setq dsh-emacs--connection-retiring (dsh-emacs--connection-buffers)))
+       (setq code 'cleanup-failed
+             dsh-emacs--connection-cleanup-needed t)
+       (message "dsh connection cleanup failed: %s" (error-message-string err))))
+    (setq dsh-emacs--connection-status (if code 'failed 'connected)
+          dsh-emacs--connection-session-status (if code 'unknown 'ready)
+          dsh-emacs--connection-error
+          (when code
+            (list :code code :message
+                  (pcase code
+                    ('cleanup-failed "Local connection cleanup failed; retry disconnect")
+                    ('authentication "Connection authentication failed")
+                    ('origin-closed "Connection origin closed")
+                    ('timeout "Connection initialization timed out")
+                    ('cancelled "Connection cancelled")
+                    (_ "Connection initialization failed")))))
+    (dsh-emacs--connection-notify
+     attempt (null code) (if code
+                             (dsh-emacs--connection-copy dsh-emacs--connection-error)
+                           (dsh-emacs-connection-state)))))
+
+(defun dsh-emacs--connection-origin-closed ()
+  "Cancel an unfinished connection whose origin is being closed."
+  (when (and dsh-emacs--connection-attempt
+             (eq (current-buffer) (plist-get dsh-emacs--connection-attempt :origin)))
+    (let ((attempt dsh-emacs--connection-attempt))
+      (setf (plist-get attempt :origin) nil)
+      (dsh-emacs--connection-finish attempt 'origin-closed))))
+
+(defun dsh-emacs--connection-check (attempt deadline)
+  "Bound ATTEMPT by its origin lifetime, ownership and DEADLINE.
+The origin check also covers temporary buffers that inhibit kill hooks."
+  (when (eq attempt dsh-emacs--connection-attempt)
+    (let ((owner (plist-get attempt :owner)))
+      (cond
+       ((not (buffer-live-p (plist-get attempt :origin)))
+        (dsh-emacs--connection-finish attempt 'origin-closed))
+       ((not (dsh-emacs--server-current-p (car owner) (cdr owner)))
+        (dsh-emacs--connection-finish attempt 'cancelled))
+       ((>= (float-time) deadline)
+        (dsh-emacs--connection-finish attempt 'timeout))))))
+
+;;;###autoload
+(cl-defun dsh-emacs-connect (url &key (token nil supplied-p) callback)
+  "Connect asynchronously to URL using only this attempt's TOKEN.
+CALLBACK receives (OK RESULT) in the live calling buffer.  Success requires
+authentication, core baselines and a ready session snapshot.  Explicit nil
+TOKEN never falls back to saved or managed-server credentials."
+  (unless (and (stringp url) (or (null callback) (functionp callback)))
+    (user-error "A server URL and optional callback function are required"))
+  (let* ((parsed (url-generic-parse-url url))
+         (url-token (dsh-emacs--server-auth-token-from-url url))
+         (auth-token (if supplied-p token url-token))
+         (base (let ((dsh-emacs-base-url url)) (dsh-emacs--server-base-url))))
+    (unless (and (member (url-type parsed) '("http" "https"))
+                 (url-host parsed) (not (string-empty-p (url-host parsed))))
+      (user-error "Use an http or https server URL"))
+    (when (and supplied-p url-token (not (equal token url-token)))
+      (user-error "URL token conflicts with the explicit token"))
+    (unless (or (null auth-token)
+                (and (stringp auth-token) (not (string-empty-p auth-token))))
+      (user-error "Token must be a nonempty string or nil"))
+    (when (or dsh-emacs--connection-cleanup-needed
+              (memq dsh-emacs--connection-status '(connecting connected disconnecting))
+              (and (eq dsh-emacs--connection-status 'initial)
+                   (or (dsh-emacs--connection-buffers) dsh-emacs--server-requests
+                       (bound-and-true-p dsh-emacs-events--host-ready))))
+      (user-error "Disconnect the current connection before connecting"))
+    ;; Validate everything above before changing configuration or state.
+    (setq dsh-emacs-base-url base)
+    (setq dsh-emacs--connection-base base)
+    (cl-incf dsh-emacs--server-generation)
+    (dsh-emacs--server-auth-reset)
+    (dsh-emacs--server-invalidate-alive)
+    (setf (url-user parsed) nil (url-password parsed) nil (url-target parsed) nil
+          (url-filename parsed) (car (split-string (or (url-filename parsed) "") "[?#]")))
+    (setq dsh-emacs--connection-endpoint (url-recreate-url parsed)
+          dsh-emacs--connection-status 'connecting
+          dsh-emacs--connection-session-status 'loading
+          dsh-emacs--connection-error nil)
+    (let* ((origin (current-buffer))
+           (owner (cons dsh-emacs--server-generation base))
+           (attempt (list :origin origin :callback callback :done nil :notified nil
+                          :owner owner :timer nil :response nil))
+           (prompted nil))
+      (setq dsh-emacs--connection-attempt attempt)
+      (add-hook 'kill-buffer-hook #'dsh-emacs--connection-origin-closed nil t)
+      (cl-labels
+          ((current-p ()
+             (when (and (eq attempt dsh-emacs--connection-attempt)
+                        (not (buffer-live-p origin)))
+               (dsh-emacs--connection-finish attempt 'origin-closed))
+             (and (eq attempt dsh-emacs--connection-attempt)
+                  (not (plist-get attempt :done))
+                  (dsh-emacs--server-current-p (car owner) base)))
+           (request ()
+             (when (current-p)
+               (let ((url-request-method "GET") (url-request-data nil)
+                     (url-request-extra-headers nil)
+                     (url-request-noninteractive t) (url-max-redirections 0))
+                 (condition-case err
+                     (setf (plist-get attempt :response)
+                           (url-retrieve
+                            (concat base "/" (when auth-token
+                                               (concat "?token=" (url-hexify-string auth-token))))
+                            #'received nil t t))
+                   ((error quit)
+                    (if (plist-get attempt :done) (signal (car err) (cdr err))
+                      (dsh-emacs--connection-finish attempt 'transport)))))))
+           (received (_status)
+             (let ((code (bound-and-true-p url-http-response-status))
+                   (cookie (progn
+                             (goto-char (point-min))
+                             (when (re-search-forward
+                                    "^Set-Cookie: \\(dsh-auth-[_A-Za-z0-9-]+=[^;\r\n]+\\)" nil t)
+                               (match-string-no-properties 1)))))
+               ;; Keep ownership until cleanup succeeds, including when a
+               ;; buffer query refuses or a cleanup hook signals an error.
+               (setf (plist-get attempt :response) (current-buffer))
+               (if (not (condition-case nil
+                            (kill-buffer (current-buffer))
+                          ((error quit) nil)))
+                   (dsh-emacs--connection-finish attempt 'cleanup-failed)
+                 (setf (plist-get attempt :response) nil)
+                 (when (current-p)
+                   (cond
+                    ((or (eq code 200) (and (eq code 303) cookie))
+                     (setq dsh-emacs--server-auth-cookie cookie)
+                     (with-current-buffer origin
+                       (let ((dsh-emacs--server-work-owner owner))
+                         (condition-case err
+                             (dsh-emacs--connection-initialize
+                              (lambda (ok)
+                                (when (current-p)
+                                  (dsh-emacs--connection-finish attempt (unless ok 'initialization)))))
+                           ((error quit)
+                            (if (plist-get attempt :done) (signal (car err) (cdr err))
+                              (dsh-emacs--connection-finish attempt 'initialization)))))))
+                    ((and (eq code 401) (not auth-token) (not prompted) (not noninteractive))
+                     (setq prompted t)
+                     (condition-case _err
+                         (setq auth-token (with-current-buffer origin
+                                            (read-passwd "dsh launch token: ")))
+                       (quit (dsh-emacs--connection-finish attempt 'cancelled)))
+                     (when (current-p)
+                       (if (or (null auth-token) (string-empty-p auth-token))
+                           (dsh-emacs--connection-finish attempt 'authentication)
+                         (request))))
+                    (t (dsh-emacs--connection-finish
+                        attempt (if (eq code 401) 'authentication 'transport)))))))))
+        (setf (plist-get attempt :timer)
+              (run-at-time 0.1 0.1 #'dsh-emacs--connection-check attempt
+                           (+ (float-time) dsh-emacs-server-wait-seconds)))
+        (request)))
+    nil))
 
 (provide 'dsh-emacs-server)
 

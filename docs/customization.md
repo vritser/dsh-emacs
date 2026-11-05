@@ -88,11 +88,21 @@ keybinding and no server restart or prompt submission.
 
 An older running Emacs first needs `M-x load-file` on the checkout's
 [dsh-emacs-reload.el](../dsh-emacs-reload.el). Wait for active readers, session
-creation and history loading to finish before invoking the command. It does
+creation, history loading, uploads and prompt/command submission responses to
+finish before invoking the command. A submission is no longer pending after
+its response is handled; ordinary model streaming does not block reload. It does
 not recreate existing transcript text or in-flight lexical callbacks; removed
 definitions, changed struct layouts and changed major-mode initialization
 require a restart. See [Source reload](architecture.md#source-reload) for
 source-directory selection, preflight checks and partial-failure behavior.
+
+Live sockets opened by 0.8.0 have no captured endpoint ownership. Upgrading
+those sockets through reload requires an explicit reconnect: finish or save
+unsent work, then after loading the new sources run `dsh-emacs-disconnect`,
+reload again, and reconnect with `dsh-emacs-connect`.
+Reload reports this requirement instead of claiming the old connections were
+preserved. Restarting Emacs also avoids this migration step. Routine reloads
+of sockets created by 0.9.0 retain their recorded ownership.
 
 ## Common options
 
@@ -763,6 +773,37 @@ Remote deployments need nothing special: a non-loopback base URL is only probed
 for reachability — dsh-emacs never spawns or installs a local server for it.
 HTTPS base URLs (including `https://user:pass@host` Basic-Auth endpoints) are
 probed through TLS.
+
+The package owns at most one managed server process. Its launch token and
+startup wait apply only to the endpoint it was started for. A reachable
+external endpoint does not stop that process; `dsh-emacs-server-stop` still
+stops the registered managed process even if `dsh-emacs-base-url` has changed.
+If another endpoint needs a new managed process, stop the old one explicitly
+first. A refused start preserves its process and output buffer.
+
+`dsh-emacs-server-stop` also invalidates startup work already in progress,
+including an installation or token prompt and queued list/init polling, even
+if no managed process has launched yet. Returning from an old prompt does not
+resume that attempt. A later start or command can start a fresh attempt at the
+same address. Pending asynchronous readiness reports cancellation when its
+response or next poll arrives; its existing timeout still bounds cleanup if
+the service never replies. Stop does not terminate an external service.
+
+Pending RPC/upload responses from before stop are also treated as failures,
+even at the same address with the same cookie. Their callbacks still settle
+local state, but cannot start another request as part of the cancelled chain.
+This does not undo an operation the server has already accepted. Command/skill
+prefetch skips its queued fetch after stop, an endpoint change or closure of
+the originating buffer. Stop does not synchronously cancel all HTTP sockets;
+pending responses release their buffers when they arrive.
+
+For live service switching, use `dsh-emacs-disconnect` followed by the public
+`dsh-emacs-connect` API.
+Disconnect protects drafts and pending writes, closes service buffers and
+clears connection state; it leaves server processes running. See
+[Switching services](server-switching.md) for setup, callback semantics,
+read APIs and cleanup retries. Changing `dsh-emacs-base-url` alone does not
+retire old work and is not a supported switch.
 
 ### New session drafts
 

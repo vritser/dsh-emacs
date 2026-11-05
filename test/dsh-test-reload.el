@@ -186,5 +186,27 @@
       (when (timerp dsh-emacs-reload--finish-timer)
         (cancel-timer dsh-emacs-reload--finish-timer)))))
 
+(ert-deftest dsh-emacs-test-reload-legacy-sockets-require-explicit-reconnect ()
+  :tags '(dsh-unit)
+  (dolist (kind '(chat core))
+    (let ((process (make-pipe-process :name "pre-owner-socket" :noquery t))
+          (restored nil))
+      (unwind-protect
+          (cl-letf (((symbol-function 'dsh-emacs-events-host-restore)
+                     (lambda () (setq restored t)))
+                    ((symbol-function 'dsh-emacs-composer-refresh) #'ignore)
+                    ((symbol-function 'dsh-emacs-session--render) #'ignore)
+                    ((symbol-function 'dsh-emacs-modeline-refresh) #'ignore))
+            ;; This fixture intentionally has NO dsh-server-owner property.
+            (process-put process (if (eq kind 'chat) 'dsh-emacs-chat-buffer
+                                   'dsh-emacs-host-stream)
+                         (if (eq kind 'chat) (current-buffer) t))
+            (let ((err (should-error (dsh-emacs-reload--finish) :type 'user-error)))
+              (should (string-match-p "disconnect" (error-message-string err))))
+            (should-not restored)
+            (should-not (process-get process 'dsh-server-owner))
+            (should (process-live-p process)))
+        (delete-process process)))))
+
 (provide 'dsh-test-reload)
 ;;; dsh-test-reload.el ends here

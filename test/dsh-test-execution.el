@@ -235,7 +235,7 @@
                   (should (equal (buffer-string)
                                  "Compacting context (between turns)\n"))))))
           (with-current-buffer first
-            (let ((process (make-pipe-process :name "execution-lost" :noquery t)))
+            (let ((process (dsh-test--event-process :name "execution-lost" :noquery t)))
               (unwind-protect
                   (progn
                     (setq dsh-emacs--event-process process)

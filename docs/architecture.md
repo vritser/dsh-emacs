@@ -75,7 +75,8 @@ register optional icon integrations without retaining a new anonymous callback
 body on each source revision.
 
 Reload refuses during an active minibuffer, question or approval interaction,
-or while any chat/draft is creating a session or loading history. Ordinary
+or while any chat/draft is creating a session, loading history, uploading
+attachments or awaiting a prompt/command submission response. Ordinary
 streaming is not a blocker: existing callbacks continue against their retained
 state, and named function calls resolve the new definitions. The command has
 no default keybinding. In an already-running older Emacs, use `M-x load-file`
@@ -89,6 +90,18 @@ rewritten. Restart for full definition removal, changed struct layouts or
 changed major-mode initialization. These boundaries avoid destroying drafts
 and live streams for the sake of an apparent clean restart. See
 [decision record 115](../postmortem/115-source-hot-reload.md).
+
+The coordinator tracks pending submission steps in each originating buffer's
+`dsh-emacs--pending-submissions`. Registration precedes consuming the composer
+or staging; completion stays registered through rollback or a follow-up
+request. Upload, slash-command fallback and final prompt steps overlap during
+handoff, so the chain does not temporarily appear idle. Each completion removes
+only its own identity; a closed origin or duplicate completion cannot mutate
+another chat or retire a newer step. Startup/callback errors and quits release
+the corresponding step without swallowing errors. The list describes local
+submission work, not whether the server is running a turn, and does not yet
+cover all service mutations needed by connection teardown. See
+[decision record 184](../postmortem/184-pending-submissions.md).
 
 ## New session drafts (`dsh-emacs.el`)
 
@@ -1077,6 +1090,76 @@ at cyclic boundaries, not optional `fboundp` guards; external integrations
 and version/build capabilities still use guards. See
 [decision record 139](../postmortem/139-server-transport-ownership.md).
 
+Managed-process ownership is stored on the process as `dsh-server-base`,
+captured at launch. Token capture reads that process's output buffer only
+while it is live and belongs to the configured endpoint. Start/readiness
+paths distinguish that process from a managed server at another endpoint;
+launch never replaces a live process implicitly. The liveness cache holds
+`(BASE ALIVE TIMESTAMP)` and cannot satisfy a probe at another address.
+Managed-process ownership remains independent of the connection-generation
+isolation for requests, streams and chat buffers. See
+[decision record 182](../postmortem/182-managed-server-endpoint.md).
+
+Server work captures `dsh-emacs--server-generation` with its endpoint.
+Explicit server stop advances it even before a process exists, invalidates
+the liveness cache, and leaves new startup attempts free to proceed.
+Readiness checks compare both this generation and the endpoint before sending
+another request, launching after installation, accepting auth results or
+continuing list/init polling. Existing attempt-local completion and buffer
+cleanup still own readiness notification. See
+[decision record 183](../postmortem/183-startup-cancellation.md).
+
+HTTP/RPC uses the same `dsh-emacs--server-current-p` predicate before sending
+and before returning results or dispatching completions, including after lazy
+authentication and response-buffer cleanup. Expired asynchronous responses
+still call the live origin's callback with failure so local pending state can
+settle; they cannot expire newer authentication. HTTP/readiness callbacks
+dynamically carry their captured owner through their immediate call chain,
+and request/readiness entries reject an expired caller even in batch mode.
+Command/skill prefetch explicitly captures the origin buffer and owner before
+scheduling; it neither fetches in an unrelated current buffer nor adopts a
+new attempt when its timer fires. Existing per-fetch stamps remain separate.
+See [186](../postmortem/186-server-work-ownership.md) for the initial HTTP
+ownership step, extended by [187](../postmortem/187-single-service-lifecycle.md).
+
+The public lifecycle lives in `dsh-emacs-server.el`: connection attempts own
+an origin, authentication response and bounded timer; the state snapshot is
+redacted and recursively copied. `dsh-emacs.el` coordinates preflight,
+module cleanup and initial session/control/workspace baselines. Feature owners
+clear their own caches and timers. Chat/list buffers and both event sockets
+carry the same server generation and endpoint; transport and command entry
+points reject retired owners even in batch mode. A fresh generation is never
+reused when returning to the same URL.
+
+Disconnect preflights input, writes, readers and in-progress dispatch before
+mutation. It then invalidates the generation, cancels registered HTTP reads,
+readiness and deferred work, retires event streams, closes recorded service
+buffers and clears caches. Cancelled reads do not dispatch stale business
+callbacks; ordinary stop still settles already pending callbacks as failures.
+Cleanup retains failed resources and rejects connect until disconnect succeeds.
+Stream-close callbacks are isolated per entry with one retry; a repeated failure
+is explicitly reported and quarantined on the retired process. Lost-socket
+recovery stops watchdog/health timers and schedules reconnect before invoking
+feature cleanup. See [188](../postmortem/188-bounded-cleanup-and-upgrade-ownership.md).
+Connect cancellation callbacks run after synchronous disconnect returns.
+Managed process lifetime and opt-in cross-session history are independent.
+Process-start checks retain generation/endpoint cancellation without granting
+an offline client RPC or authentication permission. Connection notifications
+bind the callback-active guard and original work owner before invoking user code.
+
+The default first-use flow retains its startup/auth customization. Once the
+explicit lifecycle is used, disconnected state forbids implicit service work;
+connect requires an existing service and its own credentials. Stream loss marks
+the public session directory stale; recovery installs fresh baselines and list
+before the directory becomes ready. Notifications capture Emacs instance, connection generation and an endpoint
+fingerprint, including the macOS emacsclient expression. Live pre-0.9 sockets
+lack verifiable endpoint ownership: source reload requires explicit disconnect
+and reconnect for those sockets instead of inferring ownership from current
+configuration.
+
+The core does not know Docker or project-to-container mappings. Public API and
+user contracts are in [Switching services](server-switching.md).
+
 Real-time state — the transcript, the session list, queue/steer mirrors,
 projections, and the approval/question waterfalls — is NOT polled; it
 arrives over `/api/remote.mux` logical streams (next section).
@@ -1423,6 +1506,20 @@ channel bypass this pacing.
 This bounds process-triggered redraws that downstream text batching cannot
 prevent, adding up to about 50ms of receive latency during bursts. See
 [037](../postmortem/037-streaming-display-cpu.md).
+
+Explicit core/chat disconnect marks the socket retired before closing logical
+streams or deleting the process. Filters, parsing and dispatch continuations,
+and sentinels then ignore that socket; an unwinding parser cannot restore queued
+messages after cleanup. Reconnect, handshake-health and watchdog timers check
+their captured timer identity before acting on the current owner. Core teardown
+also clears the client id, read/dispatch timers and queued transport data.
+Successful stream-close handlers are removed individually; a failure retains
+the remaining handlers and retired owner handle for a subsequent disconnect
+to retry, while still deleting the socket. `dsh-emacs-disconnect` combines
+this transport retirement with buffer closure and per-module cache clearing
+(see [RPC API](#rpc-api)). See
+[185](../postmortem/185-event-stream-retirement.md).
+
 See [decision record 031](../postmortem/031-stream-frontier-and-screen-rows.md)
 and [032](../postmortem/032-partial-line-styling-and-burst-follow.md), and the
 [performance audit](streaming-performance.md).

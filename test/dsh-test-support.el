@@ -12,6 +12,12 @@
 (add-to-list 'load-path dsh-emacs-test-root)
 (require 'dsh-emacs)
 
+(defun dsh-test--event-process (&rest args)
+  "Create a pipe with ARGS carrying the current event transport owner."
+  (let ((process (apply #'make-pipe-process args)))
+    (process-put process 'dsh-server-owner (dsh-emacs--server-capture-owner))
+    process))
+
 (defun dsh-test--fresh-process (form)
   "Evaluate FORM in a fresh Emacs; return (STATUS . OUTPUT)."
   (with-temp-buffer

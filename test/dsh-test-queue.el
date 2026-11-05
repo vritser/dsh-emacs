@@ -188,7 +188,7 @@
 (ert-deftest dsh-emacs-test-queue-queue-submit-suppress-swallows-splice-in ()
   :tags '(dsh-unit)
   (let ((chat (get-buffer-create " *t-queue-submit-suppress*"))
-        (proc (make-pipe-process :name "t-queue-suppress" :buffer nil))
+        (proc (dsh-test--event-process :name "t-queue-suppress" :buffer nil))
         (announced nil))
     (unwind-protect
         (progn
@@ -330,7 +330,7 @@
 (ert-deftest dsh-emacs-test-queue-queued-submit-previews-before-host-frame ()
   :tags '(dsh-unit)
   (let ((buf (get-buffer-create " *t-queue-optimistic-submit*"))
-        (proc (make-pipe-process :name "t-queue-opt" :buffer nil))
+        (proc (dsh-test--event-process :name "t-queue-opt" :buffer nil))
         (cbs nil))
     (unwind-protect
         (with-current-buffer buf
@@ -407,7 +407,7 @@
 (ert-deftest dsh-emacs-test-queue-queue-empty-seed-keeps-submit-suppression ()
   :tags '(dsh-unit)
   (let ((buf (get-buffer-create " *t-queue-next-row-empty-seed*"))
-        (proc (make-pipe-process :name "t-queue-empty-seed" :buffer nil))
+        (proc (dsh-test--event-process :name "t-queue-empty-seed" :buffer nil))
         (announced nil))
     (unwind-protect
         (with-current-buffer buf
@@ -531,8 +531,8 @@
   (let* ((old-chats dsh-emacs--chat-buffers)
          (chat-a (get-buffer-create " *t-queue-multi-a*"))
          (chat-b (get-buffer-create " *t-queue-multi-b*"))
-         (proc-a (make-pipe-process :name "t-queue-multi-a" :buffer nil))
-         (proc-b (make-pipe-process :name "t-queue-multi-b" :buffer nil))
+         (proc-a (dsh-test--event-process :name "t-queue-multi-a" :buffer nil))
+         (proc-b (dsh-test--event-process :name "t-queue-multi-b" :buffer nil))
          (announced nil))
     (unwind-protect
         (progn
@@ -594,7 +594,7 @@
   :tags '(dsh-unit)
   (let* ((old-chats dsh-emacs--chat-buffers)
          (chat (get-buffer-create " *t-queue-dispatch*"))
-         (proc (make-pipe-process :name "t-queue-proc" :buffer nil))
+         (proc (dsh-test--event-process :name "t-queue-proc" :buffer nil))
          (neutral (get-buffer-create " *t-queue-neutral*"))
          (paints nil))
     (unwind-protect
@@ -669,7 +669,7 @@
              (dsh-emacs--sessions-buffer
               (generate-new-buffer " *queue-owner-list*"))
              (dsh-emacs-events--host-process
-              (make-pipe-process :name "queue-owner-core" :noquery t))
+              (dsh-test--event-process :name "queue-owner-core" :noquery t))
              (processes (list dsh-emacs-events--host-process))
              (stream-buffers nil)
              (announcements nil)
@@ -687,7 +687,7 @@
                         ((symbol-function 'open-network-stream)
                          (lambda (name buffer &rest _args)
                            (push buffer stream-buffers)
-                           (let ((process (make-pipe-process
+                           (let ((process (dsh-test--event-process
                                            :name name :buffer buffer
                                            :noquery t)))
                              (push process processes)
@@ -726,7 +726,7 @@
                                                "replacement" "Pending replacement")))))))))
                   ('new-connection
                    (setq dsh-emacs-events--host-process
-                         (make-pipe-process :name "queue-new-core" :noquery t))
+                         (dsh-test--event-process :name "queue-new-core" :noquery t))
                    (push dsh-emacs-events--host-process processes)))
                 (setq announcements nil)
                 (dsh-emacs-open-session "queue-reopen")
@@ -744,12 +744,12 @@
                     (should-not dsh-emacs-queue--paint-timer)
                     (should (eq (not (null (dsh-test-composer-next-row)))
                                 (not (null expected))))
-                  (should
-                   (equal (mapcar #'dsh-protocol-queue-item-text
-                                  (dsh-emacs-queue-items))
-                          (pcase closed-update
-                            ((or 'unchanged 'local-edit) '("Pending original"))
-                            ('replaced '("Pending replacement")))))))
+                    (should
+                     (equal (mapcar #'dsh-protocol-queue-item-text
+                                    (dsh-emacs-queue-items))
+                            (pcase closed-update
+                              ((or 'unchanged 'local-edit) '("Pending original"))
+                              ('replaced '("Pending replacement")))))))
                 (should-not announcements))
             (when (buffer-live-p chat) (kill-buffer chat))
             (when (buffer-live-p dsh-emacs--sessions-buffer)
@@ -761,7 +761,7 @@
 
 (ert-deftest dsh-emacs-test-queue-follow-reconnect-preserves-local-delete ()
   :tags '(dsh-unit)
-  (let* ((core (make-pipe-process :name "queue-reconnect-core" :noquery t))
+  (let* ((core (dsh-test--event-process :name "queue-reconnect-core" :noquery t))
          (dsh-emacs-events--host-process core)
          (dsh-emacs--chat-buffers (make-hash-table :test #'equal))
          (dsh-emacs--sessions nil)
@@ -783,7 +783,7 @@
                     ((symbol-function 'open-network-stream)
                      (lambda (name buffer &rest _args)
                        (setq stream-buffer buffer)
-                       (make-pipe-process :name name :buffer buffer :noquery t))))
+                       (dsh-test--event-process :name name :buffer buffer :noquery t))))
             (dsh-emacs-queue--delete (car (dsh-emacs-queue-items)))
             (should-not (dsh-emacs-queue-items))
             ;; The delete RPC completed, but its control projection has not.
@@ -799,7 +799,7 @@
 
 (ert-deftest dsh-emacs-test-queue-session-removal-releases-cached-inbox ()
   :tags '(dsh-unit)
-  (let* ((core (make-pipe-process :name "queue-removal-core" :noquery t))
+  (let* ((core (dsh-test--event-process :name "queue-removal-core" :noquery t))
          (dsh-emacs-events--host-process core)
          (dsh-emacs--chat-buffers (make-hash-table :test #'equal))
          (dsh-emacs--sessions nil))
@@ -830,7 +830,7 @@
   :tags '(dsh-unit)
   (let* ((old-chats dsh-emacs--chat-buffers)
          (chat (get-buffer-create " *t-inbox-json*"))
-         (proc (make-pipe-process :name "t-inbox-json-proc" :buffer nil)))
+         (proc (dsh-test--event-process :name "t-inbox-json-proc" :buffer nil)))
     (unwind-protect
         (progn
           (setq dsh-emacs--chat-buffers

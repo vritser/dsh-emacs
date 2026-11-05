@@ -152,7 +152,7 @@
                    (value . ((active . t) (pending . :json-false)))))
             (ert-info ((format "%s" "plan-absence-keeps-watermark-against-late-increment"))
               (should (null dsh-emacs--modeline-plan)))
-            (let ((process (make-pipe-process :name "plan-new-host" :noquery t)))
+            (let ((process (dsh-test--event-process :name "plan-new-host" :noquery t)))
               (unwind-protect
                   (cl-letf (((symbol-function 'process-send-string) #'ignore))
                     (dsh-emacs-events--host-open process))

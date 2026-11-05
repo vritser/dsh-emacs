@@ -4,6 +4,42 @@
 
 (require 'dsh-test-support)
 
+(ert-deftest dsh-emacs-test-skill-prefetch-keeps-origin-and-owner ()
+  :tags '(dsh-unit)
+  (dolist (change '(none stop endpoint closed))
+    (let ((origin (generate-new-buffer " *dsh-prefetch-origin*"))
+          (dsh-emacs-base-url "http://prefetch.example")
+          (dsh-emacs--server-generation 0)
+          (dsh-emacs--server-process nil)
+          (dsh-emacs--server-alive-check nil)
+          (dsh-emacs--skill-catalogs nil)
+          (dsh-emacs--skill-fetch-inflight nil)
+          (dsh-emacs--skill-fetch-stamps nil)
+          (dsh-emacs-skill-prefetch t)
+          (calls 0) timer)
+      (unwind-protect
+          (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                     (lambda (_method _params callback)
+                       (cl-incf calls)
+                       (should (eq (current-buffer) origin))
+                       (funcall callback t []))))
+            (with-current-buffer origin
+              (setq timer (dsh-emacs-skill-prefetch "same-session")))
+            (should (timerp timer))
+            (cancel-timer timer)
+            (pcase change
+              ('stop (dsh-emacs-server-stop))
+              ('endpoint (setq dsh-emacs-base-url "http://other.example"))
+              ('closed (kill-buffer origin)))
+            ;; Timers run with an unrelated current buffer.  Deliver even
+            ;; after cancellation to exercise ownership, not the scheduler.
+            (with-temp-buffer
+              (apply (timer--function timer) (timer--args timer)))
+            (should (= calls (if (eq change 'none) 1 0)))
+            (should-not dsh-emacs--skill-fetch-inflight))
+        (when (timerp timer) (cancel-timer timer))
+        (when (buffer-live-p origin) (kill-buffer origin))))))
+
 ;; --- Test 97b: skill catalog (skills/list) ---
 (ert-deftest dsh-emacs-test-skill-skill-from-alist-full ()
   :tags '(dsh-unit)

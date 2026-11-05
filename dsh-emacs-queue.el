@@ -623,6 +623,14 @@ filter the list; C-g cancels.  Host-injected `context' items are hidden."
             (_ (user-error "Unknown queue menu action: %s" action)))))
     (quit (message "Queue manager cancelled"))))
 
+(defun dsh-emacs-queue--disconnect ()
+  "Cancel this buffer's pending queue presentation work."
+  (dsh-emacs-queue--submit-suppress-clear)
+  (when (timerp dsh-emacs-queue--paint-timer)
+    (cancel-timer dsh-emacs-queue--paint-timer))
+  (setq dsh-emacs-queue--paint-timer nil dsh-emacs--queue-items nil
+        dsh-emacs--queue-process nil dsh-emacs--queue-deleted nil))
+
 (provide 'dsh-emacs-queue)
 
 ;;; dsh-emacs-queue.el ends here

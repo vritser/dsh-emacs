@@ -210,6 +210,7 @@ buffer; `dsh-emacs-collapse-workspaces' and
 
 (define-derived-mode dsh-emacs-session-mode special-mode "DSH Sessions"
   "Major mode for browsing dsh sessions."
+  (setq-local dsh-emacs--server-buffer-owner (dsh-emacs--server-capture-owner))
   (setq buffer-read-only t)
   (setq truncate-lines t)
   (setq cursor-type nil)

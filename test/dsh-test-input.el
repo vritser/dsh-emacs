@@ -280,6 +280,102 @@ input-area draft (which carries no such property) is not counted."
         (should (equal unread-command-events '(?b)))))))
 
 ;; --- Test 33d: submitted text is trimmed like the web composer ---
+(ert-deftest dsh-emacs-test-input-pending-submissions-settle-independently ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (dsh-emacs-mode)
+    (setq-local dsh-emacs--buffer-session "pending-prompts")
+    (let ((dsh-emacs--input-history-by-session (make-hash-table :test #'equal))
+          (clear-input (symbol-function 'dsh-emacs--clear-input))
+          (origin (current-buffer))
+          callbacks)
+      (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (_method _params callback) (push callback callbacks)))
+                ((symbol-function 'dsh-emacs--clear-input)
+                 (lambda ()
+                   ;; Registration precedes consuming the user's input.
+                   (should dsh-emacs--pending-submissions)
+                   (funcall clear-input))))
+        ;; The direct plain path is also used by queue Send Now.
+        (dsh-emacs--submit-plain "same text")
+        (dsh-emacs--submit-deferred "same text" :mode 'queue)
+        (should (= (length dsh-emacs--pending-submissions) 2))
+        (with-temp-buffer
+          (funcall (cadr callbacks) nil '((message . "rejected")))
+          (should-not dsh-emacs--pending-submissions))
+        (should (= (length dsh-emacs--pending-submissions) 1))
+        (should (equal (dsh-emacs--get-input) "same text"))
+        (dsh-emacs--replace-input "newer draft")
+        ;; A repeated old callback cannot settle the remaining submission
+        ;; or roll back a newer draft, even with identical message text.
+        (funcall (cadr callbacks) nil '((message . "duplicate")))
+        (should (= (length dsh-emacs--pending-submissions) 1))
+        (should (equal (dsh-emacs--get-input) "newer draft"))
+        (with-temp-buffer (funcall (car callbacks) t '((accepted . t))))
+        (should (eq (current-buffer) origin))
+        (should-not dsh-emacs--pending-submissions)
+        (should (equal (dsh-emacs--get-input) "newer draft"))))))
+
+(ert-deftest dsh-emacs-test-input-pending-submission-releases-on-nonlocal-exit ()
+  :tags '(dsh-unit)
+  (dolist (mode '(plain deferred command))
+    (dolist (stage '(start callback))
+      (dolist (failure '(error quit))
+        (with-temp-buffer
+          (dsh-emacs-mode)
+          (setq-local dsh-emacs--buffer-session "pending-error")
+          (let ((dsh-emacs--input-history-by-session (make-hash-table :test #'equal))
+                (dsh-emacs--input-history nil)
+                callback result)
+            (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                       (lambda (_method _params cb)
+                         (if (eq stage 'start)
+                             (signal failure '("startup failure"))
+                           (setq callback cb))))
+                      ((symbol-function 'dsh-emacs--restore-draft)
+                       (lambda (&rest _)
+                         (should dsh-emacs--pending-submissions)
+                         (signal failure '("rollback failure")))))
+              (setq result
+                    (condition-case err
+                        (progn
+                          (pcase mode
+                            ('plain (dsh-emacs--submit-plain "text"))
+                            ('deferred (dsh-emacs--submit-deferred "text" :mode 'queue))
+                            ('command (dsh-emacs--submit-dispatch "/unknown")))
+                          (when (eq stage 'callback)
+                            (should dsh-emacs--pending-submissions)
+                            (funcall callback nil '((message . "rejected")))))
+                      ((error quit) (car err))))
+              (should (eq result
+                          (unless (and (eq mode 'command)
+                                       (eq stage 'callback) (eq failure 'quit))
+                            failure)))
+              (should-not dsh-emacs--pending-submissions))))))))
+
+(ert-deftest dsh-emacs-test-input-pending-submission-closed-origin ()
+  :tags '(dsh-unit)
+  (let ((origin (generate-new-buffer " *pending-closed*"))
+        callback restored)
+    (unwind-protect
+        (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                   (lambda (_method _params cb) (setq callback cb)))
+                  ((symbol-function 'dsh-emacs--restore-draft)
+                   (lambda (&rest _) (setq restored t))))
+          (with-current-buffer origin
+            (dsh-emacs-mode)
+            (setq-local dsh-emacs--buffer-session "pending-closed")
+            (dsh-emacs--submit-plain "text")
+            (should dsh-emacs--pending-submissions))
+          (kill-buffer origin)
+          (with-temp-buffer
+            (insert "other buffer")
+            (funcall callback nil '((message . "late failure")))
+            (should-not restored)
+            (should-not dsh-emacs--pending-submissions)
+            (should (equal (buffer-string) "other buffer"))))
+      (when (buffer-live-p origin) (kill-buffer origin)))))
+
 (ert-deftest dsh-emacs-test-input-submit-trims-message ()
   :tags '(dsh-unit)
   (dolist (mode '(nil queue))

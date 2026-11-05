@@ -145,6 +145,7 @@ failure — the error is already reported).  A fetch already in flight
 for SESSION-ID is not duplicated, and a response whose fetch
 `dsh-emacs-skill-catalog-invalidate' superseded is dropped instead of
 overwriting the newer catalog."
+  (dsh-emacs--server-capture-owner)
   (unless (member session-id dsh-emacs--skill-fetch-inflight)
     (setq dsh-emacs--skill-fetch-inflight
           (cons session-id dsh-emacs--skill-fetch-inflight))
@@ -213,16 +214,22 @@ Called when a chat buffer opens: the catalog is fetched on a short
 timer (see `dsh-emacs-skill-prefetch-delay') so the first \"/\"
 completion does not block on the network.  No-op unless
 `dsh-emacs-skill-prefetch' is enabled, the catalog has not been fetched
-and no fetch is already in flight.  Returns the timer, or nil."
+and no fetch is already in flight.  Retain the calling buffer and server
+owner; do nothing if either expires.  Returns the timer, or nil."
   (when (and dsh-emacs-skill-prefetch
              session-id
              (not (dsh-emacs-skill--fetched-p session-id))
              (not (member session-id dsh-emacs--skill-fetch-inflight)))
-    (run-at-time
-     dsh-emacs-skill-prefetch-delay nil
-     (lambda (sid)
-       (dsh-emacs-skill-catalog-fetch sid))
-     session-id)))
+    (let ((origin (current-buffer))
+          (owner (dsh-emacs--server-capture-owner)))
+      (dsh-emacs--server-run-later
+       dsh-emacs-skill-prefetch-delay nil
+       (lambda ()
+         (when (and (buffer-live-p origin)
+                    (dsh-emacs--server-current-p (car owner) (cdr owner)))
+           (with-current-buffer origin
+             (let ((dsh-emacs--server-work-owner owner))
+               (dsh-emacs-skill-catalog-fetch session-id)))))))))
 
 (defun dsh-emacs-skill-catalog-refresh (&optional session-id)
   "Re-fetch and re-cache the `skills/list' catalog, then report.
@@ -269,6 +276,12 @@ SKILL is a `dsh-protocol-skill'; its PATH comes from the host (dsh
         (dsh-emacs-ui-navigate (point-marker) #'find-file path)
       (user-error "Skill /%s has no SKILL.md path"
                   (dsh-protocol-skill-name skill)))))
+
+(defun dsh-emacs-skill--disconnect ()
+  "Clear all skill catalogs and invalidate pending fetch identities."
+  (cl-incf dsh-emacs--skill-fetch-generation)
+  (setq dsh-emacs--skill-catalogs nil dsh-emacs--skill-fetch-inflight nil
+        dsh-emacs--skill-fetch-stamps nil))
 
 (provide 'dsh-emacs-skill)
 
