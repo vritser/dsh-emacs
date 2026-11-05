@@ -58,7 +58,7 @@ printf '\n== runner and coverage self-tests ==\n'
 run 'dsh-test-runner-test' runner emacs -Q --batch -l test/dsh-test-runner-test.el
 
 printf '\n== byte-compile (production files; Errors and free-variable warnings fail) ==\n'
-byte_files=$(ls dsh-emacs*.el 2>/dev/null)
+byte_files=$(ls dsh-emacs*.el extensions/dsh-emacs-switch.el 2>/dev/null)
 if [ -z "$byte_files" ]; then
   printf 'FAIL byte-compile (no dsh-emacs*.el production files)\n'
   fail=1

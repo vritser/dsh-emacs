@@ -99,7 +99,7 @@ source-directory selection, preflight checks and partial-failure behavior.
 Live sockets opened by 0.8.0 have no captured endpoint ownership. Upgrading
 those sockets through reload requires an explicit reconnect: finish or save
 unsent work, then after loading the new sources run `dsh-emacs-disconnect`,
-reload again, and reconnect with `dsh-emacs-connect`.
+reload again, and reconnect with `dsh-emacs-connect` or `dsh-emacs-switch`.
 Reload reports this requirement instead of claiming the old connections were
 preserved. Restarting Emacs also avoids this migration step. Routine reloads
 of sockets created by 0.9.0 retain their recorded ownership.
@@ -798,7 +798,7 @@ the originating buffer. Stop does not synchronously cancel all HTTP sockets;
 pending responses release their buffers when they arrive.
 
 For live service switching, use `dsh-emacs-disconnect` followed by the public
-`dsh-emacs-connect` API.
+`dsh-emacs-connect` API, or the optional `dsh-emacs-switch` profile command.
 Disconnect protects drafts and pending writes, closes service buffers and
 clears connection state; it leaves server processes running. See
 [Switching services](server-switching.md) for setup, callback semantics,

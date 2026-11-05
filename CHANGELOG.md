@@ -17,6 +17,12 @@ minor) and stay undated until the release is cut.
   stale requests and notification actions cannot act on a replacement service.
   (rationale: [postmortem/187](postmortem/187-single-service-lifecycle.md))
 
+- **Select project services with an optional profile package**: resolve each
+  project's current endpoint and token before disconnecting, then reopen its
+  last root session or choose from the new directory. The standalone source in
+  `extensions/` uses only public core APIs and declares core 0.9.0 as its minimum.
+  (rationale: [postmortem/187](postmortem/187-single-service-lifecycle.md))
+
 ### Fixed
 
 - **Keep stream cleanup failures from blocking recovery indefinitely**:
@@ -41,6 +47,9 @@ minor) and stay undated until the release is cut.
 - **Cancel inline-image reads on disconnect**: `session/attachment` reads no
   longer incorrectly block switching as pending server writes.
 
+- **Resolve relative profile roots once**: resolver and connection work use the
+  same absolute directory, regardless of the previous profile's directory.
+
 - **Expire notifications when the configured endpoint changes**: actions
   capture endpoint identity as well as instance and generation, including in
   the default connection flow, without embedding URL credentials in OS commands.
@@ -48,6 +57,9 @@ minor) and stay undated until the release is cut.
 - **Keep session snapshots unavailable during default-connection recovery**:
   both connection entry paths mark the directory stale on stream loss; late
   HTTP replies cannot mark it ready before fresh baselines and a list arrive.
+
+- **Preserve the active service for invalid profile addresses**: resolver URLs
+  with an empty host are rejected before disconnecting the current service.
 
 - **Retain failed authentication-response cleanup for retry**: a response
   buffer that refuses to close or raises a cleanup error now fails the

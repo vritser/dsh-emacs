@@ -1157,6 +1157,9 @@ lack verifiable endpoint ownership: source reload requires explicit disconnect
 and reconnect for those sockets instead of inferring ownership from current
 configuration.
 
+`extensions/dsh-emacs-switch.el` is an optional separate package, not a core
+require. It owns profiles, resolver invocation and last-root-session ids, uses
+only public core APIs, and starts connect from its own persistent buffer.
 The core does not know Docker or project-to-container mappings. Public API and
 user contracts are in [Switching services](server-switching.md).
 

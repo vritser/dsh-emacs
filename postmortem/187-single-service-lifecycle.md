@@ -11,9 +11,11 @@ an external switcher could not reliably clean up through public APIs.
 ## Decision
 
 Make the core own explicit connect/disconnect and read-only state APIs, and
-allow a project resolver/selector to be shipped as an optional independent
-package source. The core implementation is committed as
-`feat: add explicit service connection lifecycle`, based on `7b03e89`. See the 0.9.0 Unreleased entries in
+ship the project resolver/selector as an optional independent package source.
+Implementation commits, based on `7b03e89`:
+`feat: add explicit service connection lifecycle` and
+`feat: add optional project service switcher`.
+See the 0.9.0 Unreleased entries in
 [CHANGELOG](../CHANGELOG.md) and [API guide](../docs/server-switching.md).
 
 The server module owns connection generation, authentication, attempt lifetime

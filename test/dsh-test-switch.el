@@ -1,0 +1,165 @@
+;;; dsh-test-switch.el --- Public profile extension tests -*- lexical-binding: t; -*-
+;; Package-Requires: ((emacs "28.1"))
+(require 'dsh-test-support)
+(require 'dsh-emacs-switch
+         (expand-file-name "../extensions/dsh-emacs-switch.el" dsh-emacs-test-directory))
+
+(ert-deftest dsh-emacs-test-switch-resolve-before-disconnect ()
+  :tags '(dsh-unit)
+  (let ((dsh-emacs-switch-profiles
+         (list (list :id "A" :root temporary-file-directory
+                     :resolve (lambda () (error "secret resolver detail")))))
+        disconnected)
+    (cl-letf (((symbol-function 'dsh-emacs-disconnect)
+               (lambda () (setq disconnected t))))
+      (let ((err (should-error (dsh-emacs-switch "A") :type 'user-error)))
+        (should-not (string-match-p "secret" (error-message-string err))))
+      (should-not disconnected)
+      (setf (plist-get (car dsh-emacs-switch-profiles) :resolve)
+            (lambda () '(:url "http://a.example/?token=url-secret" :token nil)))
+      (should-error (dsh-emacs-switch "A") :type 'user-error)
+      (should-not disconnected))))
+
+(ert-deftest dsh-emacs-test-switch-refused-disconnect-never-connects ()
+  :tags '(dsh-unit)
+  (let ((dsh-emacs-switch-profiles
+         (list (list :id "A" :root temporary-file-directory
+                     :resolve (lambda () '(:url "http://a.example")))))
+        (dsh-emacs-switch--profile nil) connected)
+    (cl-letf (((symbol-function 'dsh-emacs-disconnect)
+               (lambda () (user-error "unsent input")))
+              ((symbol-function 'dsh-emacs-connect)
+               (lambda (&rest _) (setq connected t))))
+      (should-error (dsh-emacs-switch "A") :type 'user-error)
+      (should-not connected)
+      (should-not (buffer-local-value 'dsh-emacs-switch--pending
+                                      (get-buffer " *dsh-switch*"))))))
+
+(ert-deftest dsh-emacs-test-switch-persistent-origin-and-last-session ()
+  :tags '(dsh-unit)
+  (let* ((root (file-name-as-directory (expand-file-name temporary-file-directory)))
+         (dsh-emacs-switch-profiles
+          (list (list :id "A" :root root
+                      :resolve (lambda ()
+                                 (should (equal default-directory root))
+                                 '(:url "http://a.example" :token nil)))))
+         (dsh-emacs-switch--profile "B")
+         (dsh-emacs-switch--sessions '(("A" . "root-A")))
+         (disconnected nil) callback origin opened)
+    (unwind-protect
+        (cl-letf (((symbol-function 'dsh-emacs-session-snapshot)
+                   (lambda () '(:status ready :sessions nil)))
+                  ((symbol-function 'dsh-emacs-current-session) (lambda () "root-B"))
+                  ((symbol-function 'dsh-emacs-session-exists-p)
+                   (lambda (id &optional _) (member id '("root-A" "root-B"))))
+                  ((symbol-function 'dsh-emacs-disconnect)
+                   (lambda () (setq disconnected t)))
+                  ((symbol-function 'dsh-emacs-connect)
+                   (lambda (url &rest args)
+                     (should disconnected)
+                     (should (equal url "http://a.example"))
+                     (should (plist-member args :token))
+                     (should-not (plist-get args :token))
+                     (setq callback (plist-get args :callback) origin (current-buffer))))
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _) (ert-fail "Remembered session should not prompt")))
+                  ((symbol-function 'dsh-emacs-open-session)
+                   (lambda (id) (setq opened id))))
+          (with-temp-buffer (dsh-emacs-switch "A"))
+          (should (buffer-live-p origin))
+          (should (buffer-local-value 'dsh-emacs-switch--pending origin))
+          (should-error (dsh-emacs-switch "A") :type 'user-error)
+          (should (equal (cdr (assoc "B" dsh-emacs-switch--sessions)) "root-B"))
+          (with-current-buffer origin (funcall callback t '(:status connected)))
+          (should (equal opened "root-A"))
+          (should (equal dsh-emacs-switch--profile "A"))
+          (should-not (buffer-local-value 'dsh-emacs-switch--pending origin)))
+      (when (buffer-live-p origin) (kill-buffer origin)))))
+
+(ert-deftest dsh-emacs-test-switch-missing-last-session-prompts-from-snapshot ()
+  :tags '(dsh-unit)
+  (let ((dsh-emacs-switch--sessions '(("A" . "removed"))) opened)
+    (cl-letf (((symbol-function 'dsh-emacs-session-snapshot)
+               (lambda ()
+                 (list :status 'ready :sessions
+                       (list (dsh-protocol-session--from-alist
+                              '((sessionId . "current") (title . "Current")))))))
+              ((symbol-function 'dsh-emacs-session-exists-p) (lambda (&rest _) nil))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt choices &rest _)
+                 (should (= (length choices) 1))
+                 (caar choices)))
+              ((symbol-function 'dsh-emacs-open-session) (lambda (id) (setq opened id))))
+      (dsh-emacs-switch--choose-session '(:id "A"))
+      (should (equal opened "current"))
+      (should (equal (cdr (assoc "A" dsh-emacs-switch--sessions)) "current")))))
+
+(ert-deftest dsh-emacs-test-switch-failed-connect-clears-pending-without-opening ()
+  :tags '(dsh-unit)
+  (let ((dsh-emacs-switch-profiles
+         (list (list :id "A" :root temporary-file-directory
+                     :resolve (lambda () '(:url "http://a.example")))))
+        (dsh-emacs-switch--profile nil) callback origin opened)
+    (unwind-protect
+        (cl-letf (((symbol-function 'dsh-emacs-disconnect) #'ignore)
+                  ((symbol-function 'dsh-emacs-connect)
+                   (lambda (_url &rest args)
+                     (setq callback (plist-get args :callback) origin (current-buffer))))
+                  ((symbol-function 'dsh-emacs-open-session)
+                   (lambda (&rest _) (setq opened t))))
+          (dsh-emacs-switch "A")
+          (with-current-buffer origin
+            (funcall callback nil '(:code authentication :message "Authentication failed")))
+          (should-not (buffer-local-value 'dsh-emacs-switch--pending origin))
+          (should-not opened)
+          (should-not dsh-emacs-switch--profile))
+      (when (buffer-live-p origin) (kill-buffer origin)))))
+
+(ert-deftest dsh-emacs-test-switch-empty-host-preserves-current-connection ()
+  :tags '(dsh-unit)
+  (dolist (url '("http://" "https://" "http:///?token=example"))
+    (let ((dsh-emacs-switch-profiles
+           (list (list :id "bad" :root temporary-file-directory
+                       :resolve (lambda () (list :url url)))))
+          (dsh-emacs-switch--profile nil)
+          disconnected connected)
+      (cl-letf (((symbol-function 'dsh-emacs-disconnect)
+                 (lambda () (setq disconnected t)))
+                ((symbol-function 'dsh-emacs-connect)
+                 (lambda (&rest _) (setq connected t))))
+        (should-error (dsh-emacs-switch "bad") :type 'user-error)
+        (should-not disconnected)
+        (should-not connected)))))
+
+(ert-deftest dsh-emacs-test-switch-relative-root-resolves-once-in-caller ()
+  :tags '(dsh-unit)
+  (let* ((parent (make-temp-file "dsh-profile-root-" t))
+         (root (expand-file-name "project/" parent))
+         (coordinator (get-buffer-create " *dsh-switch*"))
+         (dsh-emacs-switch--profile nil)
+         (dsh-emacs-switch-profiles
+          (list (list :id "relative" :root "project"
+                      :resolve (lambda ()
+                                 (should (equal default-directory root))
+                                 '(:url "http://a.example")))))
+         (connections 0))
+    (unwind-protect
+        (progn
+          (make-directory root)
+          (with-current-buffer coordinator (setq default-directory "/tmp/"))
+          (cl-letf (((symbol-function 'dsh-emacs-disconnect) #'ignore)
+                    ((symbol-function 'dsh-emacs-connect)
+                     (lambda (_url &rest args)
+                       (should (equal default-directory root))
+                       (cl-incf connections)
+                       (funcall (plist-get args :callback) nil '(:message "test cancellation")))))
+            (dotimes (_ 2)
+              (with-temp-buffer
+                (setq default-directory (file-name-as-directory parent))
+                (dsh-emacs-switch "relative"))))
+          (should (= connections 2)))
+      (when (buffer-live-p coordinator) (kill-buffer coordinator))
+      (delete-directory parent t))))
+
+(provide 'dsh-test-switch)
+;;; dsh-test-switch.el ends here

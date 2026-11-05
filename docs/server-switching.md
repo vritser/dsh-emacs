@@ -1,7 +1,7 @@
 # Switching services
 
 The 0.9.0 development version supports one active service per Emacs instance.
-Use the lifecycle API to switch; changing
+Use the lifecycle API or the optional profile package to switch; changing
 `dsh-emacs-base-url` underneath open chats is not a switch.
 
 ## Disconnect and connect
@@ -94,11 +94,59 @@ used by the public subagent entry points. An unobserved child catalog signals
 unavailable; a known empty catalog returns nil. Existence is a local snapshot,
 not a lock against server-side deletion.
 
+## Optional project profiles
+
+The independent package source is [dsh-emacs-switch.el](../extensions/dsh-emacs-switch.el).
+It depends on core 0.9.0 and uses public APIs only. It is shipped here as source;
+publish/install it as a separate package after core 0.9.0 is released. For this
+checkout:
+
+```emacs-lisp
+(add-to-list 'load-path (expand-file-name "~/dsh-emacs/extensions"))
+(require 'dsh-emacs-switch)
+
+(defun my-dsh-project-a ()
+  ;; The local launcher knows Docker, ports and token rotation. It returns a
+  ;; JSON object with "url" and optionally "token", and no diagnostic stdout.
+  (with-temp-buffer
+    (unless (zerop (call-process "/path/to/project-a/dsh-endpoint" nil t nil))
+      (error "Project launcher failed"))
+    (goto-char (point-min))
+    (let ((value (json-parse-buffer :object-type 'plist :null-object nil)))
+      (list :url (plist-get value :url) :token (plist-get value :token)))))
+
+(setq dsh-emacs-switch-profiles
+      (list (list :id "project-a" :label "Project A"
+                  :root "/path/to/project-a" :resolve #'my-dsh-project-a)))
+```
+
+Run `M-x dsh-emacs-switch`. Each profile needs a unique stable string `:id`,
+a local existing `:root`, a `:resolve` function, and optionally `:label`.
+Relative roots are expanded once in the invoking buffer, before entering the
+coordination buffer. The zero-argument resolver runs with the absolute root as
+`default-directory` and
+returns `(:url URL)` with optional `:token TOKEN`. Resolve ports and credentials
+afresh; do not store secrets in profile labels or ids. The resolver runs before
+disconnect so failure preserves the active connection. A successful resolution
+may start a container if that is your launcher's policy; the core never does so.
+
+The package owns a persistent ` *dsh-switch*` coordination buffer. Closing it
+cancels a pending connection; inspect `dsh-emacs-connection-state` for the result.
+After success it reopens the profile's last root session if still present,
+otherwise prompts from the ready directory (or opens the empty session list).
+Last-session ids are kept in memory only. Resolver failure, refused disconnect
+and connection failure are distinct; a connection failure after disconnect
+leaves the old service disconnected and does not roll back automatically.
+
+The project root is local to Emacs. `!command` still runs locally and attachments
+are read locally; container path mapping, remote file transfer and restoring
+unsent drafts are outside this package's contract.
+
 ## Verification
 
 The unit gate includes lifecycle, owned HTTP/events/timers, cleanup retry,
-notification actions and snapshot copies. Real GUI acceptance
-uses the stock token reader and records minibuffer state; it does
+notification actions, snapshot copies and profile behavior. Real GUI acceptance
+uses stock token/profile/session readers and records minibuffer state; it does
 not claim to measure child-frame focus or visual perception.
 
 For a repeatable real-server A → B → A acceptance run, provide two disposable

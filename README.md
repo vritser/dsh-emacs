@@ -48,7 +48,7 @@ For an existing server, configure [its address and authentication](#server-setup
 before connecting. A `use-package` example is in
 [Customization](docs/customization.md#example-configuration).
 For multiple project services, use the development version’s
-[connection lifecycle](docs/server-switching.md).
+[connection lifecycle and optional profile switcher](docs/server-switching.md).
 
 ## Using it
 
