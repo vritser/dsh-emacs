@@ -2925,6 +2925,7 @@
       (should (equal (alist-get 'turnWindow request)
                      '((minMessages . 1) (minTurns . 1))))
       (should (= (alist-get 'maxMessages request) 7))
+      (should (eq (alist-get 'activate request) t))
       (should (eq (alist-get 'assistantStream request) t)))))
 
 (ert-deftest dsh-emacs-test-events-burst-yields-and-pongs-before-rendering ()

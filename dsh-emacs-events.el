@@ -1595,7 +1595,12 @@ retires a pending waterfall by `eventId'."
          (dsh-emacs-events--host-control-baseline process value)
          (when (processp process) (process-put process 'dsh-control-baseline t))))
       ("projection"
-       (dsh-emacs-events--host-apply-projection process value))
+       (let ((deferred dsh-emacs-events--defer-host-repaint)
+             (dsh-emacs-events--defer-host-repaint t))
+         (dolist (projection value)
+           (dsh-emacs-events--host-apply-projection process projection))
+         (setq dsh-emacs-events--defer-host-repaint deferred)
+         (dsh-emacs-events--host-repaint)))
       ("upsert"
        (when value
          (dsh-emacs-events--host-upsert-workspace value)

@@ -1972,29 +1972,29 @@ Uses the bytes stashed on the placeholder when present, otherwise
 re-fetches them via `session/attachment'."
   (interactive)
   (let* ((data (get-text-property (point) 'dsh-emacs-image-data))
-         (attachment-id (get-text-property (point) 'dsh-emacs-attachment-id))
+         (attachment (get-text-property (point) 'dsh-emacs-attachment))
          (name (get-text-property (point) 'dsh-emacs-image-name))
          (departure (point-marker)))
     (cond
      (data (dsh-emacs-render--open-image-data data name departure))
-     (attachment-id
+     (attachment
       (message "Fetching image…")
       (dsh-emacs-render--request-attachment
-       (dsh-emacs--active-session-id) attachment-id
+       (dsh-emacs--active-session-id) attachment
        (lambda (bytes)
          (if bytes
              (dsh-emacs-render--open-image-data bytes name departure)
            (message "Image fetch failed")))))
      (t (message "Image bytes unavailable")))))
 
-(defun dsh-emacs-render--request-attachment (session-id attachment-id on-bytes)
-  "Fetch image bytes for ATTACHMENT-ID from SESSION-ID via
+(defun dsh-emacs-render--request-attachment (session-id attachment on-bytes)
+  "Fetch image bytes using complete ATTACHMENT reference from SESSION-ID via
 `session/attachment'.  ON-BYTES receives the decoded unibyte string,
 or nil when the RPC fails or the payload is malformed."
-  (when (and session-id attachment-id)
+  (when (and session-id attachment)
     (dsh-emacs--rpc-async
      "session/attachment"
-     (dsh-protocol-session-attachment-request session-id attachment-id)
+     (dsh-protocol-session-attachment-request session-id attachment)
      (lambda (ok value)
        ;; The callback may run inside a process filter: swallow the C-g quit.
        (condition-case nil
@@ -2032,16 +2032,16 @@ already in the event); an attachment ref is fetched via
   (let* ((buffer (current-buffer))
          (media-type (dsh-protocol-content-block-media-type block))
          (data-b64 (dsh-protocol-content-block-data block))
-         (attachment-id (dsh-protocol-content-block-attachment-id block))
+         (attachment (dsh-protocol-content-block-attachment block))
          (data (and data-b64 (ignore-errors (base64-decode-string data-b64)))))
     (if data
         (dsh-emacs-render--apply-attachment
          buffer id
          (dsh-emacs-render--attachment-image data media-type)
          data)
-      (when attachment-id
+      (when attachment
         (dsh-emacs-render--request-attachment
-         (dsh-emacs--active-session-id) attachment-id
+         (dsh-emacs--active-session-id) attachment
          (lambda (bytes)
            (dsh-emacs-render--apply-attachment
             buffer id
@@ -2083,10 +2083,10 @@ joined with newlines, so the asynchronous fill-in still finds every slot."
 (defun dsh-emacs-render--image-placeholder (id block)
   "Build the `[image …]' placeholder string tagged ID for image BLOCK."
   (let ((name (dsh-protocol-content-block-name block))
-        (attachment-id (dsh-protocol-content-block-attachment-id block)))
+        (attachment (dsh-protocol-content-block-attachment block)))
     (propertize (if name (format "[image: %s]" name) "[image]")
                 'dsh-emacs-image-id id
-                'dsh-emacs-attachment-id attachment-id
+                'dsh-emacs-attachment attachment
                 'dsh-emacs-image-name name
                 'keymap dsh-emacs-render--image-keymap
                 'help-echo (format "%s — RET or mouse-1 opens it"

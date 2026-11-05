@@ -696,6 +696,16 @@ gates each run behind `y-or-n-p` (see docs/shell-commands.md).
 
 ## Protocol layer (`dsh-emacs-protocol.el`)
 
+The development baseline is dsh 0.2.2-rc.1. A control `projection` frame
+contains a batch of `{key, val}` changes at one event sequence. The protocol
+decoder produces typed cells; the event layer applies the batch before one
+session-list repaint. Omitted keys remain unchanged. Chat follows explicitly
+request background activation, whose completion is separate from the opening
+snapshot. Image blocks retain their complete attachment reference for both
+automatic reads and RET retries; the renderer passes it to the protocol encoder
+without inspecting wire fields. See [190](../postmortem/190-dsh-022-protocol-baseline.md)
+and the [protocol audit](rpc.md#07-022-deltas-source-audited-at-022-rc1).
+
 `dsh-protocol-read-json` owns JSON decoding for HTTP responses and WebSocket
 frames. It uses native JSON support when available and the Lisp reader otherwise.
 Both paths return symbol-keyed alists, vector arrays, nil for null and

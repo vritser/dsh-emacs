@@ -1,7 +1,7 @@
 # dsh-emacs — an Emacs client for DeepSeek Harness
 
 [![CI](https://github.com/vritser/dsh-emacs/actions/workflows/ci.yml/badge.svg)](https://github.com/vritser/dsh-emacs/actions/workflows/ci.yml)
-[![dsh](https://img.shields.io/badge/dsh-0.2.1--rc.2-blue)](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.1-rc.2)
+[![dsh](https://img.shields.io/badge/dsh-0.2.2--rc.1-blue)](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.2-rc.1)
 
 Use [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`)
 from Emacs: streaming replies, tool calls, workspace sessions, subagent chats,
@@ -10,16 +10,12 @@ mandatory third-party Emacs packages.
 
 https://github.com/user-attachments/assets/9ee9fc66-1997-49b7-a921-5753690edafa
 
-dsh-emacs **0.8.0** is compatible with **dsh 0.2.1-rc.2**, the
-[latest upstream release](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.1-rc.2)
-as of **2026-10-18** (npm `next`; npm `latest` still points to 0.2.0-rc.2).
-The client includes compatibility fixes for the **dsh 0.2.1 protocol**:
-server-assigned session IDs, migration-required projection reads, and external
-subagent navigation guards. The [protocol reference](docs/rpc.md) is
-source-audited through **dsh 0.2.1-rc.2**. Live validation on 2026-10-23
-passed 31 E2E checks against that version (optional model-driven subagent and
-running-status scenarios were not enabled); external-child guards have unit
-coverage. Existing browser-cookie authentication is retained.
+The development version (**0.9.0 - Unreleased**) targets **dsh 0.2.2-rc.1**.
+The [protocol reference](docs/rpc.md) records the 2026-11-05 source audit and
+adaptations for batched projection updates, explicit session activation and
+image-reference reads. Browser-cookie authentication is retained. The last
+live E2E validation used **dsh 0.2.1-rc.2** with dsh-emacs 0.8.0; it does not
+validate this new baseline.
 
 ## Quick start
 

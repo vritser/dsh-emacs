@@ -578,10 +578,16 @@
                    (args . ["sess-preset-race" t])))
             (dsh-emacs-events--host-item
              nil '((type . "projection") (sessionId . "sess-preset-race")
-                   (key . "title") (value . "Live title")))
+                   (seq . 42)
+                   (changes . [((key . "title") (val . "Live title"))
+                               ((key . "permissions")
+                                (val . ((currentValue . "workspace-write"))))])))
             (should (dsh-protocol-session-running
                      (dsh-emacs--chat-session-item "sess-preset-race")))
             (should (equal (buffer-name buf) "dsh: Live title"))
+            (should (equal (buffer-local-value
+                            'dsh-emacs--modeline-permission buf)
+                           "workspace-write"))
             ;; The response predates those frames: install it, replay the rest.
             (funcall callback
                      t '((items

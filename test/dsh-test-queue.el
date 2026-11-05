@@ -563,14 +563,13 @@
             (dsh-emacs-queue-apply chat-b proc-b nil)
             (dsh-emacs-events--host-item
              proc-b
-             (list (cons 'type "projection")
-                   (cons 'sessionId "sess-multi-b")
-                   (cons 'key "inbox")
-                   (cons 'value
-                         (list (cons 'next-turn
-                                     (vector (dsh-emacs-test--inbox-message
-                                              "b1" "b-real")))
-                               (cons 'next-step [])))))
+             `((type . "projection") (sessionId . "sess-multi-b")
+               (seq . 9)
+               (changes . [((key . "inbox")
+                            (val . ((next-turn . ,(vector
+                                                   (dsh-emacs-test--inbox-message
+                                                    "b1" "b-real")))
+                                    (next-step . []))))])))
             (ert-info ((format "%s" "queue-submit-suppress-multi-session"))
               (should announced)
               (should (with-current-buffer chat-b
@@ -614,14 +613,13 @@
             ;; visible
             (dsh-emacs-events--host-item
              proc
-             (list (cons 'type "projection")
-                   (cons 'sessionId "sess-q")
-                   (cons 'key "inbox")
-                   (cons 'value
-                         (list (cons 'next-turn
-                                     (vector (dsh-emacs-test--inbox-message
-                                              "q1" "dispatched")))
-                               (cons 'next-step [])))))
+             `((type . "projection") (sessionId . "sess-q")
+               (seq . 9)
+               (changes . [((key . "inbox")
+                            (val . ((next-turn . ,(vector
+                                                   (dsh-emacs-test--inbox-message
+                                                    "q1" "dispatched")))
+                                    (next-step . []))))])))
             (funcall (car paints))
             (setq paints nil)
             (with-current-buffer chat
@@ -636,14 +634,13 @@
             (with-current-buffer neutral
               (dsh-emacs-events--host-item
                proc
-               (list (cons 'type "projection")
-                     (cons 'sessionId "sess-other")
-                     (cons 'key "inbox")
-                     (cons 'value
-                           (list (cons 'next-turn
-                                       (vector (dsh-emacs-test--inbox-message
-                                                "o1" "foreign")))
-                                 (cons 'next-step []))))))
+               `((type . "projection") (sessionId . "sess-other")
+                 (seq . 9)
+                 (changes . [((key . "inbox")
+                              (val . ((next-turn . ,(vector
+                                                     (dsh-emacs-test--inbox-message
+                                                      "o1" "foreign")))
+                                      (next-step . []))))]))))
             (with-current-buffer neutral
               (ert-info ((format "%s" "queue-frame-dispatch-foreign-cell-dropped"))
                 (should (null dsh-emacs--queue-items))))
@@ -844,12 +841,12 @@
            proc
            (concat "{\"type\":\"item\",\"streamId\":\"c1\",\"value\":{"
                    "\"type\":\"projection\",\"sessionId\":\"sess-json\","
-                   "\"key\":\"inbox\",\"seq\":9,\"value\":{"
+                   "\"seq\":9,\"changes\":[{\"key\":\"inbox\",\"val\":{"
                    "\"next-turn\":[{\"id\":\"j1\",\"content\":[{\"type\":\"text\","
                    "\"text\":\"queued json\"}],\"source\":{\"kind\":\"user\","
                    "\"rpcId\":\"r1\"}}],"
                    "\"next-step\":[{\"id\":\"j2\",\"content\":[{\"type\":\"text\","
-                   "\"text\":\"steer json\"}],\"source\":{\"kind\":\"user\"}}]}}}"))
+                   "\"text\":\"steer json\"}],\"source\":{\"kind\":\"user\"}}]}}]}}"))
           (with-current-buffer chat
             (ert-info ((format "%s" "queue-inbox-json-frame-reaches-mirror"))
               (should (equal '("j1" "j2")

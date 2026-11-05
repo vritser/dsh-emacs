@@ -39,8 +39,8 @@
               (with-current-buffer second
                 (dsh-emacs-events--host-item
                  nil `((type . "projection") (sessionId . "plan-main")
-                       (key . "plan")
-                       (value . ((active . ,active) (pending . ,pending))))))
+                       (changes . [((key . "plan")
+                                    (val . ((active . ,active) (pending . ,pending))))]))))
               (with-current-buffer first
                 (ert-info ((format "%s" (concat "plan-live-" name)))
                   (should (equal (string-trim (dsh-emacs-modeline--ml-indicator)) label))
@@ -53,7 +53,8 @@
           (with-current-buffer second
             (dsh-emacs-events--host-item
              nil '((type . "projection") (sessionId . "unopened")
-                   (key . "plan") (value . ((active . t) (pending . t)))))
+                   (changes . [((key . "plan")
+                                (val . ((active . t) (pending . t))))])))
             (ert-info ((format "%s" "plan-foreign-projections-do-not-change-current-chat"))
               (should (null dsh-emacs--modeline-plan))))
           ;; Real JSON exercises symbol session keys and false booleans in baselines.
@@ -126,8 +127,9 @@
               (should (null dsh-emacs--modeline-plan)))
             (dsh-emacs-events--host-item
              nil '((type . "projection") (sessionId . "plan-main")
-                   (key . "plan") (seq . 12)
-                   (value . ((active . t) (pending . :json-false)))))
+                   (seq . 12)
+                   (changes . [((key . "plan")
+                                (val . ((active . t) (pending . :json-false))))])))
             (dsh-emacs-events--follow-snapshot
              first '((cursor . 11) (records . [])
                      (projections . ((asOfSeq . 11)
@@ -137,8 +139,9 @@
               (should (equal (string-trim (dsh-emacs-modeline--ml-indicator)) "Plan")))
             (dsh-emacs-events--host-item
              nil '((type . "projection") (sessionId . "plan-main")
-                   (key . "plan") (seq . 10)
-                   (value . ((active . :json-false) (pending . :json-false)))))
+                   (seq . 10)
+                   (changes . [((key . "plan")
+                                (val . ((active . :json-false) (pending . :json-false))))])))
             (dsh-emacs-events--host-control-baseline
              nil '((projections . ((plan-main . ((asOfSeq . 11) (values)))))))
             (ert-info ((format "%s" "plan-older-increment-and-absent-baseline-are-ignored"))
@@ -148,8 +151,9 @@
                      (projections . ((asOfSeq . 13) (values)))))
             (dsh-emacs-events--host-item
              nil '((type . "projection") (sessionId . "plan-main")
-                   (key . "plan") (seq . 12)
-                   (value . ((active . t) (pending . :json-false)))))
+                   (seq . 12)
+                   (changes . [((key . "plan")
+                                (val . ((active . t) (pending . :json-false))))])))
             (ert-info ((format "%s" "plan-absence-keeps-watermark-against-late-increment"))
               (should (null dsh-emacs--modeline-plan)))
             (let ((process (dsh-test--event-process :name "plan-new-host" :noquery t)))

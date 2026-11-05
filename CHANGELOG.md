@@ -8,6 +8,14 @@ minor) and stay undated until the release is cut.
 
 ## 0.9.0 - Unreleased
 
+### Breaking Changes
+
+- **Target dsh 0.2.2-rc.1**: upgrade the server alongside this client. Batched
+  projection updates keep live state current, opening a chat explicitly requests
+  activation, and image reads retain the complete reference for display and retry.
+  The previous single-cell stream format is no longer consumed.
+  (rationale: [postmortem/190](postmortem/190-dsh-022-protocol-baseline.md))
+
 ### Added
 
 - **Switch services through an explicit connection lifecycle**: connect waits

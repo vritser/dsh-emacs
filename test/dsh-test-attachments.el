@@ -258,7 +258,7 @@
               (should (equal sizes '((60 . 60) (60 . 60) (60 . 60)))))))
       (kill-buffer buf))))
 
-;; --- Test 48c: attachmentId reference block goes through
+;; --- Test 48c: Complete image reference goes through
 ;; session/attachment backfill placeholder ---
 (ert-deftest dsh-emacs-test-attachments-image-ref-fetched-via-session-attachment ()
   :tags '(dsh-unit)
@@ -278,8 +278,8 @@
              (json-read-from-string
               (concat "{\"type\":\"user/message\",\"seq\":2,\"data\":{\"content\":["
                       "{\"type\":\"text\",\"text\":\"look\"},"
-                      "{\"type\":\"image\",\"attachmentId\":\"att-1\","
-                      "\"mediaType\":\"image/png\",\"name\":\"remote.png\"}]}}"))))
+                      "{\"type\":\"image\",\"attachment\":{\"attachmentId\":\"att-1\","
+                      "\"mediaType\":\"image/png\",\"bytes\":70,\"width\":1,\"height\":1,\"name\":\"remote.png\"}}]}}"))))
           (let* ((text (buffer-substring (point-min) (point-max)))
                  (pos (string-match "\\[image: remote\\.png\\]" text))
                  (call (car calls))
@@ -289,10 +289,46 @@
             (ert-info ((format "%s" "image-ref-fetched-via-session-attachment"))
               (should (and (equal (car call) "session/attachment")
                            (equal (cdr (assq 'sessionId req)) "sess-ref")
-                           (equal (cdr (assq 'attachmentId req)) "att-1")
+                           (equal (cdr (assq 'attachment req))
+                                  '((attachmentId . "att-1")
+                                    (mediaType . "image/png") (bytes . 70)
+                                    (width . 1) (height . 1)
+                                    (name . "remote.png")))
                            (string-match "look\n\\[image: remote.png\\]" text)
                            (equal stash (base64-decode-string png-b64)))))))
       (kill-buffer buf))))
+
+(ert-deftest dsh-emacs-test-attachments-image-retry-keeps-reference ()
+  :tags '(dsh-unit)
+  (with-temp-buffer
+    (setq-local dsh-emacs--buffer-session "image-retry")
+    (let* ((ref '((attachmentId . "sha256:pixel") (mediaType . "image/png")
+                  (bytes . 70) (width . 1) (height . 1) (name . "pixel.png")
+                  (originalDimensions . ((width . 2) (height . 2)))))
+           (block (dsh-protocol-content-block--from-alist
+                   `((type . "image") (attachment . ,ref))))
+           calls opened)
+      (insert (dsh-emacs-render--image-placeholder "image" block))
+      (cl-letf (((symbol-function 'dsh-emacs--rpc-async)
+                 (lambda (method args callback)
+                   (push (list method args) calls)
+                   (if (= (length calls) 1)
+                       (funcall callback nil nil)
+                     (funcall callback t '((data . "cGl4ZWw="))))))
+                ((symbol-function 'dsh-emacs-render--open-image-data)
+                 (lambda (data name &optional _departure)
+                   (setq opened (list data name)))))
+        (dsh-emacs-render--show-attachment "image" block)
+        (goto-char (point-min))
+        (should-not (get-text-property (point) 'dsh-emacs-image-data))
+        (dsh-emacs-render--image-open)
+        (should (= 2 (length calls)))
+        (dolist (call calls)
+          (should (equal call
+                         `("session/attachment"
+                           ((request . ((sessionId . "image-retry")
+                                        (attachment . ,ref))))))))
+        (should (equal opened '("pixel" "pixel.png")))))))
 
 ;; --- Test 48d: optimistic echo inlines the local attachment as
 ;; an image block (shown immediately, no RPC needed) ---

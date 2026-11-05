@@ -156,7 +156,10 @@
                      (lambda (marker) (setq departure marker))))
             (switch-to-buffer origin)
             (insert "image")
-            (put-text-property 1 6 'dsh-emacs-attachment-id "attachment")
+            (put-text-property
+             1 6 'dsh-emacs-attachment
+             '((attachmentId . "attachment") (mediaType . "image/png")
+               (bytes . 3) (width . 1) (height . 1)))
             (goto-char 3)
             (dsh-emacs-render--image-open)
             (should-not departure)

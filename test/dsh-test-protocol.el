@@ -633,6 +633,52 @@
   (should-not (dsh-protocol-core-item-payload
                (dsh-protocol-core-item--from-alist '((type . "upsert"))))))
 
+(ert-deftest dsh-emacs-test-protocol-control-batches-preserve-cuts-and-clears ()
+  :tags '(dsh-unit)
+  (let* ((item (dsh-protocol-core-item--from-alist
+                '((type . "projection") (sessionId . "batch") (seq . 31)
+                  (changes . [((key . "title") (val . "New title"))
+                              ((key . "plan") (val . ((active . t))))
+                              ((key . "tokenUsage") (val . ((outputTokens . 7))))
+                              ((key . "userQuestions") (val . nil))
+                              ((key . "inbox") (val . nil))]))))
+         (cells (dsh-protocol-core-item-payload item)))
+    (should (listp cells))
+    (should (equal (mapcar #'dsh-protocol-projection-key cells)
+                   '("title" "plan" "tokenUsage" "userQuestions" "inbox")))
+    (should (equal (mapcar #'dsh-protocol-projection-session-id cells)
+                   '("batch" "batch" "batch" "batch" "batch")))
+    (should (equal (dsh-protocol-projection-value (nth 0 cells)) "New title"))
+    (should (= 31 (dsh-protocol-plan-seq
+                   (dsh-protocol-projection-value (nth 1 cells)))))
+    (let ((usage (dsh-protocol-projection-value (nth 2 cells))))
+      (should (= 31 (dsh-protocol-subagent-cell-seq usage)))
+      (should (= 7 (dsh-protocol-token-usage-output
+                    (dsh-protocol-subagent-cell-value usage)))))
+    (should (= 31 (dsh-protocol-user-questions-seq
+                   (dsh-protocol-projection-value (nth 3 cells)))))
+    (should-not (dsh-protocol-projection-value (nth 4 cells))))
+  (should-not
+   (dsh-protocol-core-item-payload
+    (dsh-protocol-core-item--from-alist
+     '((type . "projection") (sessionId . "batch") (seq . 32)
+       (changes . []))))))
+
+(ert-deftest dsh-emacs-test-protocol-follow-requests-activation ()
+  :tags '(dsh-unit)
+  (should (eq t (alist-get 'activate
+                           (alist-get 'request
+                                      (dsh-protocol-session-follow-request
+                                       "cold" nil 10 1))))))
+
+(ert-deftest dsh-emacs-test-protocol-image-read-preserves-complete-reference ()
+  :tags '(dsh-unit)
+  (let ((ref '((attachmentId . "sha256:image") (mediaType . "image/png")
+               (bytes . 70) (width . 1) (height . 1) (name . "pixel.png")
+               (originalDimensions . ((width . 2) (height . 2))))))
+    (should (equal (dsh-protocol-session-attachment-request "s" ref)
+                   `((request . ((sessionId . "s") (attachment . ,ref))))))))
+
 (ert-deftest dsh-emacs-test-protocol-core-item-retains-control-boundaries ()
   :tags '(dsh-unit)
   (dolist (value '(nil
@@ -647,9 +693,10 @@
       (should (eq value (dsh-protocol-core-item-payload item)))))
   (let* ((item (dsh-protocol-core-item--from-alist
                 '((type . "projection") (sessionId . "session")
-                  (key . "plan") (seq . 19)
-                  (value . ((active . t) (pending . :json-false))))))
-         (projection (dsh-protocol-core-item-payload item))
+                  (seq . 19)
+                  (changes . [((key . "plan")
+                               (val . ((active . t) (pending . :json-false))))]))))
+         (projection (car (dsh-protocol-core-item-payload item)))
          (plan (dsh-protocol-projection-value projection)))
     (should (equal "projection" (dsh-protocol-core-item-type item)))
     (should (equal "session" (dsh-protocol-projection-session-id projection)))
@@ -915,7 +962,9 @@
                     (car (dsh-protocol-message-content assistant))) "assistant"))
     (should (equal (dsh-protocol-message-references user) '(("one" . "s1"))))
     (should (equal (dsh-protocol-content-block-name image) "inline"))
-    (should (equal (dsh-protocol-content-block-attachment-id image) "img"))
+    (should (equal (dsh-protocol-content-block-attachment image)
+                   '((name . "nested") (attachmentId . "img")
+                     (mediaType . "image/png"))))
     (should (equal (dsh-protocol-content-block-media-type image) "image/png"))))
 
 (ert-deftest dsh-emacs-test-protocol-request-and-usage-envelopes ()
@@ -1021,9 +1070,11 @@
            '((dsh-protocol-session-rename-request ("s" "Title")
               "{\"request\":{\"sessionId\":\"s\",\"title\":\"Title\"}}")
              (dsh-protocol-session-cancel-request ("s")
-              "{\"request\":{\"sessionId\":\"s\"}}")
-             (dsh-protocol-session-attachment-request ("s" "image-2")
-              "{\"request\":{\"sessionId\":\"s\",\"attachmentId\":\"image-2\"}}")
+                                                  "{\"request\":{\"sessionId\":\"s\"}}")
+             (dsh-protocol-session-attachment-request
+              ("s" ((attachmentId . "image-2") (mediaType . "image/png")
+                    (bytes . 70) (width . 1) (height . 1)))
+              "{\"request\":{\"sessionId\":\"s\",\"attachment\":{\"attachmentId\":\"image-2\",\"mediaType\":\"image/png\",\"bytes\":70,\"width\":1,\"height\":1}}}")
              (dsh-protocol-workspace-archive-session-request ("s")
               "{\"request\":{\"sessionId\":\"s\"}}")
              (dsh-protocol-workspace-create-request ("/project")
@@ -1087,15 +1138,16 @@
                              '((kind . "session") (sessionId . "s"))))
              (args (dsh-protocol-session-follow-request "s" address limit 3))
              (expected `((request . ((address . ,wire-address)
-                                    (assistantStream . t)
-                                    ,@(when limit `((maxMessages . ,limit)))
-                                    (turnWindow . ((minMessages . 1) (minTurns . 3)))))))
+                                     (activate . t)
+                                     (assistantStream . t)
+                                     ,@(when limit `((maxMessages . ,limit)))
+                                     (turnWindow . ((minMessages . 1) (minTurns . 3)))))))
              (json (concat
                     "{\"request\":{\"address\":"
                     (if subagent
                         "{\"kind\":\"subagent\",\"parentSessionId\":\"parent\",\"childSessionId\":\"child\",\"mode\":\"continuable\"}"
                       "{\"kind\":\"session\",\"sessionId\":\"s\"}")
-                    ",\"assistantStream\":true"
+                    ",\"activate\":true,\"assistantStream\":true"
                     (if limit (format ",\"maxMessages\":%d" limit) "")
                     ",\"turnWindow\":{\"minMessages\":1,\"minTurns\":3}}}")))
         (ert-info ((format "subagent=%S limit=%S" subagent limit))

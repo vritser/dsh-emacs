@@ -709,10 +709,10 @@
                (concat "{\"type\":\"item\",\"streamId\":\"c1\","
                        "\"value\":{\"type\":\"projection\","
                        "\"sessionId\":\"sess-proj\","
-                       "\"key\":\"contextPressure\",\"seq\":50,"
-                       "\"value\":{\"projectedTokens\":88345,"
+                       "\"seq\":50,\"changes\":[{\"key\":\"contextPressure\","
+                       "\"val\":{\"projectedTokens\":88345,"
                        "\"pressureTokens\":88000,"
-                       "\"contextWindow\":1000000}}}"))))
+                       "\"contextWindow\":1000000}}]}}"))))
           (let ((p (buffer-local-value 'dsh-emacs--modeline-context-pressure buf)))
             (ert-info ((format "%s" "session-projection-frame-dispatch"))
               (should (= 88345 p)))))

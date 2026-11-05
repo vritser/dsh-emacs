@@ -1874,7 +1874,7 @@ Subagent cells need the enclosing update frame and are decoded separately."
     (_ value)))
 
 (defun dsh-protocol-projection--from-alist (frame)
-  "Decode one control projection FRAME, preserving its sequence metadata."
+  "Decode one normalized projection FRAME, preserving its sequence metadata."
   (let* ((raw-key (dsh-protocol--field 'key frame))
          (key (if (symbolp raw-key) (symbol-name raw-key) raw-key)))
     (dsh-protocol--make-projection
@@ -1973,7 +1973,8 @@ must be handed on without interpreting their contents."
 (cl-defstruct (dsh-protocol-core-item
                (:constructor dsh-protocol--make-core-item))
   "One core stream item with a payload selected by TYPE.
-Workspace/projection payloads and session/interaction envelopes are decoded.
+Workspace payloads, projection batches and session/interaction envelopes are
+decoded.
 Control baselines stay raw for per-session decoding; ready/cancel payloads are
 ids, and unknown frames retain their original object."
   type payload)
@@ -1992,7 +1993,15 @@ wire array []; absent/null items retain the control-baseline route."
           (if (dsh-protocol--field 'items value)
               (dsh-protocol-workspace-list--from-alist value)
             value)))
-       ("projection" (dsh-protocol-projection--from-alist frame))
+       ("projection"
+        (let ((session-id (dsh-protocol--field 'sessionId frame))
+              (seq (dsh-protocol--field 'seq frame)))
+          (mapcar (lambda (change)
+                    (dsh-protocol-projection--from-alist
+                     `((sessionId . ,session-id) (seq . ,seq)
+                       (key . ,(dsh-protocol--field 'key change))
+                       (value . ,(dsh-protocol--field 'val change)))))
+                  (dsh-protocol--list (dsh-protocol--field 'changes frame)))))
        ("upsert"
         (when-let* ((workspace (dsh-protocol--field 'workspace frame)))
           (dsh-protocol-workspace--from-alist workspace)))
@@ -2089,13 +2098,14 @@ Only the receipt ID travels; display metadata and local paths do not."
   `((request . ((sessionId . ,session) (itemId . ,item) (action . ,action)))))
 
 (defun dsh-protocol-session-attachment-request (session attachment)
-  "Encode a fetch of ATTACHMENT bytes from SESSION."
-  `((request . ((sessionId . ,session) (attachmentId . ,attachment)))))
+  "Encode a fetch using the complete ATTACHMENT reference, scoped to SESSION."
+  `((request . ((sessionId . ,session) (attachment . ,attachment)))))
 
 (defun dsh-protocol-session-follow-request (session address max-messages rounds)
   "Encode a follow of SESSION or ADDRESS for ROUNDS, bounded by MAX-MESSAGES.
-Always request assistant stream frames; omit a nil message bound."
+Request background activation and assistant frames; omit a nil message bound."
   `((request . ((address . ,(dsh-protocol-session-address-json session address))
+                (activate . t)
                 (assistantStream . t)
                 ,@(when max-messages `((maxMessages . ,max-messages)))
                 (turnWindow . ((minMessages . 1) (minTurns . ,rounds)))))))
@@ -2407,14 +2417,12 @@ DATA.REASON.ERROR ({code, message, ...})."
                                                     (dsh-protocol--field 'mediaType ref)))
                                     (data (or (dsh-protocol--field 'data block)
                                               (dsh-protocol--field 'data ref)))
-                                    (attachment-id
-                                     (or (dsh-protocol--field 'attachmentId block)
-                                         (dsh-protocol--field 'attachmentId ref)))
+                                    (attachment ref)
                                     (file (when (equal kind "file")
                                             (dsh-protocol-file-ref--from-alist
                                              (or ref block)))))))
   "A message block with inline or referenced attachment fields normalized."
-  kind text name media-type data attachment-id file)
+  kind text name media-type data attachment file)
 
 (cl-defstruct (dsh-protocol-message
                (:constructor dsh-protocol-message--from-alist

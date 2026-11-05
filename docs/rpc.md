@@ -1,17 +1,15 @@
-# dsh RPC Protocol Reference (dsh 0.2.1, audited at 0.2.1-rc.2)
+# dsh RPC Protocol Reference (dsh 0.2.2, audited at 0.2.2-rc.1)
 
 This reference tracks the dsh (DeepSeek Harness) Web protocol for maintaining
-and extending dsh-emacs. The current source audit compares `dsh-v0.2.0-rc.2`
-(`639ed01539`) with `dsh-v0.2.1-rc.2` (`687f282e8625c6b8d11ff58211a90524be2e4317`)
-in `/Users/ed/github/deepseek-harness`, checked on 2026-10-17. The local
-repository's 0.2.1 release baseline is the **rc.2 tag**, not a tag named
-`dsh-v0.2.1`. The source/type/upgrade-guide audit was followed on 2026-10-18
-by live tests against the installed npm `0.2.1-rc.2`: 28 standard E2E checks
-and 9 focused creation/projection checks passed. This validates the existing
-client paths and the specific cases in §12.1, not every endpoint in this
-reference.
+and extending dsh-emacs. The 2026-11-05 source audit compares
+`dsh-v0.2.1-rc.2` (`687f282e8625c6b8d11ff58211a90524be2e4317`) with
+`dsh-v0.2.2-rc.1` (`66491b05e3f05ad35bcdd4f6cd7ed26041d9e3db`) in
+`/Users/ed/github/deepseek-harness`. The target is the release tag: the checkout's
+master branch also contains later changes. §0.7 records the client adaptations.
+This round has source and local regression coverage, not a 0.2.2 live E2E run.
+Earlier live checks against 0.2.1-rc.2 remain historical evidence only.
 
-**0.2.1 needs targeted client adaptation.** In particular, `session/create`
+**The earlier 0.2.1 migration required targeted adaptation.** In particular, `session/create`
 may return a different identity, and `session/projections` can return
 sequence-free migration hints. New capabilities include an independent API
 Peer connection, access snapshots, effective working-directory state, durable
@@ -316,6 +314,28 @@ recipes are §11.
 
 ---
 
+### 0.7 0.2.2 Deltas (source-audited at 0.2.2-rc.1)
+
+| Surface | Change since 0.2.1-rc.2 | dsh-emacs adaptation |
+|---|---|---|
+| `session/control` | One event produces `{sessionId, seq, changes:[{key,val},…]}` instead of one frame per cell | Decode every change with the shared event watermark; apply all cells before repainting the session list. Omitted keys are unchanged; explicit nulls still reach their consumers. |
+| `session/follow` | Opening a stream is passive unless `activate:true` is supplied | Chat opens request activation and assistant deltas. A snapshot does not acknowledge Agent readiness; subagent reads retain their own routing. |
+| `session/attachment` | Requires `{sessionId, attachment: ImageAttachmentRef}` | Keep the full message reference through automatic fetch and RET retry, including dimensions and byte length. |
+| Session summaries | Omit `contextPressure`, `contextBreakdown`, `turnOutline` and `imageLimits` | Existing follow/control projection readers supply chat context; incomplete list rows leave an existing meter unchanged. |
+| History and state | Adds `events`, `observeEvents`, `observeProjections`, `state`, `observeState`, `wait`; `page` remains a deprecated alias and gains a returned cursor | Existing bounded paging and follow paths remain valid; these new observation endpoints are not called. |
+| Model and prompt | Optional model badges and image-upload receipts; existing inline images and file receipts remain accepted | Existing model selection, prompt and command encoders remain valid. |
+| Subagents and forks | Ordinary forks no longer record `parentSession`; release-tag child catalogs retain ID/mode/label rows | Existing origin-based child classification and direct-parent addresses remain valid. Later master-only named catalog changes are outside this baseline. |
+
+Audit anchors at the tag: `packages/api/session-controller/src/{types,index,control,commands}.ts`,
+`src/web/controller.ts`, `packages/attachment/attachment/src/types.ts`,
+`packages/subagent/subagent/src/projection-types.ts`, and the upgrade guides
+`v0.2.1-rc.3/{session-follow-activation,attachment-read-access}` and
+`v0.2.2-alpha.2/{projection-event-frames,projection-snapshot-scope}`.
+The unary envelope, browser-cookie authentication, mux carrier and follow
+snapshot remain compatible. Test fixtures cover batched sequence propagation,
+multiple live consumers, empty batches, image retry and activation requests.
+See [decision 190](../postmortem/190-dsh-022-protocol-baseline.md).
+
 ## 1. Transport Layer
 
 | Channel | Path | Direction | Purpose |
@@ -586,7 +606,7 @@ client, for reference in later changes):
 
 | endpoint | open payload | frame content (item value) |
 |---|---|---|
-| `session/follow` | `{args:{request:{address, maxMessages?, turnWindow?, assistantStream?}}}` | Opening snapshot frame `snapshot` (header/cursor/records/hasMore/projections[/assistantStream]), followed by gapless `event` frames and optional `assistant-stream` frames (§7.1). **The client sends `assistantStream: true`**, otherwise it receives no deltas |
+| `session/follow` | `{args:{request:{address, maxMessages?, turnWindow?, activate?, assistantStream?}}}` | Opening snapshot frame `snapshot` (header/cursor/records/hasMore/projections[/assistantStream]), followed by gapless `event` frames and optional `assistant-stream` frames (§7.1). **The client sends `activate: true` and `assistantStream: true`**; assistant deltas require the latter flag |
 | `session/control` | `{args:{}}` | Exactly one `baseline` per generation, then `projection` delta frames (§6.1). **0.1.7**: the `queue`/`jobs` frames are gone; the queue rides the `inbox` projection |
 | `workspace/follow` | `{args:{}}` | One `baseline` per generation, then `replace`/`upsert`/`remove`/`order`/`archived`/`pinned` (§4.4) |
 | `workspaceFiles/changes` | `{args:{<scope>}}` | Workspace file change stream: `WorkspaceFileWatchFrame` (§4.16) |
@@ -1025,13 +1045,14 @@ value    { accepted: true }                        // receipt only, no command s
 
 #### session.attachment
 ```
-args     { request: { sessionId, attachmentId } }
+args     { request: { sessionId, attachment: ImageAttachmentRef } }
 value    { attachment: ImageAttachmentRef, data: <base64> }
 ```
 `ImageAttachmentRef = { attachmentId, mediaType, bytes, width, height, name?,
-originalDimensions? }`. Before reading, it verifies that the session log really
-references this image (otherwise `session/attachment-invalid`,
-`reason:'ATTACHMENT_NOT_REFERENCED'`).
+originalDimensions? }`. The host verifies the ID, actual media type, byte length
+and dimensions against the stored object. `name` and `originalDimensions` are
+preserved display metadata. Gateway authorization uses `sessionId`; the handler
+does not verify Session existence or image membership in its history.
 
 #### session.updateQueue
 ```
@@ -1057,11 +1078,11 @@ Requires a live Agent (none → `session/not-found`); stops the current turn and
 keeps the pending queue (resumed FIFO after settling). Subagent →
 `subagents/interruptByParent`.
 
-#### session.page
+#### session.page (deprecated alias of session.events)
 ```
-args     { request: { address: SessionAddress, throughSeq: number,
+args     { request: { address: SessionAddress, throughSeq?: number,
                       beforeSeq?, maxMessages?, turnWindow? } }
-value    { records: SessionHistoryRecord[], hasMore: boolean }
+value    { records: SessionHistoryRecord[], hasMore: boolean, cursor: number }
 ```
 Backward pagination aligned to message boundaries (one page = a whole number of
 message records, never truncated mid-message). `address = {kind:'session',
@@ -1069,8 +1090,9 @@ sessionId} | {kind:'subagent', parentSessionId, childSessionId, mode}`; the
 subagent `mode` is `'one-shot' | 'continuable' | 'unknown'` at 0.1.7 (a
 diagnostic-only identity that cannot be matched to a live catalog row reads as
 `'unknown'`).
-`throughSeq` = the inclusive cursor of the follow opening snapshot (-1 = latest);
-an omitted `beforeSeq` = start from the page at `throughSeq`. `maxMessages` is the
+`throughSeq` pins the inclusive cursor of the follow opening snapshot; omission
+selects the observed log end. The returned `cursor` reports that cut. An omitted
+`beforeSeq` starts from the page at `throughSeq`. `maxMessages` is the
 page budget (50 by default). **0.1.7** adds `turnWindow = { minMessages,
 minTurns }`: stop at a `turn/start` once both a minimum number of append-origin
 user/assistant messages and a minimum number of crossed Turn starts are reached
@@ -1086,7 +1108,7 @@ activates the Agent.
 #### session.follow (stream)
 ```
 open     { args: { request: { address: SessionAddress, maxMessages?,
-                               turnWindow?, assistantStream?: true } } }
+                               turnWindow?, activate?: boolean, assistantStream?: true } } }
 frames   first = { type:'snapshot', header: SessionWireHeader, cursor,
                  records: SessionHistoryRecord[], hasMore,
                  projections: { asOfSeq, values },
@@ -1102,9 +1124,10 @@ frames   first = { type:'snapshot', header: SessionWireHeader, cursor,
   (pure `event` records); `cursor` = the seq the snapshot covers up to;
   `projections` is that session's projection baseline (§9).
 - Subsequent live frames are bare `event` records; a skipped `seq` →
-  `gateway/internal` ("skipped seq"). An ordinary session is promoted to active in
-  the background once the snapshot has been sent (reading old pages does not);
-  a subagent address never activates.
+  `gateway/internal` ("skipped seq"). With `activate:true`, ordinary-session
+  activation starts after computing the opening snapshot and before delivering it.
+  The snapshot does not acknowledge readiness. Without that flag the read is
+  passive; a subagent address never uses ordinary Agent activation.
 - `assistant/message.data.stream` is the complete stream of that attempt.
   dsh-emacs requests in-process deltas and settles them with this durable event.
 
@@ -1999,7 +2022,7 @@ not a missing endpoint or a request to reauthenticate (§1.4).
 | `session/provider-models-unavailable` | `{ provider }` | **new in 0.2.0**: `initializeDefaultModel` found no available model for the account provider |
 | `session/invalid-time-zone` | `{ value }` | clientTimeZone not UTC/IANA |
 | `session/workspace-attach-failed` | `{ sessionId, workspaceId }` | attach failure after create/fork publication |
-| `session/attachment-invalid` | `{ reason }` | model does not support images / image not referenced by the log / queue edit is non-text / attachment read failure |
+| `session/attachment-invalid` | `{ reason }` | model does not support images / queue edit is non-text / attachment read failure |
 | `session/queue-item-not-found` | `{ itemId }` | updateQueue item no longer queued |
 | `session/steer-unavailable` | `{ itemId }` | steer not in next-turn or agent not running |
 | `session/title-invalid` | `{ sessionId }` | empty after rename normalization |
@@ -2054,15 +2077,16 @@ not a missing endpoint or a request to reauthenticate (§1.4).
 
 ### 6.1 session.control Frames (host-wide live control plane)
 
-**0.1.7 shape (unchanged in 0.2.0):**
+**0.2.2 shape:**
 ```
 baseline   { type:'baseline', value: {
               projections: Record<sessionId, SessionProjectionBaseline> } }
-projection { type:'projection', sessionId, key, value, seq }   // per-cell watermark; higher-seq-wins
+projection { type:'projection', sessionId, seq, changes: [{ key, val }, ...] }
 ```
 - Each generation (each open/reconnect) first sends one baseline, then delta
   frames. The client treats the baseline as a snapshot (truncate by `asOfSeq`
-  before seeding), then applies deltas.
+  before seeding), then applies every change at the frame's `seq`. A key absent
+  from `changes` is unchanged; a present null value is an explicit update.
 - **0.1.7 deleted the baseline's `queues` and `jobs` members and the `queue` /
   `jobs` delta frames.** Both states are still observable, just elsewhere: the
   queue is the **`inbox` projection cell** delivered through the very same
