@@ -25,6 +25,12 @@ minor) and stay undated until the release is cut.
 
 ### Fixed
 
+- **Reconnect when explicitly opening dsh after disconnect**: `M-x dsh-emacs`
+  reconnects to the configured running service, prompts for a token if needed,
+  and opens the session list after initialization. Background calls remain
+  offline; failed connections can be retried through the same command.
+  (rationale: [postmortem/189](postmortem/189-interactive-entry-reconnect.md))
+
 - **Keep stream cleanup failures from blocking recovery indefinitely**:
   every close handler runs independently; only failures are retried, and a
   second failure is reported and quarantined. Lost sockets stop their health

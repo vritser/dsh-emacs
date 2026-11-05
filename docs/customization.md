@@ -802,7 +802,9 @@ For live service switching, use `dsh-emacs-disconnect` followed by the public
 Disconnect protects drafts and pending writes, closes service buffers and
 clears connection state; it leaves server processes running. See
 [Switching services](server-switching.md) for setup, callback semantics,
-read APIs and cleanup retries. Changing `dsh-emacs-base-url` alone does not
+read APIs and cleanup retries. After disconnect, `M-x dsh-emacs` reconnects
+to the configured running service and prompts for a token if needed; background
+work remains offline. Changing `dsh-emacs-base-url` alone does not
 retire old work and is not a supported switch.
 
 ### New session drafts

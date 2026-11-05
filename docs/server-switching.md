@@ -12,7 +12,22 @@ caches and authentication. It leaves both external services and a managed
 server process running. Use `dsh-emacs-server-stop` separately to stop the
 process Emacs started. `dsh-emacs-server-start` and `dsh-emacs-server-restart`
 also work while disconnected; they start the process without connecting or
-authenticating the client. Connect explicitly afterward.
+authenticating the client. Run `M-x dsh-emacs` to reconnect afterward.
+
+After disconnect or a failed connection, `M-x dsh-emacs` reconnects to the
+current `dsh-emacs-base-url`, asks for a launch token if required, and opens
+the session list after authentication and initialization succeed. The service
+must already be running; this reconnect path does not start or install it.
+The address normally remains the last attempted endpoint, so retrying a failed
+switch targets the new service rather than rolling back to the old one. Use
+`M-x dsh-emacs-switch` when the profile's resolver must refresh its address or
+credentials. Closing the invoking buffer cancels a pending reconnect.
+
+Interactive entry explicitly authorizes this reconnect, including keyboard
+macros. Background work and direct Lisp calls to `(dsh-emacs)` remain blocked
+while disconnected; integrations continue to use `dsh-emacs-connect`.
+A pending connection or unfinished cleanup must settle before another
+connection can start.
 
 Disconnect refuses while there is unsent text, a recalled draft, staged
 attachments, session creation, a pending submission/upload or other server

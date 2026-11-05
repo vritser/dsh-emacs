@@ -49,6 +49,7 @@ before connecting. A `use-package` example is in
 [Customization](docs/customization.md#example-configuration).
 For multiple project services, use the development version’s
 [connection lifecycle and optional profile switcher](docs/server-switching.md).
+After disconnecting, run `M-x dsh-emacs` to reconnect to the configured service.
 
 ## Using it
 

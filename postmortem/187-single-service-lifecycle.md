@@ -1,5 +1,7 @@
 # 187 — Explicit single-service lifecycle and public profile integration
 
+_Interactive reopening policy superseded by [189](189-interactive-entry-reconnect.md)._
+
 ## Background
 
 The v0.8.0 baseline (`7b03e89`) supported one implicitly selected endpoint.

@@ -1149,10 +1149,16 @@ bind the callback-active guard and original work owner before invoking user code
 
 The default first-use flow retains its startup/auth customization. Once the
 explicit lifecycle is used, disconnected state forbids implicit service work;
-connect requires an existing service and its own credentials. Stream loss marks
-the public session directory stale; recovery installs fresh baselines and list
-before the directory becomes ready. Notifications capture Emacs instance, connection generation and an endpoint
-fingerprint, including the macOS emacsclient expression. Live pre-0.9 sockets
+connect requires an existing service and its own credentials. Interactive
+`dsh-emacs` entry can explicitly reconnect from disconnected or failed state
+through the same lifecycle API. Its invoking buffer owns the attempt; the
+completion opens the list with the captured project root only after success.
+Lisp entry without a reconnect argument, retired owners and incomplete cleanup
+remain blocked. See [189](../postmortem/189-interactive-entry-reconnect.md).
+Stream loss marks the public session directory stale; recovery installs fresh
+baselines and a session list before the directory becomes ready. Notifications
+capture the Emacs instance, connection generation and an endpoint fingerprint,
+including the macOS emacsclient expression. Live pre-0.9 sockets
 lack verifiable endpoint ownership: source reload requires explicit disconnect
 and reconnect for those sockets instead of inferring ownership from current
 configuration.

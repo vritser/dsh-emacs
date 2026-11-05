@@ -2860,17 +2860,36 @@ the session on the current row; a subagent row copies the child's own id."
 ;;; ---------------------------------------------------------------------------
 
 ;;;###autoload
-(defun dsh-emacs ()
+(defun dsh-emacs (&optional reconnect)
   "Open the dsh session list.
 From a local project buffer, locate and expand its existing workspace.
 Chat and session-list buffers retain active-session navigation.  Project
-matching runs only for a local server and a non-remote directory."
-  (interactive)
-  (dsh-emacs-list-sessions-display
-   (and (not (derived-mode-p 'dsh-emacs-mode 'dsh-emacs-session-mode))
-        (not (file-remote-p default-directory))
-        (dsh-emacs--server-local-host-p)
-        (dsh-emacs--project-root default-directory))))
+matching runs only for a local server and a non-remote directory.
+With RECONNECT non-nil, reconnect to the configured service after disconnect
+or a failed connection, then display the list once initialization succeeds.
+Interactive calls set RECONNECT.  The service must already be running."
+  (interactive (list t))
+  (let ((project-root
+         (and (not (derived-mode-p 'dsh-emacs-mode 'dsh-emacs-session-mode))
+              (not (file-remote-p default-directory))
+              (dsh-emacs--server-local-host-p)
+              (dsh-emacs--project-root default-directory))))
+    (cond
+     ((and reconnect (eq dsh-emacs--connection-status 'connecting))
+      (user-error "A dsh connection is already in progress"))
+     ((and reconnect
+           (memq dsh-emacs--connection-status '(disconnected failed)))
+      ;; Interactive dispatch must not revive an expired callback or buffer.
+      (when (or dsh-emacs--server-work-owner dsh-emacs--server-buffer-owner)
+        (dsh-emacs--server-capture-owner))
+      (dsh-emacs-connect
+       dsh-emacs-base-url
+       :callback (lambda (ok result)
+                   (if ok
+                       (dsh-emacs-list-sessions-display project-root)
+                     (message "dsh connection failed: %s"
+                              (plist-get result :message))))))
+     (t (dsh-emacs-list-sessions-display project-root)))))
 
 ;;;###autoload
 (defun dsh-emacs-health ()
